@@ -70,7 +70,7 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_lint)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
-    p.add_argument("agent", help="the agent that fired the event: claude or pi")
+    p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
     return parser
@@ -220,13 +220,12 @@ def cmd_hook(args) -> int:
     never prints on a failure, and always exits 0. The one line it leaves in the hook
     log is the whole record of what went wrong (BUILD-PLAN M1.1).
     """
-    home = resolve_home()
     try:
         with _hook_time_limit(HOOK_TIMEOUT_SECONDS):
             payload = json.load(sys.stdin)
             _dispatch(_hook_event(args, payload))
     except Exception as exc:
-        _log_hook_failure(home, args.agent, args.event, exc)
+        _log_hook_failure(args.agent, args.event, exc)
     return 0
 
 
@@ -280,17 +279,23 @@ def _hook_time_limit(seconds: int) -> Iterator[None]:
 HOOK_LOG_LINE_LIMIT = 500
 
 
-def _log_hook_failure(home: Path, agent: str, event: str, exc: BaseException) -> None:
+def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     """Append the one line a failed hook is allowed to leave behind.
 
     Agent, event and the failure's own words all come from outside this process, so
     the whole line is flattened and capped: whatever they contain, a failed hook
-    leaves one bounded line and nothing else. Best effort: a home that cannot be
-    written to, or a line that cannot be written, is not a reason to fail the agent.
+    leaves one bounded line and nothing else. Best effort all the way down: a home
+    that cannot be resolved or written to, or a line that cannot be written, is not
+    a reason to fail the agent.
     """
     line = f"{datetime.now(UTC).isoformat()} {agent} {event}: {type(exc).__name__}: {exc}"
     line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
+        home = resolve_home()
+        if home.parts[:1] == ("~",):
+            # An unexpanded tilde names a home this process cannot locate, not a
+            # directory to create inside the agent's working directory.
+            return
         (home / "logs").mkdir(parents=True, exist_ok=True)
         with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
