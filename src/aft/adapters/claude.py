@@ -1,11 +1,11 @@
 """Claude Code hook payloads to normalized events.
 
 Claude Code runs a hook command for each event it supports and writes that event's
-JSON payload to its stdin. Field names here are the hook input schemas of the
-installed Claude Code (2.1.283): every payload carries `session_id`,
-`transcript_path` and `cwd`, and each event adds a field naming what set it off.
-Only the three events afterthought installs appear here; anything else is an
-unknown event (BUILD-PLAN M1.1).
+JSON payload to its stdin. The payloads these field names come from, and the Claude
+Code version that produced them, are recorded in `tests/fixtures/hooks/`. Every one
+carries `session_id`, `transcript_path` and `cwd`, and each event adds a field naming
+what set it off. Only the three events afterthought installs appear here; anything
+else is an unknown event (BUILD-PLAN M1.1).
 """
 
 from __future__ import annotations
