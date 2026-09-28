@@ -1,8 +1,8 @@
 """Check a model's JSON output against the schema it was asked for.
 
-Small on purpose: it enforces the keywords afterthought's own schemas use (``type``,
-``properties``, ``required``, ``items``, ``enum``, ``minLength``, ``maxLength``) and
-ignores everything else a schema may carry, such as ``description`` or
+Small on purpose: it enforces exactly ``type``, ``enum``, ``minLength``, ``maxLength``,
+``required``, ``properties``, ``items``, ``minItems`` and ``maxItems``, and ignores
+everything else a schema may carry, such as ``description`` or
 ``additionalProperties``. That keeps a schema free to hold prose, and keeps this
 module dependency-free (BUILD-PLAN 1, no new runtime dependencies).
 """
@@ -41,9 +41,17 @@ def validate(value: Any, schema: dict, path: str = "$") -> None:
             if key in value:
                 validate(value[key], subschema, path=f"{path}.{key}")
 
-    if isinstance(value, list) and isinstance(schema.get("items"), dict):
-        for index, item in enumerate(value):
-            validate(item, schema["items"], path=f"{path}[{index}]")
+    if isinstance(value, list):
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if minimum is not None and len(value) < minimum:
+            raise SchemaError(f"{path} should have at least {minimum} items, found {len(value)}")
+        if maximum is not None and len(value) > maximum:
+            raise SchemaError(f"{path} should have at most {maximum} items, found {len(value)}")
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for index, item in enumerate(value):
+                validate(item, items, path=f"{path}[{index}]")
 
 
 def _is_type(value: Any, want: Any) -> bool:

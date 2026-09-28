@@ -17,19 +17,10 @@ SCHEMA = {
     "description": "An answer with optional numbers attached.",
     "properties": {
         "answer": {"type": "string", "maxLength": 20},
-        "counts": {"type": "array", "items": {"type": "integer"}},
+        "counts": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 5},
     },
     "required": ["answer"],
 }
-
-
-@pytest.fixture(autouse=True)
-def direct_connection(monkeypatch):
-    """urllib sends loopback requests through a proxy when the environment names one,
-    which would take them away from the fake."""
-    proxies = ("http_proxy", "https_proxy", "all_proxy")
-    for name in (*proxies, *(name.upper() for name in proxies)):
-        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -60,6 +51,11 @@ def call(cfg: configmod.Config) -> dict:
     return model.complete_json(cfg, "You answer briefly.", "Is it working?", SCHEMA, 128)
 
 
+def write_ledger(cfg: configmod.Config, lines: list[dict]) -> None:
+    """Put records in the usage ledger, as the calls of an earlier run would have."""
+    model.usage_path(cfg).write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+
 def test_valid_response_is_returned_as_a_dict(serve):
     fake, cfg = serve({"answer": "yes", "counts": [1, 2]})
     assert call(cfg) == {"answer": "yes", "counts": [1, 2]}
@@ -76,8 +72,10 @@ def test_request_carries_the_prompt_the_cap_and_the_schema(serve):
         {"role": "system", "content": "You answer briefly."},
         {"role": "user", "content": "Is it working?"},
     ]
-    assert sent["response_format"]["type"] == "json_schema"
-    assert sent["response_format"]["json_schema"]["schema"] == SCHEMA
+    assert sent["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "aft", "schema": SCHEMA},
+    }
 
 
 def test_invalid_output_is_retried_once(serve):
@@ -94,8 +92,10 @@ def test_output_that_is_not_json_counts_as_invalid(serve):
 
 def test_two_invalid_answers_raise_after_one_retry(serve):
     fake, cfg = serve({"answer": "x" * 40}, {"answer": 7})
-    with pytest.raises(model.ModelError):
+    with pytest.raises(model.ModelError) as answer:
         call(cfg)
+    assert "at most 20 characters" in str(answer.value)
+    assert "should be string" in str(answer.value)
     assert len(fake.requests) == 2
 
 
@@ -107,8 +107,18 @@ def test_a_5xx_is_retried_once(serve):
 
 def test_two_5xx_answers_raise(serve):
     fake, cfg = serve(Reply(status=503), Reply(status=500))
-    with pytest.raises(model.ModelError, match="503"):
+    with pytest.raises(model.ModelError, match="503.*500"):
         call(cfg)
+    assert len(fake.requests) == 2
+
+
+def test_both_attempts_are_reported_when_they_fail_the_same_way(serve):
+    # Two failures that read alike are still two failures: the report says so twice
+    # rather than collapsing them into one.
+    fake, cfg = serve({"answer": 7}, {"answer": 7})
+    with pytest.raises(model.ModelError) as answer:
+        call(cfg)
+    assert str(answer.value).count("should be string") == 2
     assert len(fake.requests) == 2
 
 
@@ -141,6 +151,37 @@ def test_an_endpoint_with_no_model_name_raises(cfg):
         call(cfg)
 
 
+@pytest.mark.parametrize("endpoint", ["", "127.0.0.1:8000/v1"])
+def test_an_endpoint_that_is_not_an_http_url_raises(home, endpoint):
+    with pytest.raises(model.ModelError, match="model.endpoint must be an http"):
+        call(point_at(home, endpoint))
+
+
+def test_a_url_urllib_cannot_use_raises_model_error(home):
+    # The path carries bytes that cannot go on the wire: the endpoint is down, so the
+    # work stays queued rather than the caller getting a UnicodeEncodeError.
+    with FakeEndpoint([{"answer": "yes"}]) as fake:
+        with pytest.raises(model.ModelError, match="cannot reach"):
+            call(point_at(home, f"{fake.endpoint}/chät"))
+        assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"NOT-HTTP 1.0 Confusing\r\n\r\n",
+        b'HTTP/1.1 200 OK\r\nContent-Length: 200\r\n\r\n{"choices": [',
+    ],
+)
+def test_a_reply_that_is_not_usable_http_raises_model_error(serve, raw):
+    # A status line aft cannot parse, and a body cut short, both read as a down
+    # endpoint: neither reaches the caller as an http.client exception.
+    fake, cfg = serve(Reply(raw=raw))
+    with pytest.raises(model.ModelError, match="cannot reach"):
+        call(cfg)
+    assert len(fake.requests) == 1
+
+
 def test_every_attempt_is_charged_to_the_budget(serve):
     fake, cfg = serve(
         Reply(content={"answer": 7}, usage=(100, 20)),
@@ -159,9 +200,67 @@ def test_tokens_from_earlier_days_stay_out_of_todays_count(cfg):
         {"at": yesterday.isoformat(), "prompt_tokens": 500, "completion_tokens": 100},
         {"at": today.isoformat(), "prompt_tokens": 50, "completion_tokens": 10},
     ]
-    model.usage_path(cfg).write_text("".join(json.dumps(line) + "\n" for line in lines))
+    write_ledger(cfg, lines)
     assert model.tokens_used(cfg) == 660
     assert model.tokens_used_today(cfg, now=today) == 60
+
+
+def test_a_response_that_reports_no_usage_raises_and_bills_nothing(serve):
+    # Free work would keep the daily cap from ever tripping, so an unknown cost is
+    # a failure, not a zero.
+    fake, cfg = serve(Reply(content={"answer": "yes"}, usage=None))
+    with pytest.raises(model.ModelError, match="no usable token usage"):
+        call(cfg)
+    assert len(fake.requests) == 1
+    assert not model.usage_path(cfg).exists()
+
+
+@pytest.mark.parametrize("usage", [(-5, 3), (1.5, 3), ("100", "3")])
+def test_usage_that_is_not_a_token_count_raises_and_bills_nothing(serve, usage):
+    _, cfg = serve(Reply(content={"answer": "yes"}, usage=usage))
+    with pytest.raises(model.ModelError, match="no usable token usage"):
+        call(cfg)
+    assert not model.usage_path(cfg).exists()
+
+
+def test_a_ledger_line_that_is_not_a_bill_is_left_out_of_the_total(cfg):
+    stamp = datetime.now(UTC).isoformat()
+    lines = [
+        {"at": stamp, "prompt_tokens": 100, "completion_tokens": 20},
+        {"at": stamp, "prompt_tokens": -100, "completion_tokens": 20},
+        {"at": stamp, "prompt_tokens": 1000000.0, "completion_tokens": "500"},
+        {"at": stamp, "prompt_tokens": 5},
+    ]
+    write_ledger(cfg, lines)
+    assert model.tokens_used(cfg) == 120
+    assert model.tokens_used_today(cfg) == 120
+
+
+def test_a_torn_ledger_line_does_not_spoil_the_total(cfg):
+    stamp = datetime.now(UTC).isoformat()
+    billed = json.dumps({"at": stamp, "prompt_tokens": 100, "completion_tokens": 20})
+    model.usage_path(cfg).write_bytes(
+        billed.encode()
+        + b'\n{"at": "'
+        + b"a half byte written: \xff"
+        + b"\n"
+        + billed.encode()
+        + b"\n"
+    )
+    assert model.tokens_used(cfg) == 240
+    assert model.tokens_used_today(cfg) == 240
+
+
+def test_a_stamp_with_no_offset_is_read_as_utc(cfg):
+    now = datetime.now(UTC)
+    lines = [
+        {"at": now.replace(tzinfo=None).isoformat(), "prompt_tokens": 60, "completion_tokens": 40},
+        {"at": now.isoformat(), "prompt_tokens": 5, "completion_tokens": 5},
+    ]
+    write_ledger(cfg, lines)
+    assert model.tokens_used(cfg, since=now.replace(tzinfo=None)) == 110
+    assert model.tokens_used_today(cfg, now=now) == 110
+    assert model.tokens_used_today(cfg, now=now.replace(tzinfo=None)) == 110
 
 
 @pytest.mark.parametrize(
@@ -172,6 +271,8 @@ def test_tokens_from_earlier_days_stay_out_of_todays_count(cfg):
         ({"answer": "ok", "counts": [1, "two"]}, r"\$\.counts\[1\] should be integer"),
         ({}, "missing required key answer"),
         ({"answer": "x" * 21}, "at most 20 characters"),
+        ({"answer": "ok", "counts": []}, "at least 1 items"),
+        ({"answer": "ok", "counts": [1, 2, 3, 4, 5, 6]}, "at most 5 items"),
         ({"answer": "ok", "extra": True}, None),
     ],
 )

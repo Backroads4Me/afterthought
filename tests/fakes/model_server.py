@@ -17,7 +17,8 @@ that only cares about the first two calls does not have to script the rest. A pl
 value is the assistant message content of a 200, JSON-encoded unless it is already a
 string; ``Reply`` covers the rest: ``status`` for an error response, ``delay`` to hold
 the connection open before answering, ``usage`` to report ``(prompt, completion)``
-token counts.
+token counts (or ``usage=None`` to report none at all), and ``raw`` to answer with
+bytes exactly as given, for an endpoint that does not speak HTTP properly.
 
 Point a config at it by naming the endpoint in ``config.toml``, then load it as usual:
 
@@ -50,7 +51,8 @@ class Reply:
     status: int = 200
     content: Any = None
     delay: float = 0.0
-    usage: tuple[int, int] = (0, 0)
+    usage: tuple[int, int] | None = (0, 0)
+    raw: bytes | None = None
 
 
 class FakeEndpoint:
@@ -103,6 +105,9 @@ class FakeEndpoint:
                 reply = fake.script[min(call, len(fake.script) - 1)] if fake.script else Reply()
                 if reply.delay:
                     time.sleep(reply.delay)
+                if reply.raw is not None:
+                    _send_raw(self, reply.raw)
+                    return
                 _send(self, reply.status, _payload(call, reply))
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -139,9 +144,8 @@ def _json_or_empty(body: bytes) -> dict:
 def _payload(call: int, reply: Reply) -> dict:
     if reply.status >= 400:
         return {"error": {"message": f"fake endpoint refused call {call} with {reply.status}"}}
-    prompt, completion = reply.usage
     content = reply.content if isinstance(reply.content, str) else json.dumps(reply.content)
-    return {
+    payload = {
         "id": f"chatcmpl-fake-{call}",
         "object": "chat.completion",
         "model": MODEL_NAME,
@@ -152,12 +156,15 @@ def _payload(call: int, reply: Reply) -> dict:
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
+    }
+    if reply.usage is not None:
+        prompt, completion = reply.usage
+        payload["usage"] = {
             "prompt_tokens": prompt,
             "completion_tokens": completion,
             "total_tokens": prompt + completion,
-        },
-    }
+        }
+    return payload
 
 
 def _send(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
@@ -171,4 +178,14 @@ def _send(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
     except OSError:
         # The client gave up and closed the connection, which is the point of a test
         # that scripts a delay.
+        pass
+
+
+def _send_raw(handler: BaseHTTPRequestHandler, raw: bytes) -> None:
+    """Answer with these bytes exactly, then hang up, as a broken endpoint would."""
+    handler.close_connection = True
+    try:
+        handler.wfile.write(raw)
+    except OSError:
+        # The client gave up and closed the connection first.
         pass

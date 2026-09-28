@@ -7,19 +7,22 @@ because constrained decoding is a strong expectation rather than a guarantee:
 output that fails validation, and a 5xx, are each retried once before the call
 raises (DESIGN 14).
 
-Each call records the tokens it used in ``usage.jsonl`` in the home directory.
-Budgets are measured from that log: the daily cap spans separate processes, so the
-count cannot live in memory (DESIGN 13).
+Each call records the tokens it used in ``usage.jsonl`` in the home directory; a
+response that does not report a usable token count raises rather than being written
+as free. Budgets are measured from that log: the daily cap spans separate processes,
+so the count cannot live in memory (DESIGN 13).
 """
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from aft import schema as schemamod
 from aft.config import Config
@@ -51,10 +54,14 @@ def complete_json(
     """Ask the model for one JSON object that satisfies ``schema``.
 
     Raises ``ModelError`` when the endpoint cannot be reached, answers with a
-    non-2xx or an unusable body, or returns output that fails ``schema`` twice.
+    non-2xx, an unusable body or no usable token count, or returns output that fails
+    ``schema`` twice.
     """
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
+    endpoint = config.settings.model.endpoint
+    if urlparse(endpoint).scheme not in ("http", "https"):
+        raise ModelError(f"model.endpoint must be an http(s) URL, got {endpoint!r}")
 
     body = {
         "model": config.settings.model.name,
@@ -65,7 +72,7 @@ def complete_json(
         "max_tokens": max_tokens,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": SCHEMA_NAME, "strict": True, "schema": schema},
+            "json_schema": {"name": SCHEMA_NAME, "schema": schema},
         },
     }
 
@@ -83,35 +90,45 @@ def complete_json(
             continue
         return answer
 
-    raise ModelError("; ".join(dict.fromkeys(problems)) if problems else "the model made no call")
+    raise ModelError("; ".join(problems))
 
 
 def tokens_used(config: Config, since: datetime | None = None) -> int:
-    """Tokens charged to this home since ``since``, or ever when it is None."""
+    """Tokens charged to this home since ``since``, or ever when it is None.
+
+    A stamp in the ledger or an argument with no offset is read as UTC, so every
+    comparison is between like instants.
+    """
     path = usage_path(config)
     if not path.exists():
         return 0
+    start = _utc(since) if since is not None else None
     total = 0
-    for line in path.read_text().splitlines():
+    # A torn write must not spoil the ledger for good, so bytes that do not decode
+    # are read as replacement characters and any line that is not a billable record
+    # of this home's own shape is left out of the total.
+    for line in path.read_text(errors="replace").splitlines():
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
-            # A torn write must not spoil the ledger for good, so an unreadable line
-            # is left out of the total.
+        except ValueError:
             continue
         if not isinstance(record, dict):
             continue
-        if since is not None:
+        if start is not None:
             at = _time(record.get("at"))
-            if at is None or at < since:
+            if at is None or at < start:
                 continue
-        total += _tokens(record, "prompt_tokens") + _tokens(record, "completion_tokens")
+        prompt = _token_count(record, "prompt_tokens")
+        completion = _token_count(record, "completion_tokens")
+        if prompt is None or completion is None:
+            continue
+        total += prompt + completion
     return total
 
 
 def tokens_used_today(config: Config, now: datetime | None = None) -> int:
     """Tokens used since midnight UTC, the day the daily cap is counted over."""
-    moment = now or datetime.now(UTC)
+    moment = _utc(now) if now is not None else datetime.now(UTC)
     midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
     return tokens_used(config, since=midnight)
 
@@ -139,8 +156,9 @@ def _chat(config: Config, body: dict) -> str:
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
-    except OSError as exc:
-        # Covers a refused connection, a DNS failure and a timeout alike: the
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        # Covers a refused connection, a DNS failure, a timeout, a reply that is not
+        # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
         # endpoint is treated as down and the work stays queued (DESIGN 14).
         raise ModelError(f"cannot reach {url}: {exc}") from exc
 
@@ -175,10 +193,12 @@ def _checked(content: str, schema: dict) -> dict:
 
 
 def _record_usage(config: Config, started: datetime, usage: Any) -> None:
-    prompt = completion = 0
-    if isinstance(usage, dict):
-        prompt = _tokens(usage, "prompt_tokens")
-        completion = _tokens(usage, "completion_tokens")
+    prompt = _token_count(usage, "prompt_tokens")
+    completion = _token_count(usage, "completion_tokens")
+    if prompt is None or completion is None:
+        # A call whose cost is unknown is not returned either: the budget would read
+        # it as free work, so it stays queued and reported (DESIGN 13).
+        raise ModelError(f"the endpoint reported no usable token usage: {usage!r}")
     record = {
         "at": started.isoformat(),
         "prompt_tokens": prompt,
@@ -195,10 +215,11 @@ def _record_usage(config: Config, started: datetime, usage: Any) -> None:
         raise ModelError(f"cannot record token usage in {path}: {exc}") from exc
 
 
-def _tokens(record: dict, key: str) -> int:
-    value = record.get(key)
-    if isinstance(value, bool) or not isinstance(value, int):
-        return 0
+def _token_count(source: Any, key: str) -> int | None:
+    """The token count under ``key``, or None when it is not a whole number of tokens."""
+    value = source.get(key) if isinstance(source, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
     return value
 
 
@@ -206,6 +227,11 @@ def _time(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value)
+        return _utc(datetime.fromisoformat(value))
     except ValueError:
         return None
+
+
+def _utc(moment: datetime) -> datetime:
+    """A stamp with no offset is read as UTC, so every comparison is aware."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
