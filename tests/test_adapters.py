@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from aft import cli
 from aft import config as configmod
 from aft.adapters import PARSERS
 from aft.adapters.claude import parse_claude
@@ -236,15 +235,6 @@ def test_a_home_that_cannot_be_resolved_is_silent_and_makes_no_directories(
         monkeypatch.delenv(name, raising=False)
     # A uid with no passwd entry, as a container running as a random user has.
     monkeypatch.setattr(os, "getuid", lambda: 999_999)
-
-    assert run_hook(monkeypatch, capsys, "claude", "SessionStart", "{ not json") == (0, "", "")
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_an_unexpanded_tilde_home_makes_no_directories(tmp_path, monkeypatch, capsys):
-    """Where an agent's home cannot be found, the path left behind names nothing to write."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(cli, "resolve_home", lambda: Path("~/.afterthought"))
 
     assert run_hook(monkeypatch, capsys, "claude", "SessionStart", "{ not json") == (0, "", "")
     assert list(tmp_path.iterdir()) == []

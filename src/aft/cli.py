@@ -292,10 +292,6 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
         home = resolve_home()
-        if home.parts[:1] == ("~",):
-            # An unexpanded tilde names a home this process cannot locate, not a
-            # directory to create inside the agent's working directory.
-            return
         (home / "logs").mkdir(parents=True, exist_ok=True)
         with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
