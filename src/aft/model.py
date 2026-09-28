@@ -135,6 +135,7 @@ def usage_path(config: Config) -> Path:
 def _chat(config: Config, body: dict) -> str:
     """One HTTP call. Returns the assistant message content."""
     url = config.settings.model.endpoint.rstrip("/") + "/chat/completions"
+    origin = _address(url)
     started = datetime.now(UTC)
     try:
         request = urllib.request.Request(
@@ -146,15 +147,13 @@ def _chat(config: Config, body: dict) -> str:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
     except urllib.error.HTTPError as exc:
-        # An error body is itself a response, so it can stop short or never arrive:
-        # the status code plus whatever came of the body is what aft reports.
+        # An error body is itself a response that can stop short or never arrive, and it
+        # may be enormous: aft reads only as much of it as a report can carry.
         try:
-            detail = exc.read()
-        except http.client.IncompleteRead as cut_short:
-            detail = cut_short.partial
+            detail = exc.read(500)
         except (OSError, http.client.HTTPException, ValueError):
             detail = b""
-        message = f"{url} returned {exc.code}: {detail.decode(errors='replace')[:500]}"
+        message = f"{origin} returned {exc.code}: {detail.decode(errors='replace')[:500]}"
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
@@ -162,24 +161,38 @@ def _chat(config: Config, body: dict) -> str:
         # Covers a refused connection, a DNS failure, a timeout, a reply that is not
         # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
         # endpoint is treated as down and the work stays queued (DESIGN 14).
-        raise ModelError(f"cannot reach {url}: {exc}") from exc
+        raise ModelError(f"cannot reach {origin}: {exc}") from exc
 
     try:
         reply = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ModelError(f"{url} did not answer with JSON: {raw[:200]}") from exc
+        raise ModelError(f"{origin} did not answer with JSON: {raw[:200]}") from exc
     if not isinstance(reply, dict):
-        raise ModelError(f"{url} answered with JSON that is not an object: {raw[:200]}")
+        raise ModelError(f"{origin} answered with JSON that is not an object: {raw[:200]}")
 
     _record_usage(config, started, reply.get("usage"))
     choices = reply.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ModelError(f"{url} returned no choices: {raw[:200]}")
+        raise ModelError(f"{origin} returned no choices: {raw[:200]}")
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
-        raise ModelError(f"{url} returned no message content: {raw[:200]}")
+        raise ModelError(f"{origin} returned no message content: {raw[:200]}")
     return content
+
+
+def _address(url: str) -> str:
+    """The endpoint as a failure message names it: scheme, host and path.
+
+    The setting may carry a credential as userinfo or in a query string, and DESIGN 14
+    sends failure text to the report, so neither belongs in the address aft repeats.
+    """
+    address = url.partition("?")[0].partition("#")[0]
+    scheme, sep, rest = address.partition("://")
+    if not sep:
+        return address
+    authority, slash, path = rest.partition("/")
+    return f"{scheme}://{authority.rpartition('@')[2]}{slash}{path}"
 
 
 def _checked(content: str, schema: dict) -> dict:

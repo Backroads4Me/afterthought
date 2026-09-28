@@ -184,9 +184,9 @@ def test_a_reply_that_is_not_usable_http_raises_model_error(serve, raw):
     assert len(fake.requests) == 1
 
 
-def test_a_5xx_with_a_cut_off_error_body_is_still_a_model_error(serve):
-    # An error body is a response too: this one promises 5000 bytes and sends 600
-    # before hanging up. The report gets the status and a bounded piece of the body.
+def test_a_5xx_reports_only_a_bounded_piece_of_its_error_body(serve):
+    # The error body is the endpoint's to write, so aft reads and reports only what
+    # fits: this one promises 5000 bytes, sends 600, and 500 reach the report.
     raw = b"HTTP/1.1 500 Oops\r\nContent-Length: 5000\r\n\r\n" + b"z" * 600
     fake, cfg = serve(Reply(raw=raw))
     with pytest.raises(model.ModelError) as answer:
@@ -196,6 +196,19 @@ def test_a_5xx_with_a_cut_off_error_body_is_still_a_model_error(serve):
     assert "z" in reported
     assert "z" * 501 not in reported
     assert len(fake.requests) == 2
+
+
+def test_a_failure_message_does_not_carry_a_credential_from_the_endpoint(home):
+    # A hosted endpoint addressed with a token in the URL is named by host and path in
+    # the report, so the token stays in the config and out of what DESIGN 14 writes.
+    with FakeEndpoint([Reply(status=400)]) as fake:
+        host = fake.endpoint.split("//")[1]
+        cfg = point_at(home, f"http://aft:sekret-token@{host}/v1?key=sekret-token")
+        with pytest.raises(model.ModelError) as answer:
+            call(cfg)
+        reported = str(answer.value)
+        assert "sekret-token" not in reported
+        assert host in reported
 
 
 def test_every_attempt_is_charged_to_the_budget(serve):
