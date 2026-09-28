@@ -153,7 +153,8 @@ def _chat(config: Config, body: dict) -> str:
             detail = exc.read(500)
         except (OSError, http.client.HTTPException, ValueError):
             detail = b""
-        message = f"{origin} returned {exc.code}: {detail.decode(errors='replace')[:500]}"
+        excerpt = detail.decode(errors="replace")[:500]
+        message = _reported(config, f"{origin} returned {exc.code}: {excerpt}")
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
@@ -161,31 +162,34 @@ def _chat(config: Config, body: dict) -> str:
         # Covers a refused connection, a DNS failure, a timeout, a reply that is not
         # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
         # endpoint is treated as down and the work stays queued (DESIGN 14).
-        raise ModelError(f"cannot reach {origin}: {exc}") from exc
+        raise ModelError(_reported(config, f"cannot reach {origin}: {exc}")) from exc
 
     try:
         reply = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ModelError(f"{origin} did not answer with JSON: {raw[:200]}") from exc
+        problem = f"{origin} did not answer with JSON: {raw[:200]}"
+        raise ModelError(_reported(config, problem)) from exc
     if not isinstance(reply, dict):
-        raise ModelError(f"{origin} answered with JSON that is not an object: {raw[:200]}")
+        problem = f"{origin} answered with JSON that is not an object: {raw[:200]}"
+        raise ModelError(_reported(config, problem))
 
     _record_usage(config, started, reply.get("usage"))
     choices = reply.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ModelError(f"{origin} returned no choices: {raw[:200]}")
+        raise ModelError(_reported(config, f"{origin} returned no choices: {raw[:200]}"))
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
-        raise ModelError(f"{origin} returned no message content: {raw[:200]}")
+        problem = f"{origin} returned no message content: {raw[:200]}"
+        raise ModelError(_reported(config, problem))
     return content
 
 
 def _address(url: str) -> str:
-    """The endpoint as a failure message names it: scheme, host and path.
+    """The endpoint as aft names it in a failure: scheme, host and path.
 
-    The setting may carry a credential as userinfo or in a query string, and DESIGN 14
-    sends failure text to the report, so neither belongs in the address aft repeats.
+    The userinfo and parameters a URL may carry are dropped as noise; ``_reported`` is
+    what keeps a credential out of the text, however it reached the message.
     """
     address = url.partition("?")[0].partition("#")[0]
     scheme, sep, rest = address.partition("://")
@@ -193,6 +197,28 @@ def _address(url: str) -> str:
         return address
     authority, slash, path = rest.partition("/")
     return f"{scheme}://{authority.rpartition('@')[2]}{slash}{path}"
+
+
+def _reported(config: Config, problem: str) -> str:
+    """The failure text aft reports, with any credential the endpoint setting carries
+    taken out. DESIGN 14 writes this text into a report, and the setting is the only
+    place a token can sit today, so nothing it holds may be printed: urllib echoes the
+    whole configured URL in its own wording, and a proxy can echo it in an error body.
+    """
+    for secret in _secrets(config.settings.model.endpoint):
+        problem = problem.replace(secret, "[redacted]")
+    return problem
+
+
+def _secrets(endpoint: str) -> list[str]:
+    """The parts of the endpoint setting that could be a credential: its userinfo and
+    each parameter written after a '?' or a '#'. Longest first, so a whole parameter is
+    taken out before a part of one.
+    """
+    head, _, parameters = endpoint.replace("#", "?").partition("?")
+    authority = head.split("://")[-1].split("/")[0]
+    pieces = {authority.rpartition("@")[0], parameters, *parameters.split("&")}
+    return sorted((piece for piece in pieces if piece), key=len, reverse=True)
 
 
 def _checked(content: str, schema: dict) -> dict:

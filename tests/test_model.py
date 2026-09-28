@@ -198,17 +198,38 @@ def test_a_5xx_reports_only_a_bounded_piece_of_its_error_body(serve):
     assert len(fake.requests) == 2
 
 
-def test_a_failure_message_does_not_carry_a_credential_from_the_endpoint(home):
-    # A hosted endpoint addressed with a token in the URL is named by host and path in
-    # the report, so the token stays in the config and out of what DESIGN 14 writes.
-    with FakeEndpoint([Reply(status=400)]) as fake:
+def test_a_4xx_reports_the_reason_the_endpoint_gave(serve):
+    # The cap is on what aft reads, not on what the endpoint said: this reason arrives
+    # short of its declared length and still reaches the report, in one attempt.
+    body = b'{"error": {"message": "no api key"}}'
+    raw = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 200\r\n\r\n" + body
+    fake, cfg = serve(Reply(raw=raw))
+    with pytest.raises(model.ModelError, match="no api key"):
+        call(cfg)
+    assert len(fake.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "http://aft:sekret-token@{host}/v1",
+        "sekret-token@{host}/v1?key=sekret-token",
+        "http://{host}/v1?key=sekret-token",
+    ],
+    ids=["userinfo", "no-scheme", "query"],
+)
+def test_a_failure_message_never_prints_a_credential_from_the_endpoint(home, form):
+    # DESIGN 14 writes failure text into a report and the endpoint setting is the only
+    # place a token can sit today, so it stays out of the address aft names, out of
+    # urllib's own wording of that address, and out of a body echoing the request path.
+    with FakeEndpoint() as fake:
         host = fake.endpoint.split("//")[1]
-        cfg = point_at(home, f"http://aft:sekret-token@{host}/v1?key=sekret-token")
+        cfg = point_at(home, form.format(host=host))
         with pytest.raises(model.ModelError) as answer:
             call(cfg)
         reported = str(answer.value)
         assert "sekret-token" not in reported
-        assert host in reported
+        assert "127.0.0.1" in reported
 
 
 def test_every_attempt_is_charged_to_the_budget(serve):
