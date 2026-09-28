@@ -16,7 +16,7 @@ from aft import config as configmod
 from aft.adapters import PARSERS
 from aft.adapters.claude import parse_claude
 from aft.adapters.pi import parse_pi
-from aft.cli import HOOK_TIMEOUT_SECONDS, main
+from aft.cli import HOOK_LOG_LINE_LIMIT, HOOK_TIMEOUT_SECONDS, main
 from aft.events import AdapterError, SessionEvent
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
@@ -202,6 +202,17 @@ def test_an_unknown_event_is_silent_and_logs_one_line(home, monkeypatch, capsys)
     lines = hook_log(home)
     assert len(lines) == 1
     assert "unknown claude hook event 'PostToolUse'" in lines[0]
+
+
+def test_the_failure_line_stays_one_bounded_line(home, monkeypatch, capsys):
+    """Agent, event and the error's own words come from outside: one line, capped."""
+    text = payload_text("claude-session-start.json")
+    event = "SessionStart\n" + "x" * 600
+
+    assert run_hook(monkeypatch, capsys, "claude", event, text) == (0, "", "")
+    lines = hook_log(home)
+    assert len(lines) == 1
+    assert len(lines[0]) <= HOOK_LOG_LINE_LIMIT
 
 
 def test_an_unknown_agent_is_silent_and_logs_one_line(home, monkeypatch, capsys):
