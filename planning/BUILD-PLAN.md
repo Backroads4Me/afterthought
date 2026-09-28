@@ -315,14 +315,16 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   {"type": "json_schema", ...}` using `urllib`. Validates the response against the schema
   with a small validator in `aft/schema.py` (types, required keys, enums, string lengths;
   no dependency). Retries once on invalid output or a 5xx, then raises.
-- **Credentials:** add `api_key` (default empty) to `ModelConfig` in `aft/config.py` and to
-  the commented default config. When set, it is sent as `Authorization: Bearer <key>`;
-  when empty, no header is sent. `aft` refuses to use a key if `config.toml` is readable by
-  group or others, with an error naming `chmod 600`. The key never appears in logs, error
-  messages or reports.
+- **Credentials:** add `api_key_env` (default empty) to `ModelConfig` in `aft/config.py` and
+  to the commented default config. It names an environment variable; `config.toml` never
+  holds the key itself. When `api_key_env` is set, the client reads that variable at call
+  time and sends it as `Authorization: Bearer <key>`; if the variable is unset or empty, the
+  call fails with a `ModelError` naming the variable (never its value). When `api_key_env`
+  is empty, no header is sent. The key never appears in logs, error messages or reports.
 - **Tests:** against the fake server: valid response; invalid then valid; two invalids
-  raise; timeout raises; the bearer header is sent only when a key is set; a key in a
-  group-readable config is refused; an error from a keyed call does not contain the key.
+  raise; timeout raises; the bearer header is sent only when `api_key_env` is set; a set
+  but missing variable fails naming the variable; an error from a keyed call does not
+  contain the key.
 
 #### M2.6 Digest
 
@@ -418,8 +420,12 @@ Never invent a fact, a quote, or an entry id.
 - **Behavior:** writes `aft-work.service` and `aft-work.timer` (every
   `dream.interval_minutes`) under `~/.config/systemd/user/`; the capture hook may start
   the service early with `systemctl --user start --no-block aft-work.service`, at most once
-  every 5 minutes. Unit directory passed as an argument in tests.
-- **Tests:** unit file contents; idempotent install.
+  every 5 minutes. Unit directory passed as an argument in tests. A systemd user service
+  does not see the shell's environment, so the service loads an optional
+  `EnvironmentFile=-%h/.afterthought/env`, where the variable named by `model.api_key_env`
+  can be set when the endpoint needs a key.
+- **Tests:** unit file contents, including the optional environment file; idempotent
+  install.
 
 ### M3 Search
 
@@ -633,7 +639,8 @@ specification return the right document and page (DESIGN 15, M7).
 
 ### 6.2 M2
 
-1. `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
+1. If the model endpoint needs a key, put it in `~/.afterthought/env` as
+   `<the variable named in model.api_key_env>=<key>`, with `chmod 600`. Then `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
    (`~/.treehouse`) and the validation gate (`~/.no-mistakes/worktrees`).
 2. Work normally for a day, then read the digests in `~/afterthought/digests/` and check
    their facts and quotes.
