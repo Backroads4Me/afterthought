@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,8 +40,8 @@ def registered(initialized):
     return initialized
 
 
-def run(seed, vault: Path) -> int:
-    return seed.main([str(vault)])
+def run(seed, vault: Path, *flags: str) -> int:
+    return seed.main([*flags, str(vault)])
 
 
 def page_of(cfg, seed) -> pagemod.Page:
@@ -85,14 +87,49 @@ def test_facts_are_observed_and_each_has_a_source(registered, seed):
     assert len(source_ids(page)) == len(page.facts)
 
 
-def test_reruns_write_the_same_page_and_commit_nothing(registered, seed):
+def test_a_rerun_refuses_to_replace_the_page(registered, seed, capsys):
     assert run(seed, registered.vault) == 0
     first = run_git(["log", "--format=%s"], registered.vault)
     text = (registered.vault / seed.REL_PATH).read_text()
-    assert run(seed, registered.vault) == 0
+    assert run(seed, registered.vault) == 2
     assert (registered.vault / seed.REL_PATH).read_text() == text
     assert run_git(["log", "--format=%s"], registered.vault) == first
     assert run_git(["status", "--porcelain"], registered.vault) == ""
+    assert "--overwrite" in capsys.readouterr().err
+
+
+def test_overwrite_keeps_the_dates_of_unchanged_facts(registered, seed):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    past = (date.today() - timedelta(days=30)).isoformat()
+    aged = re.sub(r"\[observed\] \d{4}-\d{2}-\d{2}", f"[observed] {past}", path.read_text())
+    assert aged != path.read_text()
+    path.write_text(aged)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: age the seeded facts")
+    first = run_git(["log", "--format=%s"], registered.vault)
+    assert run(seed, registered.vault, "--overwrite") == 0
+    assert path.read_text() == aged
+    assert run_git(["log", "--format=%s"], registered.vault) == first
+
+
+def test_overwrite_dates_a_fact_whose_statement_changed(registered, seed):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    past = (date.today() - timedelta(days=30)).isoformat()
+    aged = re.sub(r"\[observed\] \d{4}-\d{2}-\d{2}", f"[observed] {past}", path.read_text())
+    changed = seed.FACTS[0]
+    edited = aged.replace(
+        f"- {changed.statement} [observed]", f"- {changed.statement} (reworded) [observed]"
+    )
+    assert edited != aged
+    path.write_text(edited)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: reword a fact")
+    assert run(seed, registered.vault, "--overwrite") == 0
+    dates = {fact.statement: fact.date for fact in page_of(registered, seed).facts}
+    assert dates[changed.statement] == date.today().isoformat()
+    kept = [day for statement, day in dates.items() if statement != changed.statement]
+    assert len(kept) == len(dates) - 1
+    assert kept == [past] * len(kept)
 
 
 def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):

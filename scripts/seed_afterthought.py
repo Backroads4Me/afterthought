@@ -8,7 +8,11 @@ writing a page whose evidence no longer exists, and ``aft``'s own lint checks th
 in a scratch directory, so a page that breaks the page grammar never reaches the vault
 (design section 6, BUILD-PLAN M1.5).
 
-Usage: uv run python scripts/seed_afterthought.py <vault>
+The page is memory people edit, so an existing one is left alone unless the run says
+``--overwrite``. On such a run a fact whose statement and quote are unchanged keeps the date
+the page already carried: re-reading the same source is not new evidence.
+
+Usage: uv run python scripts/seed_afterthought.py [--overwrite] <vault>
 """
 
 from __future__ import annotations
@@ -239,8 +243,27 @@ def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
             raise SeedError(f"quote is not verbatim under {fact.heading!r}: {fact.quote!r}")
 
 
-def render(facts: tuple[SeedFact, ...], project_id: str, observed: str) -> str:
-    """Render the overview page: sources in the frontmatter, one fact line each."""
+def prior_dates(path: Path) -> dict[tuple[str, str], str]:
+    """The observed dates already on a page in the vault, keyed by the statement and quote that
+    make a fact the same fact."""
+    if not path.exists():
+        return {}
+    page = pagemod.parse(path.read_text(), path)
+    quotes = {
+        str(source["id"]): str(source["quote"])
+        for source in (page.frontmatter or {}).get("sources") or []
+        if isinstance(source, dict) and source.get("id") is not None and "quote" in source
+    }
+    return {
+        (fact.statement, quotes[ref]): fact.date
+        for fact in page.facts
+        for ref in fact.refs
+        if ref in quotes
+    }
+
+
+def render(facts: tuple[SeedFact, ...], project_id: str, dates: dict[tuple[str, str], str]) -> str:
+    """Render the overview page: sources in the frontmatter, one dated fact line per fact."""
     sources = [
         {
             "id": f"s{index}",
@@ -259,7 +282,8 @@ def render(facts: tuple[SeedFact, ...], project_id: str, observed: str) -> str:
     }
     statements: dict[str, list[str]] = {section: [] for section in pagemod.KIND_SECTIONS}
     for index, fact in enumerate(facts, start=1):
-        statements[fact.section].append(f"- {fact.statement} [observed] {observed} [^s{index}]")
+        day = dates[(fact.statement, fact.quote)]
+        statements[fact.section].append(f"- {fact.statement} [observed] {day} [^s{index}]")
     lines: list[str] = []
     for section, entries in statements.items():
         if not entries:
@@ -281,7 +305,7 @@ def lint_page(text: str, registry: Registry) -> list[str]:
         return [str(finding) for finding in lint_file(Path(scratch), rel, registry)]
 
 
-def seed(vault_path: Path) -> bool:
+def seed(vault_path: Path, overwrite: bool = False) -> bool:
     """Write and commit the seed page into ``vault_path``. Returns whether it committed."""
     check_quotes(FACTS, DESIGN.read_text())
     config = replace(load(), vault=vault_path)
@@ -294,11 +318,19 @@ def seed(vault_path: Path) -> bool:
                 f"{config.registry_path} does not register {SLUG}; "
                 f"run `aft project add ~/src/{SLUG}` first"
             )
-        text = render(FACTS, project.id, date.today().isoformat())
+        path = config.vault / REL_PATH
+        if path.exists() and not overwrite:
+            raise SeedError(f"{path} already exists; pass --overwrite to replace it")
+        today = date.today().isoformat()
+        carried = prior_dates(path)
+        dates = {
+            (fact.statement, fact.quote): carried.get((fact.statement, fact.quote), today)
+            for fact in FACTS
+        }
+        text = render(FACTS, project.id, dates)
         findings = lint_page(text, registry)
         if findings:
             raise SeedError("the seeded page does not lint: " + "; ".join(findings))
-        path = config.vault / REL_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
         return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE)
@@ -310,10 +342,15 @@ def main(argv: list[str] | None = None) -> int:
         description=f"Seed afterthought's overview page from {DESIGN_RESOURCE}.",
     )
     parser.add_argument("vault", help="the vault to write into, such as ~/afterthought")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=f"replace {REL_PATH} where the vault already has one",
+    )
     args = parser.parse_args(argv)
     vault_path = Path(args.vault).expanduser().resolve()
     try:
-        committed = seed(vault_path)
+        committed = seed(vault_path, overwrite=args.overwrite)
     except (SeedError, ConfigError, GitError, RegistryError, vault.VaultError, OSError) as exc:
         print(f"seed_afterthought: {exc}", file=sys.stderr)
         return 2
