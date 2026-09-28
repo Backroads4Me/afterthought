@@ -4,8 +4,9 @@
 Each fact below is hand-written from ``planning/DESIGN.md`` and carries the quote it came
 from. Before the page is written, every quote is checked against the section of the design
 document it cites, so a design edit that drops a quoted line fails the seed instead of
-writing a page whose evidence no longer exists. After the page is written, ``aft``'s own
-lint decides whether it follows the page grammar (design section 6, BUILD-PLAN M1.5).
+writing a page whose evidence no longer exists, and ``aft``'s own lint checks the rendered page
+in a scratch directory, so a page that breaks the page grammar never reaches the vault
+(design section 6, BUILD-PLAN M1.5).
 
 Usage: uv run python scripts/seed_afterthought.py <vault>
 """
@@ -15,12 +16,14 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tempfile
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
 import yaml
 
+from aft import page as pagemod
 from aft import vault
 from aft.config import ConfigError, load
 from aft.gitutil import GitError
@@ -36,6 +39,7 @@ DESCRIPTION = "Shared, evidence-backed memory for coding agents, kept as OKF mar
 COMMIT_MESSAGE = f"aft: seed the {SLUG} overview page"
 
 _HEADING = re.compile(r"^#{1,6} (?P<heading>.+?)\s*$")
+_FENCE = re.compile(r"^\s*```")
 
 
 class SeedError(Exception):
@@ -183,35 +187,55 @@ FACTS: tuple[SeedFact, ...] = (
 )
 
 
-def sections(design: str) -> dict[str, str]:
-    """Map each heading in the design document to the raw text under it, up to the next heading."""
-    found: dict[str, str] = {}
+def sections(design: str) -> dict[str, list[str]]:
+    """Map each heading to the raw text under it, up to the next heading of the document.
+
+    A heading inside a fenced code block is that block's content, not a section of the
+    document, so it neither ends the body before it nor becomes a heading of its own. A name
+    used more than once maps to every body written under it, so a citation to it is reported
+    as ambiguous instead of silently resolving to the last one.
+    """
+    found: dict[str, list[str]] = {}
     heading: str | None = None
     body: list[str] = []
+    fenced = False
     for line in design.split("\n"):
-        match = _HEADING.match(line)
-        name = match.group("heading") if match else None
-        if name is not None:
-            if heading is not None:
-                found[heading] = "\n".join(body)
-            heading = name
-            found.setdefault(name, "")
-            body = []
-        elif heading is not None:
-            body.append(line)
+        if _FENCE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            match = _HEADING.match(line)
+            if match is not None:
+                if heading is not None:
+                    found.setdefault(heading, []).append("\n".join(body))
+                heading = match.group("heading")
+                body = []
+                continue
+        if heading is not None:
             body.append(line)
     if heading is not None:
-        found[heading] = "\n".join(body)
+        found.setdefault(heading, []).append("\n".join(body))
     return found
 
 
 def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
-    """Fail unless every quote appears verbatim under the heading it cites."""
+    """Fail unless every fact names a kind section of a page and its quote appears verbatim
+    under the one heading it cites."""
     found = sections(design)
     for fact in facts:
-        if fact.heading not in found:
+        if fact.section not in pagemod.KIND_SECTIONS:
+            raise SeedError(
+                f"{fact.statement!r} would land in {fact.section!r}; a page's sections are "
+                + ", ".join(pagemod.KIND_SECTIONS)
+            )
+        bodies = found.get(fact.heading)
+        if bodies is None:
             raise SeedError(f"{DESIGN_RESOURCE} has no heading {fact.heading!r}")
-        if fact.quote not in found[fact.heading]:
+        if len(bodies) > 1:
+            raise SeedError(
+                f"{DESIGN_RESOURCE} has {len(bodies)} headings {fact.heading!r}, so the quote "
+                f"for {fact.statement!r} does not name one of them"
+            )
+        if fact.quote not in bodies[0]:
             raise SeedError(f"quote is not verbatim under {fact.heading!r}: {fact.quote!r}")
 
 
@@ -233,16 +257,28 @@ def render(facts: tuple[SeedFact, ...], project_id: str, observed: str) -> str:
         "sources": sources,
         "aft": {"project": project_id},
     }
+    statements: dict[str, list[str]] = {section: [] for section in pagemod.KIND_SECTIONS}
+    for index, fact in enumerate(facts, start=1):
+        statements[fact.section].append(f"- {fact.statement} [observed] {observed} [^s{index}]")
     lines: list[str] = []
-    for section in ("Decisions", "Facts"):
-        lines += [f"## {section}", ""]
-        for index, fact in enumerate(facts, start=1):
-            if fact.section == section:
-                lines.append(f"- {fact.statement} [observed] {observed} [^s{index}]")
-        lines.append("")
+    for section, entries in statements.items():
+        if not entries:
+            continue
+        lines += [f"## {section}", "", *entries, ""]
     body = "\n".join(lines).rstrip("\n") + "\n"
     front = yaml.safe_dump(frontmatter, sort_keys=False, width=10_000, allow_unicode=True)
     return f"---\n{front}---\n\n{body}"
+
+
+def lint_page(text: str, registry: Registry) -> list[str]:
+    """Lint the rendered page in a scratch directory, so a page that breaks the grammar
+    never reaches the vault's working tree."""
+    rel = Path(REL_PATH)
+    with tempfile.TemporaryDirectory() as scratch:
+        page = Path(scratch) / rel
+        page.parent.mkdir(parents=True)
+        page.write_text(text)
+        return [str(finding) for finding in lint_file(Path(scratch), rel, registry)]
 
 
 def seed(vault_path: Path) -> bool:
@@ -258,12 +294,13 @@ def seed(vault_path: Path) -> bool:
                 f"{config.registry_path} does not register {SLUG}; "
                 f"run `aft project add ~/src/{SLUG}` first"
             )
+        text = render(FACTS, project.id, date.today().isoformat())
+        findings = lint_page(text, registry)
+        if findings:
+            raise SeedError("the seeded page does not lint: " + "; ".join(findings))
         path = config.vault / REL_PATH
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render(FACTS, project.id, date.today().isoformat()))
-        findings = lint_file(config.vault, Path(REL_PATH), registry)
-        if findings:
-            raise SeedError("the seeded page does not lint: " + "; ".join(str(f) for f in findings))
+        path.write_text(text)
         return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE)
 
 

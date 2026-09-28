@@ -70,8 +70,9 @@ def test_every_quote_sits_under_its_cited_heading(registered, seed):
     for source in source_ids(page_of(registered, seed)).values():
         resource, _, heading = source["resource"].partition("#")
         assert resource == seed.DESIGN_RESOURCE
-        assert heading in sections, source["resource"]
-        assert source["quote"] in sections[heading]
+        bodies = sections[heading]
+        assert len(bodies) == 1, source["resource"]
+        assert source["quote"] in bodies[0]
 
 
 def test_facts_are_observed_and_each_has_a_source(registered, seed):
@@ -100,7 +101,15 @@ def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):
     assert "aft project add" in capsys.readouterr().err
 
 
-def test_a_missing_vault_is_refused(seed, tmp_path, capsys):
+def test_a_page_that_does_not_lint_is_never_written(registered, seed, monkeypatch, capsys):
+    monkeypatch.setattr(seed, "render", lambda *args: "not a page\n")
+    assert run(seed, registered.vault) == 2
+    assert not (registered.vault / seed.REL_PATH).exists()
+    assert run_git(["status", "--porcelain"], registered.vault) == ""
+    assert "does not lint" in capsys.readouterr().err
+
+
+def test_a_missing_vault_is_refused(seed, home, tmp_path, capsys):
     assert run(seed, tmp_path / "no-vault") == 2
     assert "aft init" in capsys.readouterr().err
 
@@ -120,3 +129,37 @@ def test_a_quote_copied_from_another_section_fails_the_seed(seed):
     )
     with pytest.raises(seed.SeedError):
         seed.check_quotes((moved,), DESIGN.read_text())
+
+
+def test_a_quote_may_span_several_lines(seed):
+    design = "# Kinds\n\nfirst line\nsecond line\n"
+    fact = seed.SeedFact("Facts", "a statement", "Kinds", "first line\nsecond line")
+    seed.check_quotes((fact,), design)
+
+
+def test_a_quote_of_a_repeated_non_adjacent_line_fails_the_seed(seed):
+    design = "# Kinds\n\nfirst line\nother line\nfirst line\n"
+    repeated = seed.SeedFact("Facts", "a statement", "Kinds", "first line\nfirst line")
+    with pytest.raises(seed.SeedError):
+        seed.check_quotes((repeated,), design)
+
+
+def test_a_heading_inside_a_code_block_is_not_part_of_the_design(seed):
+    design = "# Page format\n\nreal\n\n```markdown\n## Decisions\n\n- fake\n```\n\nstill real\n"
+    seed.check_quotes((seed.SeedFact("Facts", "a statement", "Page format", "still real"),), design)
+    fenced = seed.SeedFact("Facts", "a statement", "Decisions", "fake")
+    with pytest.raises(seed.SeedError):
+        seed.check_quotes((fenced,), design)
+
+
+def test_a_citation_to_a_heading_name_used_twice_is_refused(seed):
+    design = "# Kinds\n\nshared line\n\n# Kinds\n\nshared line and more\n"
+    ambiguous = seed.SeedFact("Facts", "a statement", "Kinds", "shared line")
+    with pytest.raises(seed.SeedError):
+        seed.check_quotes((ambiguous,), design)
+
+
+def test_a_fact_landing_outside_the_page_kinds_is_refused(seed):
+    misplaced = seed.SeedFact("Decision", "a statement", "Kinds", "shared line")
+    with pytest.raises(seed.SeedError):
+        seed.check_quotes((misplaced,), "# Kinds\n\nshared line\n")
