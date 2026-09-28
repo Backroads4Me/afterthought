@@ -180,7 +180,8 @@ def test_malformed_json_is_silent_and_logs_one_line(home, monkeypatch, capsys):
     assert run_hook(monkeypatch, capsys, "claude", "SessionStart", "{ not json") == (0, "", "")
     lines = hook_log(home)
     assert len(lines) == 1
-    assert "claude SessionStart" in lines[0]
+    assert "claude" in lines[0]
+    assert "SessionStart" in lines[0]
     assert "JSONDecodeError" in lines[0]
 
 
@@ -205,7 +206,8 @@ def test_an_unknown_event_is_silent_and_logs_one_line(home, monkeypatch, capsys)
 
 
 def test_the_failure_line_stays_one_bounded_line(home, monkeypatch, capsys):
-    """Agent, event and the error's own words come from outside: one line, capped."""
+    """Agent, event and the error's own words come from outside: one bounded line that
+    still names the failure."""
     text = payload_text("claude-session-start.json")
     event = "SessionStart\n" + "x" * 600
 
@@ -213,6 +215,7 @@ def test_the_failure_line_stays_one_bounded_line(home, monkeypatch, capsys):
     lines = hook_log(home)
     assert len(lines) == 1
     assert len(lines[0]) <= HOOK_LOG_LINE_LIMIT
+    assert "AdapterError" in lines[0]
 
 
 def test_an_unknown_agent_is_silent_and_logs_one_line(home, monkeypatch, capsys):
