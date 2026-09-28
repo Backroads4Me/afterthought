@@ -32,7 +32,10 @@ class ReaderError(Exception):
 
 @dataclass(frozen=True)
 class Entry:
-    id: str  # stable within the session: the agent's own entry id
+    # The agent's own entry id when the transcript carries one; for a tool result
+    # split out of a user message, that message's id joined with the tool call's
+    # id, so the same result keeps one id within the session.
+    id: str
     time: datetime
     role: str  # "user" | "assistant" | "tool"
     text: str  # user prompt, assistant final text, or tool output
