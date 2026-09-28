@@ -64,14 +64,12 @@ def string_field(payload: dict, key: str) -> str:
 def optional_string_field(payload: dict, key: str) -> str | None:
     """An optional string field: the reason an agent fired an event.
 
-    It never decides what the hook does, so a payload without it still parses.
+    It never decides what the hook does, so anything that is not a non-empty string -
+    absent, null, empty, or of another type - reads as absent rather than refusing the
+    event. Only the fields the plan requires may refuse one.
     """
     value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise AdapterError(f"{key} is not a string")
-    return value
+    return value if isinstance(value, str) and value else None
 
 
 def path_field(payload: dict, key: str) -> Path:
@@ -87,12 +85,11 @@ def path_field(payload: dict, key: str) -> Path:
 
 
 def optional_path_field(payload: dict, key: str) -> Path | None:
-    """A field holding a path a payload may leave out or null.
+    """A field holding a path a payload may leave out.
 
     pi's own session file is undefined until a session is first written, so its
-    transcript may be absent; every other path an adapter reads is required.
+    transcript may be absent or reported empty; either way the event still stands.
+    Every other path an adapter reads is required.
     """
-    value = payload.get(key)
-    if value is None:
-        return None
-    return path_field(payload, key)
+    value = optional_string_field(payload, key)
+    return None if value is None else Path(value)

@@ -255,9 +255,9 @@ def _dispatch(event: SessionEvent) -> None:
 def _hook_time_limit(seconds: int) -> Iterator[None]:
     """Give up on the hook after this many seconds, wherever it has got to.
 
-    The alarm is what bounds a stdin read that never finishes, the one place a hook
-    can hold an agent's session open. Where SIGALRM is unavailable the limit is not
-    enforced here and the agent's own hook timeout is the bound.
+    The same budget bounds both blocking steps a hook takes: a stdin read that never
+    finishes and the log write that reports a failure. Where SIGALRM is unavailable the
+    limit is not enforced here and the agent's own hook timeout is the bound.
     """
     if not hasattr(signal, "SIGALRM"):
         yield
@@ -289,9 +289,10 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     the whole line is flattened and capped: whatever they contain, a failed hook
     leaves one bounded line and nothing else. Each caller-supplied argument is clamped
     to its own budget and the event name goes last, so a runaway argument loses its
-    own tail rather than the reason for the failure. Best effort all the way down: a
-    home that cannot be resolved or written to, or a line that cannot be written, is
-    not a reason to fail the agent.
+    own tail rather than the reason for the failure. Best effort all the way down and
+    inside the hook's own budget: a home that cannot be resolved or written to, a line
+    that cannot be written, and an expiry that lands mid-write are a lost record, not
+    a reason to fail the agent.
     """
     line = (
         f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
@@ -299,9 +300,10 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     )
     line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
-        home = resolve_home()
-        (home / "logs").mkdir(parents=True, exist_ok=True)
-        with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        with _hook_time_limit(HOOK_TIMEOUT_SECONDS):
+            home = resolve_home()
+            (home / "logs").mkdir(parents=True, exist_ok=True)
+            with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
     except Exception:
         pass

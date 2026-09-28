@@ -6,6 +6,7 @@ import io
 import json
 import os
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -150,6 +151,28 @@ def test_pi_before_its_session_is_written_has_no_transcript():
     assert parse_pi("session_start", without_transcript, NOW).transcript_path is None
 
 
+def test_an_optional_detail_of_the_wrong_type_reads_as_absent(home, monkeypatch, capsys):
+    """Only the fields the plan requires may refuse an event, and detail is not one."""
+    wrong_type = payload("claude-session-end.json") | {"reason": 2}
+
+    assert parse_claude("SessionEnd", wrong_type, NOW).detail is None
+    assert run_hook(monkeypatch, capsys, "claude", "SessionEnd", json.dumps(wrong_type)) == (
+        0,
+        "",
+        "",
+    )
+    assert hook_log(home) == []
+
+
+def test_pi_reporting_an_empty_session_file_has_no_transcript(home, monkeypatch, capsys):
+    """A session file pi has not written yet reads as no transcript, not as a refused event."""
+    empty = payload("pi-session-start.json") | {"transcript_path": ""}
+
+    assert parse_pi("session_start", empty, NOW).transcript_path is None
+    assert run_hook(monkeypatch, capsys, "pi", "session_start", json.dumps(empty)) == (0, "", "")
+    assert hook_log(home) == []
+
+
 def test_fields_the_parser_does_not_know_are_ignored():
     """A captured payload carries more than afterthought reads; extra fields are
     ignored, never a reason to refuse an event the payload does describe."""
@@ -286,3 +309,23 @@ def test_a_stalled_stdin_gives_up_inside_the_budget(home, monkeypatch, capsys):
     assert (captured.out, captured.err) == ("", "")
     assert elapsed < HOOK_TIMEOUT_SECONDS + 2
     assert "TimeoutError" in hook_log(home)[0]
+
+
+def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsys):
+    """The budget covers the last thing the hook does: the failure record itself."""
+    record = home / "logs" / "hooks.log"
+    (home / "logs").mkdir()
+    os.mkfifo(record)
+
+    def unblock_someday() -> None:
+        time.sleep(10)
+        record.open("r").close()
+
+    threading.Thread(target=unblock_someday, daemon=True).start()
+
+    started = time.monotonic()
+    result = run_hook(monkeypatch, capsys, "claude", "SessionStart", "{ not json")
+    elapsed = time.monotonic() - started
+
+    assert result == (0, "", "")
+    assert elapsed < HOOK_TIMEOUT_SECONDS + 2
