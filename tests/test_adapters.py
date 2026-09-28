@@ -218,6 +218,19 @@ def test_the_failure_line_stays_one_bounded_line(home, monkeypatch, capsys):
     assert "AdapterError" in lines[0]
 
 
+def test_a_long_agent_argument_leaves_one_bounded_failure_line(home, monkeypatch, capsys):
+    """Neither caller-supplied argument may push the cause out of the record."""
+    text = payload_text("claude-session-start.json")
+    agent = "codex" + "y" * 600
+
+    assert run_hook(monkeypatch, capsys, agent, "SessionStart", text) == (0, "", "")
+    lines = hook_log(home)
+    assert len(lines) == 1
+    assert len(lines[0]) <= HOOK_LOG_LINE_LIMIT
+    assert "AdapterError" in lines[0]
+    assert "unknown agent" in lines[0]
+
+
 def test_an_unknown_agent_is_silent_and_logs_one_line(home, monkeypatch, capsys):
     text = payload_text("claude-session-start.json")
     assert run_hook(monkeypatch, capsys, "codex", "SessionStart", text) == (0, "", "")

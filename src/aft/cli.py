@@ -278,18 +278,25 @@ def _hook_time_limit(seconds: int) -> Iterator[None]:
 # The one line a hook failure leaves behind, in characters.
 HOOK_LOG_LINE_LIMIT = 500
 
+# What one caller-supplied argument may take of that line.
+HOOK_LOG_FIELD_LIMIT = 64
+
 
 def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     """Append the one line a failed hook is allowed to leave behind.
 
     Agent, event and the failure's own words all come from outside this process, so
     the whole line is flattened and capped: whatever they contain, a failed hook
-    leaves one bounded line and nothing else. The event name goes last, so a runaway
-    argument loses its own tail rather than the reason for the failure. Best effort
-    all the way down: a home that cannot be resolved or written to, or a line that
-    cannot be written, is not a reason to fail the agent.
+    leaves one bounded line and nothing else. Each caller-supplied argument is clamped
+    to its own budget and the event name goes last, so a runaway argument loses its
+    own tail rather than the reason for the failure. Best effort all the way down: a
+    home that cannot be resolved or written to, or a line that cannot be written, is
+    not a reason to fail the agent.
     """
-    line = f"{datetime.now(UTC).isoformat()} {agent} {type(exc).__name__}: {exc} | {event}"
+    line = (
+        f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
+        f" {type(exc).__name__}: {exc} | {event[:HOOK_LOG_FIELD_LIMIT]}"
+    )
     line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
         home = resolve_home()
