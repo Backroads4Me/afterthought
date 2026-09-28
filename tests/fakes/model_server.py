@@ -12,6 +12,7 @@ endpoint being up.
         # the first call gets {"answer": "yes"}; a second call would get the 500
         bodies = fake.requests          # parsed JSON bodies, in the order received
 
+        sent = fake.headers            # request headers, lower-cased, the same order
 Replies are used in order and the last one repeats once the script runs out, so a test
 that only cares about the first two calls does not have to script the rest. A plain
 value is the assistant message content of a 200, JSON-encoded unless it is already a
@@ -64,6 +65,7 @@ class FakeEndpoint:
             reply if isinstance(reply, Reply) else Reply(content=reply) for reply in replies
         ]
         self.requests: list[dict] = []
+        self.headers: list[dict[str, str]] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -102,6 +104,7 @@ class FakeEndpoint:
                 body = self.rfile.read(_length(self))
                 with fake._lock:
                     fake.requests.append(_json_or_empty(body))
+                    fake.headers.append({k.lower(): v for k, v in self.headers.items()})
                     call = len(fake.requests) - 1
                 reply = fake.script[min(call, len(fake.script) - 1)] if fake.script else Reply()
                 if reply.delay:

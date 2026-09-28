@@ -29,21 +29,22 @@ def serve(home):
     fake a test starts is stopped when the test ends."""
     started: list[FakeEndpoint] = []
 
-    def start(*replies: object) -> tuple[FakeEndpoint, configmod.Config]:
+    def start(*replies: object, api_key_env: str = "") -> tuple[FakeEndpoint, configmod.Config]:
         fake = FakeEndpoint(replies)
         fake.start()
         started.append(fake)
-        return fake, point_at(home, fake.endpoint)
+        return fake, point_at(home, fake.endpoint, api_key_env)
 
     yield start
     for fake in started:
         fake.stop()
 
 
-def point_at(home: Path, endpoint: str) -> configmod.Config:
+def point_at(home: Path, endpoint: str, api_key_env: str = "") -> configmod.Config:
     """Name the endpoint in ``config.toml`` and load the config, as aft does."""
+    setting = f'api_key_env = "{api_key_env}"\n' if api_key_env else ""
     with open(home / "config.toml", "a") as handle:
-        handle.write(f'[model]\nendpoint = "{endpoint}"\nname = "fake-model"\n')
+        handle.write(f'[model]\nendpoint = "{endpoint}"\nname = "fake-model"\n{setting}')
     return configmod.load()
 
 
@@ -185,22 +186,22 @@ def test_a_reply_that_is_not_usable_http_raises_model_error(serve, raw):
 
 
 def test_a_5xx_reports_only_a_bounded_piece_of_its_error_body(serve):
-    # The error body is the endpoint's to write, so aft reads and reports only what
-    # fits: this one promises 5000 bytes, sends 600, and 500 reach the report.
+    # The error body is the endpoint's to write as long as it likes; a report carries
+    # 500 characters of it: this one promises 5000 bytes, sends 600, and 500 are reported.
     raw = b"HTTP/1.1 500 Oops\r\nContent-Length: 5000\r\n\r\n" + b"z" * 600
     fake, cfg = serve(Reply(raw=raw))
     with pytest.raises(model.ModelError) as answer:
         call(cfg)
     reported = str(answer.value)
     assert "returned 500" in reported
-    assert "z" in reported
+    assert "z" * 500 in reported
     assert "z" * 501 not in reported
     assert len(fake.requests) == 2
 
 
 def test_a_4xx_reports_the_reason_the_endpoint_gave(serve):
-    # The cap is on what aft reads, not on what the endpoint said: this reason arrives
-    # short of its declared length and still reaches the report, in one attempt.
+    # The bound is on what a report carries, not on what the endpoint said: this reason
+    # arrives short of its declared length and still reaches the report, in one attempt.
     body = b'{"error": {"message": "no api key"}}'
     raw = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 200\r\n\r\n" + body
     fake, cfg = serve(Reply(raw=raw))
@@ -209,27 +210,44 @@ def test_a_4xx_reports_the_reason_the_endpoint_gave(serve):
     assert len(fake.requests) == 1
 
 
-@pytest.mark.parametrize(
-    "form",
-    [
-        "http://aft:sekret-token@{host}/v1",
-        "sekret-token@{host}/v1?key=sekret-token",
-        "http://{host}/v1?key=sekret-token",
-    ],
-    ids=["userinfo", "no-scheme", "query"],
-)
-def test_a_failure_message_never_prints_a_credential_from_the_endpoint(home, form):
-    # DESIGN 14 writes failure text into a report and the endpoint setting is the only
-    # place a token can sit today, so it stays out of the address aft names, out of
-    # urllib's own wording of that address, and out of a body echoing the request path.
-    with FakeEndpoint() as fake:
-        host = fake.endpoint.split("//")[1]
-        cfg = point_at(home, form.format(host=host))
-        with pytest.raises(model.ModelError) as answer:
-            call(cfg)
-        reported = str(answer.value)
-        assert "sekret-token" not in reported
-        assert "127.0.0.1" in reported
+KEY_VARIABLE = "AFT_TEST_API_KEY"
+KEY_VALUE = "sekret-key-value"
+
+
+def test_an_endpoint_with_no_key_setting_sends_no_authorization_header(serve):
+    fake, cfg = serve({"answer": "yes"})
+    assert call(cfg) == {"answer": "yes"}
+    assert "authorization" not in fake.headers[0]
+
+
+def test_the_key_named_in_config_goes_as_a_bearer_token(serve, monkeypatch):
+    monkeypatch.setenv(KEY_VARIABLE, KEY_VALUE)
+    fake, cfg = serve({"answer": "yes"}, api_key_env=KEY_VARIABLE)
+    assert call(cfg) == {"answer": "yes"}
+    assert fake.headers[0]["authorization"] == f"Bearer {KEY_VALUE}"
+
+
+def test_a_key_named_in_config_that_is_not_set_fails_naming_it(serve, monkeypatch):
+    monkeypatch.delenv(KEY_VARIABLE, raising=False)
+    fake, cfg = serve({"answer": "yes"}, api_key_env=KEY_VARIABLE)
+    with pytest.raises(model.ModelError, match=KEY_VARIABLE):
+        call(cfg)
+    assert fake.requests == []
+
+
+def test_an_error_from_a_keyed_call_does_not_print_the_key(serve, monkeypatch):
+    # A proxy quoting the request it just refused is how a key would reach a report, and
+    # DESIGN 13 says it never may.
+    monkeypatch.setenv(KEY_VARIABLE, KEY_VALUE)
+    detail = json.dumps({"error": {"message": f"refused: Bearer {KEY_VALUE}"}}).encode()
+    header = b"HTTP/1.1 400 Bad Request\r\nContent-Length: " + str(len(detail)).encode()
+    fake, cfg = serve(Reply(raw=header + b"\r\n\r\n" + detail), api_key_env=KEY_VARIABLE)
+    with pytest.raises(model.ModelError) as answer:
+        call(cfg)
+    reported = str(answer.value)
+    assert KEY_VALUE not in reported
+    assert "returned 400" in reported
+    assert len(fake.requests) == 1
 
 
 def test_every_attempt_is_charged_to_the_budget(serve):

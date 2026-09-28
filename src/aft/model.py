@@ -7,6 +7,9 @@ because constrained decoding is a strong expectation rather than a guarantee:
 output that fails validation, and a 5xx, are each retried once before the call
 raises (DESIGN 14).
 
+An endpoint that needs a key gets it from the environment variable named by
+``model.api_key_env``, sent as a bearer token and kept out of every report (DESIGN 13).
+
 Each call records the tokens it used in ``usage.jsonl`` in the home directory; a
 response that does not report a usable token count raises rather than being written
 as free. Budgets are measured from that log: the daily cap spans separate processes,
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -31,6 +35,8 @@ USAGE_LOG = "usage.jsonl"
 # a while before it counts as lost.
 TIMEOUT_SECONDS = 300.0
 ATTEMPTS = 2
+# What a report carries of the endpoint's own text.
+REPORT_CHARS = 500
 # OpenAI requires the name of a json_schema response format to match [a-zA-Z0-9_-]{1,64}.
 SCHEMA_NAME = "aft"
 
@@ -135,26 +141,26 @@ def usage_path(config: Config) -> Path:
 def _chat(config: Config, body: dict) -> str:
     """One HTTP call. Returns the assistant message content."""
     url = config.settings.model.endpoint.rstrip("/") + "/chat/completions"
-    origin = _address(url)
+    headers = _headers(config)
     started = datetime.now(UTC)
     try:
         request = urllib.request.Request(
             url,
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
     except urllib.error.HTTPError as exc:
-        # An error body is itself a response that can stop short or never arrive, and it
-        # may be enormous: aft reads only as much of it as a report can carry.
+        # A report carries REPORT_CHARS characters of the endpoint's own text at most, and
+        # reading that body is a request in itself: it can stop short or never arrive.
         try:
-            detail = exc.read(500)
+            detail = exc.read(REPORT_CHARS)
         except (OSError, http.client.HTTPException, ValueError):
             detail = b""
-        excerpt = detail.decode(errors="replace")[:500]
-        message = _reported(config, f"{origin} returned {exc.code}: {excerpt}")
+        excerpt = detail.decode(errors="replace")[:REPORT_CHARS]
+        message = _reported(config, f"{url} returned {exc.code}: {excerpt}")
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
@@ -162,63 +168,56 @@ def _chat(config: Config, body: dict) -> str:
         # Covers a refused connection, a DNS failure, a timeout, a reply that is not
         # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
         # endpoint is treated as down and the work stays queued (DESIGN 14).
-        raise ModelError(_reported(config, f"cannot reach {origin}: {exc}")) from exc
+        raise ModelError(_reported(config, f"cannot reach {url}: {exc}")) from exc
 
     try:
         reply = json.loads(raw)
     except json.JSONDecodeError as exc:
-        problem = f"{origin} did not answer with JSON: {raw[:200]}"
+        problem = f"{url} did not answer with JSON: {raw[:200]}"
         raise ModelError(_reported(config, problem)) from exc
     if not isinstance(reply, dict):
-        problem = f"{origin} answered with JSON that is not an object: {raw[:200]}"
+        problem = f"{url} answered with JSON that is not an object: {raw[:200]}"
         raise ModelError(_reported(config, problem))
 
     _record_usage(config, started, reply.get("usage"))
     choices = reply.get("choices")
     if not isinstance(choices, list) or not choices:
-        raise ModelError(_reported(config, f"{origin} returned no choices: {raw[:200]}"))
+        raise ModelError(_reported(config, f"{url} returned no choices: {raw[:200]}"))
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
-        problem = f"{origin} returned no message content: {raw[:200]}"
+        problem = f"{url} returned no message content: {raw[:200]}"
         raise ModelError(_reported(config, problem))
     return content
 
 
-def _address(url: str) -> str:
-    """The endpoint as aft names it in a failure: scheme, host and path.
+def _headers(config: Config) -> dict[str, str]:
+    """The headers of one call.
 
-    The userinfo and parameters a URL may carry are dropped as noise; ``_reported`` is
-    what keeps a credential out of the text, however it reached the message.
+    An endpoint that needs a key takes it from the environment variable
+    ``model.api_key_env`` names, so config.toml holds a name and never the key (DESIGN
+    13). A name with nothing behind it is the setup fault it sounds like: the call fails
+    there, naming the variable and never a value.
     """
-    address = url.partition("?")[0].partition("#")[0]
-    scheme, sep, rest = address.partition("://")
-    if not sep:
-        return address
-    authority, slash, path = rest.partition("/")
-    return f"{scheme}://{authority.rpartition('@')[2]}{slash}{path}"
+    name = config.settings.model.api_key_env
+    if not name:
+        return {"Content-Type": "application/json"}
+    key = os.environ.get(name, "")
+    if not key:
+        raise ModelError(f"{name} is unset or empty; model.api_key_env names it as the key")
+    return {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
 
 
 def _reported(config: Config, problem: str) -> str:
-    """The failure text aft reports, with any credential the endpoint setting carries
-    taken out. DESIGN 14 writes this text into a report, and the setting is the only
-    place a token can sit today, so nothing it holds may be printed: urllib echoes the
-    whole configured URL in its own wording, and a proxy can echo it in an error body.
-    """
-    for secret in _secrets(config.settings.model.endpoint):
-        problem = problem.replace(secret, "[redacted]")
-    return problem
+    """The failure text aft may put in a report.
 
-
-def _secrets(endpoint: str) -> list[str]:
-    """The parts of the endpoint setting that could be a credential: its userinfo and
-    each parameter written after a '?' or a '#'. Longest first, so a whole parameter is
-    taken out before a part of one.
+    DESIGN 13 keeps the API key out of error messages, and an endpoint or a proxy in
+    front of one can echo the request back in its own error body, so the key this call
+    sent is taken out of the text however the rest of the message reads.
     """
-    head, _, parameters = endpoint.replace("#", "?").partition("?")
-    authority = head.split("://")[-1].split("/")[0]
-    pieces = {authority.rpartition("@")[0], parameters, *parameters.split("&")}
-    return sorted((piece for piece in pieces if piece), key=len, reverse=True)
+    name = config.settings.model.api_key_env
+    key = os.environ.get(name, "") if name else ""
+    return problem.replace(key, "[redacted]") if key else problem
 
 
 def _checked(content: str, schema: dict) -> dict:
@@ -240,7 +239,8 @@ def _record_usage(config: Config, started: datetime, usage: Any) -> None:
         # A call whose cost is unknown, or reported as nothing at all, is not returned
         # either: an aft call always has a prompt to charge, so a server billing zero
         # both ways has usage accounting off and a cap over that ledger never trips.
-        raise ModelError(f"the endpoint reported no usable token usage: {usage!r}")
+        problem = f"the endpoint reported no usable token usage: {usage!r}"
+        raise ModelError(_reported(config, problem))
     record = {
         "at": started.isoformat(),
         "prompt_tokens": prompt,
@@ -254,7 +254,8 @@ def _record_usage(config: Config, started: datetime, usage: Any) -> None:
     except OSError as exc:
         # An answer that cannot be billed is not returned: budgets are read from this
         # log, so the caller leaves the work queued and reports the failure (DESIGN 14).
-        raise ModelError(f"cannot record token usage in {path}: {exc}") from exc
+        problem = f"cannot record token usage in {path}: {exc}"
+        raise ModelError(_reported(config, problem)) from exc
 
 
 def _token_count(source: Any, key: str) -> int | None:
