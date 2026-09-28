@@ -86,7 +86,17 @@ nothing else. Each review spends Claude allowance. At roughly ten checkpoints pl
 
 A worker that finds the design silent, contradictory, or wrong for the case in front of it
 does not guess. It stops the task, writes the question and the options it sees on the PR
-or to firstmate, and waits for Ted's answer. Firstmate relays the question to Ted.
+or to firstmate, and waits for an answer. Firstmate sorts the question:
+
+- **A design gap** is settled by firstmate with its Opus advisor: the design is silent, the
+  answer follows from the design's principles, and it changes nothing the design already
+  states (what a reader skips, how a script behaves on a rerun, which date a fact keeps).
+  The ruling and its reason go on the PR and in firstmate's rulings log, and Ted reviews
+  the milestone's rulings at its end. Rulings Ted accepts are folded into this plan.
+- **A design change** goes to Ted: anything that contradicts the design or changes
+  behavior it states, changes an interface other tasks depend on, adds or drops scope, adds
+  a dependency, or touches the trust rules (R1 to R9, the authority table, quote
+  verification). When it is unclear which kind a question is, it goes to Ted.
 
 ## 5. Tasks
 
