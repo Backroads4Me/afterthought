@@ -48,6 +48,14 @@ def test_claude_leaves_out_bookkeeping_and_prompts_meant_for_the_agent():
     assert all(e.time is not None and e.time.tzinfo is not None for e in entries)
 
 
+def test_claude_skips_the_notices_it_writes_in_place_of_an_answer():
+    entries = read(CLAUDE, "claude-session.jsonl")
+    texts = " ".join(entry.text for entry in entries)
+    assert "Failed to authenticate" not in texts  # marked by isApiErrorMessage
+    assert "No response requested" not in texts  # marked by the synthetic model
+    assert len(entries) == 4  # neither notice becomes an entry
+
+
 def test_claude_splits_a_tool_result_out_of_the_user_message_it_came_in():
     tool = next(e for e in read(CLAUDE, "claude-session.jsonl") if e.role == "tool")
     assert tool.id == "57c9f783-9ddd-428f-a7eb-6c68db63501a#toolu_019vUjvZgDiRQH22ficLzXAx"

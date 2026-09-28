@@ -6,10 +6,11 @@ Claude Code keeps one JSONL file per session under
 the file is the CLI's own bookkeeping (``attachment``, ``system``, ``mode``,
 ``custom-title``, ``queue-operation`` and more), which is not conversation.
 
-Two things about a Claude Code session are the reader's job to know: a tool
-result comes back inside a ``user`` message rather than as its own entry, and
+Three things about a Claude Code session are the reader's job to know: a tool
+result comes back inside a ``user`` message rather than as its own entry,
 compaction adds an ``isCompactSummary`` message that restates the earlier
-conversation instead of adding to it.
+conversation instead of adding to it, and the CLI writes its own failures and
+non-answers as assistant entries under a synthetic model.
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ from datetime import datetime
 from pathlib import Path
 
 from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records, parse_time
+
+# The model Claude Code records on the assistant entries it writes itself.
+SYNTHETIC_MODEL = "<synthetic>"
 
 
 def read(path: Path) -> Iterator[Entry]:
@@ -35,6 +39,11 @@ def read(path: Path) -> Iterator[Entry]:
             continue
         content = message.get("content")
         if kind == ASSISTANT:
+            # A notice the CLI wrote stands for infrastructure, not for an answer, so
+            # the marker decides it and the wording never does: a digest would quote
+            # that wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
+            if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
+                continue
             # A turn that only thought or called tools has no text of its own.
             text = blocks_text(content)
             if text:
