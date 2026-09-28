@@ -10,7 +10,7 @@ Three things about a Claude Code session are the reader's job to know: a tool
 result comes back inside a ``user`` message rather than as its own entry,
 compaction adds an ``isCompactSummary`` message that restates the earlier
 conversation instead of adding to it, and the CLI writes its own failures and
-non-answers as assistant entries under a synthetic model.
+non-answers as assistant entries, recognizable only by their markers.
 """
 
 from __future__ import annotations

@@ -1,10 +1,11 @@
 """pi transcripts.
 
-pi keeps one JSONL file per session under
-``~/.pi/agent/sessions/<cwd>/<timestamp>_<session id>.jsonl``. Its conversation
-is the ``message`` entries; the other entry types are the session's own record
-of a model or thinking-level change, a compaction, extension state, and
-extension-injected context.
+pi keeps one JSONL file per session, by default under ``~/.pi/agent/sessions``, in
+a directory named for the session's working directory with its separators folded
+into dashes (``--home-dev-projects-garden--``) and called
+``<timestamp>_<session id>.jsonl``. Its conversation is the ``message`` entries;
+the other entry types are the session's own record of a model or thinking-level
+change, a compaction, extension state, and extension-injected context.
 
 Entries form a tree rather than a list: each carries an ``id`` and a
 ``parentId``, and returning to an earlier point with ``/tree`` appends a new
@@ -21,8 +22,9 @@ from pathlib import Path
 from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records, parse_time
 
 # pi's message roles, mapped to the roles of an Entry. A system message holds the
-# prompt and the tool loadout rather than either side of a conversation, and a role
-# not listed here is one an extension added, so neither has an Entry to become.
+# prompt and the tool loadout rather than either side of a conversation, and the
+# roles beyond these - pi's own summaries and bash runs, or one an extension
+# added - have no Entry to become.
 ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
 
