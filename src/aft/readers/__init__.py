@@ -9,9 +9,10 @@ Readers are deliberately forgiving. An entry type, a role or a field they do
 not recognize is skipped rather than fatal, so an agent update that adds bookkeeping
 to its transcript cannot break capture.
 
-That forgiveness is per entry. A file with bytes in it and no entry anywhere in it is
-a transcript whose format the reader no longer knows, so `iter_entries` raises
-`UnrecognizedTranscript` rather than letting it read as a session with nothing to say.
+That forgiveness is per entry. `iter_entries` reports the two readings that are not
+forgiveness but a changed format: a conversation record this reader cannot read, and a
+file of text holding no record that names its type. Everything else, a bookkeeping-only
+session included, is a session with nothing to say.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class ReaderError(Exception):
 
 
 class UnrecognizedTranscript(ReaderError):
-    """The file holds content, but no record in it yields an entry for the reader."""
+    """A transcript in no format this reader can read: see ``iter_entries``."""
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
     watermark the file does not have calls for re-reading it, not for skipping it.
 
     Raises ``ReaderError`` for an agent with no reader, and ``UnrecognizedTranscript``
-    for a file with content that holds no entry that reader can read.
+    for a transcript in no format that reader can read.
     """
     # The readers build the Entry defined above, so they import this module:
     # importing them here keeps the package importable in either order.
@@ -108,23 +109,39 @@ def iter_records(path: Path) -> Iterator[dict]:
                 yield record
 
 
-def iter_entries(path: Path, of_record: Callable[[dict], Iterable[Entry]]) -> Iterator[Entry]:
-    """The entries of a JSONL session file, in file order, for one agent's mapping.
+def iter_entries(
+    path: Path,
+    of_record: Callable[[dict], Iterable[Entry]],
+    unreadable: Callable[[dict], bool],
+) -> Iterator[Entry]:
+    """The entries of a JSONL session file, in file order, for one agent's reader.
 
-    ``of_record`` is the reader's own mapping from a record to the entries it carries,
-    so what counts as readable is what that reader can actually read. A file with
-    bytes in it and no entry anywhere in it is a transcript whose format the reader no
-    longer knows, which capture cannot tell from a session with nothing to say, so it
-    is reported. (BUILD-PLAN 5, M2.1)
+    ``of_record`` maps a record to the entries it carries; ``unreadable`` names the
+    records holding conversation that reader cannot read. Capture cannot tell a changed
+    format from a session with nothing to say, so the file is reported when one of those
+    records appears, and when it holds text yet no record that names its type at all.
+    Bookkeeping alone is an empty session, and so is every entry type skipped as
+    unknown. (BUILD-PLAN 5, M2.1)
     """
-    recognized = False
+    envelope = False
+    broken = False
     for record in iter_records(path):
-        entries = list(of_record(record))
-        if entries:
-            recognized = True
-        yield from entries
-    if not recognized and path.stat().st_size:
-        raise UnrecognizedTranscript(f"{path}: no record holds an entry this reader can read")
+        if isinstance(record.get("type"), str):
+            envelope = True
+        broken = broken or unreadable(record)
+        yield from of_record(record)
+    if broken:
+        raise UnrecognizedTranscript(
+            f"{path}: a conversation record is not in a shape this reader can read"
+        )
+    if not envelope and _holds_text(path):
+        raise UnrecognizedTranscript(f"{path}: no record names a type, so no transcript here")
+
+
+def _holds_text(path: Path) -> bool:
+    """Whether the file holds anything but whitespace."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return any(line.strip() for line in handle)
 
 
 def parse_time(value: object) -> datetime | None:

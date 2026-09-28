@@ -24,23 +24,42 @@ from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_entries,
 # The model Claude Code records on the assistant entries it writes itself.
 SYNTHETIC_MODEL = "<synthetic>"
 
+# The record types Claude Code uses for one side of the conversation.
+CONVERSATION = (USER, ASSISTANT)
+
 
 def read(path: Path) -> Iterator[Entry]:
     """The session's entries: what the records of the file hold, in file order."""
-    return iter_entries(path, _record_entries)
+    return iter_entries(path, _record_entries, _unreadable)
+
+
+def _parts(record: dict) -> tuple[str, datetime, dict] | None:
+    """The id, time and message of a readable conversation record, or None."""
+    entry_id = record.get("uuid")
+    time = parse_time(record.get("timestamp"))
+    message = record.get("message")
+    if not isinstance(entry_id, str) or time is None or not isinstance(message, dict):
+        return None
+    return entry_id, time, message
+
+
+def _unreadable(record: dict) -> bool:
+    """True for a conversation record whose parts this reader cannot read."""
+    return record.get("type") in CONVERSATION and _parts(record) is None
 
 
 def _record_entries(record: dict) -> Iterator[Entry]:
     """The entries one record carries: its message, and any tool result inside it."""
-    entry_id = record.get("uuid")
-    message = record.get("message")
     kind = record.get("type")
-    time = parse_time(record.get("timestamp"))
-    if kind not in (USER, ASSISTANT) or not isinstance(entry_id, str) or time is None:
+    if kind not in CONVERSATION:
         return
+    parts = _parts(record)
+    if parts is None:
+        return
+    entry_id, time, message = parts
     # isMeta: the CLI's own prompt to the agent. isCompactSummary: the summary
     # written on compaction, whose content repeats entries already read.
-    if not isinstance(message, dict) or record.get("isMeta") or record.get("isCompactSummary"):
+    if record.get("isMeta") or record.get("isCompactSummary"):
         return
     content = message.get("content")
     if kind == ASSISTANT:

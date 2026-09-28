@@ -286,10 +286,57 @@ def test_a_file_of_nothing_the_reader_reads_is_reported_rather_than_empty(tmp_pa
 
 
 def test_a_session_file_nothing_written_to_yet_is_simply_empty(tmp_path):
-    path = tmp_path / "empty.jsonl"
-    path.write_text("")
+    for name, text in (("empty.jsonl", ""), ("blank lines.jsonl", "\n \n\t\n")):
+        path = tmp_path / name
+        path.write_text(text)
+        for agent in (CLAUDE, PI):
+            assert list(readers.read(agent, path)) == []
 
-    for agent in (CLAUDE, PI):
+
+def test_a_session_of_only_bookkeeping_before_the_first_turn_is_empty(tmp_path):
+    # Both agents write records before anyone has said anything: Claude Code its queue
+    # and title entries, pi its header, model change and the system prompt holding the
+    # instructions. None of them is conversation the reader failed to read, so the
+    # session is empty and not reported.
+    claude_only = [
+        {
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "sessionId": "0dcbf5a2-1b06-5f0e-9cbb-0af0e0d0a991",
+            "timestamp": "2026-09-27T05:00:00.000Z",
+            "content": "wake up",
+        },
+        {"type": "custom-title", "customTitle": "Watering scheduler", "sessionId": "0dcbf5a2"},
+        {"type": "mode", "mode": "normal", "sessionId": "0dcbf5a2"},
+    ]
+    pi_only = [
+        {
+            "type": "session",
+            "id": "7be69a6f-a36a-507b-b4b7-6cc754237d29",
+            "timestamp": "2026-09-27T04:59:00.000Z",
+            "cwd": "/home/dev/projects/garden",
+            "version": 3,
+        },
+        {
+            "type": "model_change",
+            "id": "5e33d511",
+            "parentId": None,
+            "timestamp": "2026-09-27T04:59:01.000Z",
+            "provider": "mock",
+            "modelId": "mock-coder",
+        },
+        {
+            "type": "message",
+            "id": "c354ef8c",
+            "parentId": "5e33d511",
+            "timestamp": "2026-09-27T04:59:02.000Z",
+            "message": {"role": "system", "content": "You are a coding agent."},
+        },
+    ]
+
+    for agent, records in ((CLAUDE, claude_only), (PI, pi_only)):
+        path = tmp_path / f"{agent}-bookkeeping.jsonl"
+        path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
         assert list(readers.read(agent, path)) == []
 
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 
 from aft.readers import (
@@ -37,26 +38,43 @@ from aft.readers import (
 # added - have no Entry to become.
 ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
+# The record type pi uses for one side of the conversation.
+CONVERSATION = ("message",)
+
 LOGGER = logging.getLogger(__name__)
 
 
 def read(path: Path) -> Iterator[Entry]:
     """The conversation: the entries of the file that sit on the active branch."""
     active = _active_branch(path)
-    for entry in iter_entries(path, _record_entries):
+    for entry in iter_entries(path, _record_entries, _unreadable):
         if entry.id in active:
             yield entry
 
 
+def _parts(record: dict) -> tuple[str, datetime, dict] | None:
+    """The id, time and message of a readable message record, or None."""
+    entry_id = record.get("id")
+    time = parse_time(record.get("timestamp"))
+    message = record.get("message")
+    if not isinstance(entry_id, str) or time is None or not isinstance(message, dict):
+        return None
+    return entry_id, time, message
+
+
+def _unreadable(record: dict) -> bool:
+    """True for a message record whose parts this reader cannot read."""
+    return record.get("type") in CONVERSATION and _parts(record) is None
+
+
 def _record_entries(record: dict) -> Iterator[Entry]:
     """The entry one message record carries, or none."""
-    entry_id = record.get("id")
-    message = record.get("message")
-    time = parse_time(record.get("timestamp"))
-    if record.get("type") != "message" or not isinstance(entry_id, str) or time is None:
+    if record.get("type") not in CONVERSATION:
         return
-    if not isinstance(message, dict):
+    parts = _parts(record)
+    if parts is None:
         return
+    entry_id, time, message = parts
     role_name = message.get("role")
     role = ROLES.get(role_name) if isinstance(role_name, str) else None
     if role is None:
@@ -81,9 +99,12 @@ def _active_branch(path: Path) -> set[str]:
     holds. (BUILD-PLAN 5, M2.1)
     """
     parents: dict[str, str | None] = {}
+    message_ids: list[object] = []
     last: str | None = None
     for record in iter_records(path):
         entry_id = record.get("id")
+        if record.get("type") in CONVERSATION:
+            message_ids.append(entry_id)
         if not isinstance(entry_id, str):
             continue
         parent = record.get("parentId")
@@ -95,11 +116,7 @@ def _active_branch(path: Path) -> set[str]:
         branch.add(current)
         current = parents[current]
     if isinstance(current, str) and current not in parents:
-        off_branch = sum(
-            1
-            for record in iter_records(path)
-            if record.get("type") == "message" and record.get("id") not in branch
-        )
+        off_branch = sum(1 for entry_id in message_ids if entry_id not in branch)
         LOGGER.warning(
             "%s: no record with id %s: the active branch ends there and %d message "
             "records of the file fall off it",
