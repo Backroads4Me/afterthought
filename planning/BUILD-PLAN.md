@@ -640,11 +640,12 @@ specification return the right document and page (DESIGN 15, M7).
 ### 6.2 M2
 
 1. If the model endpoint needs a key, put it in `~/.afterthought/env` as
-   `<the variable named in model.api_key_env>=<key>`, with `chmod 600`. Then `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
+   `<the variable named in model.api_key_env>=<key>`, with `chmod 600`.
+2. `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
    (`~/.treehouse`) and the validation gate (`~/.no-mistakes/worktrees`).
-2. Work normally for a day, then read the digests in `~/afterthought/digests/` and check
+3. Work normally for a day, then read the digests in `~/afterthought/digests/` and check
    their facts and quotes.
-3. Try `aft off` and `aft on` in a session and confirm nothing between them appears.
+4. Try `aft off` and `aft on` in a session and confirm nothing between them appears.
 
 ### 6.3 M4
 
