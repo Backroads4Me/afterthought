@@ -74,8 +74,8 @@ def optional_string_field(payload: dict, key: str) -> str | None:
 def path_field(payload: dict, key: str) -> Path:
     """A required field holding a path.
 
-    Absent, null, empty and wrongly typed values are all failures, so an event is
-    never dispatched without a working directory or, for Claude Code, a transcript.
+    `string_field` decides what counts as present, so an event is never dispatched
+    without a working directory or, for Claude Code, a transcript.
     """
     return Path(string_field(payload, key))
 
@@ -83,9 +83,8 @@ def path_field(payload: dict, key: str) -> Path:
 def optional_path_field(payload: dict, key: str) -> Path | None:
     """A field holding a path a payload may leave out.
 
-    pi's own session file is undefined until a session is first written, so its
-    transcript may be absent or reported empty; either way the event still stands.
-    Every other path an adapter reads is required.
+    Only pi leaves a path out, and `adapters/pi.py` says why. A missing one never
+    refuses the event; every other path an adapter reads is required.
     """
     value = optional_string_field(payload, key)
     return None if value is None else Path(value)

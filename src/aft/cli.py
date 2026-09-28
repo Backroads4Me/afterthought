@@ -296,8 +296,9 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     to its own budget and the event name goes last, so a runaway argument loses its
     own tail rather than the reason for the failure. Best effort all the way down, and
     inside the share of the hook budget HOOK_LOG_TIMEOUT_SECONDS reserves for this write:
-    a home that cannot be resolved or written to, a line that cannot be written, and an
-    expiry that lands mid-write are a lost record, not a reason to fail the agent.
+    a home that cannot be resolved or written to, a line that cannot be built or
+    written, and an expiry that lands mid-write are a lost record, not a reason to
+    fail the agent.
     """
     try:
         line = (

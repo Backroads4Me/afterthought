@@ -10,7 +10,7 @@ or overflow (BUILD-PLAN M1.1).
 
 `session_id`, `cwd` and `transcript_path` come from pi's session manager, whose
 `getSessionFile()` is undefined until the session is first written, so a payload can
-leave the transcript out.
+leave the transcript out or report it empty; either way the event still stands.
 """
 
 from __future__ import annotations
