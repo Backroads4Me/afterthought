@@ -20,7 +20,8 @@ These rules apply to every task and every pull request.
    redaction`). A task too large for one PR is split before starting, and the split is
    reported.
 4. **Tests define done.** Each task lists its tests. `uv run pytest`, `uv run ruff check`
-   and `uv run ruff format --check` pass on every PR.
+   and `uv run ruff format --check` pass on every PR. GitHub Actions runs all three on every
+   pull request (`.github/workflows/ci.yml`), and a PR is green when that run passes.
 5. **Tests never touch real state.** Every test runs with `AFT_HOME` and the vault in a
    temporary directory, a temporary git identity (see `tests/conftest.py`), and no network.
    Model calls go to the fake endpoint from M2.5.
@@ -78,19 +79,25 @@ The worker then fixes every finding marked `blocking` in the same PR, or replies
 explaining why a finding is wrong. Non-blocking findings are listed in the PR description
 for Ted.
 
-Two prerequisites, both Ted's:
-
-- Firstmate's `captain.md` forbids running a Claude model unless Ted names it for the task.
-  These checkpoints need a standing permission there, such as: "For afterthought, workers
-  run `claude -p` reviews at the checkpoints listed in `planning/BUILD-PLAN.md` section 3."
-- Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
+Firstmate's `captain.md` gives the standing permission for these checkpoints, and for
+nothing else. Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
   PRs, expect twenty to thirty reviews over the build.
 
 ## 4. When a worker is unsure
 
 A worker that finds the design silent, contradictory, or wrong for the case in front of it
 does not guess. It stops the task, writes the question and the options it sees on the PR
-or to firstmate, and waits for Ted's answer. Firstmate relays the question to Ted.
+or to firstmate, and waits for an answer. Firstmate sorts the question:
+
+- **A design gap** is settled by firstmate with its Opus advisor: the design is silent, the
+  answer follows from the design's principles, and it changes nothing the design already
+  states (what a reader skips, how a script behaves on a rerun, which date a fact keeps).
+  The ruling and its reason go on the PR and in firstmate's rulings log, and Ted reviews
+  the milestone's rulings at its end. Rulings Ted accepts are folded into this plan.
+- **A design change** goes to Ted: anything that contradicts the design or changes
+  behavior it states, changes an interface other tasks depend on, adds or drops scope, adds
+  a dependency, or touches the trust rules (R1 to R9, the authority table, quote
+  verification). When it is unclear which kind a question is, it goes to Ted.
 
 ## 5. Tasks
 
@@ -132,9 +139,12 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
   `session_start`, `session_before_compact` and `session_shutdown`. The command **always
   exits 0**, prints nothing on failure, logs failures to `~/.afterthought/logs/hooks.log`,
   and gives up after 2 seconds.
-- **First step:** record one real payload per event from the installed Claude Code and pi
-  versions into `tests/fixtures/hooks/` (Ted captures the Claude Code ones; see 6.1). Build
-  the parsers against those files, not against documentation.
+- **First step:** use real payloads, not documentation. The Claude Code 2.1.283 payloads
+  were captured on 2026-09-28 and are in firstmate's
+  `data/afterthought-m1-1-hook-events/captured-hooks/`, with a README noting the fields the
+  documentation omits; copy them into `tests/fixtures/hooks/`. Parsers ignore unknown
+  fields. pi has no shell hooks of its own, so its payloads are whatever the M1.4 extension
+  sends, and the two tasks must agree on that shape.
 - **Tests:** each fixture parses to the expected event; malformed JSON, a missing field, or
   an unknown event exits 0 with no output and one log line.
 - **Out of scope:** installing hooks (M1.3, M1.4).
@@ -203,8 +213,13 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
   `projects/afterthought/overview.md` into a vault given on the command line.
 - **Behavior:** 10 to 20 facts about afterthought taken from `planning/DESIGN.md`, each
   `[observed]`, with a source whose `resource` is `file:planning/DESIGN.md#<heading>` and
-  whose `quote` is copied from that section. The page passes `aft lint`.
-- **Tests:** the script's output lints clean, and every quote appears in `DESIGN.md`.
+  whose `quote` is copied from that section. The page passes `aft lint`. Run against a
+  vault that already has the page, it refuses unless given `--overwrite`. With
+  `--overwrite`, a fact whose statement and quote are unchanged keeps its earlier date,
+  because re-reading the same source is not new evidence; a new or changed fact gets
+  today's date.
+- **Tests:** the script's output lints clean; every quote appears in `DESIGN.md`; a rerun
+  refuses without `--overwrite`; with it, unchanged facts keep their dates.
 
 ### M2 Capture
 
@@ -232,8 +247,11 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 ```
 
 - **Behavior:** yields entries after the `after` id in file order. Claude Code: skip
-  `isMeta` entries, thinking blocks, and the summary entries it writes on compaction;
-  split tool results out of user messages. pi: read `message` entries, follow the active
+  `isMeta` entries, thinking blocks, the summary entries it writes on compaction, and the
+  failure notices Claude Code writes as assistant entries (model `<synthetic>` or
+  `isApiErrorMessage: true`; match on those markers, never on the message text), since
+  they are infrastructure noise, not anything the agent said; split tool results out of
+  user messages. pi: read `message` entries, follow the active
   branch only. Unknown entry types are skipped, never fatal.
 - **Tests:** fixture transcripts (small, hand-trimmed from real sessions, secrets removed)
   for each agent, including a compaction, a tool error and a resumed session.
@@ -297,8 +315,16 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   {"type": "json_schema", ...}` using `urllib`. Validates the response against the schema
   with a small validator in `aft/schema.py` (types, required keys, enums, string lengths;
   no dependency). Retries once on invalid output or a 5xx, then raises.
+- **Credentials:** add `api_key_env` (default empty) to `ModelConfig` in `aft/config.py` and
+  to the commented default config. It names an environment variable; `config.toml` never
+  holds the key itself. When `api_key_env` is set, the client reads that variable at call
+  time and sends it as `Authorization: Bearer <key>`; if the variable is unset or empty, the
+  call fails with a `ModelError` naming the variable (never its value). When `api_key_env`
+  is empty, no header is sent. The key never appears in logs, error messages or reports.
 - **Tests:** against the fake server: valid response; invalid then valid; two invalids
-  raise; timeout raises.
+  raise; timeout raises; the bearer header is sent only when `api_key_env` is set; a set
+  but missing variable fails naming the variable; an error from a keyed call does not
+  contain the key.
 
 #### M2.6 Digest
 
@@ -394,8 +420,12 @@ Never invent a fact, a quote, or an entry id.
 - **Behavior:** writes `aft-work.service` and `aft-work.timer` (every
   `dream.interval_minutes`) under `~/.config/systemd/user/`; the capture hook may start
   the service early with `systemctl --user start --no-block aft-work.service`, at most once
-  every 5 minutes. Unit directory passed as an argument in tests.
-- **Tests:** unit file contents; idempotent install.
+  every 5 minutes. Unit directory passed as an argument in tests. A systemd user service
+  does not see the shell's environment, so the service loads an optional
+  `EnvironmentFile=-%h/.afterthought/env`, where the variable named by `model.api_key_env`
+  can be set when the endpoint needs a key.
+- **Tests:** unit file contents, including the optional environment file; idempotent
+  install.
 
 ### M3 Search
 
@@ -601,21 +631,21 @@ specification return the right document and page (DESIGN 15, M7).
 
 ### 6.1 M1
 
-1. Capture one real hook payload per event for Claude Code and pi into
-   `tests/fixtures/hooks/` (M1.1 explains how).
-2. Run `aft init`, `aft project add ~/src/afterthought`, and the M1.5 seed script against
+1. Run `aft init`, `aft project add ~/src/afterthought`, and the M1.5 seed script against
    the real vault.
-3. Run `aft install claude --dry-run`, check the diff, then install. Same for pi.
-4. Start a new session in each agent in `~/src/afterthought` and check both show the same
+2. Run `aft install claude --dry-run`, check the diff, then install. Same for pi.
+3. Start a new session in each agent in `~/src/afterthought` and check both show the same
    memory block.
 
 ### 6.2 M2
 
-1. `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
+1. If the model endpoint needs a key, put it in `~/.afterthought/env` as
+   `<the variable named in model.api_key_env>=<key>`, with `chmod 600`.
+2. `aft install timer`. Set `capture.worker_paths` for firstmate's worktrees
    (`~/.treehouse`) and the validation gate (`~/.no-mistakes/worktrees`).
-2. Work normally for a day, then read the digests in `~/afterthought/digests/` and check
+3. Work normally for a day, then read the digests in `~/afterthought/digests/` and check
    their facts and quotes.
-3. Try `aft off` and `aft on` in a session and confirm nothing between them appears.
+4. Try `aft off` and `aft on` in a session and confirm nothing between them appears.
 
 ### 6.3 M4
 
