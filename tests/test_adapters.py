@@ -290,25 +290,19 @@ def test_a_home_that_cannot_be_resolved_is_silent_and_makes_no_directories(
     assert list(tmp_path.iterdir()) == []
 
 
+# The whole hook gets one bound (HOOK_TIMEOUT_SECONDS, BUILD-PLAN M1.1), split up front
+# between its two blocking steps. A test that consumes the full bound allows this much
+# scheduling slack; a test of a single blocking step is asserted against the bound itself,
+# so paying the bound once per step fails it.
+HOOK_TIMING_SLACK_SECONDS = 1.0
+
+
 class StalledStdin:
     """A pipe that never delivers a payload, which is how a hung caller would look."""
 
     def read(self, size: int = -1) -> str:
         time.sleep(10)
         return ""
-
-
-def test_a_stalled_stdin_gives_up_inside_the_budget(home, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "stdin", StalledStdin())
-    started = time.monotonic()
-    code = main(["hook", "claude", "SessionStart"])
-    elapsed = time.monotonic() - started
-    captured = capsys.readouterr()
-
-    assert code == 0
-    assert (captured.out, captured.err) == ("", "")
-    assert elapsed < HOOK_TIMEOUT_SECONDS + 2
-    assert "TimeoutError" in hook_log(home)[0]
 
 
 def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsys):
@@ -328,7 +322,7 @@ def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsy
     elapsed = time.monotonic() - started
 
     assert result == (0, "", "")
-    assert elapsed < HOOK_TIMEOUT_SECONDS + 2
+    assert elapsed < HOOK_TIMEOUT_SECONDS
 
 
 def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, monkeypatch, capsys):
@@ -341,7 +335,7 @@ def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, m
     captured = capsys.readouterr()
 
     assert (code, captured.out, captured.err) == (0, "", "")
-    assert elapsed < HOOK_TIMEOUT_SECONDS + 1
+    assert elapsed < HOOK_TIMEOUT_SECONDS + HOOK_TIMING_SLACK_SECONDS
     lines = hook_log(home)
     assert len(lines) == 1
     assert "TimeoutError" in lines[0]
@@ -362,4 +356,4 @@ def test_a_stalled_stdin_and_a_blocked_write_share_one_budget(home, monkeypatch,
     captured = capsys.readouterr()
 
     assert (code, captured.out, captured.err) == (0, "", "")
-    assert elapsed < HOOK_TIMEOUT_SECONDS + 1
+    assert elapsed < HOOK_TIMEOUT_SECONDS + HOOK_TIMING_SLACK_SECONDS

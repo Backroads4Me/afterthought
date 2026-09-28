@@ -77,10 +77,7 @@ def path_field(payload: dict, key: str) -> Path:
     Absent, null, empty and wrongly typed values are all failures, so an event is
     never dispatched without a working directory or, for Claude Code, a transcript.
     """
-    value = payload.get(key)
-    if not isinstance(value, str) or not value:
-        raise AdapterError(f"{key} is missing or is not a non-empty string")
-    return Path(value)
+    return Path(string_field(payload, key))
 
 
 def optional_path_field(payload: dict, key: str) -> Path | None:
