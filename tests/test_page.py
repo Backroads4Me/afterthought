@@ -47,6 +47,23 @@ def parse(text: str) -> page.Page:
     return page.parse(text, Path("projects/widget/overview.md"))
 
 
+def fact_page(body: str, page_type: str = "Project") -> str:
+    return f"---\ntype: {page_type}\nsources: []\n---\n{body}"
+
+
+INJECTED = {page.ACTIVE, page.CONFLICT, page.NEEDS_YOU}
+
+
+def actionable(result: page.Page) -> list[str]:
+    """The statements a consumer that reads only `page.parse` would put before an agent.
+
+    Injection shows active, conflict and needs-you facts and excludes candidates, stale,
+    superseded and withdrawn lines (design section 10, BUILD-PLAN M1.2), so a line reaches
+    memory exactly when it is in `facts` with one of those three states.
+    """
+    return [f.statement for f in result.facts if f.state in INJECTED]
+
+
 def test_valid_page_parses_every_state():
     result = parse(VALID)
     assert result.errors == []
@@ -86,8 +103,7 @@ def test_line_numbers_count_frontmatter():
 
 
 def errors_for(body: str, page_type: str = "Project") -> list[str]:
-    text = f"---\ntype: {page_type}\nsources: []\n---\n{body}"
-    return [message for _, message in parse(text).errors]
+    return [message for _, message in parse(fact_page(body, page_type)).errors]
 
 
 def test_unknown_section():
@@ -124,10 +140,52 @@ def test_invalid_date():
     ]
 
 
-def test_struck_fact_needs_a_reason():
-    assert (
-        "struck fact must end" in errors_for("## Facts\n- ~~Old.~~ [stated] 2026-01-01 [^a]\n")[0]
+def test_struck_fact_with_unrecognized_suffix_is_not_memory():
+    line = "- ~~Old.~~ [stated] 2026-01-01 [^a] retired last year"
+    text = fact_page(f"## Facts\n{line}\n")
+    result = parse(text)
+    assert [message for _, message in result.errors] == [
+        "a struck fact must end 'superseded <date> by [^id]' or 'withdrawn <date>'"
+    ]
+    assert text.split("\n")[result.errors[0][0] - 1] == line
+    assert result.facts == []
+    assert actionable(result) == []
+
+
+def test_struck_fact_with_a_recognized_suffix_is_not_injected():
+    body = (
+        "## Decisions\n"
+        "- ~~Use FTS5.~~ [stated] 2026-01-01 [^a] superseded 2026-01-02 by [^a]\n"
+        "- ~~Use Redis.~~ [stated] 2026-01-01 [^a] withdrawn 2026-01-03\n"
     )
+    result = parse(fact_page(body))
+    assert result.errors == []
+    assert [(f.statement, f.state, f.struck) for f in result.facts] == [
+        ("Use FTS5.", page.SUPERSEDED, True),
+        ("Use Redis.", page.WITHDRAWN, True),
+    ]
+    assert actionable(result) == []
+
+
+def test_plain_fact_is_active_memory():
+    result = parse(fact_page("## Facts\n- A fact. [stated] 2026-01-01 [^a]\n"))
+    assert result.errors == []
+    assert [(f.statement, f.state, f.struck) for f in result.facts] == [
+        ("A fact.", page.ACTIVE, False)
+    ]
+    assert actionable(result) == ["A fact."]
+
+
+def test_note_after_a_rejected_struck_line_has_no_fact_to_be_about():
+    body = (
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "- ~~Old.~~ [stated] 2026-01-01 [^a] retired\n"
+        "> [!conflict] 2026-01-03\n"
+    )
+    result = parse(fact_page(body))
+    assert "a callout must follow the fact it is about" in [message for _, message in result.errors]
+    assert actionable(result) == ["A fact."]
 
 
 def test_trailing_text_rejected():

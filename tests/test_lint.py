@@ -150,3 +150,16 @@ def test_plain_brackets_in_a_note_are_not_footnotes(initialized):
     note = "\n> [!question] 2026-10-01\n> Is [this] still true? See [s9] and [^ not a ref].\n"
     write(initialized, "projects/widget/overview.md", PAGE.format(project_id=project.id) + note)
     assert messages(initialized) == []
+
+
+def test_struck_fact_without_a_state_marker_is_a_finding(initialized):
+    project = register(initialized)
+    text = PAGE.format(project_id=project.id).replace(
+        "- The index is SQLite. [stated] 2026-09-28 [^s1]",
+        "- ~~The index is SQLite.~~ [stated] 2026-09-28 [^s1] no longer true",
+    )
+    write(initialized, "projects/widget/overview.md", text)
+    assert messages(initialized) == [
+        "projects/widget/overview.md:16: a struck fact must end "
+        "'superseded <date> by [^id]' or 'withdrawn <date>'"
+    ]

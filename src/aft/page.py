@@ -87,6 +87,17 @@ class Fact:
 
 @dataclass
 class Page:
+    """The memory one page holds, and every problem the parser found reading it.
+
+    `facts` is what a consumer acts on. A fact line the parser could not read as one of
+    the states of the fact-state table (design section 6) is named in `errors` and kept
+    out of `facts`, so a consumer reading `facts` and `Fact.state` alone cannot act on it.
+    A fact that stays in `facts` carries the state its own markers write even where
+    `errors` also names a field of it, such as an unknown source tag or an invalid date; a
+    consumer that acts only on sound lines reads `errors` as well, which is what `aft lint`
+    reports.
+    """
+
     path: Path
     frontmatter: dict | None
     body_start: int
@@ -160,9 +171,11 @@ def parse(text: str, path: Path) -> Page:
             page.errors.append((number, "only fact lines are allowed in a fact section"))
             continue
         fact = _parse_fact(page, stripped[2:], number, section)
+        # A line the parser rejected holds no fact, so a note after it has no fact to be
+        # about and is reported rather than marking the fact above it.
+        last_fact = fact
         if fact is not None:
             page.facts.append(fact)
-            last_fact = fact
     return page
 
 
@@ -211,16 +224,24 @@ def _parse_fact(page: Page, text: str, number: int, section: str) -> Fact | None
         struck=struck,
         state=CANDIDATE if candidate else ACTIVE,
     )
-    _apply_suffix(page, fact, match.group("suffix"), number)
+    if not _apply_suffix(page, fact, match.group("suffix"), number):
+        return None
     return fact
 
 
-def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> None:
+def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> bool:
+    """Record the state the line's marker writes; False when it writes none to read.
+
+    A struck fact states which state it is in, so a struck line whose marker the parser
+    does not recognize names no state and is not a fact of any. A plain line's marker is
+    optional, so unrecognized text after its sources is a problem with the line and not
+    with its state, which stays the one a plain line writes.
+    """
     candidate = fact.section == CANDIDATES
     if candidate:
         if fact.struck:
             page.errors.append((number, "a candidate cannot be struck through"))
-            return
+            return True
         if suffix:
             counts = _COUNTS.match(suffix)
             if counts:
@@ -229,7 +250,7 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> None:
                 fact.sessions = (values[2], values[3])
             else:
                 page.errors.append((number, "a candidate may end only with its signal counts"))
-        return
+        return True
     if fact.struck:
         superseded = _SUPERSEDED.match(suffix)
         withdrawn = _WITHDRAWN.match(suffix)
@@ -247,12 +268,12 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> None:
                     "a struck fact must end 'superseded <date> by [^id]' or 'withdrawn <date>'",
                 )
             )
-            return
+            return False
         if not _valid_date(fact.state_date):
             page.errors.append((number, f"invalid date {fact.state_date}"))
-        return
+        return True
     if not suffix:
-        return
+        return True
     stale = _STALE.match(suffix)
     if stale:
         fact.state = STALE
@@ -260,8 +281,9 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> None:
         fact.reason = stale.group("reason")
         if not _valid_date(fact.state_date):
             page.errors.append((number, f"invalid date {fact.state_date}"))
-        return
+        return True
     page.errors.append((number, f"unrecognized text after the sources: {suffix.strip()!r}"))
+    return True
 
 
 def _valid_date(value: str | None) -> bool:
