@@ -22,7 +22,6 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from aft import schema as schemamod
 from aft.config import Config
@@ -59,10 +58,6 @@ def complete_json(
     """
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
-    endpoint = config.settings.model.endpoint
-    if urlparse(endpoint).scheme not in ("http", "https"):
-        raise ModelError(f"model.endpoint must be an http(s) URL, got {endpoint!r}")
-
     body = {
         "model": config.settings.model.name,
         "messages": [
@@ -129,7 +124,7 @@ def tokens_used(config: Config, since: datetime | None = None) -> int:
 def tokens_used_today(config: Config, now: datetime | None = None) -> int:
     """Tokens used since midnight UTC, the day the daily cap is counted over."""
     moment = _utc(now) if now is not None else datetime.now(UTC)
-    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight = moment.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return tokens_used(config, since=midnight)
 
 
@@ -141,13 +136,13 @@ def _chat(config: Config, body: dict) -> str:
     """One HTTP call. Returns the assistant message content."""
     url = config.settings.model.endpoint.rstrip("/") + "/chat/completions"
     started = datetime.now(UTC)
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
     except urllib.error.HTTPError as exc:
@@ -195,9 +190,10 @@ def _checked(content: str, schema: dict) -> dict:
 def _record_usage(config: Config, started: datetime, usage: Any) -> None:
     prompt = _token_count(usage, "prompt_tokens")
     completion = _token_count(usage, "completion_tokens")
-    if prompt is None or completion is None:
-        # A call whose cost is unknown is not returned either: the budget would read
-        # it as free work, so it stays queued and reported (DESIGN 13).
+    if prompt is None or completion is None or (prompt == 0 and completion == 0):
+        # A call whose cost is unknown, or reported as nothing at all, is not returned
+        # either: an aft call always has a prompt to charge, so a server billing zero
+        # both ways has usage accounting off and a cap over that ledger never trips.
         raise ModelError(f"the endpoint reported no usable token usage: {usage!r}")
     record = {
         "at": started.isoformat(),

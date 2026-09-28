@@ -17,8 +17,9 @@ that only cares about the first two calls does not have to script the rest. A pl
 value is the assistant message content of a 200, JSON-encoded unless it is already a
 string; ``Reply`` covers the rest: ``status`` for an error response, ``delay`` to hold
 the connection open before answering, ``usage`` to report ``(prompt, completion)``
-token counts (or ``usage=None`` to report none at all), and ``raw`` to answer with
-bytes exactly as given, for an endpoint that does not speak HTTP properly.
+token counts, defaulting to a plausible pair because aft refuses to record a call that
+reports no cost (``usage=None`` stands for a reply carrying no usage object at all),
+and ``raw`` to answer with bytes exactly as given, as a broken endpoint would.
 
 Point a config at it by naming the endpoint in ``config.toml``, then load it as usual:
 
@@ -51,7 +52,7 @@ class Reply:
     status: int = 200
     content: Any = None
     delay: float = 0.0
-    usage: tuple[int, int] | None = (0, 0)
+    usage: tuple[int, int] | None = (200, 50)
     raw: bytes | None = None
 
 

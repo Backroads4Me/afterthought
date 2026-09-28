@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -151,9 +151,11 @@ def test_an_endpoint_with_no_model_name_raises(cfg):
         call(cfg)
 
 
-@pytest.mark.parametrize("endpoint", ["", "127.0.0.1:8000/v1"])
-def test_an_endpoint_that_is_not_an_http_url_raises(home, endpoint):
-    with pytest.raises(model.ModelError, match="model.endpoint must be an http"):
+@pytest.mark.parametrize("endpoint", ["", "127.0.0.1:8000/v1", "http://[::1"])
+def test_an_endpoint_that_is_not_a_usable_url_raises_model_error(home, endpoint):
+    # An empty setting, a bare host, a truncated IPv6 address: aft reports the
+    # endpoint as down, not the ValueError urllib raises over a URL it cannot use.
+    with pytest.raises(model.ModelError, match="cannot reach"):
         call(point_at(home, endpoint))
 
 
@@ -215,8 +217,10 @@ def test_a_response_that_reports_no_usage_raises_and_bills_nothing(serve):
     assert not model.usage_path(cfg).exists()
 
 
-@pytest.mark.parametrize("usage", [(-5, 3), (1.5, 3), ("100", "3")])
-def test_usage_that_is_not_a_token_count_raises_and_bills_nothing(serve, usage):
+@pytest.mark.parametrize("usage", [(-5, 3), (1.5, 3), ("100", "3"), (0, 0)])
+def test_usage_that_is_not_a_bill_raises_and_bills_nothing(serve, usage):
+    # Two zeros is what a server with usage accounting off reports, and work billed
+    # as free keeps the daily cap from ever tripping just as a missing figure does.
     _, cfg = serve(Reply(content={"answer": "yes"}, usage=usage))
     with pytest.raises(model.ModelError, match="no usable token usage"):
         call(cfg)
@@ -261,6 +265,18 @@ def test_a_stamp_with_no_offset_is_read_as_utc(cfg):
     assert model.tokens_used(cfg, since=now.replace(tzinfo=None)) == 110
     assert model.tokens_used_today(cfg, now=now) == 110
     assert model.tokens_used_today(cfg, now=now.replace(tzinfo=None)) == 110
+
+
+def test_the_daily_window_is_counted_from_utc_midnight(cfg):
+    # A caller's own offset must not shift the day: this now is 18:00 UTC, so the
+    # window starts at 00:00 UTC and the earlier evening line stays out of it.
+    now = datetime(2025, 3, 4, 2, 0, tzinfo=timezone(timedelta(hours=8)))
+    lines = [
+        {"at": "2025-03-02T20:00:00+00:00", "prompt_tokens": 70, "completion_tokens": 30},
+        {"at": "2025-03-03T10:00:00+00:00", "prompt_tokens": 40, "completion_tokens": 10},
+    ]
+    write_ledger(cfg, lines)
+    assert model.tokens_used_today(cfg, now=now) == 50
 
 
 @pytest.mark.parametrize(
