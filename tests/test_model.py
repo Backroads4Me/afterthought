@@ -210,6 +210,22 @@ def test_a_4xx_reports_the_reason_the_endpoint_gave(serve):
     assert len(fake.requests) == 1
 
 
+def test_a_redirect_is_refused_rather_than_followed(serve, monkeypatch):
+    # aft posts to the endpoint the operator configured and nowhere else, so a 302 names
+    # the host it tried to send the call to and stops there with the key behind it.
+    monkeypatch.setenv(KEY_VARIABLE, KEY_VALUE)
+    raw = (
+        b"HTTP/1.1 302 Found\r\nLocation: http://somewhere-else.invalid/login\r\n"
+        b"Content-Length: 0\r\n\r\n"
+    )
+    fake, cfg = serve(Reply(raw=raw), api_key_env=KEY_VARIABLE)
+    with pytest.raises(model.ModelError) as refusal:
+        call(cfg)
+    assert "redirected to http://somewhere-else.invalid/login" in str(refusal.value)
+    assert KEY_VALUE not in str(refusal.value)
+    assert len(fake.requests) == 1
+
+
 KEY_VARIABLE = "AFT_TEST_API_KEY"
 KEY_VALUE = "sekret-key-value"
 
@@ -258,6 +274,20 @@ def test_an_error_from_a_keyed_call_does_not_print_the_key(serve, monkeypatch):
     assert "should be one of" in str(rejection.value)
     assert KEY_VALUE not in str(rejection.value)
     assert len(fake.requests) == 3
+
+
+def test_a_key_too_short_to_cut_out_takes_the_message_with_it(serve, monkeypatch):
+    # A one-character value is likelier part of the prose than a key, so the report says
+    # a message was withheld rather than arriving with letters punched out of it.
+    monkeypatch.setenv(KEY_VARIABLE, "a")
+    fake, cfg = serve(Reply(status=400), api_key_env=KEY_VARIABLE)
+    with pytest.raises(model.ModelError) as refusal:
+        call(cfg)
+    reported = str(refusal.value)
+    assert "withheld" in reported
+    assert "127.0.0.1" not in reported
+    assert "[redacted]" not in reported
+    assert len(fake.requests) == 1
 
 
 def test_every_attempt_is_charged_to_the_budget(serve):
@@ -386,3 +416,33 @@ def test_validate_checks_enums_and_accepts_a_list_of_types():
     schema.validate(None, nullable)
     with pytest.raises(schema.SchemaError, match=r"should be string or null"):
         schema.validate(3, nullable)
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        None,
+        "object",
+        {"type": "object", "required": "answer"},
+        {"type": "object", "required": None},
+        {"type": "object", "properties": None},
+        {"type": "string", "maxLength": True},
+        {"type": "object", "properties": "answer"},
+        {"type": "object", "properties": {"answer": "string"}},
+        {"type": "string", "enum": "decision"},
+        {"type": "string", "minLength": "3"},
+        {"type": "array", "items": "string"},
+        {"type": "array", "maxItems": "5"},
+    ],
+)
+def test_a_malformed_schema_reports_as_a_schema_problem(declared):
+    # Every keyword shape says so as a SchemaError, so a typo in a committed schema is
+    # charged to the schema rather than arriving as an AttributeError over an answer.
+    with pytest.raises(schema.SchemaError, match="the schema for"):
+        schema.validate({"answer": "ok", "counts": [1]}, declared)
+
+
+def test_a_schema_that_wears_a_slip_as_a_missing_key_is_corrected():
+    # ``"required": "summary"`` is an authoring slip, not a model that forgot a key.
+    with pytest.raises(schema.SchemaError, match="declares required as"):
+        schema.validate({"summary": "fine"}, {"required": "summary"})

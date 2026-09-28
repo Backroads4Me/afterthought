@@ -37,6 +37,8 @@ TIMEOUT_SECONDS = 300.0
 ATTEMPTS = 2
 # What a report carries of the endpoint's own text.
 REPORT_CHARS = 500
+# A real API key runs 20 to 50 characters, so at this length a cut cannot mangle prose.
+MIN_KEY_CHARS = 16
 # OpenAI requires the name of a json_schema response format to match [a-zA-Z0-9_-]{1,64}.
 SCHEMA_NAME = "aft"
 
@@ -47,6 +49,18 @@ class ModelError(Exception):
 
 class _Retryable(Exception):
     """The endpoint answered badly in a way one more call can plausibly fix."""
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Hand a 3xx back as an HTTPError rather than following it.
+
+    aft posts to the endpoint the operator configured and nowhere else, so a bearer key
+    never travels to a host nobody set up.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """None is urllib's signal to leave the redirect response to the caller."""
+        return None
 
 
 def complete_json(
@@ -150,9 +164,14 @@ def _chat(config: Config, body: dict) -> str:
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        # Built here rather than at import, so the proxy environment is read at call time.
+        opener = urllib.request.build_opener(_RefuseRedirect())
+        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
     except urllib.error.HTTPError as exc:
+        target = exc.headers.get("location")
+        if 300 <= exc.code < 400 and target:
+            raise ModelError(_reported(config, f"{url} redirected to {target}")) from exc
         # A report carries REPORT_CHARS characters of the endpoint's own text at most, and
         # reading that body is a request in itself: it can stop short or never arrive.
         try:
@@ -212,12 +231,17 @@ def _reported(config: Config, problem: str) -> str:
     """The failure text aft may put in a report.
 
     DESIGN 13 keeps the API key out of error messages, and an endpoint or a proxy in
-    front of one can echo the request back in its own error body, so the key this call
-    sent is taken out of the text however the rest of the message reads.
+    front of one can echo the request back in its own error body. A key long enough to
+    cut out precisely comes out in place; one too short to tell from the prose takes the
+    whole message down with it rather than leaving a garbled report behind.
     """
     name = config.settings.model.api_key_env
     key = os.environ.get(name, "") if name else ""
-    return problem.replace(key, "[redacted]") if key else problem
+    if not key:
+        return problem
+    if len(key) >= MIN_KEY_CHARS:
+        return problem.replace(key, "[redacted]")
+    return "the endpoint failed and aft withheld its message rather than print the key"
 
 
 def _checked(content: str, schema: dict) -> dict:

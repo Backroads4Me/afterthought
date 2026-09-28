@@ -5,11 +5,31 @@ Small on purpose: it enforces exactly ``type``, ``enum``, ``minLength``, ``maxLe
 everything else a schema may carry, such as ``description`` or
 ``additionalProperties``. That keeps a schema free to hold prose, and keeps this
 module dependency-free (BUILD-PLAN 1, no new runtime dependencies).
+
+A schema that misuses one of these keywords is reported as a schema problem naming that
+keyword, whatever the answer looks like, so a typo in a committed schema never surfaces
+as some unrelated exception.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+# The keywords this module reads and the shape each must have. A schema that carries one
+# must carry it in that shape: a wrong one is a schema bug, reported as one before any
+# answer is judged against it, so it never surfaces as some other exception type. A
+# bound written ``true`` is refused with them because bool is a subclass of int, and only
+# ``type`` reads null as "any".
+SHAPES = {
+    "enum": (list, tuple),
+    "required": (list, tuple),
+    "properties": (dict,),
+    "items": (dict,),
+    "minLength": (int,),
+    "maxLength": (int,),
+    "minItems": (int,),
+    "maxItems": (int,),
+}
 
 
 class SchemaError(Exception):
@@ -18,12 +38,22 @@ class SchemaError(Exception):
 
 def validate(value: Any, schema: dict, path: str = "$") -> None:
     """Raise ``SchemaError`` describing the first problem, else return None."""
+    if not isinstance(schema, dict):
+        raise SchemaError(f"the schema for {path} is {schema!r}, not an object")
+    for keyword, kinds in SHAPES.items():
+        if keyword not in schema:
+            continue
+        declared = schema[keyword]
+        if declared is None or isinstance(declared, bool) or not isinstance(declared, kinds):
+            raise SchemaError(f"the schema for {path} declares {keyword} as {declared!r}")
+
     want = schema.get("type")
     if want is not None and not _is_type(value, want):
         raise SchemaError(f"{path} should be {_say(want)}, found {_found(value)}")
 
-    if "enum" in schema and not any(value == item for item in schema["enum"]):
-        raise SchemaError(f"{path} should be one of {schema['enum']}, found {value!r}")
+    enum = schema.get("enum")
+    if enum is not None and not any(value == item for item in enum):
+        raise SchemaError(f"{path} should be one of {enum}, found {value!r}")
 
     if isinstance(value, str):
         minimum = schema.get("minLength")
@@ -49,7 +79,7 @@ def validate(value: Any, schema: dict, path: str = "$") -> None:
         if maximum is not None and len(value) > maximum:
             raise SchemaError(f"{path} should have at most {maximum} items, found {len(value)}")
         items = schema.get("items")
-        if isinstance(items, dict):
+        if items is not None:
             for index, item in enumerate(value):
                 validate(item, items, path=f"{path}[{index}]")
 
