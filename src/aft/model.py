@@ -146,8 +146,15 @@ def _chat(config: Config, body: dict) -> str:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode(errors="replace")[:500]
-        message = f"{url} returned {exc.code}: {detail}"
+        # An error body is itself a response, so it can stop short or never arrive:
+        # the status code plus whatever came of the body is what aft reports.
+        try:
+            detail = exc.read()
+        except http.client.IncompleteRead as cut_short:
+            detail = cut_short.partial
+        except (OSError, http.client.HTTPException, ValueError):
+            detail = b""
+        message = f"{url} returned {exc.code}: {detail.decode(errors='replace')[:500]}"
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc

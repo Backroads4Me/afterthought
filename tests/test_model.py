@@ -184,6 +184,20 @@ def test_a_reply_that_is_not_usable_http_raises_model_error(serve, raw):
     assert len(fake.requests) == 1
 
 
+def test_a_5xx_with_a_cut_off_error_body_is_still_a_model_error(serve):
+    # An error body is a response too: this one promises 5000 bytes and sends 600
+    # before hanging up. The report gets the status and a bounded piece of the body.
+    raw = b"HTTP/1.1 500 Oops\r\nContent-Length: 5000\r\n\r\n" + b"z" * 600
+    fake, cfg = serve(Reply(raw=raw))
+    with pytest.raises(model.ModelError) as answer:
+        call(cfg)
+    reported = str(answer.value)
+    assert "returned 500" in reported
+    assert "z" in reported
+    assert "z" * 501 not in reported
+    assert len(fake.requests) == 2
+
+
 def test_every_attempt_is_charged_to_the_budget(serve):
     fake, cfg = serve(
         Reply(content={"answer": 7}, usage=(100, 20)),
