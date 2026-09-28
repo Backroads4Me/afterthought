@@ -1,9 +1,8 @@
 """The one event shape every agent adapter produces.
 
-This is the adapter boundary of DESIGN 5: agent-specific payloads become a single
-normalized event carrying the agent, the kind, the session id, the working
-directory, the transcript path and the time. Nothing past this file may assume
-anything about Claude Code or pi.
+This is the adapter boundary of DESIGN 5: agent-specific payloads become one
+`SessionEvent`, defined below, and that definition is the whole boundary contract.
+Nothing past this file may assume anything about Claude Code or pi.
 """
 
 from __future__ import annotations
