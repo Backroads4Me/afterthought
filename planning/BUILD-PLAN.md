@@ -78,12 +78,8 @@ The worker then fixes every finding marked `blocking` in the same PR, or replies
 explaining why a finding is wrong. Non-blocking findings are listed in the PR description
 for Ted.
 
-Two prerequisites, both Ted's:
-
-- Firstmate's `captain.md` forbids running a Claude model unless Ted names it for the task.
-  These checkpoints need a standing permission there, such as: "For afterthought, workers
-  run `claude -p` reviews at the checkpoints listed in `planning/BUILD-PLAN.md` section 3."
-- Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
+Firstmate's `captain.md` gives the standing permission for these checkpoints, and for
+nothing else. Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
   PRs, expect twenty to thirty reviews over the build.
 
 ## 4. When a worker is unsure
@@ -132,9 +128,12 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
   `session_start`, `session_before_compact` and `session_shutdown`. The command **always
   exits 0**, prints nothing on failure, logs failures to `~/.afterthought/logs/hooks.log`,
   and gives up after 2 seconds.
-- **First step:** record one real payload per event from the installed Claude Code and pi
-  versions into `tests/fixtures/hooks/` (Ted captures the Claude Code ones; see 6.1). Build
-  the parsers against those files, not against documentation.
+- **First step:** use real payloads, not documentation. The Claude Code 2.1.283 payloads
+  were captured on 2026-09-28 and are in firstmate's
+  `data/afterthought-m1-1-hook-events/captured-hooks/`, with a README noting the fields the
+  documentation omits; copy them into `tests/fixtures/hooks/`. Parsers ignore unknown
+  fields. pi has no shell hooks of its own, so its payloads are whatever the M1.4 extension
+  sends, and the two tasks must agree on that shape.
 - **Tests:** each fixture parses to the expected event; malformed JSON, a missing field, or
   an unknown event exits 0 with no output and one log line.
 - **Out of scope:** installing hooks (M1.3, M1.4).
@@ -203,8 +202,13 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
   `projects/afterthought/overview.md` into a vault given on the command line.
 - **Behavior:** 10 to 20 facts about afterthought taken from `planning/DESIGN.md`, each
   `[observed]`, with a source whose `resource` is `file:planning/DESIGN.md#<heading>` and
-  whose `quote` is copied from that section. The page passes `aft lint`.
-- **Tests:** the script's output lints clean, and every quote appears in `DESIGN.md`.
+  whose `quote` is copied from that section. The page passes `aft lint`. Run against a
+  vault that already has the page, it refuses unless given `--overwrite`. With
+  `--overwrite`, a fact whose statement and quote are unchanged keeps its earlier date,
+  because re-reading the same source is not new evidence; a new or changed fact gets
+  today's date.
+- **Tests:** the script's output lints clean; every quote appears in `DESIGN.md`; a rerun
+  refuses without `--overwrite`; with it, unchanged facts keep their dates.
 
 ### M2 Capture
 
@@ -232,8 +236,11 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 ```
 
 - **Behavior:** yields entries after the `after` id in file order. Claude Code: skip
-  `isMeta` entries, thinking blocks, and the summary entries it writes on compaction;
-  split tool results out of user messages. pi: read `message` entries, follow the active
+  `isMeta` entries, thinking blocks, the summary entries it writes on compaction, and the
+  failure notices Claude Code writes as assistant entries (model `<synthetic>` or
+  `isApiErrorMessage: true`; match on those markers, never on the message text), since
+  they are infrastructure noise, not anything the agent said; split tool results out of
+  user messages. pi: read `message` entries, follow the active
   branch only. Unknown entry types are skipped, never fatal.
 - **Tests:** fixture transcripts (small, hand-trimmed from real sessions, secrets removed)
   for each agent, including a compaction, a tool error and a resumed session.
@@ -601,12 +608,10 @@ specification return the right document and page (DESIGN 15, M7).
 
 ### 6.1 M1
 
-1. Capture one real hook payload per event for Claude Code and pi into
-   `tests/fixtures/hooks/` (M1.1 explains how).
-2. Run `aft init`, `aft project add ~/src/afterthought`, and the M1.5 seed script against
+1. Run `aft init`, `aft project add ~/src/afterthought`, and the M1.5 seed script against
    the real vault.
-3. Run `aft install claude --dry-run`, check the diff, then install. Same for pi.
-4. Start a new session in each agent in `~/src/afterthought` and check both show the same
+2. Run `aft install claude --dry-run`, check the diff, then install. Same for pi.
+3. Start a new session in each agent in `~/src/afterthought` and check both show the same
    memory block.
 
 ### 6.2 M2
