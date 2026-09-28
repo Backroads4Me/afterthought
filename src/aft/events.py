@@ -33,23 +33,20 @@ class AdapterError(Exception):
     """A payload or event name this adapter cannot turn into a SessionEvent."""
 
 
-def resolve_kind(agent: str, hook_event: str, payload: dict, events: dict[str, str]) -> str:
-    """The normalized kind for one agent's event name.
+def resolve_event(
+    agent: str, hook_event: str, events: dict[str, tuple[str, str]]
+) -> tuple[str, str]:
+    """The kind and the detail field an agent's table gives one of its event names.
 
-    The payload names its own event too, and a payload that disagrees with the
-    event the hook was invoked for means the agent's wiring is wrong: recording
-    that payload under the wrong kind would put a compaction where a session start
-    belongs, so it is refused rather than guessed at.
+    A name the table does not list is refused: there is no kind to normalize it to,
+    and guessing one would file the event under that kind for good.
     """
-    kind = events.get(hook_event)
-    if kind is None:
+    entry = events.get(hook_event)
+    if entry is None:
         raise AdapterError(
             f"unknown {agent} hook event {hook_event!r}, expected one of {' or '.join(events)}"
         )
-    declared = payload.get("hook_event_name")
-    if declared is not None and declared != hook_event:
-        raise AdapterError(f"{agent} hook ran for {hook_event!r}, payload says {declared!r}")
-    return kind
+    return entry
 
 
 def string_field(payload: dict, key: str) -> str:
@@ -77,17 +74,25 @@ def optional_string_field(payload: dict, key: str) -> str | None:
     return value
 
 
-def path_field(payload: dict, key: str, *, required: bool = True) -> Path | None:
-    """A field holding a path, or None when the payload leaves it out or nulls it.
+def path_field(payload: dict, key: str) -> Path:
+    """A required field holding a path.
 
-    pi's own session file is undefined until a session is first written, so
-    `transcript_path` is optional there; Claude Code always provides one.
+    Absent, null, empty and wrongly typed values are all failures, so an event is
+    never dispatched without a working directory or, for Claude Code, a transcript.
+    """
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise AdapterError(f"{key} is missing or is not a non-empty string")
+    return Path(value)
+
+
+def optional_path_field(payload: dict, key: str) -> Path | None:
+    """A field holding a path a payload may leave out or null.
+
+    pi's own session file is undefined until a session is first written, so its
+    transcript may be absent; every other path an adapter reads is required.
     """
     value = payload.get(key)
     if value is None:
-        if required:
-            raise AdapterError(f"{key} is missing or is not a non-empty string")
         return None
-    if not isinstance(value, str) or not value:
-        raise AdapterError(f"{key} is not a path")
-    return Path(value)
+    return path_field(payload, key)

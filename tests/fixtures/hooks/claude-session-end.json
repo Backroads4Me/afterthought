@@ -1,7 +1,1 @@
-{
-  "session_id": "6b1c2f6f-6d1e-4f2a-9d3c-7f2f8c1e5a52",
-  "transcript_path": "/home/ted/.claude/projects/-home-ted-src-widget/6b1c2f6f-6d1e-4f2a-9d3c-7f2f8c1e5a52.jsonl",
-  "cwd": "/home/ted/src/widget",
-  "hook_event_name": "SessionEnd",
-  "reason": "prompt_input_exit"
-}
+{"session_id":"39eaeb4c-e03d-4847-b937-ae5e79107d95","transcript_path":"/home/ted/.claude/projects/-tmp-claude-1000--home-ted-src-afterthought-75ecdcb9-0baf-4177-85c5-d35ca9eb59b2-scratchpad-hookcap-work/39eaeb4c-e03d-4847-b937-ae5e79107d95.jsonl","cwd":"/tmp/claude-1000/-home-ted-src-afterthought/75ecdcb9-0baf-4177-85c5-d35ca9eb59b2/scratchpad/hookcap/work","scratchpad_dir":"/tmp/claude-1000/-tmp-claude-1000--home-ted-src-afterthought-75ecdcb9-0baf-4177-85c5-d35ca9eb59b2-scratchpad-hookcap-work/39eaeb4c-e03d-4847-b937-ae5e79107d95/scratchpad","prompt_id":"859fcece-f3a0-4bc7-8122-ec57d4f74fb9","hook_event_name":"SessionEnd","reason":"other"}

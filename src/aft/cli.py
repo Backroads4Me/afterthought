@@ -6,7 +6,6 @@ import argparse
 import json
 import signal
 import sys
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -261,8 +260,7 @@ def _hook_time_limit(seconds: int) -> Iterator[None]:
     can hold an agent's session open. Where SIGALRM is unavailable the limit is not
     enforced here and the agent's own hook timeout is the bound.
     """
-    on_main_thread = threading.current_thread() is threading.main_thread()
-    if not on_main_thread or not hasattr(signal, "SIGALRM"):
+    if not hasattr(signal, "SIGALRM"):
         yield
         return
 
@@ -278,18 +276,23 @@ def _hook_time_limit(seconds: int) -> Iterator[None]:
         signal.signal(signal.SIGALRM, previous)
 
 
+# The one line a hook failure leaves behind, in characters.
+HOOK_LOG_LINE_LIMIT = 500
+
+
 def _log_hook_failure(home: Path, agent: str, event: str, exc: BaseException) -> None:
     """Append the one line a failed hook is allowed to leave behind.
 
-    Written flat so a failure whose message spans several lines stays one line, and
-    best effort: a home that cannot be written to is not a reason to fail the agent.
+    Agent, event and the failure's own words all come from outside this process, so
+    the whole line is flattened and capped: whatever they contain, a failed hook
+    leaves one bounded line and nothing else. Best effort: a home that cannot be
+    written to, or a line that cannot be written, is not a reason to fail the agent.
     """
-    stamp = datetime.now(UTC).isoformat()
-    message = " ".join(str(exc).split())
-    line = f"{stamp} {agent} {event}: {type(exc).__name__}: {message}"
+    line = f"{datetime.now(UTC).isoformat()} {agent} {event}: {type(exc).__name__}: {exc}"
+    line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
         (home / "logs").mkdir(parents=True, exist_ok=True)
         with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
-    except OSError:
+    except Exception:
         pass

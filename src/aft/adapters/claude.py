@@ -11,7 +11,6 @@ unknown event (BUILD-PLAN M1.1).
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
 
 from aft.events import (
     COMPACTION,
@@ -20,38 +19,32 @@ from aft.events import (
     SessionEvent,
     optional_string_field,
     path_field,
-    resolve_kind,
+    resolve_event,
     string_field,
 )
 
 AGENT = "claude"
 
-# Claude Code's event name -> the kind afterthought dispatches it as.
+# Claude Code's event name -> the kind afterthought dispatches it as, and the field
+# that says why it fired, kept as SessionEvent.detail: `source` is startup, resume,
+# clear, compact or fork; `trigger` is manual or auto; `reason` is clear, resume,
+# logout, prompt_input_exit or other.
 EVENTS = {
-    "SessionStart": SESSION_START,
-    "PreCompact": COMPACTION,
-    "SessionEnd": SESSION_END,
-}
-
-# The field that says why each event fired, kept as SessionEvent.detail: `source` is
-# startup, resume, clear, compact or fork; `trigger` is manual or auto; `reason` is
-# clear, resume, logout, prompt_input_exit or other.
-DETAIL_FIELD = {
-    "SessionStart": "source",
-    "PreCompact": "trigger",
-    "SessionEnd": "reason",
+    "SessionStart": (SESSION_START, "source"),
+    "PreCompact": (COMPACTION, "trigger"),
+    "SessionEnd": (SESSION_END, "reason"),
 }
 
 
 def parse_claude(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
     """One Claude Code hook event and payload, as a SessionEvent."""
-    kind = resolve_kind(AGENT, hook_event, payload, EVENTS)
+    kind, detail_field = resolve_event(AGENT, hook_event, EVENTS)
     return SessionEvent(
         agent=AGENT,
         kind=kind,
         session_id=string_field(payload, "session_id"),
-        cwd=Path(string_field(payload, "cwd")),
+        cwd=path_field(payload, "cwd"),
         transcript_path=path_field(payload, "transcript_path"),
         time=now,
-        detail=optional_string_field(payload, DETAIL_FIELD[hook_event]),
+        detail=optional_string_field(payload, detail_field),
     )

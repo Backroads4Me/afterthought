@@ -21,10 +21,21 @@ from aft.events import AdapterError, SessionEvent
 FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
 NOW = datetime(2026, 6, 30, 14, 22, 8, 517000, tzinfo=UTC)
 
-CWD = Path("/home/ted/src/widget")
-CLAUDE_ID = "6b1c2f6f-6d1e-4f2a-9d3c-7f2f8c1e5a52"
-CLAUDE_TRANSCRIPT = Path(f"/home/ted/.claude/projects/-home-ted-src-widget/{CLAUDE_ID}.jsonl")
+# The Claude fixtures are payloads captured from a real Claude Code run, so they carry
+# that capture session's id, working directory and transcript path.
+CLAUDE_ID = "39eaeb4c-e03d-4847-b937-ae5e79107d95"
+CLAUDE_CWD = Path(
+    "/tmp/claude-1000/-home-ted-src-afterthought"
+    "/75ecdcb9-0baf-4177-85c5-d35ca9eb59b2/scratchpad/hookcap/work"
+)
+CLAUDE_TRANSCRIPT = Path(
+    "/home/ted/.claude/projects"
+    "/-tmp-claude-1000--home-ted-src-afterthought"
+    "-75ecdcb9-0baf-4177-85c5-d35ca9eb59b2-scratchpad-hookcap-work"
+    f"/{CLAUDE_ID}.jsonl"
+)
 PI_ID = "019f17a3-2b64-7a1f-9c2e-4f6d8a1b3c5d"
+PI_CWD = Path("/home/ted/src/widget")
 PI_SESSION_DIR = "/home/ted/.pi/agent/sessions/--home-ted-src-widget--"
 PI_TRANSCRIPT = Path(f"{PI_SESSION_DIR}/2026-06-30T14-22-08-517Z_{PI_ID}.jsonl")
 
@@ -34,45 +45,59 @@ CASES = [
         "claude-session-start.json",
         "claude",
         "SessionStart",
-        SessionEvent("claude", "session_start", CLAUDE_ID, CWD, CLAUDE_TRANSCRIPT, NOW, "startup"),
+        SessionEvent(
+            "claude", "session_start", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "startup"
+        ),
+    ),
+    (
+        "claude-session-start-resume.json",
+        "claude",
+        "SessionStart",
+        SessionEvent(
+            "claude", "session_start", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "resume"
+        ),
     ),
     (
         "claude-session-start-compact.json",
         "claude",
         "SessionStart",
-        SessionEvent("claude", "session_start", CLAUDE_ID, CWD, CLAUDE_TRANSCRIPT, NOW, "compact"),
+        SessionEvent(
+            "claude", "session_start", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "compact"
+        ),
     ),
     (
         "claude-pre-compact.json",
         "claude",
         "PreCompact",
-        SessionEvent("claude", "compaction", CLAUDE_ID, CWD, CLAUDE_TRANSCRIPT, NOW, "auto"),
+        SessionEvent(
+            "claude", "compaction", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "manual"
+        ),
     ),
     (
         "claude-session-end.json",
         "claude",
         "SessionEnd",
         SessionEvent(
-            "claude", "session_end", CLAUDE_ID, CWD, CLAUDE_TRANSCRIPT, NOW, "prompt_input_exit"
+            "claude", "session_end", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "other"
         ),
     ),
     (
         "pi-session-start.json",
         "pi",
         "session_start",
-        SessionEvent("pi", "session_start", PI_ID, CWD, PI_TRANSCRIPT, NOW, "startup"),
+        SessionEvent("pi", "session_start", PI_ID, PI_CWD, PI_TRANSCRIPT, NOW, "startup"),
     ),
     (
         "pi-session-before-compact.json",
         "pi",
         "session_before_compact",
-        SessionEvent("pi", "compaction", PI_ID, CWD, PI_TRANSCRIPT, NOW, "threshold"),
+        SessionEvent("pi", "compaction", PI_ID, PI_CWD, PI_TRANSCRIPT, NOW, "threshold"),
     ),
     (
         "pi-session-shutdown.json",
         "pi",
         "session_shutdown",
-        SessionEvent("pi", "session_end", PI_ID, CWD, PI_TRANSCRIPT, NOW, "quit"),
+        SessionEvent("pi", "session_end", PI_ID, PI_CWD, PI_TRANSCRIPT, NOW, "quit"),
     ),
 ]
 
@@ -124,10 +149,25 @@ def test_pi_before_its_session_is_written_has_no_transcript():
     assert parse_pi("session_start", without_transcript, NOW).transcript_path is None
 
 
-def test_a_payload_naming_another_event_is_refused():
-    """The event on the command line and the one in the payload have to agree."""
-    with pytest.raises(AdapterError, match="payload says"):
-        parse_claude("SessionStart", payload("claude-pre-compact.json"), NOW)
+def test_fields_the_parser_does_not_know_are_ignored():
+    """A captured payload carries more than afterthought reads; extra fields are
+    ignored, never a reason to refuse an event the payload does describe."""
+    captured = payload("claude-session-start-resume.json")
+    known = {key: captured[key] for key in ("session_id", "transcript_path", "cwd", "source")}
+    assert set(captured) - set(known) == {
+        "hook_event_name",
+        "scratchpad_dir",
+        "seconds_since_last_response",
+        "context_tokens",
+        "prompt_cache_likely_expired",
+        "estimated_cache_write_usd",
+    }
+    expected = SessionEvent(
+        "claude", "session_start", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "resume"
+    )
+
+    assert parse_claude("SessionStart", captured, NOW) == expected
+    assert parse_claude("SessionStart", known, NOW) == expected
 
 
 def test_an_unknown_event_is_refused():
