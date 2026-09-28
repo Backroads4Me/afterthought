@@ -245,7 +245,8 @@ def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
 
 def prior_dates(path: Path) -> dict[tuple[str, str], str]:
     """The observed dates already on a page in the vault, keyed by the statement and quote that
-    make a fact the same fact."""
+    make a fact the same fact. A line whose date is not a date is dropped, so the run dates it
+    anew rather than copying the bad text back into the page it writes."""
     if not path.exists():
         return {}
     page = pagemod.parse(path.read_text(), path)
@@ -254,12 +255,16 @@ def prior_dates(path: Path) -> dict[tuple[str, str], str]:
         for source in (page.frontmatter or {}).get("sources") or []
         if isinstance(source, dict) and source.get("id") is not None and "quote" in source
     }
-    return {
-        (fact.statement, quotes[ref]): fact.date
-        for fact in page.facts
-        for ref in fact.refs
-        if ref in quotes
-    }
+    carried: dict[tuple[str, str], str] = {}
+    for fact in page.facts:
+        try:
+            date.fromisoformat(fact.date)
+        except ValueError:
+            continue
+        for ref in fact.refs:
+            if ref in quotes:
+                carried[(fact.statement, quotes[ref])] = fact.date
+    return carried
 
 
 def render(facts: tuple[SeedFact, ...], project_id: str, dates: dict[tuple[str, str], str]) -> str:

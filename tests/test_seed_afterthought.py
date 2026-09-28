@@ -132,6 +132,29 @@ def test_overwrite_dates_a_fact_whose_statement_changed(registered, seed):
     assert kept == [past] * len(kept)
 
 
+def test_overwrite_dates_a_fact_whose_page_date_is_unreadable(registered, seed):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    past = (date.today() - timedelta(days=30)).isoformat()
+    aged = re.sub(r"\[observed\] \d{4}-\d{2}-\d{2}", f"[observed] {past}", path.read_text())
+    mistyped = seed.FACTS[0]
+    broken = aged.replace(
+        f"- {mistyped.statement} [observed] {past}",
+        f"- {mistyped.statement} [observed] 2026-13-45",
+        1,
+    )
+    assert broken != aged
+    path.write_text(broken)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: mistype a date")
+    assert run(seed, registered.vault, "--overwrite") == 0
+    assert lint.lint_vault(registered.vault) == []
+    dates = {fact.statement: fact.date for fact in page_of(registered, seed).facts}
+    assert dates[mistyped.statement] == date.today().isoformat()
+    kept = [day for statement, day in dates.items() if statement != mistyped.statement]
+    assert len(kept) == len(dates) - 1
+    assert kept == [past] * len(kept)
+
+
 def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):
     assert run(seed, initialized.vault) == 2
     assert not (initialized.vault / seed.REL_PATH).exists()
