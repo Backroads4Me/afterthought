@@ -163,7 +163,8 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
      State, Decisions, Lessons, Procedures, Facts, References; a conflict or question is
      marked `(disputed)` or `(waiting on Ted)` after the line; source tags and footnotes are
      stripped
-  4. active facts from `global/preferences.md`
+  4. active and conflict/needs-you facts from `global/preferences.md`, marked the same way
+     as in layer 3, since a preference stands until Ted changes it
   5. one line per other page in `projects/<slug>/` and per reference collection whose
      `aft.projects` includes the project: `- <title>: <description> (aft read <path>)`
   6. `Search memory: aft search "<words>". Read a page: aft read <path>.`
@@ -252,7 +253,10 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   `isApiErrorMessage: true`; match on those markers, never on the message text), since
   they are infrastructure noise, not anything the agent said; split tool results out of
   user messages. pi: read `message` entries, follow the active
-  branch only. Unknown entry types are skipped, never fatal.
+  branch only. Unknown entry types are skipped, never fatal, but counted: a file that has
+  content yet yields no recognized entry raises `UnrecognizedTranscript`, so a changed
+  transcript format is reported instead of reading as an empty session. Capture logs it,
+  names it in the next report, and keeps the job for a retry after the reader is fixed.
 - **Tests:** fixture transcripts (small, hand-trimmed from real sessions, secrets removed)
   for each agent, including a compaction, a tool error and a resumed session.
 
@@ -488,9 +492,21 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
   `withdraw(fact)`, `mark_stale(fact, reason)`, `add_callout(fact, type, text)`,
   `resolve_callout`, `add_candidate`, `update_counts`, `promote(candidate)`.
 - **Behavior:** edits change only the lines they touch; everything else is preserved byte
-  for byte. The result always parses and lints.
+  for byte. The result always parses and lints. Rulings (DESIGN 6):
+  - Never lose text the tool did not write. An operation on a line or note that carries text
+    outside the grammar (a hand-typed tail, an extra note row) refuses with a reason instead
+    of rebuilding the line, and an edit may never make a parse error disappear by deleting
+    the bytes it flagged. `resolve_callout` moves the whole note, header and every row, to
+    `archive/<slug>.md` with the date and the fact it belonged to, and never deletes it.
+  - `add_callout` refuses a note whose text cites a `[^id]` missing from the page's
+    sources; `aft lint` checks note footnotes the same way (on main since M0).
+  - Statements are checked by round trip, not by pattern: a statement is accepted when the
+    written line parses back to exactly that statement. The look-alike tail guard is
+    removed; the refusals for blank text, `~~` and line breaks stay.
 - **Tests:** each operation round-trips through `page.parse` and `lint`; untouched lines are
-  unchanged.
+  unchanged; a hand-typed tail or note row makes the operation refuse and leaves the page
+  unchanged; `resolve_callout` archives the note verbatim; a statement ending in text that
+  looks like a tag is written and parses back unchanged.
 
 #### M4.3 Retrieval and the decision call
 
