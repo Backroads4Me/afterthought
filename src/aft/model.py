@@ -91,7 +91,7 @@ def complete_json(
             continue
         return answer
 
-    raise ModelError("; ".join(problems))
+    raise ModelError(_reported(config, "; ".join(problems)))
 
 
 def tokens_used(config: Config, since: datetime | None = None) -> int:

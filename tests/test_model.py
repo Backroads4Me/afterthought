@@ -236,18 +236,28 @@ def test_a_key_named_in_config_that_is_not_set_fails_naming_it(serve, monkeypatc
 
 
 def test_an_error_from_a_keyed_call_does_not_print_the_key(serve, monkeypatch):
-    # A proxy quoting the request it just refused is how a key would reach a report, and
-    # DESIGN 13 says it never may.
+    # How a key reaches a report is the endpoint quoting the request that carried it: a
+    # refused call quotes it in an error body, and an accepted one can echo it back in an
+    # answer that then fails validation. DESIGN 13 says neither may.
     monkeypatch.setenv(KEY_VARIABLE, KEY_VALUE)
     detail = json.dumps({"error": {"message": f"refused: Bearer {KEY_VALUE}"}}).encode()
     header = b"HTTP/1.1 400 Bad Request\r\nContent-Length: " + str(len(detail)).encode()
-    fake, cfg = serve(Reply(raw=header + b"\r\n\r\n" + detail), api_key_env=KEY_VARIABLE)
-    with pytest.raises(model.ModelError) as answer:
+    answer_schema = {"type": "object", "properties": {"kind": {"enum": ["note", "fact"]}}}
+    fake, cfg = serve(
+        Reply(raw=header + b"\r\n\r\n" + detail),
+        Reply(content={"kind": KEY_VALUE}),
+        api_key_env=KEY_VARIABLE,
+    )
+    with pytest.raises(model.ModelError) as refusal:
         call(cfg)
-    reported = str(answer.value)
-    assert KEY_VALUE not in reported
-    assert "returned 400" in reported
-    assert len(fake.requests) == 1
+    assert "returned 400" in str(refusal.value)
+    assert KEY_VALUE not in str(refusal.value)
+
+    with pytest.raises(model.ModelError) as rejection:
+        model.complete_json(cfg, "You answer briefly.", "Is it working?", answer_schema, 128)
+    assert "should be one of" in str(rejection.value)
+    assert KEY_VALUE not in str(rejection.value)
+    assert len(fake.requests) == 3
 
 
 def test_every_attempt_is_charged_to_the_budget(serve):
