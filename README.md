@@ -19,9 +19,6 @@ uv run aft --help
 `aft` reads `~/.afterthought/config.toml`. Set `AFT_HOME` to point it at another home
 directory; the test suite does this so it never touches real memory.
 
-Afterthought's own memory is seeded too: `scripts/seed_afterthought.py` writes its
-overview page into a vault from the design it cites; its `--help` covers the options.
-
 ## Commands
 
 | Command | Does |
