@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from aft import __version__, gitutil, keys, lint, vault
+from aft import __version__, gitutil, inject, keys, lint, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load
 from aft.gitutil import GitError
 from aft.registry import Registry, RegistryError, path_key, slugify
@@ -42,6 +42,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--json", action="store_true")
     p.set_defaults(handler=cmd_key)
+
+    p = sub.add_parser("inject", help="print the memory a session starts with")
+    p.add_argument("path", nargs="?", default=".")
+    p.set_defaults(handler=cmd_inject)
 
     p = sub.add_parser("project", help="manage registered projects")
     psub = p.add_subparsers(metavar="action")
@@ -101,6 +105,17 @@ def cmd_key(args) -> int:
     else:
         print(f"{result.slug or '-'}\t{result.kind}\t{result.root or '-'}")
     return 0 if result.registered else 1
+
+
+def cmd_inject(args) -> int:
+    """Print the block. The lookup records no alias: injection only reads memory."""
+    config = load()
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(Path(args.path), registry, config.host)
+    block = inject.build(config, result)
+    if block:
+        print(block)
+    return 0
 
 
 def _alias_writer(config: Config):
