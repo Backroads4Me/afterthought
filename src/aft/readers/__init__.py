@@ -13,7 +13,7 @@ to its transcript cannot break capture.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,25 +54,25 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
         from aft.readers.pi import read as read_session
     else:
         raise ReaderError(f"no transcript reader for agent {agent!r}")
-    return _after(read_session(path), after)
+    return _after(lambda: read_session(path), after)
 
 
-def _after(entries: Iterable[Entry], after: str | None) -> Iterator[Entry]:
+def _after(reopen: Callable[[], Iterator[Entry]], after: str | None) -> Iterator[Entry]:
+    """The entries after ``after``, streaming so a long session costs its tail only.
+
+    Walking to the watermark drops what it passes over; when no entry carries it
+    the transcript is read again from the start rather than buffered on the chance
+    it might be needed.
+    """
+    entries = reopen()
     if after is None:
         yield from entries
         return
-    before: list[Entry] = []
-    found = False
     for entry in entries:
-        if found:
-            yield entry
-        elif entry.id == after:
-            found = True
-            before = []
-        else:
-            before.append(entry)
-    if not found:
-        yield from before
+        if entry.id == after:
+            yield from entries
+            return
+    yield from reopen()
 
 
 def iter_records(path: Path) -> Iterator[dict]:

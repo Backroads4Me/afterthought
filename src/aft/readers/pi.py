@@ -20,17 +20,15 @@ from pathlib import Path
 
 from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records, parse_time
 
-# pi's own message roles, to the roles of an Entry. A system message carries the
-# pi's message roles, as the roles of an Entry. A system message holds the prompt and
-# the tool loadout, and a role an extension adds holds neither side of a conversation,
-# so a role missing here has no Entry to become.
+# pi's message roles, mapped to the roles of an Entry. A system message holds the
+# prompt and the tool loadout rather than either side of a conversation, and a role
+# not listed here is one an extension added, so neither has an Entry to become.
 ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
 
 def read(path: Path) -> Iterator[Entry]:
-    records = list(iter_records(path))
-    active = _active_branch(records)
-    for record in records:
+    active = _active_branch(path)
+    for record in iter_records(path):
         entry_id = record.get("id")
         message = record.get("message")
         time = parse_time(record.get("timestamp"))
@@ -48,23 +46,27 @@ def read(path: Path) -> Iterator[Entry]:
         if role is None:
             continue
         text = blocks_text(message.get("content"))
-        # An assistant turn that only thought or called tools has no text of its
-        # own; a tool result is worth an entry even when it returned nothing.
-        if not text and role != TOOL:
+        # A turn with no text of its own is not an entry: an assistant turn that only
+        # thought or called tools, or a tool result that returned nothing.
+        if not text:
             continue
         yield Entry(entry_id, time, role, text, bool(message.get("isError")))
 
 
-def _active_branch(records: list[dict]) -> set[str]:
+def _active_branch(path: Path) -> set[str]:
     """The ids from the last entry back to the root: the branch pi reads back."""
-    by_id = {r["id"]: r for r in records if isinstance(r.get("id"), str)}
-    current = next(
-        (r["id"] for r in reversed(records) if isinstance(r.get("id"), str)),
-        None,
-    )
+    parents: dict[str, str | None] = {}
+    last: str | None = None
+    for record in iter_records(path):
+        entry_id = record.get("id")
+        if not isinstance(entry_id, str):
+            continue
+        parent = record.get("parentId")
+        parents[entry_id] = parent if isinstance(parent, str) else None
+        last = entry_id
     branch: set[str] = set()
-    while isinstance(current, str) and current in by_id and current not in branch:
+    current = last
+    while isinstance(current, str) and current in parents and current not in branch:
         branch.add(current)
-        parent = by_id[current].get("parentId")
-        current = parent if isinstance(parent, str) else None
+        current = parents[current]
     return branch

@@ -62,6 +62,10 @@ def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[En
     for position, block in enumerate(content):
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
+        text = blocks_text(block.get("content"))
+        # A result that returned no text is not an entry, whatever it carried.
+        if not text:
+            continue
         # The user message holds the entry id; the result inside it has Claude's
         # own tool_use_id, which is what names this part of the entry.
         result_id = block.get("tool_use_id")
@@ -69,6 +73,6 @@ def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[En
             f"{entry_id}#{result_id if isinstance(result_id, str) else position}",
             time,
             TOOL,
-            blocks_text(block.get("content")),
+            text,
             bool(block.get("is_error")),
         )
