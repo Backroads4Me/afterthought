@@ -1,13 +1,11 @@
 """The injection block: what an agent is told at session start (design section 10).
 
 It reads files only, so a cold session gets the same block in every agent without a model
-call or an index. The parts come out in the design's order and ``inject.max_chars``
-trims each part to what is left of the budget: a fact is either in the block or left
-out, never cut short. Firstmate's ruling on M1.2 states the allocation: the fixed costs
-first, then every layer's floor, then what remains between the two layers that grow
-with the vault, so no section can grow into what a cold session needs to find the rest
-of memory. A budget with no room for a layer's first line leaves that layer out and
-says so plainly under ``Cut``.
+call or an index. The parts come out in the design's order and the block as a whole stays
+within ``inject.max_chars``: a fact is either in the block or left out, never cut short.
+``_block`` gives the allocation that firstmate's ruling on M1.2 sets, so no section can
+grow into what a cold session needs to find the rest of memory; a budget with no room for
+a layer's first line leaves that layer out and says so plainly under ``Cut``.
 """
 
 from __future__ import annotations

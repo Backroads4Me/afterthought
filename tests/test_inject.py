@@ -342,8 +342,9 @@ def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
 
 
 def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
-    """Half the cap belongs to the project's own layer, so a long overview still
-    leaves the preferences, the page map and the search and read lines in place."""
+    """The project's own layer gets its floor plus half of what the floors leave, so a
+    long overview still leaves the preferences, the page map and the search and read
+    lines in place."""
     project = Registry.load(widget.registry_path).by_slug("widget")
     facts = "\n".join(
         f"- Fact {number} is long enough that the overview alone fills the block."
