@@ -52,7 +52,7 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
     def add(line: int, message: str) -> None:
         out.append(Finding(name, line, message))
 
-    frontmatter, _, _, error = pagemod.split_frontmatter(text)
+    frontmatter, body, _, error = pagemod.split_frontmatter(text)
     if error:
         add(1, error)
         return out
@@ -76,7 +76,7 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
         page = pagemod.parse(text, rel)
         for line, message in page.errors:
             add(line, message)
-        _check_evidence(page, frontmatter, add)
+        _check_evidence(page, frontmatter, body, add)
         _check_scope(rel, frontmatter, registry, add)
     return out
 
@@ -119,27 +119,25 @@ def _check_okf(fm: dict, add) -> None:
             seen.add(str(sid))
 
 
-def _check_evidence(page: pagemod.Page, fm: dict, add) -> None:
+def _check_evidence(page: pagemod.Page, fm: dict, body: str, add) -> None:
+    """Check the sources every footnote on the page cites.
+
+    The body is read as written, not through the facts the parser accepted, so a line the
+    parser refused and a note with no fact above it still have their citations checked: a
+    `[^id]` anywhere on a fact page has to name a source (design section 6).
+    """
     sources = {
         str(s["id"]): s
         for s in fm.get("sources") or []
         if isinstance(s, dict) and s.get("id") is not None
     }
-    for fact in page.facts:
-        for ref in fact.refs:
+    for number, row in enumerate(body.split("\n"), start=page.body_start):
+        for ref in dict.fromkeys(_FOOTNOTE.findall(row)):
             source = sources.get(ref)
             if source is None:
-                add(fact.line, f"footnote [^{ref}] is not defined in sources")
+                add(number, f"footnote [^{ref}] is not defined in sources")
             elif not isinstance(source.get("quote"), str) or not source["quote"].strip():
-                add(fact.line, f"source {ref} has no quote")
-        if fact.superseded_by and fact.superseded_by not in sources:
-            add(fact.line, f"superseded by [^{fact.superseded_by}], which is not in sources")
-        # A note is read next to its fact, so its footnotes must resolve like the fact's.
-        for callout in fact.callouts:
-            for offset, row in enumerate(callout.text, start=1):
-                for ref in _FOOTNOTE.findall(row):
-                    if ref not in sources:
-                        add(callout.line + offset, f"footnote [^{ref}] is not defined in sources")
+                add(number, f"source {ref} has no quote")
     aft = fm.get("aft") or {}
     anchors = aft.get("anchors") if isinstance(aft, dict) else None
     if anchors is None:

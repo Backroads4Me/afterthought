@@ -89,13 +89,13 @@ class Fact:
 class Page:
     """The memory one page holds, and every problem the parser found reading it.
 
-    `facts` is what a consumer acts on. A fact line the parser could not read as one of
-    the states of the fact-state table (design section 6) is named in `errors` and kept
-    out of `facts`, so a consumer reading `facts` and `Fact.state` alone cannot act on it.
-    A fact that stays in `facts` carries the state its own markers write even where
-    `errors` also names a field of it, such as an unknown source tag or an invalid date; a
-    consumer that acts only on sound lines reads `errors` as well, which is what `aft lint`
-    reports.
+    `facts` is what a consumer acts on. Any fact line the parser reports a problem with -
+    an unreadable tail, an unknown source tag, an invalid date, a marker that writes no
+    state - is named in `errors` and holds no fact, whichever part of the line reported it.
+    A consumer reading `facts` and `Fact.state` never acts on a line the parse complained
+    about, and every fact here carries the state a whole line wrote. A page with entries in
+    `errors` is a broken page: `aft lint` reports each one and checks the page's footnotes
+    over its text as written, which still holds the refused lines.
     """
 
     path: Path
@@ -167,12 +167,14 @@ def parse(text: str, path: Path) -> Page:
         if stripped.startswith(">"):
             callout = _start_callout(page, stripped, number, last_fact)
             continue
-        if not stripped.startswith("- "):
+        if stripped.startswith("- "):
+            fact = _parse_fact(page, stripped[2:], number, section)
+        else:
             page.errors.append((number, "only fact lines are allowed in a fact section"))
-            continue
-        fact = _parse_fact(page, stripped[2:], number, section)
-        # A line the parser rejected holds no fact, so a note after it has no fact to be
-        # about and is reported rather than marking the fact above it.
+            fact = None
+        # Only a line the parser accepted holds a fact, so a note after a hand-typed
+        # sentence or a refused line has no fact to be about and is reported rather than
+        # marking the fact above it.
         last_fact = fact
         if fact is not None:
             page.facts.append(fact)
@@ -199,6 +201,12 @@ def _start_callout(page: Page, line: str, number: int, fact: Fact | None) -> Cal
 
 
 def _parse_fact(page: Page, text: str, number: int, section: str) -> Fact | None:
+    """Read one fact line; None when the parser reports any problem with it.
+
+    A line reported against is refused whole, whichever part of it produced the report, so
+    nothing reaches `Page.facts` carrying a complaint about its own line.
+    """
+    reported = len(page.errors)
     struck = text.startswith("~~")
     match = (_STRUCK_LINE if struck else _ACTIVE_LINE).match(text)
     if not match:
@@ -224,24 +232,17 @@ def _parse_fact(page: Page, text: str, number: int, section: str) -> Fact | None
         struck=struck,
         state=CANDIDATE if candidate else ACTIVE,
     )
-    if not _apply_suffix(page, fact, match.group("suffix"), number):
-        return None
-    return fact
+    _apply_suffix(page, fact, match.group("suffix"), number)
+    return None if len(page.errors) > reported else fact
 
 
-def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> bool:
-    """Record the state the line's marker writes; False when it writes none to read.
-
-    A struck fact states which state it is in, so a struck line whose marker the parser
-    does not recognize names no state and is not a fact of any. A plain line's marker is
-    optional, so unrecognized text after its sources is a problem with the line and not
-    with its state, which stays the one a plain line writes.
-    """
+def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> None:
+    """Write the state the line's marker carries, reporting a problem with line or marker."""
     candidate = fact.section == CANDIDATES
     if candidate:
         if fact.struck:
             page.errors.append((number, "a candidate cannot be struck through"))
-            return True
+            return
         if suffix:
             counts = _COUNTS.match(suffix)
             if counts:
@@ -250,7 +251,7 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> bool:
                 fact.sessions = (values[2], values[3])
             else:
                 page.errors.append((number, "a candidate may end only with its signal counts"))
-        return True
+        return
     if fact.struck:
         superseded = _SUPERSEDED.match(suffix)
         withdrawn = _WITHDRAWN.match(suffix)
@@ -268,12 +269,12 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> bool:
                     "a struck fact must end 'superseded <date> by [^id]' or 'withdrawn <date>'",
                 )
             )
-            return False
+            return
         if not _valid_date(fact.state_date):
             page.errors.append((number, f"invalid date {fact.state_date}"))
-        return True
+        return
     if not suffix:
-        return True
+        return
     stale = _STALE.match(suffix)
     if stale:
         fact.state = STALE
@@ -281,9 +282,8 @@ def _apply_suffix(page: Page, fact: Fact, suffix: str, number: int) -> bool:
         fact.reason = stale.group("reason")
         if not _valid_date(fact.state_date):
             page.errors.append((number, f"invalid date {fact.state_date}"))
-        return True
+        return
     page.errors.append((number, f"unrecognized text after the sources: {suffix.strip()!r}"))
-    return True
 
 
 def _valid_date(value: str | None) -> bool:

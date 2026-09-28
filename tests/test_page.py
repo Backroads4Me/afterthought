@@ -140,16 +140,47 @@ def test_invalid_date():
     ]
 
 
-def test_struck_fact_with_unrecognized_suffix_is_not_memory():
-    line = "- ~~Old.~~ [stated] 2026-01-01 [^a] retired last year"
-    text = fact_page(f"## Facts\n{line}\n")
-    result = parse(text)
-    assert [message for _, message in result.errors] == [
-        "a struck fact must end 'superseded <date> by [^id]' or 'withdrawn <date>'"
+def test_a_line_the_parser_reports_on_is_not_memory():
+    refused = [
+        # The hand-typed line that only missed the strikethrough.
+        (
+            "## Facts",
+            "- The index is SQLite. [stated] 2026-01-01 [^s1] superseded 2026-01-02 by [^s2]",
+            "unrecognized text after the sources",
+        ),
+        # Trailing text that leaves the stale marker unreadable.
+        (
+            "## Facts",
+            "- Capture takes 12 ms. [observed] 2026-01-01 [^s1] (stale 2026-01-02: gone) more",
+            "unrecognized text after the sources",
+        ),
+        # A struck line naming a state the parser does not know, and one naming none at all.
+        ("## Facts", "- ~~Old.~~ [stated] 2026-01-01 [^s1] retired last year", "a struck fact"),
+        ("## Facts", "- ~~Old.~~ [stated] 2026-01-01 [^s1]", "a struck fact"),
+        # A line whose own fields are wrong.
+        ("## Facts", "- A fact. [rumored] 2026-01-01 [^s1]", "unknown source tag"),
+        ("## Facts", "- A fact. [stated] 2026-13-01 [^s1]", "invalid date"),
+        # A candidate line the Candidates rules reject.
+        (
+            "## Candidates",
+            "- ~~Old.~~ [inferred] 2026-01-01 [^s1] withdrawn 2026-01-02",
+            "a candidate cannot be struck through",
+        ),
+        (
+            "## Candidates",
+            "- New. [inferred] 2026-01-01 [^s1] (stale 2026-01-02: x)",
+            "a candidate may end only with its signal counts",
+        ),
     ]
-    assert text.split("\n")[result.errors[0][0] - 1] == line
-    assert result.facts == []
-    assert actionable(result) == []
+    for section, line, expected in refused:
+        text = fact_page(f"{section}\n{line}\n")
+        result = parse(text)
+        assert len(result.errors) == 1, (line, result.errors)
+        number, message = result.errors[0]
+        assert text.split("\n")[number - 1] == line
+        assert expected in message
+        assert result.facts == []
+        assert actionable(result) == []
 
 
 def test_struck_fact_with_a_recognized_suffix_is_not_injected():
@@ -185,6 +216,18 @@ def test_note_after_a_rejected_struck_line_has_no_fact_to_be_about():
     )
     result = parse(fact_page(body))
     assert "a callout must follow the fact it is about" in [message for _, message in result.errors]
+    assert actionable(result) == ["A fact."]
+
+
+def test_note_after_prose_in_a_fact_section_has_no_fact_to_be_about():
+    body = (
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "A sentence someone typed by hand.\n"
+        "> [!conflict] 2026-01-03\n"
+    )
+    result = parse(fact_page(body))
+    assert "a callout must follow the fact it is about" in [m for _, m in result.errors]
     assert actionable(result) == ["A fact."]
 
 
