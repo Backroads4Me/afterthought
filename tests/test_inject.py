@@ -341,6 +341,34 @@ def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_pa
     assert "the September draft" not in block
 
 
+def test_a_frontmatter_block_scalar_stays_on_one_line(widget, tmp_path):
+    """A page description or handoff note written as a YAML block reaches the session
+    as one line per page and one line per handoff item."""
+    write(
+        widget.vault / "projects/widget/api.md",
+        "---\ntype: Project\ntitle: Widget API\nsources: []\n"
+        "description: |-\n  How to call a widget.\n  Over HTTP, versioned by path.\n"
+        "aft:\n  project: p_widget\n---\n\n## Facts\n\n"
+        "- The API is versioned by path. [stated] 2026-09-18 [^s1]\n",
+    )
+    write(
+        widget.vault / "digests/widget/2026/11/2026-11-01-pi-one.md",
+        "---\ntype: Session Digest\ntitle: Widget session\n"
+        "description: Digest of the widget session on 2026-11-01.\nsources: []\n"
+        "aft:\n  project: p_widget\n  handoff:\n"
+        "    in_flight: |-\n      the injection block\n      and its tests\n"
+        "    open:\n      - |-\n        the pi extension\n        and its hooks\n---\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    lines = block.splitlines()
+    assert (
+        "- Widget API: How to call a widget. Over HTTP, versioned by path."
+        " (aft read projects/widget/api.md)"
+    ) in lines
+    assert "- In flight: the injection block and its tests" in lines
+    assert "- Open: the pi extension and its hooks" in lines
+
+
 def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path):
     outside = make_repo(tmp_path / "nowhere")
     resolution = resolve(widget, outside)

@@ -114,11 +114,7 @@ def _handoff(digest: Path | None) -> list[str]:
     for key in ("failed", "open"):
         items = note.get(key)
         if isinstance(items, list):
-            lines += [
-                f"- {key.capitalize()}: {item.strip()}"
-                for item in items
-                if isinstance(item, str) and item.strip()
-            ]
+            lines += [f"- {key.capitalize()}: {text}" for text in map(_line, items) if text]
     return lines
 
 
@@ -242,5 +238,10 @@ def _read(path: Path) -> str | None:
 
 
 def _text(mapping: dict | None, key: str) -> str:
-    value = (mapping or {}).get(key)
-    return value.strip() if isinstance(value, str) else ""
+    return _line((mapping or {}).get(key))
+
+
+def _line(value: object) -> str:
+    """A frontmatter value as one line: a block scalar keeps its words and loses its
+    breaks, so no value reaches the block as a second, unbulleted line."""
+    return " ".join(value.split()) if isinstance(value, str) else ""
