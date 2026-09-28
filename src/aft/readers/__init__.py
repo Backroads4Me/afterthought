@@ -9,16 +9,15 @@ Readers are deliberately forgiving. An entry type, a role or a field they do
 not recognize is skipped rather than fatal, so an agent update that adds bookkeeping
 to its transcript cannot break capture.
 
-That forgiveness is per entry. A file with lines and not one record of the agent's
-shape is a transcript in a format the reader no longer knows, so `iter_records`
-raises `UnrecognizedTranscript` rather than letting it read as a session with
-nothing to say.
+That forgiveness is per entry. A file with bytes in it and no entry anywhere in it is
+a transcript whose format the reader no longer knows, so `iter_entries` raises
+`UnrecognizedTranscript` rather than letting it read as a session with nothing to say.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +35,7 @@ class ReaderError(Exception):
 
 
 class UnrecognizedTranscript(ReaderError):
-    """The file holds content, but no record in the shape the agent's reader knows."""
+    """The file holds content, but no record in it yields an entry for the reader."""
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
     watermark the file does not have calls for re-reading it, not for skipping it.
 
     Raises ``ReaderError`` for an agent with no reader, and ``UnrecognizedTranscript``
-    for a file whose content is not in a shape that reader knows.
+    for a file with content that holds no entry that reader can read.
     """
     # The readers build the Entry defined above, so they import this module:
     # importing them here keeps the package importable in either order.
@@ -90,36 +89,42 @@ def _after(reopen: Callable[[], Iterator[Entry]], after: str | None) -> Iterator
     yield from reopen()
 
 
-def iter_records(path: Path, shape: tuple[str, ...]) -> Iterator[dict]:
+def iter_records(path: Path) -> Iterator[dict]:
     """The JSON objects of a JSONL session file, in file order.
 
-    ``shape`` names the fields every record of the agent's transcript carries. A line
-    that is not one object is skipped: an agent killed mid-write leaves a truncated
-    last line, and capture should read what is there. A file with lines and not one
-    record of ``shape`` is the case a caller cannot tell from an empty session, so it
-    is reported instead. (BUILD-PLAN 5, M2.1)
+    A line that is not one is skipped: an agent killed mid-write leaves a
+    truncated last line, and capture should read what is there.
     """
-    content = False
-    recognized = False
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
-            content = True
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(record, dict):
-                continue
-            if all(isinstance(record.get(field), str) for field in shape):
-                recognized = True
-            yield record
-    if content and not recognized:
-        raise UnrecognizedTranscript(
-            f"{path}: no record carries the string fields {' and '.join(shape)}"
-        )
+            if isinstance(record, dict):
+                yield record
+
+
+def iter_entries(path: Path, of_record: Callable[[dict], Iterable[Entry]]) -> Iterator[Entry]:
+    """The entries of a JSONL session file, in file order, for one agent's mapping.
+
+    ``of_record`` is the reader's own mapping from a record to the entries it carries,
+    so what counts as readable is what that reader can actually read. A file with
+    bytes in it and no entry anywhere in it is a transcript whose format the reader no
+    longer knows, which capture cannot tell from a session with nothing to say, so it
+    is reported. (BUILD-PLAN 5, M2.1)
+    """
+    recognized = False
+    for record in iter_records(path):
+        entries = list(of_record(record))
+        if entries:
+            recognized = True
+        yield from entries
+    if not recognized and path.stat().st_size:
+        raise UnrecognizedTranscript(f"{path}: no record holds an entry this reader can read")
 
 
 def parse_time(value: object) -> datetime | None:

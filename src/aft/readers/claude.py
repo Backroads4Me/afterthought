@@ -19,50 +19,52 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
-from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records, parse_time
+from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_entries, parse_time
 
 # The model Claude Code records on the assistant entries it writes itself.
 SYNTHETIC_MODEL = "<synthetic>"
 
-# Every Claude Code record, bookkeeping included, names its type and its session.
-SHAPE = ("type", "sessionId")
-
 
 def read(path: Path) -> Iterator[Entry]:
-    for record in iter_records(path, SHAPE):
-        entry_id = record.get("uuid")
-        message = record.get("message")
-        kind = record.get("type")
-        time = parse_time(record.get("timestamp"))
-        if kind not in (USER, ASSISTANT) or not isinstance(entry_id, str) or time is None:
-            continue
-        # isMeta: the CLI's own prompt to the agent. isCompactSummary: the summary
-        # written on compaction, whose content repeats entries already read.
-        if not isinstance(message, dict) or record.get("isMeta") or record.get("isCompactSummary"):
-            continue
-        content = message.get("content")
-        if kind == ASSISTANT:
-            # A notice the CLI wrote stands for infrastructure, not for an answer, so
-            # the marker decides it and the wording never does: a digest would quote
-            # that wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
-            if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
-                continue
-            # A turn that only thought or called tools has no text of its own.
-            text = blocks_text(content)
-            if text:
-                yield Entry(entry_id, time, ASSISTANT, text, False)
-            continue
+    """The session's entries: what the records of the file hold, in file order."""
+    return iter_entries(path, _record_entries)
+
+
+def _record_entries(record: dict) -> Iterator[Entry]:
+    """The entries one record carries: its message, and any tool result inside it."""
+    entry_id = record.get("uuid")
+    message = record.get("message")
+    kind = record.get("type")
+    time = parse_time(record.get("timestamp"))
+    if kind not in (USER, ASSISTANT) or not isinstance(entry_id, str) or time is None:
+        return
+    # isMeta: the CLI's own prompt to the agent. isCompactSummary: the summary
+    # written on compaction, whose content repeats entries already read.
+    if not isinstance(message, dict) or record.get("isMeta") or record.get("isCompactSummary"):
+        return
+    content = message.get("content")
+    if kind == ASSISTANT:
+        # A notice the CLI wrote stands for infrastructure, not for an answer, so
+        # the marker decides it and the wording never does: a digest would quote
+        # that wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
+        if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
+            return
+        # A turn that only thought or called tools has no text of its own.
         text = blocks_text(content)
         if text:
-            yield Entry(entry_id, time, USER, text, False)
-        yield from _tool_results(entry_id, time, content)
+            yield Entry(entry_id, time, ASSISTANT, text, False)
+        return
+    text = blocks_text(content)
+    if text:
+        yield Entry(entry_id, time, USER, text, False)
+    yield from _tool_results(entry_id, time, content)
 
 
 def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[Entry]:
     """Split the tool results of one user message into entries of their own."""
     if not isinstance(content, list):
         return
-    for position, block in enumerate(content):
+    for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
         text = blocks_text(block.get("content"))
@@ -70,12 +72,9 @@ def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[En
         if not text:
             continue
         # The user message holds the entry id; the result inside it has Claude's
-        # own tool_use_id, which is what names this part of the entry.
+        # own tool_use_id, which is what names this part of the entry. A block with
+        # no tool call to name holds no entry.
         result_id = block.get("tool_use_id")
-        yield Entry(
-            f"{entry_id}#{result_id if isinstance(result_id, str) else position}",
-            time,
-            TOOL,
-            text,
-            bool(block.get("is_error")),
-        )
+        if not isinstance(result_id, str):
+            continue
+        yield Entry(f"{entry_id}#{result_id}", time, TOOL, text, bool(block.get("is_error")))

@@ -75,21 +75,26 @@ def test_a_tool_result_that_returned_no_text_is_not_an_entry(tmp_path):
     # and nothing else: it contributes no entry.
     assert [e.role for e in read(CLAUDE, "claude-resumed.jsonl")] == ["user", "assistant", "user"]
     assert CLAUDE_EMPTY_RESULT_ID not in ids(read(CLAUDE, "claude-resumed.jsonl"))
-    # One rule in both readers, so pi drops the same kind of result.
+    # One rule in both readers, so pi drops the same kind of result. The turn beside it
+    # is what makes that file a readable session rather than an unreadable one.
+    turn = {
+        "type": "message",
+        "id": "11223344",
+        "parentId": None,
+        "timestamp": "2026-09-27T04:59:00.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Running it now"}]},
+    }
+    result = {
+        "type": "message",
+        "id": "0a0b0c0d",
+        "parentId": "11223344",
+        "timestamp": "2026-09-27T05:00:00.000Z",
+        "message": {"role": "toolResult", "content": [], "isError": True},
+    }
     empty_result = tmp_path / "pi-empty-result.jsonl"
-    empty_result.write_text(
-        json.dumps(
-            {
-                "type": "message",
-                "id": "0a0b0c0d",
-                "parentId": None,
-                "timestamp": "2026-09-27T05:00:00.000Z",
-                "message": {"role": "toolResult", "content": [], "isError": True},
-            }
-        )
-        + "\n"
-    )
-    assert ids(readers.read(PI, empty_result)) == []
+    empty_result.write_text("\n".join(json.dumps(r) for r in (turn, result)) + "\n")
+
+    assert ids(readers.read(PI, empty_result)) == ["11223344"]
 
 
 def test_claude_skips_the_summary_it_writes_on_compaction():
@@ -286,6 +291,45 @@ def test_a_session_file_nothing_written_to_yet_is_simply_empty(tmp_path):
 
     for agent in (CLAUDE, PI):
         assert list(readers.read(agent, path)) == []
+
+
+def test_a_renamed_pi_field_is_reported_not_read_as_empty(tmp_path):
+    # pi names a record's time `timestamp` and the reader reads no entry without it, so
+    # a transcript that renamed the field still holds its conversation unreadably.
+    text = (FIXTURES / "pi-compaction.jsonl").read_text()
+    records = [json.loads(line) for line in text.splitlines()]
+    for record in records:
+        record["ts"] = record.pop("timestamp")
+    path = tmp_path / "pi-renamed-timestamp.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(PI, path))
+
+
+def test_a_renamed_claude_field_is_reported_not_read_as_empty(tmp_path):
+    # The Claude reader identifies an entry by the record's uuid, so a transcript that
+    # renamed that field yields nothing while holding a whole conversation.
+    text = (FIXTURES / "claude-session.jsonl").read_text()
+    records = [json.loads(line) for line in text.splitlines()]
+    for record in records:
+        if "uuid" in record:
+            record["identifier"] = record.pop("uuid")
+    path = tmp_path / "claude-renamed-uuid.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(CLAUDE, path))
+
+
+def test_a_well_formed_session_reads_without_a_warning(caplog):
+    # A broken parent chain is damage, not an ordinary shape, so every fixture - each
+    # one a transcript in the form its agent really writes - must read back silent.
+    with caplog.at_level(logging.WARNING):
+        for fixture in sorted(FIXTURES.glob("*.jsonl")):
+            read(agent_of(fixture.name), fixture.name)
+
+    assert not caplog.records
 
 
 def test_an_unknown_agent_is_reported_at_once():

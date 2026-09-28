@@ -20,7 +20,16 @@ import logging
 from collections.abc import Iterator
 from pathlib import Path
 
-from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records, parse_time
+from aft.readers import (
+    ASSISTANT,
+    TOOL,
+    USER,
+    Entry,
+    blocks_text,
+    iter_entries,
+    iter_records,
+    parse_time,
+)
 
 # pi's message roles, mapped to the roles of an Entry. A system message holds the
 # prompt and the tool loadout rather than either side of a conversation, and the
@@ -28,37 +37,36 @@ from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records,
 # added - have no Entry to become.
 ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
-# Every pi record, bookkeeping included, names its type and carries its own id.
-SHAPE = ("type", "id")
-
 LOGGER = logging.getLogger(__name__)
 
 
 def read(path: Path) -> Iterator[Entry]:
+    """The conversation: the entries of the file that sit on the active branch."""
     active = _active_branch(path)
-    for record in iter_records(path, SHAPE):
-        entry_id = record.get("id")
-        message = record.get("message")
-        time = parse_time(record.get("timestamp"))
-        if (
-            record.get("type") != "message"
-            or not isinstance(entry_id, str)
-            or entry_id not in active
-            or time is None
-        ):
-            continue
-        if not isinstance(message, dict):
-            continue
-        role_name = message.get("role")
-        role = ROLES.get(role_name) if isinstance(role_name, str) else None
-        if role is None:
-            continue
-        text = blocks_text(message.get("content"))
-        # A turn with no text of its own is not an entry: an assistant turn that only
-        # thought or called tools, or a tool result that returned nothing.
-        if not text:
-            continue
-        yield Entry(entry_id, time, role, text, bool(message.get("isError")))
+    for entry in iter_entries(path, _record_entries):
+        if entry.id in active:
+            yield entry
+
+
+def _record_entries(record: dict) -> Iterator[Entry]:
+    """The entry one message record carries, or none."""
+    entry_id = record.get("id")
+    message = record.get("message")
+    time = parse_time(record.get("timestamp"))
+    if record.get("type") != "message" or not isinstance(entry_id, str) or time is None:
+        return
+    if not isinstance(message, dict):
+        return
+    role_name = message.get("role")
+    role = ROLES.get(role_name) if isinstance(role_name, str) else None
+    if role is None:
+        return
+    text = blocks_text(message.get("content"))
+    # A turn with no text of its own is not an entry: an assistant turn that only
+    # thought or called tools, or a tool result that returned nothing.
+    if not text:
+        return
+    yield Entry(entry_id, time, role, text, bool(message.get("isError")))
 
 
 def _active_branch(path: Path) -> set[str]:
@@ -74,7 +82,7 @@ def _active_branch(path: Path) -> set[str]:
     """
     parents: dict[str, str | None] = {}
     last: str | None = None
-    for record in iter_records(path, SHAPE):
+    for record in iter_records(path):
         entry_id = record.get("id")
         if not isinstance(entry_id, str):
             continue
@@ -89,7 +97,7 @@ def _active_branch(path: Path) -> set[str]:
     if isinstance(current, str) and current not in parents:
         off_branch = sum(
             1
-            for record in iter_records(path, SHAPE)
+            for record in iter_records(path)
             if record.get("type") == "message" and record.get("id") not in branch
         )
         LOGGER.warning(
