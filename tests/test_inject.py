@@ -404,6 +404,51 @@ def test_a_hundred_pages_cannot_starve_the_project_layers(widget, tmp_path):
     assert parts[inject.HOW_TO] == [inject.HOW_TO]
 
 
+def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path):
+    """The two layers that grow with the vault spend only what the fixed costs and the
+    floors leave, so they cannot jointly bury the preferences layer, the title, or the
+    read line."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    facts = "\n".join(
+        f"- Fact {number} is long enough that the overview alone fills the block."
+        f" [observed] 2026-09-30 [^s1]"
+        for number in range(200)
+    )
+    write(
+        widget.vault / "projects/widget/overview.md",
+        "---\ntype: Project\ntitle: Widget\n"
+        "description: A widget that turns water into widgets.\nsources: []\n"
+        f"aft:\n  project: {project.id}\n---\n\n## Facts\n\n{facts}\n",
+    )
+    preferences = "\n".join(
+        f"- Preference {number} was promoted from an earlier session. [stated] 2026-09-01 [^s1]"
+        for number in range(150)
+    )
+    write(
+        widget.vault / "global/preferences.md",
+        "---\ntype: Preferences\ntitle: Preferences\n"
+        "description: Your preferences that apply in every project.\nsources: []\n"
+        f"---\n\n## Preferences\n\n{preferences}\n",
+    )
+    write_pages(widget.vault, "widget", 100)
+    resolution = resolve(widget, tmp_path / "widget")
+    roomy = dataclasses.replace(
+        widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(60_000))
+    )
+    uncapped = parts_of(inject.build(roomy, resolution))
+    block = inject.build(widget, resolution)
+    assert len(block) <= widget.settings.inject.max_chars
+    parts = parts_of(block)
+    assert parts[""] == ["# Memory: Widget", "A widget that turns water into widgets."]
+    assert parts["## Last session"] == uncapped["## Last session"]
+    assert parts["## Preferences"]
+    assert parts["## Preferences"] == uncapped["## Preferences"][: len(parts["## Preferences"])]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    for heading in ("## Pages", "## Facts"):
+        assert len(parts[heading]) < len(uncapped[heading])
+        assert parts[heading] == uncapped[heading][: len(parts[heading])]
+
+
 def test_an_over_grown_page_map_drops_whole_pointer_lines(widget, tmp_path):
     """A map over its share loses whole pointers from the end, so the last pointer the
     session is given is complete and the read line still has its own room."""

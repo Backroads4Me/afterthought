@@ -3,10 +3,10 @@
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and ``inject.max_chars``
 trims each part to what is left of the budget: a fact is either in the block or left
-out, never cut short. Firstmate's ruling on M1.2 sets the order of that budget: the
-closing lines on how to search and read keep their room, then the project's page map
-is built and held to half the block, as is the project's own layer, so no section can
-grow into what a cold session needs to find the rest of memory.
+out, never cut short. Firstmate's ruling on M1.2 states the allocation: the fixed costs
+first, then every layer's floor, then what remains between the two layers that grow
+with the vault, so no section can grow into what a cold session needs to find the rest
+of memory.
 """
 
 from __future__ import annotations
@@ -49,30 +49,18 @@ def build(config: Config, resolution: Resolution) -> str:
     and those lines.
     """
     max_chars = config.settings.inject.max_chars
-    # Each section that grows with the vault stops at half the block, so neither can
-    # reach what the rest of the block needs (firstmate's ruling on M1.2; design 10
-    # caps the whole block only).
-    share = max_chars // 2
-    parts: list[Part] = []
-    reserved: list[Part] = []
     project = resolution.project
-    if project and project.slug:
-        pages = config.vault / "projects" / project.slug
-        # The map is built and cut to its share before the fill runs, so its size comes
-        # from the budget and not from how many page files the project has.
-        reserved = _trim([_part("Pages", _pointers(config, project, pages))], share)
-        parts += _trim(_overview_parts(config, project), share)
-    parts += _section_parts(_read_page(config.vault / PREFERENCES), None)
-    return _fit(parts, reserved, HOW_TO, max_chars)
-
-
-def _overview_parts(config: Config, project: Project) -> list[Part]:
-    """The project's own layers: its name, the last handoff, and its overview's facts."""
-    overview = _read_page(config.vault / "projects" / project.slug / OVERVIEW)
-    parts = [_heading(project, overview)]
-    parts.append(_handoff_part(config, project.slug))
-    parts += _section_parts(overview, OVERVIEW_SECTIONS)
-    return parts
+    title: list[Part] = []
+    own: list[Part] = []
+    page_map: list[Part] = []
+    if project:
+        directory = config.vault / "projects" / project.slug
+        overview = _read_page(directory / OVERVIEW)
+        title = [_heading(project, overview)]
+        own = [_handoff_part(config, project.slug), *_section_parts(overview, OVERVIEW_SECTIONS)]
+        page_map = [_part("Pages", _pointers(config, project, directory))]
+    preferences = _section_parts(_read_page(config.vault / PREFERENCES), None)
+    return _block(title, own, preferences, page_map, max_chars)
 
 
 def _heading(project: Project, overview: pagemod.Page | None) -> Part:
@@ -192,26 +180,29 @@ def _part(heading: str, lines: list[str]) -> Part:
 def _trim(parts: list[Part], max_chars: int) -> list[Part]:
     """The parts with whole lines cut off their ends so they take ``max_chars`` at most.
 
-    A fact is either in the block or left out, never cut short, and a part with no
-    room left for a line of its own drops out with its heading rather than showing
-    an empty one.
+    Every part that has a line holds its heading and that first line before a later
+    part is offered a second one, so a layer the plan requires is present or the
+    budget ran out - never silently absent. Past the first line the room goes to the
+    parts in order, and a fact is either in the block or left out, never cut short. A
+    part that cannot hold its first line drops out with its heading, along with every
+    part after it, so a short block ends on a whole line.
     """
+    present = [(heading, lines) for heading, lines in parts if lines]
     kept: list[Part] = []
     used = 0
-    for heading, content in parts:
-        label = _label(heading)
-        cost = (2 if kept else 0) + len(label)
-        lines: list[str] = []
-        for line in content:
-            extra = len(line) + (1 if lines else 0)
-            if used + cost + extra > max_chars:
-                break
-            lines.append(line)
-            cost += extra
-        if not lines:
-            continue
-        kept.append((heading, lines))
+    for heading, lines in present:
+        cost = (2 if kept else 0) + len(_label(heading)) + len(lines[0])
+        if used + cost > max_chars:
+            break
+        kept.append((heading, [lines[0]]))
         used += cost
+    # kept is the prefix of present that cleared its floor, so the pairing ends with it
+    for (_, kept_lines), (_, content) in zip(kept, present, strict=False):
+        for line in content[1:]:
+            if used + len(line) + 1 > max_chars:
+                break
+            kept_lines.append(line)
+            used += len(line) + 1
     return kept
 
 
@@ -220,21 +211,42 @@ def _blocks(parts: list[Part]) -> list[str]:
     return [_label(heading) + "\n".join(lines) for heading, lines in parts]
 
 
-def _fit(parts: list[Part], reserved: list[Part], closing: str, max_chars: int) -> str:
-    """The parts in order, then the reserved parts, then the closing line.
+def _block(
+    title: list[Part],
+    own: list[Part],
+    preferences: list[Part],
+    page_map: list[Part],
+    max_chars: int,
+) -> str:
+    """The layers in the design's order, under one stated allocation of ``max_chars``.
 
-    The closing line and the reserved parts are measured first and ``parts`` takes only
-    the budget left, so no section can grow into the page map or into the lines that
-    tell the session it can search and read (firstmate's ruling on M1.2, design 10).
+    The fixed costs come first - the block's title and the closing line on how to
+    search and read - and then every part holds its floor, the heading and first line
+    that name a layer (``_trim``). What the floors leave is the budget of the two
+    producers that grow with the vault, divided evenly between them: the project's own
+    text and its page map, each capped from that remainder rather than from the block,
+    so they cannot over-subscribe it and neither can reach what the other needs. The
+    global preferences layer, which the plan gives no limit of its own, takes whatever
+    those two leave. A budget below the floors keeps the parts from the front and stops
+    on a whole line, so the block is visibly short rather than quietly missing a layer
+    (design 10, firstmate's ruling on M1.2).
     """
-    tail: list[Part] = []
-    room = max_chars
-    if len(closing) + 2 <= max_chars:
-        room -= len(closing) + 2
-        kept = _trim(reserved, room)
-        room -= _width(kept) + (2 if kept else 0)
-        tail = kept + [("", [closing])]
-    return "\n\n".join([*_blocks(_trim(parts, room)), *_blocks(tail)])
+    closing: list[Part] = [("", [HOW_TO])]
+    own_floor = _floors(own)
+    preferences_floor = _floors(preferences)
+    map_floor = _floors(page_map)
+    minimal = _trim([*title, *own_floor, *preferences_floor, *map_floor, *closing], max_chars)
+    extra = (max_chars - _width(minimal)) // 2
+    project_layer = _trim(own, _width(own_floor) + extra)
+    pages = _trim(page_map, _width(map_floor) + extra)
+    room = max_chars - _width([*title, *project_layer, *pages, *closing]) - 2
+    parts = [*title, *project_layer, *_trim(preferences, room), *pages, *closing]
+    return "\n\n".join(_blocks(_trim(parts, max_chars)))
+
+
+def _floors(parts: list[Part]) -> list[Part]:
+    """Each part reduced to its floor: its heading and the first line under it."""
+    return [(heading, lines[:1]) for heading, lines in parts if lines]
 
 
 def _width(parts: list[Part]) -> int:
