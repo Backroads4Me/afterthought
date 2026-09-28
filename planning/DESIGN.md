@@ -254,7 +254,7 @@ aft:
 
 ## Candidates
 
-- Long orchestrator sessions need checkpoint capture. [inferred] 2026-09-30 [^s19] (signals 2/3, sessions 1/2)
+- Long orchestrator sessions need checkpoint capture. [inferred] 2026-09-30 [^s19] [^s20] (signals 2/3, sessions 1/2)
 ```
 
 - **Sections:** a fact page's body is only `##` sections named for its kinds
@@ -263,7 +263,9 @@ aft:
   is no free prose: a page's one-line summary is its `description`, so every sentence an
   agent reads on a fact page is a fact with a source.
 - **Line grammar:** `- <statement> [<source>] <date last evidenced> [^id] ...`, followed by
-  any state marker. A candidate ends with its gate progress, `(signals a/b, sessions c/d)`.
+  any state marker. A candidate ends with its gate progress, `(signals a/b, sessions c/d)`, which the
+  writer derives from the footnotes: one signal per source, one session per distinct session
+  among them. The 30-day half weighting of R3 is applied by the gate, not written.
   Evidence counts (sources, sessions, last seen) are derived from the footnotes, so no
   confidence score is stored.
 - **Project pages** name their project by id in `aft.project`, so renaming a project's slug
@@ -275,6 +277,13 @@ aft:
   evidence and a `resource` URI naming the session and entry.
 - **Anchors** tie a fact about code to a file, words that must appear in it, and the commit
   where that was verified (the repocodex pin check).
+- **Every footnote resolves.** A `[^id]` anywhere on a fact page, in a fact line or in the
+  note under it, names a source in the page's `sources`. Notes are read next to their fact,
+  so an unresolvable citation there is as misleading as one on the line.
+- **Text the tool did not write is never lost.** A person may type into a page, including
+  answers under a note. The writer edits only what it can fully parse: an edit that would
+  drop or rewrite text outside the grammar is refused and reported, and resolving a note
+  moves the whole note, verbatim, to the archive instead of deleting it.
 
 ### Fact state
 

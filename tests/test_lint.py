@@ -133,3 +133,20 @@ def test_library_and_reports_are_not_fact_pages(initialized):
 def test_broken_registry_is_reported(initialized):
     initialized.registry_path.write_text("version: 7\n")
     assert any(m.startswith("registry.yaml:1:") for m in messages(initialized))
+
+
+def test_note_footnotes_must_resolve(initialized):
+    project = register(initialized)
+    note = "\n> [!conflict] 2026-10-01\n> A session says otherwise ([^s1]), see also [^s9].\n"
+    text = PAGE.format(project_id=project.id) + note
+    write(initialized, "projects/widget/overview.md", text)
+    assert messages(initialized) == [
+        "projects/widget/overview.md:19: footnote [^s9] is not defined in sources"
+    ]
+
+
+def test_plain_brackets_in_a_note_are_not_footnotes(initialized):
+    project = register(initialized)
+    note = "\n> [!question] 2026-10-01\n> Is [this] still true? See [s9] and [^ not a ref].\n"
+    write(initialized, "projects/widget/overview.md", PAGE.format(project_id=project.id) + note)
+    assert messages(initialized) == []

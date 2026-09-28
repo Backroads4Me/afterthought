@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ FACT_DIRS = ("projects", "global", "references")
 SKIP_DIRS = {".git", ".obsidian", "library"}
 RESERVED = {"index.md", "log.md"}
 STATUSES = {"draft", "stable", "deprecated"}
+_FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,12 @@ def _check_evidence(page: pagemod.Page, fm: dict, add) -> None:
                 add(fact.line, f"source {ref} has no quote")
         if fact.superseded_by and fact.superseded_by not in sources:
             add(fact.line, f"superseded by [^{fact.superseded_by}], which is not in sources")
+        # A note is read next to its fact, so its footnotes must resolve like the fact's.
+        for callout in fact.callouts:
+            for offset, row in enumerate(callout.text, start=1):
+                for ref in _FOOTNOTE.findall(row):
+                    if ref not in sources:
+                        add(callout.line + offset, f"footnote [^{ref}] is not defined in sources")
     aft = fm.get("aft") or {}
     anchors = aft.get("anchors") if isinstance(aft, dict) else None
     if anchors is None:
