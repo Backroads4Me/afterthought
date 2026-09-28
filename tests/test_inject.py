@@ -102,6 +102,21 @@ aft:
 - The API is versioned by path. [stated] 2026-09-18 [^s1]
 """
 
+NOTE_PAGE = """\
+---
+type: Project
+title: Widget Note {number:02d}
+description: Notes filed for the widget project.
+sources: []
+aft:
+  project: p_widget
+---
+
+## Facts
+
+- Note {number:02d} records one line about the widget. [observed] 2026-09-30 [^s1]
+"""
+
 LISTING = """\
 # Widget
 
@@ -199,6 +214,12 @@ def write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return path
+
+
+def write_pages(vault: Path, slug: str, count: int) -> None:
+    """The project's own pages, one file each, as a long-lived project accumulates them."""
+    for number in range(count):
+        write(vault / f"projects/{slug}/note{number:02d}.md", NOTE_PAGE.format(number=number))
 
 
 def parts_of(block: str) -> dict[str, list[str]]:
@@ -366,6 +387,42 @@ def test_a_long_preferences_page_cannot_bury_the_page_map(widget, tmp_path):
     assert 1 < len(parts["## Preferences"]) < 150
 
 
+def test_a_hundred_pages_cannot_starve_the_project_layers(widget, tmp_path):
+    """A project accumulates page files without end, so the map stops at its share of the
+    block and the layers that carry the project's identity keep their room."""
+    write_pages(widget.vault, "widget", 100)
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert len(block) <= widget.settings.inject.max_chars
+    parts = parts_of(block)
+    assert parts[""] == [
+        "# Memory: Widget",
+        "A widget that turns water into widgets.",
+    ]
+    assert parts["## State"] == ["- The daemon listens on 8123. (disputed)"]
+    assert parts["## Facts"] == ["- The widget is round."]
+    assert parts["## Preferences"] == ["- Prefer short commits."]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+
+
+def test_an_over_grown_page_map_drops_whole_pointer_lines(widget, tmp_path):
+    """A map over its share loses whole pointers from the end, so the last pointer the
+    session is given is complete and the read line still has its own room."""
+    write_pages(widget.vault, "widget", 100)
+    resolution = resolve(widget, tmp_path / "widget")
+    roomy = dataclasses.replace(
+        widget,
+        settings=dataclasses.replace(widget.settings, inject=InjectConfig(20_000)),
+    )
+    whole = parts_of(inject.build(roomy, resolution))["## Pages"]
+    block = inject.build(widget, resolution)
+    kept = parts_of(block)["## Pages"]
+    assert len(whole) == 102  # the api page, a hundred notes, and the collection
+    assert len(kept) < len(whole)
+    assert kept == whole[: len(kept)]
+    assert len("## Pages\n\n" + "\n".join(kept)) <= widget.settings.inject.max_chars // 2
+    assert block.endswith(inject.HOW_TO)
+
+
 def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_path):
     """M2.6 files a digest at ``digests/<slug>/<yyyy>/<mm>/``; the month directory
     is read as a number, so a ``9`` cannot sort a September handoff above October."""
@@ -459,6 +516,8 @@ def test_builds_50_pages_of_200_lines_in_under_150_ms(initialized, tmp_path):
     elapsed = time.perf_counter() - started
     assert block.count("\n- Fact ") > 1
     assert len(block) <= initialized.settings.inject.max_chars
+    assert block.startswith("# Memory: ")
+    assert inject.HOW_TO in block
     assert elapsed < 0.15, f"the block took {elapsed * 1000:.0f} ms to build"
 
 

@@ -3,10 +3,10 @@
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and ``inject.max_chars``
 trims each part to what is left of the budget: a fact is either in the block or left
-out, never cut short. Firstmate's ruling on M1.2 sets what claims that budget first: the
-closing lines on how to search and read, then the project's page map, then half the
-block for the project's own layer, so no section can grow into what a cold session
-needs to find the rest of memory.
+out, never cut short. Firstmate's ruling on M1.2 sets the order of that budget: the
+closing lines on how to search and read keep their room, then the project's page map
+is built and held to half the block, as is the project's own layer, so no section can
+grow into what a cold session needs to find the rest of memory.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 from aft import page as pagemod
 from aft.config import Config
 from aft.keys import Resolution
+from aft.registry import Project
 
 # The overview's sections, in the order the block shows them.
 OVERVIEW_SECTIONS = ("State", "Decisions", "Lessons", "Procedures", "Facts", "References")
@@ -48,37 +49,40 @@ def build(config: Config, resolution: Resolution) -> str:
     and those lines.
     """
     max_chars = config.settings.inject.max_chars
+    # Each section that grows with the vault stops at half the block, so neither can
+    # reach what the rest of the block needs (firstmate's ruling on M1.2; design 10
+    # caps the whole block only).
+    share = max_chars // 2
     parts: list[Part] = []
     reserved: list[Part] = []
-    slug = resolution.slug if resolution.registered else None
-    if slug:
-        pages = config.vault / "projects" / slug
-        # The map claims its room before the fill runs, so no section can grow into it,
-        # and the project's own layer stops at half the block (firstmate's ruling on
-        # M1.2; design 10 caps the whole block only).
-        reserved.append(_part("Pages", _pointers(config, resolution, pages)))
-        parts += _trim(_overview_parts(config, resolution, slug), max_chars // 2)
+    project = resolution.project
+    if project and project.slug:
+        pages = config.vault / "projects" / project.slug
+        # The map is built and cut to its share before the fill runs, so its size comes
+        # from the budget and not from how many page files the project has.
+        reserved = _trim([_part("Pages", _pointers(config, project, pages))], share)
+        parts += _trim(_overview_parts(config, project), share)
     parts += _section_parts(_read_page(config.vault / PREFERENCES), None)
     return _fit(parts, reserved, HOW_TO, max_chars)
 
 
-def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[Part]:
+def _overview_parts(config: Config, project: Project) -> list[Part]:
     """The project's own layers: its name, the last handoff, and its overview's facts."""
-    overview = _read_page(config.vault / "projects" / slug / OVERVIEW)
-    parts = [_heading(resolution, overview)]
-    parts.append(_handoff_part(config, slug))
+    overview = _read_page(config.vault / "projects" / project.slug / OVERVIEW)
+    parts = [_heading(project, overview)]
+    parts.append(_handoff_part(config, project.slug))
     parts += _section_parts(overview, OVERVIEW_SECTIONS)
     return parts
 
 
-def _heading(resolution: Resolution, overview: pagemod.Page | None) -> Part:
+def _heading(project: Project, overview: pagemod.Page | None) -> Part:
     """The block's title line, then the overview's description as its one-line summary.
 
     The registry always carries a title, falling back to the slug for an entry written
-    without one, and only a registered project reaches this part.
+    without one.
     """
     frontmatter = overview.frontmatter if overview else None
-    title = _text(frontmatter, "title") or resolution.project.title
+    title = _text(frontmatter, "title") or project.title
     lines = [f"# Memory: {title}"]
     description = _text(frontmatter, "description")
     if description:
@@ -150,7 +154,7 @@ def _shown(fact: pagemod.Fact) -> str:
     return f"{fact.statement} {mark}" if mark else fact.statement
 
 
-def _pointers(config: Config, resolution: Resolution, directory: Path) -> list[str]:
+def _pointers(config: Config, project: Project, directory: Path) -> list[str]:
     """One line per other page of the project and per collection that covers it, so the
     block stays a map rather than becoming a dump (design 10, 11)."""
     lines = [
@@ -158,14 +162,11 @@ def _pointers(config: Config, resolution: Resolution, directory: Path) -> list[s
         for path in sorted(directory.rglob("*.md"))
         if path.name not in (OVERVIEW, LISTING)
     ]
-    return lines + _collection_lines(config, resolution)
+    return lines + _collection_lines(config, project)
 
 
-def _collection_lines(config: Config, resolution: Resolution) -> list[str]:
+def _collection_lines(config: Config, project: Project) -> list[str]:
     """Collections the project is one of ``aft.projects`` for (design 11)."""
-    project = resolution.project
-    if project is None:
-        return []
     lines = []
     for path in sorted((config.vault / "references").glob(f"*/{COLLECTION}")):
         aft = _frontmatter(path).get("aft")
