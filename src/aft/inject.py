@@ -3,9 +3,10 @@
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and ``inject.max_chars``
 trims each part to what is left of the budget: a fact is either in the block or left
-out, never cut short, and the closing lines on how to search and read keep room. The
-project's own layer takes half that budget first, by firstmate's ruling on M1.2, so
-what follows it still has somewhere to go.
+out, never cut short. Firstmate's ruling on M1.2 sets what claims that budget first: the
+closing lines on how to search and read, then the project's page map, then half the
+block for the project's own layer, so no section can grow into what a cold session
+needs to find the rest of memory.
 """
 
 from __future__ import annotations
@@ -48,17 +49,17 @@ def build(config: Config, resolution: Resolution) -> str:
     """
     max_chars = config.settings.inject.max_chars
     parts: list[Part] = []
+    reserved: list[Part] = []
     slug = resolution.slug if resolution.registered else None
     if slug:
-        # Firstmate's ruling on M1.2: the project's own layer takes half the block, so
-        # a long overview leaves room for the layers after it. The design caps the whole
-        # block only (section 10); the half split is not a design rule.
+        pages = config.vault / "projects" / slug
+        # The map claims its room before the fill runs, so no section can grow into it,
+        # and the project's own layer stops at half the block (firstmate's ruling on
+        # M1.2; design 10 caps the whole block only).
+        reserved.append(_part("Pages", _pointers(config, resolution, pages)))
         parts += _trim(_overview_parts(config, resolution, slug), max_chars // 2)
     parts += _section_parts(_read_page(config.vault / PREFERENCES), None)
-    if slug:
-        pages = config.vault / "projects" / slug
-        parts.append(_part("Pages", _pointers(config, resolution, pages)))
-    return _fit(parts, HOW_TO, max_chars)
+    return _fit(parts, reserved, HOW_TO, max_chars)
 
 
 def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[Part]:
@@ -71,10 +72,13 @@ def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[P
 
 
 def _heading(resolution: Resolution, overview: pagemod.Page | None) -> Part:
-    """The block's title line, then the overview's description as its one-line summary."""
+    """The block's title line, then the overview's description as its one-line summary.
+
+    The registry always carries a title, falling back to the slug for an entry written
+    without one, and only a registered project reaches this part.
+    """
     frontmatter = overview.frontmatter if overview else None
-    project = resolution.project
-    title = _text(frontmatter, "title") or (project.title if project else "") or resolution.slug
+    title = _text(frontmatter, "title") or resolution.project.title
     lines = [f"# Memory: {title}"]
     description = _text(frontmatter, "description")
     if description:
@@ -210,17 +214,31 @@ def _trim(parts: list[Part], max_chars: int) -> list[Part]:
     return kept
 
 
-def _fit(parts: list[Part], closing: str, max_chars: int) -> str:
-    """The trimmed parts in order, then ``closing``, the block's fixed last line.
+def _blocks(parts: list[Part]) -> list[str]:
+    """The parts as the block shows them: each heading above its own lines."""
+    return [_label(heading) + "\n".join(lines) for heading, lines in parts]
 
-    The closing line's room is kept back before the parts are trimmed, so the longest
-    overview still tells the session how to search and read (design 10).
+
+def _fit(parts: list[Part], reserved: list[Part], closing: str, max_chars: int) -> str:
+    """The parts in order, then the reserved parts, then the closing line.
+
+    The closing line and the reserved parts are measured first and ``parts`` takes only
+    the budget left, so no section can grow into the page map or into the lines that
+    tell the session it can search and read (firstmate's ruling on M1.2, design 10).
     """
-    trimmed = _trim(parts, max_chars - len(closing) - 2)
-    blocks = [_label(heading) + "\n".join(lines) for heading, lines in trimmed]
-    if blocks or len(closing) <= max_chars:
-        blocks.append(closing)
-    return "\n\n".join(blocks)
+    tail: list[Part] = []
+    room = max_chars
+    if len(closing) + 2 <= max_chars:
+        room -= len(closing) + 2
+        kept = _trim(reserved, room)
+        room -= _width(kept) + (2 if kept else 0)
+        tail = kept + [("", [closing])]
+    return "\n\n".join([*_blocks(_trim(parts, room)), *_blocks(tail)])
+
+
+def _width(parts: list[Part]) -> int:
+    """The characters the parts take once they are stacked together."""
+    return len("\n\n".join(_blocks(parts)))
 
 
 def _label(heading: str) -> str:

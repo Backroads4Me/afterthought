@@ -333,6 +333,39 @@ def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
     assert 1 < len(parts["## Facts"]) < 200
 
 
+def test_a_long_preferences_page_cannot_bury_the_page_map(widget, tmp_path):
+    """Dreaming promotes into global/preferences.md without end, so the page map and the
+    closing line keep their room before the fill runs rather than after it."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    facts = "\n".join(
+        f"- Fact {number} says something short about the project. [observed] 2026-09-30 [^s1]"
+        for number in range(20)
+    )
+    write(
+        widget.vault / "projects/widget/overview.md",
+        "---\ntype: Project\ntitle: Widget\n"
+        "description: A widget that turns water into widgets.\nsources: []\n"
+        f"aft:\n  project: {project.id}\n---\n\n## Facts\n\n{facts}\n",
+    )
+    preferences = "\n".join(
+        f"- Preference {number} was promoted from an earlier session. [stated] 2026-09-01 [^s1]"
+        for number in range(150)
+    )
+    write(
+        widget.vault / "global/preferences.md",
+        "---\ntype: Preferences\ntitle: Preferences\n"
+        "description: Your preferences that apply in every project.\nsources: []\n"
+        f"---\n\n## Preferences\n\n{preferences}\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert len(block) <= widget.settings.inject.max_chars
+    parts = parts_of(block)
+    assert parts["## Pages"] == PAGES.splitlines()
+    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert len(parts["## Facts"]) == 20
+    assert 1 < len(parts["## Preferences"]) < 150
+
+
 def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_path):
     """M2.6 files a digest at ``digests/<slug>/<yyyy>/<mm>/``; the month directory
     is read as a number, so a ``9`` cannot sort a September handoff above October."""
