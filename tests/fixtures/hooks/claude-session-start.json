@@ -1,0 +1,8 @@
+{
+  "session_id": "6b1c2f6f-6d1e-4f2a-9d3c-7f2f8c1e5a52",
+  "transcript_path": "/home/ted/.claude/projects/-home-ted-src-widget/6b1c2f6f-6d1e-4f2a-9d3c-7f2f8c1e5a52.jsonl",
+  "cwd": "/home/ted/src/widget",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "model": "claude-sonnet-4-5"
+}
