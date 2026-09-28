@@ -676,7 +676,10 @@ explains how to do but never does on its own.
 ## 13. The model and its load
 
 - One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`. Today that is vLLM serving
-  Qwen3.8-Flash-Next on the GPU host. A hosted endpoint works the same way.
+  Qwen3.8-Flash-Next on the GPU host. A hosted endpoint works the same way: its API key goes in
+  the same file as `model.api_key`, sent as a bearer token, and a local endpoint needs none.
+  `config.toml` then holds a secret, so `aft` refuses to read a key from a file other users can
+  read, and the key never appears in logs, reports or error messages.
 - Afterthought calls the endpoint over HTTP. It never runs an agent harness from inside a
   hook, which avoids a loop where memory work creates sessions to capture.
 - Budgets: a per-chunk input cap for digests, a per-run token budget for dreaming, and a

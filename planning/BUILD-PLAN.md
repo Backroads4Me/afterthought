@@ -20,7 +20,8 @@ These rules apply to every task and every pull request.
    redaction`). A task too large for one PR is split before starting, and the split is
    reported.
 4. **Tests define done.** Each task lists its tests. `uv run pytest`, `uv run ruff check`
-   and `uv run ruff format --check` pass on every PR.
+   and `uv run ruff format --check` pass on every PR. GitHub Actions runs all three on every
+   pull request (`.github/workflows/ci.yml`), and a PR is green when that run passes.
 5. **Tests never touch real state.** Every test runs with `AFT_HOME` and the vault in a
    temporary directory, a temporary git identity (see `tests/conftest.py`), and no network.
    Model calls go to the fake endpoint from M2.5.
@@ -314,8 +315,14 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   {"type": "json_schema", ...}` using `urllib`. Validates the response against the schema
   with a small validator in `aft/schema.py` (types, required keys, enums, string lengths;
   no dependency). Retries once on invalid output or a 5xx, then raises.
+- **Credentials:** add `api_key` (default empty) to `ModelConfig` in `aft/config.py` and to
+  the commented default config. When set, it is sent as `Authorization: Bearer <key>`;
+  when empty, no header is sent. `aft` refuses to use a key if `config.toml` is readable by
+  group or others, with an error naming `chmod 600`. The key never appears in logs, error
+  messages or reports.
 - **Tests:** against the fake server: valid response; invalid then valid; two invalids
-  raise; timeout raises.
+  raise; timeout raises; the bearer header is sent only when a key is set; a key in a
+  group-readable config is refused; an error from a keyed call does not contain the key.
 
 #### M2.6 Digest
 
