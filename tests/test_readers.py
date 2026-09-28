@@ -255,8 +255,8 @@ def test_a_line_the_agent_left_half_written_is_skipped(tmp_path):
 
 def test_a_break_over_a_whole_conversation_reads_short_not_unreadable(tmp_path, caplog):
     # The branch holds only a system message, so nothing is yielded, while the real
-    # conversation of the file sits behind the break. Recognized records are counted
-    # across the file, so this is a short read with a warning and not a changed format.
+    # conversation of the file sits behind the break. No record is unreadable and each
+    # names its type, so this is a short read with a warning, not a changed format.
     lines = (FIXTURES / "pi-session.jsonl").read_text().splitlines()
     orphan = {
         "type": "message",
