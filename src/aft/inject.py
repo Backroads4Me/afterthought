@@ -3,7 +3,9 @@
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and ``inject.max_chars``
 trims each part to what is left of the budget: a fact is either in the block or left
-out, never cut short, and the closing lines on how to search and read keep room.
+out, never cut short, and the closing lines on how to search and read keep room. The
+project's own layer takes half that budget first, by firstmate's ruling on M1.2, so
+what follows it still has somewhere to go.
 """
 
 from __future__ import annotations
@@ -44,15 +46,19 @@ def build(config: Config, resolution: Resolution) -> str:
     search and read. An unregistered or unresolved directory gets only global preferences
     and those lines.
     """
+    max_chars = config.settings.inject.max_chars
     parts: list[Part] = []
     slug = resolution.slug if resolution.registered else None
     if slug:
-        parts += _overview_parts(config, resolution, slug)
+        # Firstmate's ruling on M1.2: the project's own layer takes half the block, so
+        # a long overview leaves room for the layers after it. The design caps the whole
+        # block only (section 10); the half split is not a design rule.
+        parts += _trim(_overview_parts(config, resolution, slug), max_chars // 2)
     parts += _section_parts(_read_page(config.vault / PREFERENCES), None)
     if slug:
         pages = config.vault / "projects" / slug
         parts.append(_part("Pages", _pointers(config, resolution, pages)))
-    return _fit(parts, HOW_TO, config.settings.inject.max_chars)
+    return _fit(parts, HOW_TO, max_chars)
 
 
 def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[Part]:
@@ -178,33 +184,41 @@ def _part(heading: str, lines: list[str]) -> Part:
     return (heading, lines) if lines else ("", [])
 
 
-def _fit(parts: list[Part], closing: str, max_chars: int) -> str:
-    """The parts stacked in order, each trimmed to what is left of ``max_chars``.
+def _trim(parts: list[Part], max_chars: int) -> list[Part]:
+    """The parts with whole lines cut off their ends so they take ``max_chars`` at most.
 
-    Lines come off a part's end whole, so a fact is either in the block or left out
-    and never cut short. A part with no room left for a line of its own drops out
-    with its heading rather than showing an empty one, and ``closing`` (the block's
-    fixed last line) keeps room for itself, so the longest overview still tells the
-    session how to search and read (design 10).
+    A fact is either in the block or left out, never cut short, and a part with no
+    room left for a line of its own drops out with its heading rather than showing
+    an empty one.
     """
-    room = max_chars - len(closing) - 2
-    blocks: list[str] = []
+    kept: list[Part] = []
     used = 0
     for heading, content in parts:
         label = _label(heading)
-        cost = (2 if blocks else 0) + len(label)
-        kept: list[str] = []
+        cost = (2 if kept else 0) + len(label)
+        lines: list[str] = []
         for line in content:
-            extra = len(line) + (1 if kept else 0)
-            if used + cost + extra > room:
+            extra = len(line) + (1 if lines else 0)
+            if used + cost + extra > max_chars:
                 break
-            kept.append(line)
+            lines.append(line)
             cost += extra
-        if not kept:
+        if not lines:
             continue
-        blocks.append(label + "\n".join(kept))
+        kept.append((heading, lines))
         used += cost
-    if used + (2 if blocks else 0) + len(closing) <= max_chars:
+    return kept
+
+
+def _fit(parts: list[Part], closing: str, max_chars: int) -> str:
+    """The trimmed parts in order, then ``closing``, the block's fixed last line.
+
+    The closing line's room is kept back before the parts are trimmed, so the longest
+    overview still tells the session how to search and read (design 10).
+    """
+    trimmed = _trim(parts, max_chars - len(closing) - 2)
+    blocks = [_label(heading) + "\n".join(lines) for heading, lines in trimmed]
+    if blocks or len(closing) <= max_chars:
         blocks.append(closing)
     return "\n\n".join(blocks)
 

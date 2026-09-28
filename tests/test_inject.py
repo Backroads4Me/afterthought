@@ -309,9 +309,9 @@ def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
         assert inject.HOW_TO in parts or len(block) + 2 + len(inject.HOW_TO) > cap
 
 
-def test_a_long_overview_still_tells_the_session_how_to_search(widget, tmp_path):
-    """The block stays a map of the project: the lines on how to search and read
-    keep their room even when the overview's own facts overflow the cap."""
+def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
+    """Half the cap belongs to the project's own layer, so a long overview still
+    leaves the preferences, the page map and the search and read lines in place."""
     project = Registry.load(widget.registry_path).by_slug("widget")
     facts = "\n".join(
         f"- Fact {number} is long enough that the overview alone fills the block."
@@ -326,7 +326,11 @@ def test_a_long_overview_still_tells_the_session_how_to_search(widget, tmp_path)
     )
     block = inject.build(widget, resolve(widget, tmp_path / "widget"))
     assert len(block) <= widget.settings.inject.max_chars
-    assert block.endswith(inject.HOW_TO)
+    parts = parts_of(block)
+    assert parts["## Preferences"] == ["- Prefer short commits."]
+    assert parts["## Pages"] == PAGES.splitlines()
+    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert 1 < len(parts["## Facts"]) < 200
 
 
 def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_path):
