@@ -208,9 +208,13 @@ def cmd_lint(args) -> int:
     return 0
 
 
-# An agent's session waits on this command, so it gets a hard budget of its own
-# before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1).
+# An agent's session waits on this command, so the whole hook gets one hard budget
+# before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1). The
+# budget is split up front between the two steps that can block: the stdin read takes
+# the larger share, the failure-line write keeps the remainder named below, so no step
+# can hang and the hook as a whole never holds a session past the bound.
 HOOK_TIMEOUT_SECONDS = 2
+HOOK_LOG_TIMEOUT_SECONDS = 0.5
 
 
 def cmd_hook(args) -> int:
@@ -221,7 +225,7 @@ def cmd_hook(args) -> int:
     log is the whole record of what went wrong (BUILD-PLAN M1.1).
     """
     try:
-        with _hook_time_limit(HOOK_TIMEOUT_SECONDS):
+        with _hook_time_limit(HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS):
             payload = json.load(sys.stdin)
             _dispatch(_hook_event(args, payload))
     except Exception as exc:
@@ -252,12 +256,13 @@ def _dispatch(event: SessionEvent) -> None:
 
 
 @contextmanager
-def _hook_time_limit(seconds: int) -> Iterator[None]:
-    """Give up on the hook after this many seconds, wherever it has got to.
+def _hook_time_limit(seconds: float) -> Iterator[None]:
+    """Bound one blocking step of the hook to its share of the hook budget.
 
-    The same budget bounds both blocking steps a hook takes: a stdin read that never
-    finishes and the log write that reports a failure. Where SIGALRM is unavailable the
-    limit is not enforced here and the agent's own hook timeout is the bound.
+    The two callers pass the two shares of HOOK_TIMEOUT_SECONDS, so every blocking step
+    is bounded on its own and the hook as a whole still fits the bound in that constant.
+    Where SIGALRM is unavailable the limit is not enforced here and the agent's own hook
+    timeout is the bound.
     """
     if not hasattr(signal, "SIGALRM"):
         yield
@@ -289,10 +294,10 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     the whole line is flattened and capped: whatever they contain, a failed hook
     leaves one bounded line and nothing else. Each caller-supplied argument is clamped
     to its own budget and the event name goes last, so a runaway argument loses its
-    own tail rather than the reason for the failure. Best effort all the way down and
-    inside the hook's own budget: a home that cannot be resolved or written to, a line
-    that cannot be written, and an expiry that lands mid-write are a lost record, not
-    a reason to fail the agent.
+    own tail rather than the reason for the failure. Best effort all the way down, and
+    inside the share of the hook budget HOOK_LOG_TIMEOUT_SECONDS reserves for this write:
+    a home that cannot be resolved or written to, a line that cannot be written, and an
+    expiry that lands mid-write are a lost record, not a reason to fail the agent.
     """
     line = (
         f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
@@ -300,7 +305,7 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     )
     line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
-        with _hook_time_limit(HOOK_TIMEOUT_SECONDS):
+        with _hook_time_limit(HOOK_LOG_TIMEOUT_SECONDS):
             home = resolve_home()
             (home / "logs").mkdir(parents=True, exist_ok=True)
             with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:

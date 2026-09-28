@@ -329,3 +329,37 @@ def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsy
 
     assert result == (0, "", "")
     assert elapsed < HOOK_TIMEOUT_SECONDS + 2
+
+
+def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, monkeypatch, capsys):
+    """The read spending its share cannot cost the failure line the remainder held back
+    for it."""
+    monkeypatch.setattr(sys, "stdin", StalledStdin())
+    started = time.monotonic()
+    code = main(["hook", "claude", "SessionStart"])
+    elapsed = time.monotonic() - started
+    captured = capsys.readouterr()
+
+    assert (code, captured.out, captured.err) == (0, "", "")
+    assert elapsed < HOOK_TIMEOUT_SECONDS + 1
+    lines = hook_log(home)
+    assert len(lines) == 1
+    assert "TimeoutError" in lines[0]
+
+
+def test_a_stalled_stdin_and_a_blocked_write_share_one_budget(home, monkeypatch, capsys):
+    """Both blocking steps at once still fit the one bound the plan states: the budget is
+    split between them up front, so it is not paid once per step."""
+    record = home / "logs" / "hooks.log"
+    (home / "logs").mkdir()
+    os.mkfifo(record)
+    # No reader ever opens the fifo, so only the write's own share can end the open.
+
+    monkeypatch.setattr(sys, "stdin", StalledStdin())
+    started = time.monotonic()
+    code = main(["hook", "claude", "SessionStart"])
+    elapsed = time.monotonic() - started
+    captured = capsys.readouterr()
+
+    assert (code, captured.out, captured.err) == (0, "", "")
+    assert elapsed < HOOK_TIMEOUT_SECONDS + 1
