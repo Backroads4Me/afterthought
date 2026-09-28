@@ -167,8 +167,8 @@ def test_a_tool_result_that_returned_no_text_is_not_an_entry(tmp_path):
     # and nothing else: it contributes no entry.
     assert [e.role for e in read(CLAUDE, "claude-resumed.jsonl")] == ["user", "assistant", "user"]
     assert CLAUDE_EMPTY_RESULT_ID not in ids(read(CLAUDE, "claude-resumed.jsonl"))
-    # One rule in both readers, so pi drops the same kind of result. The turn beside it
-    # is what makes that file a readable session rather than an unreadable one.
+    # One rule in both readers, so pi drops the same kind of result while the read still
+    # yields the turn beside it.
     turn = {
         "type": "message",
         "id": "11223344",
