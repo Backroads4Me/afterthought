@@ -1,0 +1,198 @@
+"""The ``aft`` command line."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from aft import __version__, gitutil, keys, lint, vault
+from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load
+from aft.gitutil import GitError
+from aft.registry import Registry, RegistryError, path_key, slugify
+
+
+class UsageError(Exception):
+    pass
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "handler"):
+        parser.print_help()
+        return 2
+    try:
+        return args.handler(args)
+    except (ConfigError, RegistryError, vault.VaultError, GitError, UsageError) as exc:
+        print(f"aft: {exc}", file=sys.stderr)
+        return 2
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="aft", description="Shared memory for coding agents.")
+    parser.add_argument("--version", action="version", version=f"aft {__version__}")
+    sub = parser.add_subparsers(metavar="command")
+
+    p = sub.add_parser("init", help="create the config file and the vault")
+    p.set_defaults(handler=cmd_init)
+
+    p = sub.add_parser("key", help="show which project a directory belongs to")
+    p.add_argument("path", nargs="?", default=".")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(handler=cmd_key)
+
+    p = sub.add_parser("project", help="manage registered projects")
+    psub = p.add_subparsers(metavar="action")
+    q = psub.add_parser("list", help="list projects")
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(handler=cmd_project_list)
+    q = psub.add_parser("add", help="register the project at a path")
+    q.add_argument("path", nargs="?", default=".")
+    q.add_argument("--slug", help="defaults to the directory name")
+    q.add_argument("--title")
+    q.set_defaults(handler=cmd_project_add)
+    q = psub.add_parser("rename", help="change a project's slug")
+    q.add_argument("old")
+    q.add_argument("new")
+    q.set_defaults(handler=cmd_project_rename)
+    q = psub.add_parser("forget", help="remove a project from the registry")
+    q.add_argument("slug")
+    q.set_defaults(handler=cmd_project_forget)
+
+    p = sub.add_parser("lint", help="check the vault's pages")
+    p.set_defaults(handler=cmd_lint)
+    return parser
+
+
+def cmd_init(args) -> int:
+    config = load()
+    config.home.mkdir(parents=True, exist_ok=True)
+    if not config.config_path.exists():
+        config.config_path.write_text(DEFAULT_CONFIG_TEXT)
+        print(f"wrote {config.config_path}")
+        config = load()
+    created = vault.init(config)
+    if created:
+        print(f"initialized the vault at {config.vault}")
+    else:
+        print(f"the vault at {config.vault} is already initialized")
+    return 0
+
+
+def cmd_key(args) -> int:
+    config = load()
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(Path(args.path), registry, config.host, on_alias=_alias_writer(config))
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "kind": result.kind,
+                    "slug": result.slug,
+                    "project_id": result.project.id if result.project else None,
+                    "root": str(result.root) if result.root else None,
+                    "cwd": str(result.cwd),
+                    "alias_added": result.alias_added,
+                }
+            )
+        )
+    else:
+        print(f"{result.slug or '-'}\t{result.kind}\t{result.root or '-'}")
+    return 0 if result.registered else 1
+
+
+def _alias_writer(config: Config):
+    """Record a path found by remote, if the vault exists. Never fails the lookup."""
+
+    def write(project, key: str) -> None:
+        if not vault.is_initialized(config.vault):
+            return
+        with vault.locked(config):
+            registry = Registry.load(config.registry_path)
+            current = registry.by_id(project.id)
+            if current is None or not registry.add_path(current, key):
+                return
+            registry.save()
+            vault.commit(config.vault, ["registry.yaml"], f"aft: record {key} for {current.slug}")
+
+    return write
+
+
+def cmd_project_list(args) -> int:
+    config = load()
+    registry = Registry.load(config.registry_path)
+    if args.json:
+        print(json.dumps([p.to_dict() for p in registry.projects], indent=2))
+        return 0
+    for p in registry.projects:
+        print(f"{p.slug}\t{p.id}\t{', '.join(p.paths) or '-'}\t{', '.join(p.remotes) or '-'}")
+    return 0
+
+
+def cmd_project_add(args) -> int:
+    config = load()
+    vault.require(config)
+    info = gitutil.repo_info(Path(args.path).resolve())
+    root = info.main if info else Path(args.path).resolve()
+    slug = args.slug or slugify(root.name)
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        project = registry.add(slug, args.title)
+        registry.add_path(project, path_key(config.host, root))
+        if info and info.origin:
+            registry.add_remote(project, gitutil.normalize_remote(info.origin))
+        registry.save()
+        vault.commit(config.vault, ["registry.yaml"], f"aft: register {slug}")
+    print(f"registered {slug} ({project.id}) at {config.host}:{root}")
+    return 0
+
+
+def cmd_project_rename(args) -> int:
+    config = load()
+    vault.require(config)
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        registry.rename(args.old, args.new)
+        registry.save()
+        changed = ["registry.yaml"]
+        for old, new in (
+            (f"projects/{args.old}", f"projects/{args.new}"),
+            (f"digests/{args.old}", f"digests/{args.new}"),
+            (f"archive/{args.old}.md", f"archive/{args.new}.md"),
+        ):
+            if (config.vault / old).exists():
+                (config.vault / old).rename(config.vault / new)
+                changed += [old, new]
+        vault.commit(config.vault, changed, f"aft: rename {args.old} to {args.new}")
+    print(f"renamed {args.old} to {args.new}")
+    return 0
+
+
+def cmd_project_forget(args) -> int:
+    config = load()
+    vault.require(config)
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        project = registry.remove(args.slug)
+        registry.save()
+        vault.commit(config.vault, ["registry.yaml"], f"aft: forget {args.slug}")
+    print(f"removed {args.slug} ({project.id}) from the registry")
+    if (config.vault / "projects" / args.slug).exists():
+        print(
+            f"its pages remain in projects/{args.slug}; delete them yourself if you want them gone"
+        )
+    return 0
+
+
+def cmd_lint(args) -> int:
+    config = load()
+    vault.require(config)
+    findings = lint.lint_vault(config.vault)
+    for finding in findings:
+        print(finding)
+    if findings:
+        print(f"{len(findings)} problem(s)", file=sys.stderr)
+        return 1
+    return 0
