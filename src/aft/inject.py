@@ -6,7 +6,8 @@ trims each part to what is left of the budget: a fact is either in the block or 
 out, never cut short. Firstmate's ruling on M1.2 states the allocation: the fixed costs
 first, then every layer's floor, then what remains between the two layers that grow
 with the vault, so no section can grow into what a cold session needs to find the rest
-of memory.
+of memory. A budget with no room for a layer's first line leaves that layer out and
+says so plainly under ``Cut``.
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on Ted)"}
 
 HOW_TO = 'Search memory: aft search "<words>". Read a page: aft read <path>.'
+
+# What the block says when the budget leaves no room for a layer's first line (design 10).
+CUT_HEADING = "Cut"
+CUT_NOTE = "The rest was cut to fit this block: aft search or aft read reaches all of it."
 
 # The overview is the block itself, and a directory's index.md is a generated listing, so
 # neither is a page the block points at (design 6).
@@ -181,27 +186,32 @@ def _trim(parts: list[Part], max_chars: int) -> list[Part]:
     """The parts with whole lines cut off their ends so they take ``max_chars`` at most.
 
     Every part that has a line holds its heading and that first line before a later
-    part is offered a second one, so a layer the plan requires is present or the
-    budget ran out - never silently absent. Past the first line the room goes to the
-    parts in order, and a fact is either in the block or left out, never cut short. A
-    part that cannot hold its first line drops out with its heading, along with every
-    part after it, so a short block ends on a whole line.
+    part is offered a second one, and a part with no room for its first line costs
+    itself alone: the parts after it are still offered their floor. Past the first
+    line the room goes to the parts in order, whole lines only, so a fact is either in
+    the block or left out, never cut short and never left under an empty heading.
     """
-    present = [(heading, lines) for heading, lines in parts if lines]
+    # A single line longer than the whole budget can never be shown, so it costs only
+    # itself: the lines after it and the parts after it keep their room.
+    parts = [
+        (heading, [line for line in lines if len(line) <= max_chars]) for heading, lines in parts
+    ]
     kept: list[Part] = []
+    later: list[list[str]] = []
     used = 0
-    for heading, lines in present:
-        cost = (2 if kept else 0) + len(_label(heading)) + len(lines[0])
-        if used + cost > max_chars:
-            break
-        kept.append((heading, [lines[0]]))
-        used += cost
-    # kept is the prefix of present that cleared its floor, so the pairing ends with it
-    for (_, kept_lines), (_, content) in zip(kept, present, strict=False):
-        for line in content[1:]:
+    for heading, content in parts:
+        if not content:
+            continue
+        cost = (2 if kept else 0) + len(_label(heading)) + len(content[0])
+        if used + cost <= max_chars:
+            kept.append((heading, [content[0]]))
+            later.append(content[1:])
+            used += cost
+    for (_, lines), rest in zip(kept, later, strict=True):
+        for line in rest:
             if used + len(line) + 1 > max_chars:
                 break
-            kept_lines.append(line)
+            lines.append(line)
             used += len(line) + 1
     return kept
 
@@ -227,20 +237,25 @@ def _block(
     text and its page map, each capped from that remainder rather than from the block,
     so they cannot over-subscribe it and neither can reach what the other needs. The
     global preferences layer, which the plan gives no limit of its own, takes whatever
-    those two leave. A budget below the floors keeps the parts from the front and stops
-    on a whole line, so the block is visibly short rather than quietly missing a layer
-    (design 10, firstmate's ruling on M1.2).
+    those two leave. When the budget leaves no room for a layer's first line, the block
+    keeps its title and says under ``Cut`` that the rest was cut: a short block is
+    acceptable, a layer missing without a word is the defect (design 10, firstmate's
+    ruling on M1.2).
     """
     closing: list[Part] = [("", [HOW_TO])]
+    head = _trim(title, max_chars)  # the title, as far as the budget can show it
     own_floor = _floors(own)
     preferences_floor = _floors(preferences)
     map_floor = _floors(page_map)
-    minimal = _trim([*title, *own_floor, *preferences_floor, *map_floor, *closing], max_chars)
+    floors = [*head, *own_floor, *preferences_floor, *map_floor, *closing]
+    minimal = _trim(floors, max_chars)
     extra = (max_chars - _width(minimal)) // 2
-    project_layer = _trim(own, _width(own_floor) + extra)
-    pages = _trim(page_map, _width(map_floor) + extra)
-    room = max_chars - _width([*title, *project_layer, *pages, *closing]) - 2
-    parts = [*title, *project_layer, *_trim(preferences, room), *pages, *closing]
+    project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
+    pages = _trim(page_map, min(_width(map_floor) + extra, max_chars))
+    room = max_chars - _width([*head, *project_layer, *pages, *closing]) - 2
+    body = [*project_layer, *_trim(preferences, room), *pages]
+    cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
+    parts = [*head, *cut, *body, *closing]
     return "\n\n".join(_blocks(_trim(parts, max_chars)))
 
 

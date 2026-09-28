@@ -316,6 +316,7 @@ def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
     resolution = resolve(widget, tmp_path / "widget")
     full = inject.build(widget, resolution)
     complete = parts_of(full)
+    cut = f"## {inject.CUT_HEADING}"
     for cap in range(0, len(full) + 1, 17):
         capped = dataclasses.replace(
             widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(cap))
@@ -324,9 +325,19 @@ def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
         assert len(block) <= cap, f"cap {cap} gave {len(block)} characters"
         parts = parts_of(block)
         for heading, under in parts.items():
-            shown = complete[heading]
+            if heading == cut:
+                assert under == [inject.CUT_NOTE], f"cap {cap} reported {under}"
+                continue
+            # A line longer than the cap cannot be shown at all, so it is skipped; the
+            # rest of a layer is trimmed off its end, whole.
+            shown = [line for line in complete[heading] if len(line) <= cap]
             assert under == shown[: len(under)], f"cap {cap} cut into {heading or 'the title'}"
             assert not heading.startswith("## ") or under, f"cap {cap} left {heading} empty"
+        hidden = [
+            heading for heading in complete if heading.startswith("## ") and heading not in parts
+        ]
+        reported = cut in parts or len(block) + 2 + len(inject.CUT_NOTE) > cap
+        assert not hidden or reported, f"cap {cap} dropped {hidden} without saying so"
         assert inject.HOW_TO in parts or len(block) + 2 + len(inject.HOW_TO) > cap
 
 
@@ -447,6 +458,56 @@ def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path
     for heading in ("## Pages", "## Facts"):
         assert len(parts[heading]) < len(uncapped[heading])
         assert parts[heading] == uncapped[heading][: len(parts[heading])]
+
+
+def test_one_over_long_line_costs_only_itself(widget, tmp_path):
+    """A fact statement or a page description longer than the whole budget leaves out
+    its own line alone: the layers around it keep their room, so the session still gets
+    the page map, the preferences, and the line telling it how to search."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    facts = "\n".join(
+        [f"- {'x' * 12_000} [observed] 2026-09-30 [^s1]"]
+        + [
+            f"- Fact {number} is short enough to show. [observed] 2026-09-30 [^s1]"
+            for number in range(3)
+        ]
+    )
+    write(
+        widget.vault / "projects/widget/overview.md",
+        "---\ntype: Project\ntitle: Widget\n"
+        "description: A widget that turns water into widgets.\nsources: []\n"
+        f"aft:\n  project: {project.id}\n---\n\n## Facts\n\n{facts}\n",
+    )
+    write(
+        widget.vault / "projects/widget/api.md",
+        "---\ntype: Project\ntitle: Widget API\nsources: []\n"
+        f"description: >-\n  {'y' * 9_000}\n"
+        "aft:\n  project: p_widget\n---\n\n## Facts\n\n"
+        "- The API is versioned by path. [stated] 2026-09-18 [^s1]\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert len(block) <= widget.settings.inject.max_chars
+    parts = parts_of(block)
+    assert parts[""] == ["# Memory: Widget", "A widget that turns water into widgets."]
+    assert parts["## Preferences"] == ["- Prefer short commits."]
+    assert parts["## Pages"] == [PAGES.splitlines()[1]]
+    assert parts["## Facts"] == [f"- Fact {number} is short enough to show." for number in range(3)]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+
+
+def test_a_budget_below_the_floors_reports_the_cut(widget, tmp_path):
+    """A cap below what the layers need keeps the title and says plainly that the rest
+    was cut, so a mis-set inject.max_chars never leaves a session with memory quietly
+    missing."""
+    tight = dataclasses.replace(
+        widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(300))
+    )
+    block = inject.build(tight, resolve(widget, tmp_path / "widget"))
+    parts = parts_of(block)
+    assert len(block) <= 300
+    assert block.startswith("# Memory: Widget")
+    assert parts[f"## {inject.CUT_HEADING}"] == [inject.CUT_NOTE]
+    assert "## Pages" not in parts
 
 
 def test_an_over_grown_page_map_drops_whole_pointer_lines(widget, tmp_path):
