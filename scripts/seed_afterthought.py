@@ -12,7 +12,8 @@ The page is memory people edit, so an existing one is left alone unless the run 
 ``--overwrite``. On such a run a fact whose statement and quote are unchanged keeps the date
 the page already carried: re-reading the same source is not new evidence. An existing page whose
 fact lines cite sources its own frontmatter does not define stops the run, since the dates on
-it cannot be read.
+it cannot be read. Lines of the old page that the page parser rejects are counted and named in
+the report, because they hold dates the run could not carry.
 
 Usage: uv run python scripts/seed_afterthought.py [--overwrite] <vault>
 """
@@ -240,22 +241,27 @@ def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
             raise SeedError(f"quote is not verbatim under {fact.heading!r}: {fact.quote!r}")
 
 
-def prior_dates(path: Path) -> dict[tuple[str, str], str]:
-    """The observed dates already on a page in the vault, keyed by the statement and quote that
-    make a fact the same fact.
+def prior_page(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
+    """Read the page already in the vault: the dates it carries and the lines it cannot show.
 
-    A line whose date is not a date is dropped, so the run dates that fact anew rather than
+    Dates are keyed by the statement and quote that make a fact the same fact. A line whose
+    date is not a date is dropped from the carry, so the run dates that fact anew rather than
     copying the bad text into the page it writes. A line citing a source the page does not
-    define with a quote is the opposite case: there the run cannot tell an unchanged fact from
-    a new one, so it refuses the page instead of rewriting the date its facts were seen on.
+    define with a usable quote is the opposite case: there the run cannot tell an unchanged
+    fact from a new one, so it refuses the page instead of rewriting the date its facts were
+    seen on. A line the parser rejects cannot be carried at all, so it comes back for the run
+    to report.
     """
     if not path.exists():
-        return {}
+        return {}, []
     page = pagemod.parse(path.read_text(), path)
     quotes = {
-        str(source["id"]): str(source["quote"])
+        str(source["id"]): source["quote"]
         for source in (page.frontmatter or {}).get("sources") or []
-        if isinstance(source, dict) and source.get("id") is not None and "quote" in source
+        if isinstance(source, dict)
+        and source.get("id") is not None
+        and isinstance(source.get("quote"), str)
+        and source["quote"].strip()
     }
     unreadable = sorted({ref for fact in page.facts for ref in fact.refs if ref not in quotes})
     if unreadable:
@@ -271,7 +277,8 @@ def prior_dates(path: Path) -> dict[tuple[str, str], str]:
             continue
         for ref in fact.refs:
             carried[(fact.statement, quotes[ref])] = fact.date
-    return carried
+    rejected = [f"{path}:{number}: {message}" for number, message in page.errors]
+    return carried, rejected
 
 
 def render(facts: tuple[SeedFact, ...], project_id: str, dates: dict[tuple[str, str], str]) -> str:
@@ -317,8 +324,12 @@ def lint_page(text: str, registry: Registry) -> list[str]:
         return [str(finding) for finding in lint_file(Path(scratch), rel, registry)]
 
 
-def seed(vault_path: Path, overwrite: bool = False) -> bool:
-    """Write and commit the seed page into ``vault_path``. Returns whether it committed."""
+def seed(vault_path: Path, overwrite: bool = False) -> tuple[bool, list[str]]:
+    """Write and commit the seed page into ``vault_path``.
+
+    Returns whether it committed and the lines of the page it replaced that the page parser
+    rejected, which the run names rather than dropping silently.
+    """
     check_quotes(FACTS, DESIGN.read_text())
     config = replace(load(), vault=vault_path)
     vault.require(config)
@@ -334,7 +345,7 @@ def seed(vault_path: Path, overwrite: bool = False) -> bool:
         if path.exists() and not overwrite:
             raise SeedError(f"{path} already exists; pass --overwrite to replace it")
         today = date.today().isoformat()
-        carried = prior_dates(path)
+        carried, rejected = prior_page(path)
         dates = {
             (fact.statement, fact.quote): carried.get((fact.statement, fact.quote), today)
             for fact in FACTS
@@ -345,7 +356,7 @@ def seed(vault_path: Path, overwrite: bool = False) -> bool:
             raise SeedError("the seeded page does not lint: " + "; ".join(findings))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-        return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE)
+        return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE), rejected
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -362,10 +373,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     vault_path = Path(args.vault).expanduser().resolve()
     try:
-        committed = seed(vault_path, overwrite=args.overwrite)
+        committed, rejected = seed(vault_path, overwrite=args.overwrite)
     except (SeedError, ConfigError, GitError, RegistryError, vault.VaultError, OSError) as exc:
         print(f"seed_afterthought: {exc}", file=sys.stderr)
         return 2
+    if rejected:
+        print(
+            f"seed_afterthought: the parser rejected {len(rejected)} of the old page's lines: "
+            + "; ".join(rejected),
+            file=sys.stderr,
+        )
     state = "committed" if committed else "unchanged"
     print(f"seeded {REL_PATH} into {vault_path} ({len(FACTS)} facts, {state})")
     return 0

@@ -186,6 +186,35 @@ def test_overwrite_refuses_a_page_whose_source_lost_its_quote(registered, seed, 
     assert path.read_text() == broken
 
 
+def test_overwrite_refuses_a_page_whose_source_quote_is_blank(registered, seed, capsys):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    text = path.read_text()
+    for value in ("quote:", 'quote: ""'):
+        broken = re.sub(r"^  quote: .*\n", f"  {value}\n", text, count=1, flags=re.MULTILINE)
+        assert broken != text
+        path.write_text(broken)
+        assert run(seed, registered.vault, "--overwrite") == 2
+        assert "s1" in capsys.readouterr().err
+    assert path.read_text() == broken
+
+
+def test_a_line_the_parser_rejects_is_named_in_the_run_report(registered, seed, capsys):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    text = path.read_text()
+    dropped = text.replace(" [^s1]\n", "\n", 1)
+    assert dropped != text
+    path.write_text(dropped)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: drop a fact's source tag")
+    assert run(seed, registered.vault, "--overwrite") == 0
+    report = capsys.readouterr().err
+    assert "rejected 1 of the old page's lines" in report
+    assert "fact line must read" in report
+    assert str(seed.REL_PATH) in report
+    assert lint.lint_vault(registered.vault) == []
+
+
 def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):
     assert run(seed, initialized.vault) == 2
     assert not (initialized.vault / seed.REL_PATH).exists()
