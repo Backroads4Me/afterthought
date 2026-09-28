@@ -21,6 +21,32 @@ PI_HEADER_ID = "7be69a6f-a36a-507b-b4b7-6cc754237d29"
 # Claude reader gives the result of a user message.
 CLAUDE_EMPTY_RESULT_ID = "38624bec-7c7e-5ca1-8d56-9f959db90177#toolu_5013a588fd9a51beb3d7ebb9"
 
+# A user turn the CLI tagged as though it were one of its own notices.
+MARKED_USER_TURN = {
+    "parentUuid": "9016e5a5-35e8-502c-ada5-9f305dcb1235",
+    "isSidechain": False,
+    "promptId": "6c5feec8-b407-5da0-8a22-a970fbcd2b2e",
+    "type": "user",
+    "message": {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "did the schedule doc land?"},
+            {
+                "type": "tool_result",
+                "content": "schedule doc missing",
+                "is_error": True,
+                "tool_use_id": "toolu_380fffc5950b58f6974ef308",
+            },
+        ],
+    },
+    "uuid": "d59a4bb6-be78-52de-92a5-2019e732fc1f",
+    "timestamp": "2026-09-28T06:57:06.713Z",
+    "sourceToolAssistantUUID": "9016e5a5-35e8-502c-ada5-9f305dcb1235",
+    "sessionId": "f3572571-122b-59d2-901e-3a3be1c5cd0a",
+    "version": "2.1.280",
+    "isApiErrorMessage": True,
+}
+
 
 def read(agent: str, fixture: str, after: str | None = None) -> list[readers.Entry]:
     return list(readers.read(agent, FIXTURES / fixture, after))
@@ -34,20 +60,39 @@ def ids(entries) -> list[str]:
     return [entry.id for entry in entries]
 
 
-def drop_field(fixture: str, record_id: str, field: str, tmp_path, name: str) -> Path:
-    """A copy of `fixture` with one field removed from the record `record_id`."""
-    lines = (FIXTURES / fixture).read_text().splitlines()
+DROP = object()  # a field to take out of the record rather than set
+
+
+def patch_record(fixture: str, record_id: str, tmp_path, name: str, **fields) -> Path:
+    """A copy of `fixture` with record `record_id` given `fields`, DROP removing one."""
+    records = [json.loads(line) for line in (FIXTURES / fixture).read_text().splitlines()]
+    for record in records:
+        if record.get("id") != record_id:
+            continue
+        for field, value in fields.items():
+            if value is DROP:
+                record.pop(field, None)
+            else:
+                record[field] = value
     path = tmp_path / name
-    path.write_text(
-        "\n".join(
-            json.dumps({k: v for k, v in json.loads(line).items() if k != field})
-            if json.loads(line).get("id") == record_id
-            else line
-            for line in lines
-        )
-        + "\n"
-    )
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
     return path
+
+
+def parts_holding(record: dict, container: str) -> list[dict]:
+    """The parts of one record that hold the fields an entry is built from."""
+    if container == "record":
+        return [record]
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return []
+    if container == "message":
+        return [message]
+    return [
+        block
+        for block in message.get("content", [])
+        if isinstance(block, dict) and block.get("type") == container
+    ]
 
 
 def test_claude_session_reads_the_conversation_in_file_order():
@@ -77,6 +122,37 @@ def test_claude_skips_the_notices_it_writes_in_place_of_an_answer():
     assert "Failed to authenticate" not in texts  # marked by isApiErrorMessage
     assert "No response requested" not in texts  # marked by the synthetic model
     assert len(entries) == 4  # neither notice becomes an entry
+
+
+def test_a_user_turn_the_cli_marked_is_still_read(tmp_path):
+    # The notices to skip are the ones Claude Code writes on its assistant entries, so a
+    # marker on a user turn does not unsay what the user asked or hide the tool result
+    # that came back inside the same message.
+    path = tmp_path / "claude-marked-user-turn.jsonl"
+    path.write_text(json.dumps(MARKED_USER_TURN) + "\n")
+
+    entries = list(readers.read(CLAUDE, path))
+
+    assert [(e.id, e.role) for e in entries] == [
+        ("d59a4bb6-be78-52de-92a5-2019e732fc1f", "user"),
+        ("d59a4bb6-be78-52de-92a5-2019e732fc1f#toolu_380fffc5950b58f6974ef308", "tool"),
+    ]
+    assert [e.text for e in entries] == [
+        "did the schedule doc land?",
+        "schedule doc missing",
+    ]
+    assert [e.is_error for e in entries] == [False, True]
+
+
+def test_a_marked_user_turn_that_cannot_be_read_is_reported(tmp_path):
+    # The guard on a message's content covers content, not one side of the conversation,
+    # so a user turn the CLI marked is still reported when none of it can be built.
+    path = tmp_path / "claude-marked-user-turn-unreadable.jsonl"
+    turn = {**MARKED_USER_TURN, "message": {"role": "user", "body": "retry"}}
+    path.write_text(json.dumps(turn) + "\n")
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(CLAUDE, path))
 
 
 def test_claude_splits_a_tool_result_out_of_the_user_message_it_came_in():
@@ -295,7 +371,9 @@ def test_damage_to_a_record_off_the_branch_leaves_the_read_alone(tmp_path, caplo
     # 2bef3173 is the user turn as it stood before /tree re-submitted it, so it sits on
     # the branch the walk dropped. Whether a record is part of the conversation this
     # read hands over is what decides it, and a dropped record is not.
-    path = drop_field("pi-resumed.jsonl", "2bef3173", "timestamp", tmp_path, "pi-dead-branch.jsonl")
+    path = patch_record(
+        "pi-resumed.jsonl", "2bef3173", tmp_path, "pi-dead-branch.jsonl", timestamp=DROP
+    )
 
     with caplog.at_level(logging.WARNING):
         entries = list(readers.read(PI, path))
@@ -307,7 +385,21 @@ def test_damage_to_a_record_off_the_branch_leaves_the_read_alone(tmp_path, caplo
 def test_damage_to_a_record_the_branch_kept_is_reported(tmp_path):
     # The same field gone from 2f255160, which the walk did keep: the conversation being
     # handed over holds a record no entry can be built from, which is a changed format.
-    path = drop_field("pi-resumed.jsonl", "2f255160", "timestamp", tmp_path, "pi-live-branch.jsonl")
+    path = patch_record(
+        "pi-resumed.jsonl", "2f255160", tmp_path, "pi-live-branch.jsonl", timestamp=DROP
+    )
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(PI, path))
+
+
+def test_a_record_id_that_is_not_a_name_is_reported(tmp_path):
+    # pi names every record with a string id, so an id the walk cannot place on any
+    # branch is not one it dropped. Capture is told to retry the reader error, not a
+    # type error it was never given.
+    path = patch_record(
+        "pi-session.jsonl", "61afebc7", tmp_path, "pi-id-not-a-name.jsonl", id={"value": "a2"}
+    )
 
     with pytest.raises(readers.UnrecognizedTranscript):
         list(readers.read(PI, path))
@@ -414,6 +506,7 @@ def test_a_renamed_claude_field_is_reported_not_read_as_empty(tmp_path):
         ("claude-session.jsonl", "tool_result", "tool_use_id"),
         ("pi-session.jsonl", "message", "content"),
         ("pi-session.jsonl", "message", "role"),
+        ("pi-session.jsonl", "record", "id"),
     ],
 )
 def test_a_renamed_field_an_entry_is_built_from_is_reported(tmp_path, fixture, container, field):
@@ -421,19 +514,7 @@ def test_a_renamed_field_an_entry_is_built_from_is_reported(tmp_path, fixture, c
     # transcript that renamed one still holds its conversation, unreadably.
     records = [json.loads(line) for line in (FIXTURES / fixture).read_text().splitlines()]
     for record in records:
-        message = record.get("message")
-        if not isinstance(message, dict):
-            continue
-        parts = (
-            [message]
-            if container == "message"
-            else [
-                block
-                for block in message.get("content", [])
-                if isinstance(block, dict) and block.get("type") == container
-            ]
-        )
-        for part in parts:
+        for part in parts_holding(record, container):
             if field in part:
                 part["renamed_" + field] = part.pop(field)
     path = tmp_path / f"{fixture}-{container}-{field}-renamed.jsonl"

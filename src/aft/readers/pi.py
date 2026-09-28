@@ -47,7 +47,13 @@ LOGGER = logging.getLogger(__name__)
 def read(path: Path) -> Iterator[Entry]:
     """The conversation: the entries of the file that sit on the active branch."""
     active = _active_branch(path)
-    return iter_entries(path, _record_entries, lambda record: record.get("id") in active)
+
+    def kept(record: dict) -> bool:
+        """Every record but one the walk placed on a branch it dropped."""
+        entry_id = record.get("id")
+        return not isinstance(entry_id, str) or entry_id in active
+
+    return iter_entries(path, _record_entries, kept)
 
 
 def _record_entries(record: dict) -> Iterator[Entry]:
@@ -109,7 +115,9 @@ def _active_branch(path: Path) -> set[str]:
         branch.add(current)
         current = parents[current]
     if isinstance(current, str) and current not in parents:
-        off_branch = sum(1 for entry_id in message_ids if entry_id not in branch)
+        off_branch = sum(
+            1 for entry_id in message_ids if not isinstance(entry_id, str) or entry_id not in branch
+        )
         LOGGER.warning(
             "%s: no record with id %s: the active branch ends there and %d message "
             "records of the file fall off it",

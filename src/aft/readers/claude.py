@@ -62,10 +62,12 @@ def _record_entries(record: dict) -> Iterator[Entry]:
     # written on compaction, whose content repeats entries already read.
     if record.get("isMeta") or record.get("isCompactSummary"):
         return
-    # A notice the CLI wrote stands for infrastructure, not for an answer, so the
-    # marker decides it and the wording never does: a digest would quote that
-    # wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
-    if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
+    # A notice the CLI wrote on an assistant entry stands for infrastructure, not for an
+    # answer, so the marker decides it and the wording never does: a digest would quote
+    # that wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
+    if kind == ASSISTANT and (
+        message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage")
+    ):
         return
     content = message.get("content")
     if not isinstance(content, (str, list)):
