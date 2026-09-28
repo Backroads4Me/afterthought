@@ -73,8 +73,7 @@ def test_every_quote_sits_under_its_cited_heading(registered, seed):
         resource, _, heading = source["resource"].partition("#")
         assert resource == seed.DESIGN_RESOURCE
         bodies = sections[heading]
-        assert len(bodies) == 1, source["resource"]
-        assert source["quote"] in bodies[0]
+        assert any(source["quote"] in body for body in bodies), source["resource"]
 
 
 def test_facts_are_observed_and_each_has_a_source(registered, seed):
@@ -85,6 +84,11 @@ def test_facts_are_observed_and_each_has_a_source(registered, seed):
     assert {fact.source for fact in page.facts} == {"observed"}
     assert all(fact.refs for fact in page.facts)
     assert len(source_ids(page)) == len(page.facts)
+
+
+def test_a_page_with_no_earlier_dates_seeds_every_fact_today(registered, seed):
+    assert run(seed, registered.vault) == 0
+    assert {fact.date for fact in page_of(registered, seed).facts} == {date.today().isoformat()}
 
 
 def test_a_rerun_refuses_to_replace_the_page(registered, seed, capsys):
@@ -155,6 +159,33 @@ def test_overwrite_dates_a_fact_whose_page_date_is_unreadable(registered, seed):
     assert kept == [past] * len(kept)
 
 
+def test_overwrite_refuses_a_page_whose_frontmatter_it_cannot_read(registered, seed, capsys):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    text = path.read_text()
+    broken = text.replace("type: Project\n", "type: Project\n  bad: [unclosed\n", 1)
+    assert broken != text
+    path.write_text(broken)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: break the frontmatter")
+    assert run(seed, registered.vault, "--overwrite") == 2
+    assert str(path) in capsys.readouterr().err
+    assert path.read_text() == broken
+    assert run_git(["status", "--porcelain"], registered.vault) == ""
+
+
+def test_overwrite_refuses_a_page_whose_source_lost_its_quote(registered, seed, capsys):
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    text = path.read_text()
+    broken = re.sub(r"^  quote:.*\n", "", text, count=1, flags=re.MULTILINE)
+    assert broken != text
+    path.write_text(broken)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: drop a source quote")
+    assert run(seed, registered.vault, "--overwrite") == 2
+    assert "s1" in capsys.readouterr().err
+    assert path.read_text() == broken
+
+
 def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):
     assert run(seed, initialized.vault) == 2
     assert not (initialized.vault / seed.REL_PATH).exists()
@@ -212,11 +243,13 @@ def test_a_heading_inside_a_code_block_is_not_part_of_the_design(seed):
         seed.check_quotes((fenced,), design)
 
 
-def test_a_citation_to_a_heading_name_used_twice_is_refused(seed):
-    design = "# Kinds\n\nshared line\n\n# Kinds\n\nshared line and more\n"
-    ambiguous = seed.SeedFact("Facts", "a statement", "Kinds", "shared line")
+def test_a_quote_under_one_of_two_headings_of_the_same_name_is_accepted(seed):
+    design = "# Kinds\n\nthe real quote\n\n# Kinds\n\nother wording\n"
+    quoted = seed.SeedFact("Facts", "a statement", "Kinds", "the real quote")
+    seed.check_quotes((quoted,), design)
+    absent = seed.SeedFact("Facts", "a statement", "Kinds", "a line neither section has")
     with pytest.raises(seed.SeedError):
-        seed.check_quotes((ambiguous,), design)
+        seed.check_quotes((absent,), design)
 
 
 def test_a_fact_landing_outside_the_page_kinds_is_refused(seed):

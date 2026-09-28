@@ -10,7 +10,9 @@ in a scratch directory, so a page that breaks the page grammar never reaches the
 
 The page is memory people edit, so an existing one is left alone unless the run says
 ``--overwrite``. On such a run a fact whose statement and quote are unchanged keeps the date
-the page already carried: re-reading the same source is not new evidence.
+the page already carried: re-reading the same source is not new evidence. An existing page whose
+fact lines cite sources its own frontmatter does not define stops the run, since the dates on
+it cannot be read.
 
 Usage: uv run python scripts/seed_afterthought.py [--overwrite] <vault>
 """
@@ -196,8 +198,8 @@ def sections(design: str) -> dict[str, list[str]]:
 
     A heading inside a fenced code block is that block's content, not a section of the
     document, so it neither ends the body before it nor becomes a heading of its own. A name
-    used more than once maps to every body written under it, so a citation to it is reported
-    as ambiguous instead of silently resolving to the last one.
+    used more than once maps to every body written under it, so a quote copied from any of them
+    verifies instead of only from the last one.
     """
     found: dict[str, list[str]] = {}
     heading: str | None = None
@@ -223,7 +225,7 @@ def sections(design: str) -> dict[str, list[str]]:
 
 def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
     """Fail unless every fact names a kind section of a page and its quote appears verbatim
-    under the one heading it cites."""
+    under the heading it cites."""
     found = sections(design)
     for fact in facts:
         if fact.section not in pagemod.KIND_SECTIONS:
@@ -234,19 +236,19 @@ def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
         bodies = found.get(fact.heading)
         if bodies is None:
             raise SeedError(f"{DESIGN_RESOURCE} has no heading {fact.heading!r}")
-        if len(bodies) > 1:
-            raise SeedError(
-                f"{DESIGN_RESOURCE} has {len(bodies)} headings {fact.heading!r}, so the quote "
-                f"for {fact.statement!r} does not name one of them"
-            )
-        if fact.quote not in bodies[0]:
+        if not any(fact.quote in body for body in bodies):
             raise SeedError(f"quote is not verbatim under {fact.heading!r}: {fact.quote!r}")
 
 
 def prior_dates(path: Path) -> dict[tuple[str, str], str]:
     """The observed dates already on a page in the vault, keyed by the statement and quote that
-    make a fact the same fact. A line whose date is not a date is dropped, so the run dates it
-    anew rather than copying the bad text back into the page it writes."""
+    make a fact the same fact.
+
+    A line whose date is not a date is dropped, so the run dates that fact anew rather than
+    copying the bad text into the page it writes. A line citing a source the page does not
+    define with a quote is the opposite case: there the run cannot tell an unchanged fact from
+    a new one, so it refuses the page instead of rewriting the date its facts were seen on.
+    """
     if not path.exists():
         return {}
     page = pagemod.parse(path.read_text(), path)
@@ -255,6 +257,12 @@ def prior_dates(path: Path) -> dict[tuple[str, str], str]:
         for source in (page.frontmatter or {}).get("sources") or []
         if isinstance(source, dict) and source.get("id") is not None and "quote" in source
     }
+    unreadable = sorted({ref for fact in page.facts for ref in fact.refs if ref not in quotes})
+    if unreadable:
+        raise SeedError(
+            f"{path} cites {', '.join(unreadable)}, which its frontmatter does not define with "
+            "a quote: repair the page, or remove it and seed fresh"
+        )
     carried: dict[tuple[str, str], str] = {}
     for fact in page.facts:
         try:
@@ -262,8 +270,7 @@ def prior_dates(path: Path) -> dict[tuple[str, str], str]:
         except ValueError:
             continue
         for ref in fact.refs:
-            if ref in quotes:
-                carried[(fact.statement, quotes[ref])] = fact.date
+            carried[(fact.statement, quotes[ref])] = fact.date
     return carried
 
 
