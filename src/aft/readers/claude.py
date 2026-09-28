@@ -24,9 +24,12 @@ from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records,
 # The model Claude Code records on the assistant entries it writes itself.
 SYNTHETIC_MODEL = "<synthetic>"
 
+# Every Claude Code record, bookkeeping included, names its type and its session.
+SHAPE = ("type", "sessionId")
+
 
 def read(path: Path) -> Iterator[Entry]:
-    for record in iter_records(path):
+    for record in iter_records(path, SHAPE):
         entry_id = record.get("uuid")
         message = record.get("message")
         kind = record.get("type")

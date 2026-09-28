@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -177,6 +178,63 @@ def test_pi_continues_after_a_watermark():
     assert ids(read(PI, "pi-resumed.jsonl", after="17f1b5d4")) == ["2f255160"]
 
 
+def test_a_parent_the_file_lacks_ends_the_branch_and_says_so(tmp_path, caplog):
+    # A write that failed partway leaves 80343c73 as a fragment the parser drops, with
+    # the records after it still naming it as their parent. The branch ends at the
+    # break rather than guessing past it into whatever else the file holds.
+    lines = (FIXTURES / "pi-resumed.jsonl").read_text().splitlines()
+    path = tmp_path / "pi-torn-parent.jsonl"
+    path.write_text(
+        "\n".join(
+            '{"type":"message","id":"80343c73","parentId":"997aac76","mess'
+            if json.loads(line)["id"] == "80343c73"
+            else line
+            for line in lines
+        )
+        + "\n"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        entries = list(readers.read(PI, path))
+
+    assert ids(entries) == ["2f255160"]
+    warning = next(record for record in caplog.records if record.levelno == logging.WARNING)
+    assert warning.name == "aft.readers.pi"
+    text = warning.getMessage()
+    assert str(path) in text
+    assert "80343c73" in text
+    assert "5 message records" in text
+
+
+def test_a_new_root_opens_a_branch_and_warns_nothing(tmp_path, caplog):
+    # pi writes a null parentId when /tree moves the conversation to the root. What
+    # sits above that new root is an abandoned branch, so the short read is correct and
+    # nothing is missing.
+    lines = (FIXTURES / "pi-session.jsonl").read_text().splitlines()
+    root = {
+        "type": "message",
+        "id": "aaaa0001",
+        "parentId": None,
+        "timestamp": "2026-09-27T09:00:00.000Z",
+        "message": {"role": "user", "content": "back to the first question"},
+    }
+    reply = {
+        "type": "message",
+        "id": "aaaa0002",
+        "parentId": "aaaa0001",
+        "timestamp": "2026-09-27T09:00:30.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Sure."}]},
+    }
+    path = tmp_path / "pi-new-root.jsonl"
+    path.write_text("\n".join([*lines, json.dumps(root), json.dumps(reply)]) + "\n")
+
+    with caplog.at_level(logging.WARNING):
+        entries = list(readers.read(PI, path))
+
+    assert ids(entries) == ["aaaa0001", "aaaa0002"]
+    assert not caplog.records
+
+
 def test_entry_ids_are_unique_within_a_session():
     for path in sorted(FIXTURES.glob("*.jsonl")):
         seen = ids(read(agent_of(path.name), path.name))
@@ -188,6 +246,46 @@ def test_a_line_the_agent_left_half_written_is_skipped(tmp_path):
     path = tmp_path / "session.jsonl"
     path.write_text("\n".join([*lines, '{"type":"message","id":"9999"', "not json at all"]) + "\n")
     assert ids(readers.read(PI, path)) == ids(read(PI, "pi-session.jsonl"))
+
+
+def test_a_break_over_a_whole_conversation_reads_short_not_unreadable(tmp_path, caplog):
+    # The branch holds only a system message, so nothing is yielded, while the real
+    # conversation of the file sits behind the break. Recognized records are counted
+    # across the file, so this is a short read with a warning and not a changed format.
+    lines = (FIXTURES / "pi-session.jsonl").read_text().splitlines()
+    orphan = {
+        "type": "message",
+        "id": "cccc0001",
+        "parentId": "dddd9999",
+        "timestamp": "2026-09-27T09:00:00.000Z",
+        "message": {"role": "system", "content": "you are a coding agent"},
+    }
+    path = tmp_path / "pi-break-above-conversation.jsonl"
+    path.write_text("\n".join([*lines, json.dumps(orphan)]) + "\n")
+
+    with caplog.at_level(logging.WARNING):
+        entries = list(readers.read(PI, path))
+
+    assert entries == []
+    assert any("dddd9999" in record.getMessage() for record in caplog.records)
+
+
+def test_a_file_of_nothing_the_reader_reads_is_reported_rather_than_empty(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text('{"event": "session_start", "at": 1}\nnot json at all\n')
+
+    for agent in (CLAUDE, PI):
+        with pytest.raises(readers.UnrecognizedTranscript) as failure:
+            list(readers.read(agent, path))
+        assert str(path) in str(failure.value)
+
+
+def test_a_session_file_nothing_written_to_yet_is_simply_empty(tmp_path):
+    path = tmp_path / "empty.jsonl"
+    path.write_text("")
+
+    for agent in (CLAUDE, PI):
+        assert list(readers.read(agent, path)) == []
 
 
 def test_an_unknown_agent_is_reported_at_once():

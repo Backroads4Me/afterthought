@@ -8,6 +8,11 @@ downstream of it (capture, the filter, the archive, the digest) sees only
 Readers are deliberately forgiving. An entry type, a role or a field they do
 not recognize is skipped rather than fatal, so an agent update that adds bookkeeping
 to its transcript cannot break capture.
+
+That forgiveness is per entry. A file with lines and not one record of the agent's
+shape is a transcript in a format the reader no longer knows, so `iter_records`
+raises `UnrecognizedTranscript` rather than letting it read as a session with
+nothing to say.
 """
 
 from __future__ import annotations
@@ -30,6 +35,10 @@ class ReaderError(Exception):
     pass
 
 
+class UnrecognizedTranscript(ReaderError):
+    """The file holds content, but no record in the shape the agent's reader knows."""
+
+
 @dataclass(frozen=True)
 class Entry:
     # The agent's own entry id when the transcript carries one; for a tool result
@@ -48,6 +57,9 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
     ``after`` is the watermark of a session: the id of its last already-read
     entry. An id no entry in the file carries yields the whole session, since a
     watermark the file does not have calls for re-reading it, not for skipping it.
+
+    Raises ``ReaderError`` for an agent with no reader, and ``UnrecognizedTranscript``
+    for a file whose content is not in a shape that reader knows.
     """
     # The readers build the Entry defined above, so they import this module:
     # importing them here keeps the package importable in either order.
@@ -78,23 +90,36 @@ def _after(reopen: Callable[[], Iterator[Entry]], after: str | None) -> Iterator
     yield from reopen()
 
 
-def iter_records(path: Path) -> Iterator[dict]:
+def iter_records(path: Path, shape: tuple[str, ...]) -> Iterator[dict]:
     """The JSON objects of a JSONL session file, in file order.
 
-    A line that is not one is skipped: an agent killed mid-write leaves a
-    truncated last line, and capture should read what is there.
+    ``shape`` names the fields every record of the agent's transcript carries. A line
+    that is not one object is skipped: an agent killed mid-write leaves a truncated
+    last line, and capture should read what is there. A file with lines and not one
+    record of ``shape`` is the case a caller cannot tell from an empty session, so it
+    is reported instead. (BUILD-PLAN 5, M2.1)
     """
+    content = False
+    recognized = False
     with open(path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             line = line.strip()
             if not line:
                 continue
+            content = True
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(record, dict):
-                yield record
+            if not isinstance(record, dict):
+                continue
+            if all(isinstance(record.get(field), str) for field in shape):
+                recognized = True
+            yield record
+    if content and not recognized:
+        raise UnrecognizedTranscript(
+            f"{path}: no record carries the string fields {' and '.join(shape)}"
+        )
 
 
 def parse_time(value: object) -> datetime | None:

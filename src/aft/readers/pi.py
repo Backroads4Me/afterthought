@@ -16,6 +16,7 @@ leaf to the root.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -27,10 +28,15 @@ from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_records,
 # added - have no Entry to become.
 ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
+# Every pi record, bookkeeping included, names its type and carries its own id.
+SHAPE = ("type", "id")
+
+LOGGER = logging.getLogger(__name__)
+
 
 def read(path: Path) -> Iterator[Entry]:
     active = _active_branch(path)
-    for record in iter_records(path):
+    for record in iter_records(path, SHAPE):
         entry_id = record.get("id")
         message = record.get("message")
         time = parse_time(record.get("timestamp"))
@@ -56,10 +62,19 @@ def read(path: Path) -> Iterator[Entry]:
 
 
 def _active_branch(path: Path) -> set[str]:
-    """The ids from the last entry back to the root: the branch pi reads back."""
+    """The ids from the last entry back to the root: the branch pi reads back.
+
+    A parent that is null or absent is a root, and the walk ends there quietly. That
+    is how pi starts a branch when ``/tree`` moves the conversation to the root, and
+    nothing is lost by stopping at one. A parent naming an id no record in the file
+    carries is a break: the records it would have led to are lost ancestors or an
+    abandoned branch, and the reader cannot tell which, so it does not guess past
+    them. It ends the branch at the break and reports what the rest of the file
+    holds. (BUILD-PLAN 5, M2.1)
+    """
     parents: dict[str, str | None] = {}
     last: str | None = None
-    for record in iter_records(path):
+    for record in iter_records(path, SHAPE):
         entry_id = record.get("id")
         if not isinstance(entry_id, str):
             continue
@@ -71,4 +86,17 @@ def _active_branch(path: Path) -> set[str]:
     while isinstance(current, str) and current in parents and current not in branch:
         branch.add(current)
         current = parents[current]
+    if isinstance(current, str) and current not in parents:
+        off_branch = sum(
+            1
+            for record in iter_records(path, SHAPE)
+            if record.get("type") == "message" and record.get("id") not in branch
+        )
+        LOGGER.warning(
+            "%s: no record with id %s: the active branch ends there and %d message "
+            "records of the file fall off it",
+            path,
+            current,
+            off_branch,
+        )
     return branch
