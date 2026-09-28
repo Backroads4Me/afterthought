@@ -1,8 +1,9 @@
 """The injection block: what an agent is told at session start (design section 10).
 
 It reads files only, so a cold session gets the same block in every agent without a model
-call or an index. The parts come out in the design's order, and ``inject.max_chars``
-trims whole lines off the end: a fact is either in the block or left out, never cut short.
+call or an index. The parts come out in the design's order and ``inject.max_chars``
+trims each part to what is left of the budget: a fact is either in the block or left
+out, never cut short, and the closing lines on how to search and read keep room.
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ LISTING = "index.md"
 COLLECTION = "collection.md"
 PREFERENCES = Path("global/preferences.md")
 
+# One part of the block: the heading its lines sit under, "" when it has none, and
+# the lines under that heading.
+Part = tuple[str, list[str]]
+
 
 def build(config: Config, resolution: Resolution) -> str:
     """The block for ``resolution``.
@@ -39,7 +44,7 @@ def build(config: Config, resolution: Resolution) -> str:
     search and read. An unregistered or unresolved directory gets only global preferences
     and those lines.
     """
-    parts: list[list[str]] = []
+    parts: list[Part] = []
     slug = resolution.slug if resolution.registered else None
     if slug:
         parts += _overview_parts(config, resolution, slug)
@@ -47,11 +52,10 @@ def build(config: Config, resolution: Resolution) -> str:
     if slug:
         pages = config.vault / "projects" / slug
         parts.append(_part("Pages", _pointers(config, resolution, pages)))
-    parts.append([HOW_TO])
-    return _fit(_stack(parts), config.settings.inject.max_chars)
+    return _fit(parts, HOW_TO, config.settings.inject.max_chars)
 
 
-def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[list[str]]:
+def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[Part]:
     """The project's own layers: its name, the last handoff, and its overview's facts."""
     overview = _read_page(config.vault / "projects" / slug / OVERVIEW)
     parts = [_heading(resolution, overview)]
@@ -60,7 +64,7 @@ def _overview_parts(config: Config, resolution: Resolution, slug: str) -> list[l
     return parts
 
 
-def _heading(resolution: Resolution, overview: pagemod.Page | None) -> list[str]:
+def _heading(resolution: Resolution, overview: pagemod.Page | None) -> Part:
     """The block's title line, then the overview's description as its one-line summary."""
     frontmatter = overview.frontmatter if overview else None
     project = resolution.project
@@ -69,19 +73,31 @@ def _heading(resolution: Resolution, overview: pagemod.Page | None) -> list[str]
     description = _text(frontmatter, "description")
     if description:
         lines.append(description)
-    return lines
+    return ("", lines)
 
 
-def _handoff_part(config: Config, slug: str) -> list[str]:
+def _handoff_part(config: Config, slug: str) -> Part:
     """The handoff of the newest digest for the project, if there is one. Digests arrive
     with M2.6, so until then this part is empty."""
     return _part("Last session", _handoff(_newest_digest(config.vault / "digests" / slug)))
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The latest digest under ``directory``, which sorts last because its year and month
-    directories and its ``<date>-<agent>-<session>`` name lead with dates (design 6)."""
-    return max(directory.rglob("*.md"), key=str, default=None)
+    """The latest digest under ``directory``, which M2.6 files at
+    ``digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md`` (design 6)."""
+    return max(directory.rglob("*.md"), key=_digest_date, default=None)
+
+
+def _digest_date(digest: Path) -> tuple[int, int, str]:
+    """The date a digest is filed under: its year and month directories as numbers,
+    then the ``<date>-<agent>-<session>`` name that follows them. The directories read
+    as numbers so an unpadded month cannot sort an older digest above a newer one."""
+    parts = digest.parts
+    return (_as_int(parts[-3]), _as_int(parts[-2]), digest.name)
+
+
+def _as_int(part: str) -> int:
+    return int(part) if part.isdigit() else 0
 
 
 def _handoff(digest: Path | None) -> list[str]:
@@ -106,7 +122,7 @@ def _handoff(digest: Path | None) -> list[str]:
     return lines
 
 
-def _section_parts(page: pagemod.Page | None, sections: Iterable[str] | None) -> list[list[str]]:
+def _section_parts(page: pagemod.Page | None, sections: Iterable[str] | None) -> list[Part]:
     """The page's injected facts, in one part per section. ``None`` keeps the page's own
     section order."""
     if page is None:
@@ -114,7 +130,9 @@ def _section_parts(page: pagemod.Page | None, sections: Iterable[str] | None) ->
     order = dict.fromkeys(page.sections) if sections is None else sections
     parts = []
     for section in order:
-        facts = [f for f in page.facts if f.section == section and f.state in INJECTED]
+        facts = [
+            f for f in page.facts if f.section == section and f.state in INJECTED and not f.struck
+        ]
         parts.append(_part(section, [f"- {_shown(fact)}" for fact in facts]))
     return parts
 
@@ -146,7 +164,7 @@ def _collection_lines(config: Config, resolution: Resolution) -> list[str]:
     for path in sorted((config.vault / "references").glob(f"*/{COLLECTION}")):
         aft = _frontmatter(path).get("aft")
         projects = aft.get("projects") if isinstance(aft, dict) else None
-        if isinstance(projects, list) and project.id in [str(p) for p in projects]:
+        if isinstance(projects, list) and project.id in projects:
             lines.append(_pointer(path, config.vault))
     return lines
 
@@ -159,36 +177,45 @@ def _pointer(path: Path, vault: Path) -> str:
     return f"- {title}{f': {summary}' if summary else ''} (aft read {where})"
 
 
-def _part(heading: str, lines: list[str]) -> list[str]:
+def _part(heading: str, lines: list[str]) -> Part:
     """One labelled part of the block, or nothing when there is nothing to say."""
-    return [f"## {heading}", "", *lines] if lines else []
+    return (heading, lines) if lines else ("", [])
 
 
-def _stack(parts: list[list[str]]) -> list[str]:
-    """The parts in order, with one blank line between each."""
-    lines: list[str] = []
-    for part in parts:
-        if not part:
-            continue
-        if lines:
-            lines.append("")
-        lines += part
-    return lines
+def _fit(parts: list[Part], closing: str, max_chars: int) -> str:
+    """The parts stacked in order, each trimmed to what is left of ``max_chars``.
 
-
-def _fit(lines: list[str], max_chars: int) -> str:
-    """The longest run of whole lines that fits in ``max_chars``, counting the newlines
-    that join them."""
-    kept: list[str] = []
+    Lines come off a part's end whole, so a fact is either in the block or left out
+    and never cut short. A part with no room left for a line of its own drops out
+    with its heading rather than showing an empty one, and ``closing`` (the block's
+    fixed last line) keeps room for itself, so the longest overview still tells the
+    session how to search and read (design 10).
+    """
+    room = max_chars - len(closing) - 2
+    blocks: list[str] = []
     used = 0
-    for line in lines:
-        used += len(line) + 1
-        if used > max_chars:
-            break
-        kept.append(line)
-    while kept and not kept[-1].strip():
-        kept.pop()
-    return "\n".join(kept)
+    for heading, content in parts:
+        label = _label(heading)
+        cost = (2 if blocks else 0) + len(label)
+        kept: list[str] = []
+        for line in content:
+            extra = len(line) + (1 if kept else 0)
+            if used + cost + extra > room:
+                break
+            kept.append(line)
+            cost += extra
+        if not kept:
+            continue
+        blocks.append(label + "\n".join(kept))
+        used += cost
+    if used + (2 if blocks else 0) + len(closing) <= max_chars:
+        blocks.append(closing)
+    return "\n\n".join(blocks)
+
+
+def _label(heading: str) -> str:
+    """A part's heading as the block shows it, with the blank line under it."""
+    return f"## {heading}\n\n" if heading else ""
 
 
 def _frontmatter(path: Path) -> dict:

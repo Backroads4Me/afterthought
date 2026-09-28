@@ -10,8 +10,9 @@ import pytest
 from aft import inject, keys
 from aft.cli import main
 from aft.config import Config, InjectConfig
+from aft.gitutil import normalize_remote
 from aft.registry import Registry, path_key
-from conftest import make_repo
+from conftest import make_repo, run_git
 
 HOST = "testhost"
 
@@ -35,6 +36,7 @@ aft:
 ## Facts
 
 - The widget is round. [observed] 2026-09-11 [^s1]
+- ~~The daemon runs on systemd.~~ [observed] 2026-09-05 [^s1]
 - The widget is square. [observed] 2026-09-10 [^s1] (stale 2026-09-20: the round model replaced it)
 
 ## Procedures
@@ -199,6 +201,20 @@ def write(path: Path, text: str) -> Path:
     return path
 
 
+def parts_of(block: str) -> dict[str, list[str]]:
+    """The block as it emits its parts: the lines under each ``##`` heading, the lines
+    before the first heading under ``""``, and the closing line as the part it is."""
+    groups: dict[str, list[str]] = {"": []}
+    heading = ""
+    for line in block.splitlines():
+        if line.startswith("## ") or line == inject.HOW_TO:
+            heading = line
+            groups.setdefault(heading, [])
+        if line.strip() and not line.startswith("## "):
+            groups[heading].append(line)
+    return groups
+
+
 @pytest.fixture
 def widget(initialized: Config, tmp_path) -> Config:
     """A registered project with an overview, a second page, a collection and digests."""
@@ -239,6 +255,7 @@ def test_the_block_layers_in_design_order(widget, tmp_path):
         "The widget is square.",  # stale
         "Storage is plain files.",  # superseded
         "Rebooting fixes the hang.",  # withdrawn
+        "The daemon runs on systemd.",  # struck through with no reason recorded
         "The session wrote the injection block.",  # a digest's facts, not its handoff
     ],
 )
@@ -277,15 +294,51 @@ def test_the_pages_layer_points_at_every_page_but_the_overview_and_the_listing(w
 def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
     resolution = resolve(widget, tmp_path / "widget")
     full = inject.build(widget, resolution)
-    lines = full.splitlines()
+    complete = parts_of(full)
     for cap in range(0, len(full) + 1, 17):
         capped = dataclasses.replace(
             widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(cap))
         )
         block = inject.build(capped, resolution)
-        assert len(block) <= cap
-        assert full.startswith(block)
-        assert block == "\n".join(lines[: len(block.splitlines())])
+        assert len(block) <= cap, f"cap {cap} gave {len(block)} characters"
+        parts = parts_of(block)
+        for heading, under in parts.items():
+            shown = complete[heading]
+            assert under == shown[: len(under)], f"cap {cap} cut into {heading or 'the title'}"
+            assert not heading.startswith("## ") or under, f"cap {cap} left {heading} empty"
+        assert inject.HOW_TO in parts or len(block) + 2 + len(inject.HOW_TO) > cap
+
+
+def test_a_long_overview_still_tells_the_session_how_to_search(widget, tmp_path):
+    """The block stays a map of the project: the lines on how to search and read
+    keep their room even when the overview's own facts overflow the cap."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    facts = "\n".join(
+        f"- Fact {number} is long enough that the overview alone fills the block."
+        f" [observed] 2026-09-30 [^s1]"
+        for number in range(200)
+    )
+    write(
+        widget.vault / "projects/widget/overview.md",
+        "---\ntype: Project\ntitle: Widget\n"
+        "description: A widget that turns water into widgets.\nsources: []\n"
+        f"aft:\n  project: {project.id}\n---\n\n## Facts\n\n{facts}\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert len(block) <= widget.settings.inject.max_chars
+    assert block.endswith(inject.HOW_TO)
+
+
+def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_path):
+    """M2.6 files a digest at ``digests/<slug>/<yyyy>/<mm>/``; the month directory
+    is read as a number, so a ``9`` cannot sort a September handoff above October."""
+    write(
+        widget.vault / "digests/widget/2026/9/2026-09-30-pi-old.md",
+        DIGEST.format(date="2026-09-30", in_flight="the September draft"),
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "- In flight: the block" in block
+    assert "the September draft" not in block
 
 
 def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path):
@@ -358,3 +411,24 @@ def test_inject_prints_what_it_has_elsewhere(widget, tmp_path, capsys, monkeypat
     assert capsys.readouterr().out == (
         "## Preferences\n\n- Prefer short commits.\n\n" + inject.HOW_TO + "\n"
     )
+
+
+def test_injection_writes_nothing_even_when_it_resolves_by_remote(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """Reads files only: the alias ``aft key`` records for a re-clone is not recorded
+    here, so the registry and the vault's history stay exactly as they were."""
+    origin = "git@github.com:Example/Widget.git"
+    registry = Registry.load(widget.registry_path)
+    registry.add_remote(registry.by_slug("widget"), normalize_remote(origin))
+    registry.save()
+    registry_before = widget.registry_path.read_bytes()
+    log_before = run_git(["log", "--format=%H"], widget.vault)
+    status_before = run_git(["status", "--porcelain"], widget.vault)
+    clone = make_repo(tmp_path / "re-clone", origin=origin)
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    assert main(["inject", str(clone)]) == 0
+    assert capsys.readouterr().out == EXPECTED + "\n"
+    assert widget.registry_path.read_bytes() == registry_before
+    assert run_git(["log", "--format=%H"], widget.vault) == log_before
+    assert run_git(["status", "--porcelain"], widget.vault) == status_before
