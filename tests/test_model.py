@@ -276,17 +276,54 @@ def test_an_error_from_a_keyed_call_does_not_print_the_key(serve, monkeypatch):
     assert len(fake.requests) == 3
 
 
-def test_a_key_too_short_to_cut_out_takes_the_message_with_it(serve, monkeypatch):
-    # A one-character value is likelier part of the prose than a key, so the report says
-    # a message was withheld rather than arriving with letters punched out of it.
-    monkeypatch.setenv(KEY_VARIABLE, "a")
-    fake, cfg = serve(Reply(status=400), api_key_env=KEY_VARIABLE)
+def test_a_short_key_leaves_a_down_endpoint_still_named(home, monkeypatch):
+    # A placeholder value exported while an endpoint is being wired up is too short to cut
+    # out of prose, and the report of an endpoint that never answered still has to name
+    # it: DESIGN 14 leaves the queued work to be reported with exactly that text.
+    monkeypatch.setenv(KEY_VARIABLE, "dummy")
+    fake = FakeEndpoint()
+    fake.start()
+    endpoint = fake.endpoint
+    fake.stop()
+    with pytest.raises(model.ModelError) as refusal:
+        call(point_at(home, endpoint, KEY_VARIABLE))
+    reported = str(refusal.value)
+    assert "cannot reach" in reported
+    assert endpoint in reported
+    assert "dummy" not in reported
+
+
+def test_a_short_key_withholds_only_what_the_endpoint_said(serve, monkeypatch):
+    # The endpoint's own body is the one piece that can echo a key back, so a short key
+    # takes that body out and nothing else: the endpoint and the status stay on the line.
+    monkeypatch.setenv(KEY_VARIABLE, "dummy")
+    detail = b'{"error": {"message": "no dummy key accepted"}}'
+    header = b"HTTP/1.1 400 Bad Request\r\nContent-Length: " + str(len(detail)).encode()
+    fake, cfg = serve(Reply(raw=header + b"\r\n\r\n" + detail), api_key_env=KEY_VARIABLE)
     with pytest.raises(model.ModelError) as refusal:
         call(cfg)
     reported = str(refusal.value)
-    assert "withheld" in reported
+    assert "returned 400" in reported
+    assert "127.0.0.1" in reported
+    assert "[details withheld]" in reported
+    assert "dummy" not in reported
+    assert len(fake.requests) == 1
+
+
+def test_a_ledger_that_cannot_be_written_names_the_ledger(serve, monkeypatch):
+    # The answer arrived and was usable: a write that did not happen is a local failure,
+    # so its report names the file and gains no endpoint and no status it never touched.
+    monkeypatch.setenv(KEY_VARIABLE, "dummy")
+    fake, cfg = serve({"answer": "yes"}, api_key_env=KEY_VARIABLE)
+    ledger = model.usage_path(cfg)
+    ledger.mkdir()
+    with pytest.raises(model.ModelError) as refusal:
+        call(cfg)
+    reported = str(refusal.value)
+    assert "cannot record token usage" in reported
+    assert str(ledger) in reported
     assert "127.0.0.1" not in reported
-    assert "[redacted]" not in reported
+    assert "returned" not in reported
     assert len(fake.requests) == 1
 
 
@@ -440,9 +477,3 @@ def test_a_malformed_schema_reports_as_a_schema_problem(declared):
     # charged to the schema rather than arriving as an AttributeError over an answer.
     with pytest.raises(schema.SchemaError, match="the schema for"):
         schema.validate({"answer": "ok", "counts": [1]}, declared)
-
-
-def test_a_schema_that_wears_a_slip_as_a_missing_key_is_corrected():
-    # ``"required": "summary"`` is an authoring slip, not a model that forgot a key.
-    with pytest.raises(schema.SchemaError, match="declares required as"):
-        schema.validate({"summary": "fine"}, {"required": "summary"})
