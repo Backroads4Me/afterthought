@@ -26,9 +26,11 @@ from aft.events import (
 AGENT = "claude"
 
 # Claude Code's event name -> the kind afterthought dispatches it as, and the field
-# that says why it fired, kept as SessionEvent.detail: `source` is startup, resume,
-# clear, compact or fork; `trigger` is manual or auto; `reason` is clear, resume,
-# logout, prompt_input_exit or other.
+# that says why it fired, kept as SessionEvent.detail. The hooks reference enumerates
+# `source` as startup, resume, clear, compact or fork, and `trigger` as manual or auto;
+# for `reason` it gives clear, logout, prompt_input_exit and other, and does not list
+# resume. `detail` stores whatever the source reports verbatim, so a value outside
+# these lists passes through rather than failing the event.
 EVENTS = {
     "SessionStart": (SESSION_START, "source"),
     "PreCompact": (COMPACTION, "trigger"),
