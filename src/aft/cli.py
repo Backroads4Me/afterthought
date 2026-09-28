@@ -299,12 +299,12 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
     a home that cannot be resolved or written to, a line that cannot be written, and an
     expiry that lands mid-write are a lost record, not a reason to fail the agent.
     """
-    line = (
-        f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
-        f" {type(exc).__name__}: {exc} | {event[:HOOK_LOG_FIELD_LIMIT]}"
-    )
-    line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
     try:
+        line = (
+            f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
+            f" {type(exc).__name__}: {exc} | {event[:HOOK_LOG_FIELD_LIMIT]}"
+        )
+        line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
         with _hook_time_limit(HOOK_LOG_TIMEOUT_SECONDS):
             home = resolve_home()
             (home / "logs").mkdir(parents=True, exist_ok=True)
