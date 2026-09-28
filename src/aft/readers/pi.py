@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from datetime import datetime
 from pathlib import Path
 
 from aft.readers import (
@@ -26,6 +25,7 @@ from aft.readers import (
     TOOL,
     USER,
     Entry,
+    UnreadableRecord,
     blocks_text,
     iter_entries,
     iter_records,
@@ -47,39 +47,32 @@ LOGGER = logging.getLogger(__name__)
 def read(path: Path) -> Iterator[Entry]:
     """The conversation: the entries of the file that sit on the active branch."""
     active = _active_branch(path)
-    for entry in iter_entries(path, _record_entries, _unreadable):
-        if entry.id in active:
-            yield entry
+    return iter_entries(path, _record_entries, lambda record: record.get("id") in active)
 
 
-def _parts(record: dict) -> tuple[str, datetime, dict] | None:
-    """The id, time and message of a readable message record, or None."""
+def _record_entries(record: dict) -> Iterator[Entry]:
+    """The entry one message record carries, or none.
+
+    Raises ``UnreadableRecord`` for a message record this reader cannot build an entry
+    from. A role it does not know is an entry type it skips, not a changed format.
+    """
+    if record.get("type") not in CONVERSATION:
+        return
     entry_id = record.get("id")
     time = parse_time(record.get("timestamp"))
     message = record.get("message")
     if not isinstance(entry_id, str) or time is None or not isinstance(message, dict):
-        return None
-    return entry_id, time, message
-
-
-def _unreadable(record: dict) -> bool:
-    """True for a message record whose parts this reader cannot read."""
-    return record.get("type") in CONVERSATION and _parts(record) is None
-
-
-def _record_entries(record: dict) -> Iterator[Entry]:
-    """The entry one message record carries, or none."""
-    if record.get("type") not in CONVERSATION:
-        return
-    parts = _parts(record)
-    if parts is None:
-        return
-    entry_id, time, message = parts
+        raise UnreadableRecord
     role_name = message.get("role")
-    role = ROLES.get(role_name) if isinstance(role_name, str) else None
+    if not isinstance(role_name, str):
+        raise UnreadableRecord
+    role = ROLES.get(role_name)
     if role is None:
         return
-    text = blocks_text(message.get("content"))
+    content = message.get("content")
+    if not isinstance(content, (str, list)):
+        raise UnreadableRecord
+    text = blocks_text(content)
     # A turn with no text of its own is not an entry: an assistant turn that only
     # thought or called tools, or a tool result that returned nothing.
     if not text:

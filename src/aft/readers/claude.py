@@ -19,7 +19,16 @@ from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 
-from aft.readers import ASSISTANT, TOOL, USER, Entry, blocks_text, iter_entries, parse_time
+from aft.readers import (
+    ASSISTANT,
+    TOOL,
+    USER,
+    Entry,
+    UnreadableRecord,
+    blocks_text,
+    iter_entries,
+    parse_time,
+)
 
 # The model Claude Code records on the assistant entries it writes itself.
 SYNTHETIC_MODEL = "<synthetic>"
@@ -30,53 +39,43 @@ CONVERSATION = (USER, ASSISTANT)
 
 def read(path: Path) -> Iterator[Entry]:
     """The session's entries: what the records of the file hold, in file order."""
-    return iter_entries(path, _record_entries, _unreadable)
+    return iter_entries(path, _record_entries)
 
 
-def _parts(record: dict) -> tuple[str, datetime, dict] | None:
-    """The id, time and message of a readable conversation record, or None."""
+def _record_entries(record: dict) -> Iterator[Entry]:
+    """The entries one record carries: its message, and any tool result inside it.
+
+    Raises ``UnreadableRecord`` for a user or assistant record this reader cannot build
+    an entry from. A record it can read and that holds nothing - a prompt meant for the
+    agent, the summary of a compaction, a turn that only thought, a result that returned
+    no text - yields nothing.
+    """
+    kind = record.get("type")
+    if kind not in CONVERSATION:
+        return
     entry_id = record.get("uuid")
     time = parse_time(record.get("timestamp"))
     message = record.get("message")
     if not isinstance(entry_id, str) or time is None or not isinstance(message, dict):
-        return None
-    return entry_id, time, message
-
-
-def _unreadable(record: dict) -> bool:
-    """True for a conversation record whose parts this reader cannot read."""
-    return record.get("type") in CONVERSATION and _parts(record) is None
-
-
-def _record_entries(record: dict) -> Iterator[Entry]:
-    """The entries one record carries: its message, and any tool result inside it."""
-    kind = record.get("type")
-    if kind not in CONVERSATION:
-        return
-    parts = _parts(record)
-    if parts is None:
-        return
-    entry_id, time, message = parts
+        raise UnreadableRecord
     # isMeta: the CLI's own prompt to the agent. isCompactSummary: the summary
     # written on compaction, whose content repeats entries already read.
     if record.get("isMeta") or record.get("isCompactSummary"):
         return
-    content = message.get("content")
-    if kind == ASSISTANT:
-        # A notice the CLI wrote stands for infrastructure, not for an answer, so
-        # the marker decides it and the wording never does: a digest would quote
-        # that wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
-        if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
-            return
-        # A turn that only thought or called tools has no text of its own.
-        text = blocks_text(content)
-        if text:
-            yield Entry(entry_id, time, ASSISTANT, text, False)
+    # A notice the CLI wrote stands for infrastructure, not for an answer, so the
+    # marker decides it and the wording never does: a digest would quote that
+    # wording as though the assistant had said it. (BUILD-PLAN 5, M2.1)
+    if message.get("model") == SYNTHETIC_MODEL or record.get("isApiErrorMessage"):
         return
+    content = message.get("content")
+    if not isinstance(content, (str, list)):
+        raise UnreadableRecord
+    # A turn that only thought or called tools has no text of its own.
     text = blocks_text(content)
     if text:
-        yield Entry(entry_id, time, USER, text, False)
-    yield from _tool_results(entry_id, time, content)
+        yield Entry(entry_id, time, kind, text, False)
+    if kind == USER:
+        yield from _tool_results(entry_id, time, content)
 
 
 def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[Entry]:
@@ -86,14 +85,19 @@ def _tool_results(entry_id: str, time: datetime, content: object) -> Iterator[En
     for block in content:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
             continue
-        text = blocks_text(block.get("content"))
-        # A result that returned no text is not an entry, whatever it carried.
+        # The API leaves content off a result that returned nothing, and a result with
+        # no text is not an entry, whatever else it carried.
+        result = block.get("content")
+        if result is None:
+            continue
+        if not isinstance(result, (str, list)):
+            raise UnreadableRecord
+        text = blocks_text(result)
         if not text:
             continue
-        # The user message holds the entry id; the result inside it has Claude's
-        # own tool_use_id, which is what names this part of the entry. A block with
-        # no tool call to name holds no entry.
+        # The user message holds the entry id; the result inside it has Claude's own
+        # tool_use_id, which is what names this part of the entry.
         result_id = block.get("tool_use_id")
         if not isinstance(result_id, str):
-            continue
+            raise UnreadableRecord
         yield Entry(f"{entry_id}#{result_id}", time, TOOL, text, bool(block.get("is_error")))

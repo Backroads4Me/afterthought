@@ -34,6 +34,22 @@ def ids(entries) -> list[str]:
     return [entry.id for entry in entries]
 
 
+def drop_field(fixture: str, record_id: str, field: str, tmp_path, name: str) -> Path:
+    """A copy of `fixture` with one field removed from the record `record_id`."""
+    lines = (FIXTURES / fixture).read_text().splitlines()
+    path = tmp_path / name
+    path.write_text(
+        "\n".join(
+            json.dumps({k: v for k, v in json.loads(line).items() if k != field})
+            if json.loads(line).get("id") == record_id
+            else line
+            for line in lines
+        )
+        + "\n"
+    )
+    return path
+
+
 def test_claude_session_reads_the_conversation_in_file_order():
     entries = read(CLAUDE, "claude-session.jsonl")
     assert [(e.role, e.is_error) for e in entries] == [
@@ -275,6 +291,28 @@ def test_a_break_over_a_whole_conversation_reads_short_not_unreadable(tmp_path, 
     assert any("dddd9999" in record.getMessage() for record in caplog.records)
 
 
+def test_damage_to_a_record_off_the_branch_leaves_the_read_alone(tmp_path, caplog):
+    # 2bef3173 is the user turn as it stood before /tree re-submitted it, so it sits on
+    # the branch the walk dropped. Whether a record is part of the conversation this
+    # read hands over is what decides it, and a dropped record is not.
+    path = drop_field("pi-resumed.jsonl", "2bef3173", "timestamp", tmp_path, "pi-dead-branch.jsonl")
+
+    with caplog.at_level(logging.WARNING):
+        entries = list(readers.read(PI, path))
+
+    assert ids(entries) == ["8538c366", "b0f7bd00", "17f1b5d4", "2f255160"]
+    assert not caplog.records
+
+
+def test_damage_to_a_record_the_branch_kept_is_reported(tmp_path):
+    # The same field gone from 2f255160, which the walk did keep: the conversation being
+    # handed over holds a record no entry can be built from, which is a changed format.
+    path = drop_field("pi-resumed.jsonl", "2f255160", "timestamp", tmp_path, "pi-live-branch.jsonl")
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(PI, path))
+
+
 def test_a_file_of_nothing_the_reader_reads_is_reported_rather_than_empty(tmp_path):
     path = tmp_path / "events.jsonl"
     path.write_text('{"event": "session_start", "at": 1}\nnot json at all\n')
@@ -367,6 +405,42 @@ def test_a_renamed_claude_field_is_reported_not_read_as_empty(tmp_path):
 
     with pytest.raises(readers.UnrecognizedTranscript):
         list(readers.read(CLAUDE, path))
+
+
+@pytest.mark.parametrize(
+    "fixture, container, field",
+    [
+        ("claude-session.jsonl", "message", "content"),
+        ("claude-session.jsonl", "tool_result", "tool_use_id"),
+        ("pi-session.jsonl", "message", "content"),
+        ("pi-session.jsonl", "message", "role"),
+    ],
+)
+def test_a_renamed_field_an_entry_is_built_from_is_reported(tmp_path, fixture, container, field):
+    # An entry is built from the fields of the message and of the blocks inside it, so a
+    # transcript that renamed one still holds its conversation, unreadably.
+    records = [json.loads(line) for line in (FIXTURES / fixture).read_text().splitlines()]
+    for record in records:
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        parts = (
+            [message]
+            if container == "message"
+            else [
+                block
+                for block in message.get("content", [])
+                if isinstance(block, dict) and block.get("type") == container
+            ]
+        )
+        for part in parts:
+            if field in part:
+                part["renamed_" + field] = part.pop(field)
+    path = tmp_path / f"{fixture}-{container}-{field}-renamed.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(agent_of(fixture), path))
 
 
 def test_a_well_formed_session_reads_without_a_warning(caplog):

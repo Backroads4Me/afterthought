@@ -10,9 +10,9 @@ not recognize is skipped rather than fatal, so an agent update that adds bookkee
 to its transcript cannot break capture.
 
 That forgiveness is per entry. `iter_entries` reports the two readings that are not
-forgiveness but a changed format: a conversation record this reader cannot read, and a
-file of text holding no record that names its type. Everything else, a bookkeeping-only
-session included, is a session with nothing to say.
+forgiveness but a changed format: an entry of the conversation being handed over that
+this reader cannot build, and a file of text holding no record that names its type.
+Everything else, a bookkeeping-only session included, is a session with nothing to say.
 """
 
 from __future__ import annotations
@@ -37,6 +37,10 @@ class ReaderError(Exception):
 
 class UnrecognizedTranscript(ReaderError):
     """A transcript in no format this reader can read: see ``iter_entries``."""
+
+
+class UnreadableRecord(ReaderError):
+    """A record a reader could not build entries from: what ``iter_entries`` reports."""
 
 
 @dataclass(frozen=True)
@@ -73,11 +77,12 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
 
 
 def _after(reopen: Callable[[], Iterator[Entry]], after: str | None) -> Iterator[Entry]:
-    """The entries after ``after``, streaming so a long session costs its tail only.
+    """The entries after ``after``, yielded as they are read rather than collected, so
+    what the watermark passes over is never held in memory.
 
-    Walking to the watermark drops what it passes over; when no entry carries it
-    the transcript is read again from the start rather than buffered on the chance
-    it might be needed.
+    Streaming bounds memory, not parsing: reaching the watermark reads every record
+    before it, and when no entry carries the watermark the transcript is read again from
+    the start rather than buffered on the chance it might be needed.
     """
     entries = reopen()
     if after is None:
@@ -112,24 +117,30 @@ def iter_records(path: Path) -> Iterator[dict]:
 def iter_entries(
     path: Path,
     of_record: Callable[[dict], Iterable[Entry]],
-    unreadable: Callable[[dict], bool],
+    kept: Callable[[dict], bool] | None = None,
 ) -> Iterator[Entry]:
     """The entries of a JSONL session file, in file order, for one agent's reader.
 
-    ``of_record`` maps a record to the entries it carries; ``unreadable`` names the
-    records holding conversation that reader cannot read. Capture cannot tell a changed
-    format from a session with nothing to say, so the file is reported when one of those
-    records appears, and when it holds text yet no record that names its type at all.
-    Bookkeeping alone is an empty session, and so is every entry type skipped as
-    unknown. (BUILD-PLAN 5, M2.1)
+    ``of_record`` builds the entries one record carries and raises ``UnreadableRecord``
+    for a conversation record whose shape it cannot build an entry from. ``kept`` names the
+    records that make up the conversation being handed over; the rest are not read at all,
+    so a record the walk dropped cannot void a read of the branch it kept. Capture cannot
+    tell a changed format from a session with nothing to say, so the read is reported when
+    a kept record cannot be built, and the file when it holds text yet no record names its
+    type at all. Bookkeeping alone is an empty session, and so is every entry type skipped
+    as unknown. (BUILD-PLAN 5, M2.1)
     """
     envelope = False
     broken = False
     for record in iter_records(path):
         if isinstance(record.get("type"), str):
             envelope = True
-        broken = broken or unreadable(record)
-        yield from of_record(record)
+        if kept is not None and not kept(record):
+            continue
+        try:
+            yield from of_record(record)
+        except UnreadableRecord:
+            broken = True
     if broken:
         raise UnrecognizedTranscript(
             f"{path}: a conversation record is not in a shape this reader can read"
