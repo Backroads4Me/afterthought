@@ -462,7 +462,7 @@ so later evidence is applied after earlier evidence.
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
 | **R6 One project per unit of work** | A run never edits another project's pages. Global pages change only from `[stated]` facts. | Script |
 | **R7 Size caps** | Pages over their cap are flagged in the report. Condensing and splitting come after v1. | Script |
-| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
+| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it; the line keeps its date, since matching words are not a verified quote. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
 | **R9 No free-form writes** | Model output is schema-constrained JSON. Only the script edits files. | Script |
 
 ### Authority to replace a fact

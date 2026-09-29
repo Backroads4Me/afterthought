@@ -699,7 +699,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   with M2.2). Implements the M2.3 interface and behavior above. No queue file predates
   this, so a queue file without per-session span state is refused, not migrated.
 - **F4 Clear stale** (after M4.2). `PageDoc.clear_stale(fact, date)` removes a stale mark;
-  M4.5 uses it when an anchor's words reappear. Test: a cleared line parses as active and
+  M4.5 uses it when an anchor's words reappear; the line keeps its date. Trust decisions
+  such as whether a replacement is newer live in `aft.dream.rules`; the writer only writes. Test: a cleared line parses as active and
   lints.
 
 ## 6. Ted's checklists at milestone ends
