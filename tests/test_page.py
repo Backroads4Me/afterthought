@@ -183,6 +183,57 @@ def test_a_line_the_parser_reports_on_is_not_memory():
         assert actionable(result) == []
 
 
+def test_a_refused_line_is_in_rejected_and_not_in_facts():
+    result = parse(fact_page("## Facts\n- Remember to renew the certificate\n"))
+    assert result.facts == []
+    assert result.rejected == [
+        (
+            6,
+            "- Remember to renew the certificate",
+            "fact line must read '- <statement> [<source>] YYYY-MM-DD [^id]'",
+        )
+    ]
+
+
+def test_rejected_lines_keep_their_line_their_text_and_their_reason():
+    text = fact_page(
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "A sentence someone typed by hand.\n"
+        "- A fact. [rumored] 2026-13-01 [^a]\n"
+    )
+    result = parse(text)
+    assert [f.statement for f in result.facts] == ["A fact."]
+    assert [(number, raw) for number, raw, _ in result.rejected] == [
+        (7, "A sentence someone typed by hand."),
+        (8, "- A fact. [rumored] 2026-13-01 [^a]"),
+    ]
+    assert [reason for _, _, reason in result.rejected] == [
+        "only fact lines are allowed in a fact section",
+        "unknown source tag [rumored]; invalid date 2026-13-01",
+    ]
+    for number, raw, reason in result.rejected:
+        assert text.split("\n")[number - 1] == raw
+        assert reason == "; ".join(message for line, message in result.errors if line == number)
+
+
+def test_a_refused_candidate_line_is_rejected_too():
+    body = "## Candidates\n- New. [inferred] 2026-01-01 [^a] (stale 2026-01-02: x)\n"
+    result = parse(fact_page(body))
+    assert result.facts == []
+    assert [reason for _, _, reason in result.rejected] == [
+        "a candidate may end only with its signal counts"
+    ]
+
+
+def test_lines_that_are_not_fact_lines_are_never_rejected():
+    assert parse(VALID).rejected == []
+    assert parse(fact_page("## Contents\nAnything goes here.\n", "Reference")).rejected == []
+    assert parse(fact_page("## Musings\n- x [stated] 2026-01-01 [^a]\n")).rejected == []
+    noted = parse(fact_page("## Facts\n- A. [stated] 2026-01-01 [^a]\n> [!note] 2026-01-01\n"))
+    assert noted.errors != [] and noted.rejected == []
+
+
 def test_struck_fact_with_a_recognized_suffix_is_not_injected():
     body = (
         "## Decisions\n"
