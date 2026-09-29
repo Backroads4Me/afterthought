@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import page
+from aft import page, pagewrite
 from aft.dream import rules
 from aft.dream.rules import Outcome, apply, check, downgrade, reject
 
@@ -35,6 +35,11 @@ OBSERVED_LINE_DATE = "2026-09-30"
 lines 2026-09-30, and every supersede cell below carries its own date so which side is
 newer is written in the test rather than inherited from a default."""
 
+S1_RESOURCE = "aft://session/claude/2c1e9d0a#entry-148"
+S2_RESOURCE = "aft://session/pi/01a0e256#entry-88"
+S9_RESOURCE = "aft://session/pi/7777aaaa#entry-4"
+"""The ``aft://`` entries the fixture's sources s1 and s2 name, and one no page cites."""
+
 NO_RGB = "No RGB lighting."
 SQLITE = "The index is plain SQLite."
 VLLM = "The GPU host runs vLLM."
@@ -51,6 +56,12 @@ CHECKPOINTS = "Long sessions need checkpoint capture."
 SESSION_END = "Capture runs at session end."
 OFF_THE_RECORD = "Off the record spans survive compaction."
 SGLANG = "The GPU host runs SGLang."
+
+RESIN = "Print with the resin profile, not the default one."
+SWEEP = "The queue sweeps on the timer."
+NOTED_LINES = (DIGEST_PER_CHUNK, WORKER_BUDGET, RESIN)
+"""Lines that stand with a note still open on them: one under a conflict, one under a
+question, and one of the commitments that only your newer word may replace."""
 
 TARGET_BY_KIND = {
     "preference": NO_RGB,
@@ -93,6 +104,13 @@ aft:
 - """
     + NO_RGB
     + """ [stated] 2026-09-20 [^s1]
+
+- """
+    + RESIN
+    + """ [stated] 2026-09-22 [^s1]
+
+> [!question] 2026-10-03
+> Does the resin profile cover the tough variants?
 
 ## Decisions
 
@@ -158,12 +176,46 @@ aft:
     + CHECKPOINTS
     + """ [inferred] 2026-09-30 [^s3] (signals 1/3, sessions 1/2)
 - """
+    + SWEEP
+    + """ [inferred] 2026-09-29 [^s1] [^s2] (signals 2/3, sessions 2/2)
+- """
     + SESSION_END
     + """ [stated] 2026-09-28 [^s1] (signals 1/3, sessions 1/2)
 - """
     + OFF_THE_RECORD
     + """ [suggested] 2026-09-28 [^s3] (signals 1/3, sessions 1/2)
 """
+)
+
+STATE_PAGE = """\
+---
+type: Project
+title: widget
+description: A widget project.
+aft:
+  project: p_widget
+---
+
+# Widget
+
+## State
+
+"""
+
+NOTED_LINE = (
+    STATE_PAGE
+    + f"- {DIGEST_PER_CHUNK} [observed] 2026-09-29 [^s2]\n"
+    + "> [!conflict] 2026-10-01\n> A session says digests run per entry.\n"
+)
+
+STRUCK_UNDER_THE_NOTE = (
+    STATE_PAGE
+    + f"- ~~{DIGEST_PER_CHUNK}~~ [observed] 2026-09-29 [^s2] superseded 2026-10-04 by [^s2]\n"
+    + "> [!conflict] 2026-10-01\n> A session says digests run per entry.\n"
+)
+
+SECOND_NOTE_ON_A_LINE = NOTED_LINE + (
+    "\n> [!conflict] 2026-10-05\n> A second session says digests run per entry.\n"
 )
 
 
@@ -180,12 +232,23 @@ def sig(
     session: str,
     date: str,
     *,
+    source: str | None = None,
+    resource: str | None = None,
     origin: str = rules.PRIMARY,
     verified: bool = True,
     yours: bool = True,
 ) -> rules.Evidence:
-    """One quote the fact can cite, from one session on one date."""
-    return rules.Evidence(session=session, origin=origin, date=date, verified=verified, yours=yours)
+    """One quote the fact can cite, from one session on one date. Each quote carries a
+    footnote id of its own unless the test names one, so a fact is counted as citing fewer
+    sources than it has quotes only where that count is what the test is about."""
+    return rules.Evidence(
+        source=source or f"{session}-{date}",
+        resource=resource or f"aft://session/pi/{session}#entry-1",
+        origin=origin,
+        date=date,
+        verified=verified,
+        yours=yours,
+    )
 
 
 def new_fact(**changes) -> rules.NewFact:
@@ -243,12 +306,17 @@ def test_the_fixture_page_holds_the_states_the_rules_read():
     assert states[NO_RGB] == page.ACTIVE and kinds[NO_RGB] == "preference"
     assert states[DIGEST_PER_CHUNK] == page.CONFLICT
     assert states[WORKER_BUDGET] == page.NEEDS_YOU
+    assert states[RESIN] == page.NEEDS_YOU
+    assert [callout.type for callout in line(RESIN).callouts] == ["question"]
+    assert [callout.type for callout in line(DIGEST_PER_CHUNK).callouts] == ["conflict"]
     assert states[HOOK_ENQUEUES] == page.STALE
     assert states[JSON_INDEX] == page.SUPERSEDED
     assert states[DGN_2016] == page.WITHDRAWN
     candidate = line(CHECKPOINTS)
     assert candidate.state == page.CANDIDATE and candidate.kind is None
     assert candidate.signals == (1, 3) and candidate.sessions == (1, 2)
+    cited = line(SWEEP)
+    assert cited.refs == ("s1", "s2") and cited.signals == (2, 3)
 
 
 # R9: an answer naming no action the decision schema allows reaches nothing.
@@ -272,7 +340,7 @@ def test_skip_writes_nothing_so_no_rule_is_consulted():
 @pytest.mark.parametrize("action", ["confirm", "supersede", "conflict"])
 def test_a_decision_that_names_no_line_edits_nothing(action):
     outcome = check(decide(action, line=None), new_fact(), None, ctx(sig("a", NEWER)))
-    assert outcome == reject("R9")
+    assert outcome == reject("M4.3 decision schema")
 
 
 def test_adding_ignores_the_line_the_model_named_beside_it():
@@ -489,9 +557,9 @@ def test_an_explicit_correction_from_you_skips_the_gate():
 
 
 def test_a_suggested_fact_is_held_to_the_same_gate_as_an_inferred_one():
-    """Open question on the pull request: R3 names the gate for ``[inferred]``, and design
-    9 says nothing about what clears a ``[suggested]`` fact. The weaker tag is held to the
-    same bar rather than given the easier path out of Candidates."""
+    """R3 names the gate for ``[inferred]``; firstmate ruled on 2026-09-29 that the same bar
+    holds a ``[suggested]`` fact, so the weaker tag gets no easier path out of
+    Candidates."""
     outcome = check(
         decide("add", line=None),
         new_fact(source="suggested"),
@@ -512,6 +580,58 @@ def test_what_you_said_or_a_run_observed_needs_no_gate(source):
         decide("add", line=None), new_fact(source=source), None, ctx(sig("a", "2026-10-04"))
     )
     assert outcome == apply("add")
+
+
+def test_two_quotes_citing_one_source_are_one_signal():
+    """The gate counts what the writer counts: one signal per distinct footnote and one
+    session per distinct session among them. Four quotes describing two sources across two
+    sessions do not clear a gate that names three signals."""
+    quotes = (
+        sig("a", "2026-10-04", source="s1", resource=S1_RESOURCE),
+        sig("a", "2026-10-03", source="s1", resource=S1_RESOURCE),
+        sig("b", "2026-10-02", source="s2", resource=S2_RESOURCE),
+        sig("b", "2026-10-01", source="s2", resource=S2_RESOURCE),
+    )
+    assert pagewrite.counts_for(
+        [quote.source for quote in quotes],
+        {quote.source: {"resource": quote.resource} for quote in quotes},
+    ) == (2, 2)
+    outcome = check(
+        decide("add", line=None),
+        new_fact(source="inferred"),
+        None,
+        ctx(*quotes),
+    )
+    assert outcome == downgrade("candidate", "R3")
+
+
+def test_a_candidate_citing_two_sources_leaves_on_one_more_corroborating_source():
+    """The gate asks about the line as the edit leaves it, so the footnotes it already
+    carries count beside the new quote, and those are the numbers update_counts prints."""
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="inferred"),
+        line(SWEEP),
+        ctx(
+            sig("s1", "2026-10-04", source="s1", resource=S1_RESOURCE),
+            sig("s2", "2026-10-03", source="s2", resource=S2_RESOURCE),
+            sig("s9", "2026-10-02", source="s9", resource=S9_RESOURCE),
+        ),
+    )
+    assert outcome == apply("promote")
+
+
+def test_a_caller_that_hands_in_only_the_new_quote_leaves_the_line_a_candidate():
+    """The line's own quotes are what carry the sessions behind its footnotes: without
+    them the count under-reads and the gate holds rather than guesses, which is what
+    ``Context.evidence`` asks the caller for."""
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="inferred"),
+        line(SWEEP),
+        ctx(sig("s9", "2026-10-02", source="s9", resource=S9_RESOURCE)),
+    )
+    assert outcome == apply("confirm")
 
 
 # Design 8's worker rule: a fact of a lower rank stays a candidate.
@@ -683,6 +803,88 @@ def test_an_observation_never_replaces_a_preference_how_new_or_old_its_evidence_
         assert outcome == downgrade("needs-you", "R4"), date
 
 
+def test_a_fact_dated_after_the_line_with_no_quote_after_it_replaces_nothing():
+    """R4 reads the date off a verified quote, not off what the fact claims: a claim is
+    only as strong as the words a script can find in its source (design 9)."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date=NEWER),
+        line(VLLM),
+        ctx(sig("a", OLDER)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_a_verified_quote_carries_the_replacement_however_the_fact_dates_itself():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date=OLDER),
+        line(VLLM),
+        ctx(sig("a", NEWER)),
+    )
+    assert outcome == apply("supersede")
+
+
+def test_an_unverified_quote_newer_than_the_line_carries_no_replacement():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date=NEWER),
+        line(VLLM),
+        ctx(sig("a", OLDER), sig("b", NEWER, verified=False)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_a_date_that_is_not_one_carries_no_replacement():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date="2026-9-5"),
+        line(VLLM),
+        ctx(sig("a", "2026-9-5"), sig("b", OLDER)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_an_explicit_correction_skips_the_gate_and_no_other_rule():
+    """Design 9 lets your own correction skip R3's gate; R4's authority and its newer
+    verified quote still stand between a fact and a standing line."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="stated", date=NEWER, explicit_correction=True),
+        line(VLLM),
+        ctx(sig("a", OLDER)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+@pytest.mark.parametrize("statement", [NO_RGB, SQLITE])
+@pytest.mark.parametrize("action", ["supersede", "conflict"])
+def test_an_observation_contradicting_a_commitment_needs_you_whichever_action_named_it(
+    action: str, statement: str
+) -> None:
+    """M4.3's prompt names ``conflict`` for the fact that contradicts a line with no clear
+    change, which is the pair design 9's table sends to needs you: one physical situation
+    comes to one outcome whatever the model called it."""
+    outcome = check(
+        decide(action),
+        new_fact(source="observed", date=NEWER),
+        line(statement),
+        ctx(sig("a", NEWER)),
+    )
+    assert outcome == downgrade("needs-you", "R4"), (action, statement)
+
+
+@pytest.mark.parametrize("source", ["stated", "inferred", "suggested"])
+def test_weaker_evidence_contradicting_a_commitment_is_still_only_a_note(source: str) -> None:
+    outcome = check(
+        decide("conflict"),
+        new_fact(source=source, date=NEWER),
+        line(NO_RGB),
+        ctx(sig("a", NEWER)),
+    )
+    assert outcome == apply("conflict")
+
+
 @pytest.mark.parametrize("source", ["inferred", "suggested"])
 def test_an_inferred_or_suggested_fact_never_replaces_a_line_of_any_kind(source: str) -> None:
     for kind, statement in TARGET_BY_KIND.items():
@@ -724,16 +926,36 @@ def test_a_candidate_line_is_neither_replaced_nor_marked(action: str) -> None:
     assert outcome == reject("R4")
 
 
-def test_a_line_in_conflict_still_stands_and_can_be_replaced():
-    """Design 6's example note says the line stands until stronger evidence arrives, so a
-    line under a note is an ordinary target for a supersede holding the authority for it."""
+@pytest.mark.parametrize("action", ["supersede", "conflict"])
+@pytest.mark.parametrize("statement", NOTED_LINES)
+def test_a_strike_or_a_second_note_on_a_line_whose_note_is_open_is_refused(
+    action: str, statement: str
+) -> None:
+    """Design 6's example note says the line stands until stronger evidence arrives, but a
+    note stays open until a person closes it and a line carries one at a time: striking the
+    line or noting it again would add a parse error, and the writer refuses an edit that
+    adds one, so the rules refuse instead of handing the writer an edit it would drop."""
     outcome = check(
-        decide("supersede"),
+        decide(action),
         new_fact(source="observed", date=NEWER),
-        line(DIGEST_PER_CHUNK),
+        line(statement),
         ctx(sig("a", NEWER)),
     )
-    assert outcome == apply("supersede")
+    assert outcome == reject("design 6 open note"), (action, statement)
+
+
+def test_a_note_under_a_standing_line_is_what_the_page_can_write():
+    assert page.parse(NOTED_LINE, PAGE_PATH).errors == []
+
+
+def test_a_strike_through_a_noted_line_is_text_the_parser_refuses():
+    errors = [message for _, message in page.parse(STRUCK_UNDER_THE_NOTE, PAGE_PATH).errors]
+    assert errors == ["a callout cannot follow a superseded fact"]
+
+
+def test_a_second_note_on_a_noted_line_is_text_the_parser_refuses():
+    errors = [message for _, message in page.parse(SECOND_NOTE_ON_A_LINE, PAGE_PATH).errors]
+    assert errors == ["a callout cannot follow a conflict fact"]
 
 
 # confirm: a citation on a line that stands, and the one moment a candidate leaves.
@@ -863,6 +1085,24 @@ def test_a_statement_carrying_a_fenced_code_block_is_refused():
     ],
 )
 def test_a_statement_naming_one_or_two_files_or_a_version_is_kept(statement: str) -> None:
+    outcome = check(
+        decide("add", line=None), new_fact(statement=statement), None, ctx(sig("a", NEWER))
+    )
+    assert outcome == apply("add")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "DGN lives at https://a.com/b, https://c.com/d and https://e.com/f.",
+        "The US/UK, EU/Asia and APAC/EMEA splits differ.",
+        "The handbook is at https://aft.dev/handbook beside src/aft/page.py.",
+        "Fit it with the 3/12 twist lock and a 4mm hex key.",
+    ],
+)
+def test_urls_a_slash_pair_or_a_size_in_a_statement_is_no_file_listing(statement: str) -> None:
+    """R5 refuses a file listing and a code block. A reference is a kind of its own whose
+    pages hold URLs, and a run like ``US/UK`` or ``3/12`` names no path in the repo."""
     outcome = check(
         decide("add", line=None), new_fact(statement=statement), None, ctx(sig("a", NEWER))
     )

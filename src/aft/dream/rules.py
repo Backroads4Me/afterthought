@@ -14,14 +14,18 @@ lost its nerve is undebuggable, and design 9's report holds a Rejected row per r
 
 Pure by construction: no page, archive, index, clock or database is read or written here.
 Each rule that would otherwise need the outside world takes the value from ``context``,
-which carries the run's date, every quote the line would cite with its session, role and
-date, and the project ids of the run and of the page the decision would edit.
+which carries the run's date, every quote the line would end up citing with the source and
+session it came in, its role and its date, and the project ids of the run and of the page
+the decision would edit.
 
 Which of design 9's rules are here, and where the rest are:
 
-* **R1** provenance, **R2** stated means committed, **R3** the recurrence gate,
-  **R4** authority by kind, **R5** what cannot be re-derived and **R6** one project per
-  unit of work are checked here, in that order.
+* **R1** provenance, **R2** stated means committed, **R6** one project per unit of work
+  and **R5** what cannot be re-derived judge the fact and the page rather than the
+  action, and are checked here in that order before any action is looked at. **R3**'s
+  gate and **R4**'s table each answer for one action, so they run inside it, and design
+  6's open note is the last word on whatever they decide to write. ``check`` gives the
+  whole order, and the first rule a decision breaks is the one its outcome names.
 * **R7** size caps flags a long page in the report (M4.5). No decision changes because a
   page is long, so no outcome here could carry the flag.
 * **R8** anchors marks a line stale when its words leave the file, which needs ripgrep
@@ -67,6 +71,7 @@ HALF_WEIGHT_AFTER_DAYS = 30
 MODEL_ACTIONS = ("add", "confirm", "supersede", "conflict", "skip")
 """The decisions the model may name (design 9 step 3, M4.3's schema)."""
 
+
 AUTHORITY = {
     "preference": ("stated",),
     "decision": ("stated",),
@@ -79,20 +84,29 @@ AUTHORITY = {
 """Who may replace a line of each kind, by source tag (design 9, authority to replace a
 fact). ``inferred`` and ``suggested`` appear in no row: they never replace anything. The
 ``stated`` in the first two rows is *your* newer statement, which R2 has already grounded
-in your own words, and every row needs newer evidence besides: the date check runs next to
-this table in ``_supersede``."""
+in your own words, and every row needs a verified quote newer than the line besides: that
+check runs beside this table in ``_supersede``."""
 
 NEEDS_THE_GATE = ("inferred", "suggested")
 """The tags whose facts are the model's own output rather than something you said or a run
-observed. R3's gate holds them in Candidates; design 9 says nothing about what clears a
-``suggested`` fact, so it is held to the same bar as the stronger ``inferred`` tag."""
+observed. R3's gate holds them in Candidates, and firstmate ruled on 2026-09-29 that the
+bar holds a ``[suggested]`` fact exactly as it holds an ``[inferred]`` one."""
 
 NO_LONGER_MEMORY = (page.SUPERSEDED, page.WITHDRAWN, page.STALE)
 """Lines that stand no longer (design 6's fact state): the authority table has rows for
 the seven kinds of line that stand as memory, and none for these."""
 
-_PATH_TOKEN = re.compile(r"[\w.\-]*(?:/[\w.\-]+)+")
-"""A path: the shape a file listing is made of (R5)."""
+NOTE_OR_STRIKE = ("supersede", "conflict", "needs-you")
+"""The outcomes that write below the target line: a strike through it, or a callout under
+it. A line whose note is still open can carry neither (design 6's fact state): a second
+note marks a fact that is no longer active and a strike leaves the note following a
+superseded fact, both of which ``page.parse`` reports and the page writer refuses."""
+
+_PATH_TOKEN = re.compile(r"(?<![\w./-])(?:[\w.-]+/)+[\w-]+\.[A-Za-z][A-Za-z0-9]*")
+"""A file path: a run of name segments separated by slashes whose last one carries an
+extension, which is the shape a file listing is made of (R5). ``:`` is not a path
+character and a run may not start inside one, so a URL is never read as a path, and a
+pair like ``US/UK`` is not a path either."""
 
 
 @dataclass(frozen=True)
@@ -102,15 +116,21 @@ class Evidence:
     The digest verifies a quote when it writes it (design 8); the dream re-checks it from
     these values rather than opening the archive (R1, R2, R3)."""
 
-    session: str
-    """The session id the quote came from. R3 counts distinct sessions, and a session is
-    one of these ids, not one of its chunks."""
+    source: str
+    """The footnote id the quote would be cited under on the resulting line (design 6,
+    sources). R3's counts are the writer's, which count one signal per distinct id, so
+    two quotes carrying one id are one signal."""
+
+    resource: str
+    """The ``aft://`` entry the quote came in, fragment included. Design 6 makes a session
+    the part of that uri before the fragment, which is what R3 counts sessions of."""
 
     origin: str
     """``PRIMARY`` or ``WORKER``: how that session was classified (design 8, worker sessions)."""
 
     date: str
-    """YYYY-MM-DD the evidence is dated, which decides whether it counts half (R3)."""
+    """YYYY-MM-DD the evidence is dated, which decides whether it counts half (R3) and
+    whether it is newer than a standing line (R4)."""
 
     verified: bool = False
     """The quote appears in the entry it cites (design 8, design 9 R1)."""
@@ -133,14 +153,16 @@ class NewFact:
     """One of the four source tags, as the digest tagged it (``page.SOURCES``)."""
 
     date: str
-    """YYYY-MM-DD the fact was last evidenced, which is the date its line would carry."""
+    """YYYY-MM-DD the fact was last evidenced, which is the date its line would carry. It
+    carries no replacement on its own: R4 judges a replacement by the quotes."""
 
     scope: str = "project"
     """``project`` or ``global`` (design 8). Retrieval uses it to decide which pages to
     search; R6 reads the page a decision would edit."""
 
     explicit_correction: bool = False
-    """You corrected the record yourself, which skips R3's gate (design 9 R3)."""
+    """You corrected the record yourself, which skips R3's gate and no other rule: an
+    explicit correction still needs the authority and the newer quote R4 asks for."""
 
 
 @dataclass(frozen=True)
@@ -150,7 +172,7 @@ class Decision:
     action: str
     line: str | None = None
     """The ``L1`` to ``L10`` name the model gave. Retrieval resolves it to the target line
-    passed beside it; the reason it named nothing usable is M4.3's to reject."""
+    passed beside it, and the schema requires one on an action that edits a line."""
 
     reason: str = ""
     """Carried through untouched for the report's Conflicts and Rejected rows (design 9)."""
@@ -167,8 +189,11 @@ class Context:
     """YYYY-MM-DD of the run. Nothing here reads a clock."""
 
     evidence: tuple[Evidence, ...]
-    """Every quote the line would cite, the new fact's own included. An unverified quote
-    travels here too, so R1's refusal is visible rather than absent."""
+    """Every quote the line would end up citing, the new fact's own and the target line's
+    own included: R3 counts the footnotes the finished line would carry, so leaving the
+    standing line's quotes out under-reads the sessions behind them and holds the gate
+    rather than clearing it. An unverified quote travels here too, so R1's refusal is
+    visible rather than absent."""
 
     run_project: str
     """The project the run is on (R6)."""
@@ -223,10 +248,22 @@ def check(
 ) -> Outcome:
     """Judge one decision against the rules (design 9 step 4).
 
-    The checks run in rule order, so a decision that breaks two rules reports the first,
-    and a refusal never hides behind a weaker result. ``skip`` writes nothing, so nothing
-    is checked for it. ``add`` ignores a named line: the schema allows one on it, and
-    adding touches no existing line.
+    The checks run in one order, so a decision that breaks two rules reports the first and
+    a refusal never hides behind a weaker result:
+
+    1. the action is one of the five the schema allows, and ``skip`` answers at once;
+    2. R1, R2, R6 and R5, which judge the fact and the page rather than the action;
+    3. design 8's worker rule, which holds a fact of a lower rank in Candidates;
+    4. the action's own rule, which is R3's gate for ``add``, R3's gate or the worker
+       release inside a candidate's ``confirm``, R4's table and a newer verified quote
+       for ``supersede``, and R4's table for the note a ``conflict`` writes. An action
+       that named no line, or named one the table gives no row for, is refused where
+       that rule would have run, before it;
+    5. design 6's open note, last because it depends on which note or strike the rules
+       above decided to write.
+
+    ``skip`` writes nothing, so nothing else is checked for it. ``add`` ignores a named
+    line: the schema allows one on it, and adding touches no existing line.
     """
     if decision.action not in MODEL_ACTIONS:
         return reject("R9")  # no action the schema allows: nothing to apply
@@ -265,7 +302,9 @@ def check(
         return _new_line(new_fact, context)
 
     if target_line is None:
-        return reject("R9")  # the schema names a line for these three decisions (M4.3)
+        # Only the three actions that edit a line reach here, and M4.3's schema makes
+        # one mandatory on each of them: naming nothing usable is the schema failure it is.
+        return reject("M4.3 decision schema")
     if target_line.state in NO_LONGER_MEMORY:
         return reject("R4")  # the table gives no authority over a line that no longer stands
     if target_line.kind is None and decision.action != "confirm":
@@ -275,14 +314,24 @@ def check(
         return reject("R4")
 
     if decision.action == "confirm":
-        return _confirm(new_fact, target_line, context)
-    if decision.action == "conflict":
-        return apply("conflict")
-    return _supersede(new_fact, target_line)
+        outcome = _confirm(new_fact, target_line, context)
+    elif decision.action == "conflict":
+        outcome = _note(new_fact, target_line)
+    else:
+        outcome = _supersede(new_fact, target_line, context)
+
+    # Last, because which note or strike to write is settled by the rules above: a line
+    # whose note is still open carries neither, and the text either would need is one the
+    # parser reports, so the writer would refuse the edit and write nothing anyway.
+    if _open_note(outcome, target_line):
+        return reject("design 6 open note")
+    return outcome
 
 
 def _new_line(new_fact: NewFact, context: Context) -> Outcome:
-    """Where an added line goes: R3's gate decides between a kind section and Candidates."""
+    """Where an added line goes: R3's gate decides between a kind section and Candidates.
+    The line has no footnotes yet, so the gate counts the quotes handed in and nothing
+    else."""
     if new_fact.source in NEEDS_THE_GATE and not new_fact.explicit_correction:
         if not _passes_gate(context):
             return downgrade("candidate", "R3")
@@ -293,13 +342,15 @@ def _confirm(new_fact: NewFact, target_line: page.Fact, context: Context) -> Out
     """Confirming cites the new source on the line and counts toward recurrence.
 
     On a candidate line it is also where the gate is judged, since a candidate leaves
-    Candidates only when its evidence carries it over (design 6, R3)."""
+    Candidates only when its evidence carries it over (design 6, R3). The gate counts the
+    footnotes the line would end up citing, so the candidate's own come from the line."""
     if target_line.kind is not None:
         return apply("confirm")
     if new_fact.explicit_correction:
         return apply("promote")  # R3: an explicit correction from you skips the gate
     if target_line.source in NEEDS_THE_GATE:
-        return apply("promote") if _passes_gate(context) else apply("confirm")
+        promoted = _passes_gate(context, target_line.refs)
+        return apply("promote") if promoted else apply("confirm")
     # A stated or observed line is in Candidates because the worker rule held it; a
     # primary session corroborating it is what the worker rule asks for.
     if any(quote.verified and quote.origin == PRIMARY for quote in context.evidence):
@@ -307,31 +358,72 @@ def _confirm(new_fact: NewFact, target_line: page.Fact, context: Context) -> Out
     return apply("confirm")
 
 
-def _supersede(new_fact: NewFact, target_line: page.Fact) -> Outcome:
-    """R4: replacing needs the authority the table gives *and* evidence newer than the
-    line's latest evidence. Without either the old line stands and the result is a
-    conflict, or needs you when it is one of your commitments that is contradicted."""
+def _note(new_fact: NewFact, target_line: page.Fact) -> Outcome:
+    """The note a ``conflict`` action asks for. Design 9's table answers one physical
+    situation with one note, whichever action named it: an observation contradicting a
+    preference or a decision of yours is the pair that goes to needs you, and M4.3's prompt
+    defines ``conflict`` for exactly that case."""
+    if _refusal(new_fact, target_line) == "needs-you":
+        return downgrade("needs-you", "R4")
+    return apply("conflict")
+
+
+def _supersede(new_fact: NewFact, target_line: page.Fact, context: Context) -> Outcome:
+    """R4: replacing needs the authority the table gives *and* a verified quote newer than
+    the line's own date - the quote check stands in for a second model, so what the fact
+    claims about its own date carries no replacement. Without either the old line stands
+    and the result is a conflict, or needs you when it is one of your commitments that is
+    contradicted."""
     authority = AUTHORITY.get(target_line.kind or "", ())
-    if new_fact.source in authority and new_fact.date > target_line.date:
+    if new_fact.source in authority and _newer_than_the_line(context, target_line):
         return apply("supersede")
     return downgrade(_refusal(new_fact, target_line), "R4")
 
 
+def _newer_than_the_line(context: Context, target_line: page.Fact) -> bool:
+    """R4's date half: some verified quote outdates the date on the line (design 9: "a
+    verified quote newer than the line's latest evidence"). An unverified quote is no
+    evidence of a newer world, and a quote whose date does not parse is none either. The
+    line's own date always parses: a line with an unreadable date holds no fact."""
+    line_date = _date(target_line.date)
+    dated = [d for q in context.evidence if q.verified if (d := _date(q.date)) is not None]
+    return line_date is not None and bool(dated) and max(dated) > line_date
+
+
 def _refusal(new_fact: NewFact, target_line: page.Fact) -> str:
-    """What a refused supersede becomes (design 9's table): a conflict note, or needs you
-    when only weaker evidence disagrees with a preference or a decision of yours and that
-    evidence is an observation."""
+    """What a disagreement with a standing line becomes (design 9's table): a conflict
+    note, or needs you when it is an observation that contradicts a preference or a
+    decision of yours. Both the refused supersede and the conflict note ask it, so the pair
+    comes to one outcome whichever action named it."""
     if target_line.kind in ("preference", "decision") and new_fact.source == "observed":
         return "needs-you"
     return "conflict"
 
 
-def _passes_gate(context: Context) -> bool:
+def _open_note(outcome: Outcome, target_line: page.Fact) -> bool:
+    """Whether the outcome strikes a line, or notes it again, while its note is still
+    open. Notes stay open until a person closes them, so this is the ordinary state of a
+    line a later run contradicts again (design 6's fact state)."""
+    if not target_line.callouts:
+        return False
+    if isinstance(outcome, Apply):
+        return outcome.action in NOTE_OR_STRIKE
+    return isinstance(outcome, Downgrade) and outcome.to_action in NOTE_OR_STRIKE
+
+
+def _passes_gate(context: Context, line_refs: tuple[str, ...] = ()) -> bool:
     """R3: three signals across two primary sessions, signals older than 30 days counting
-    half. Both numbers come from ``context.evidence``, never from a page or an archive."""
-    signals = _primary(context.evidence)
-    weight = sum(_weight(quote, context.today) for quote in signals)
-    return weight >= SIGNALS_GATE and len({quote.session for quote in signals}) >= SESSIONS_GATE
+    half. The two numbers are the writer's own ``counts_for`` over the footnotes the line
+    would end up citing - the verified quotes from primary sessions beside the ones the
+    line already carries - so the gate and the counts suffix a person reads cannot
+    disagree, and the weighting is arithmetic on the count it returns. Nothing is read
+    from a page or an archive."""
+    quotes = _primary(context.evidence)
+    entries = {quote.source: {"resource": quote.resource} for quote in quotes}
+    refs = [quote.source for quote in quotes] + list(line_refs)
+    signals, sessions = pagewrite.counts_for(refs, entries)
+    aged = sum(1 for ref in dict.fromkeys(refs) if _aged(ref, quotes, context.today))
+    return signals - aged / 2 >= SIGNALS_GATE and sessions >= SESSIONS_GATE
 
 
 def _primary(evidence: tuple[Evidence, ...]) -> list[Evidence]:
@@ -340,17 +432,30 @@ def _primary(evidence: tuple[Evidence, ...]) -> list[Evidence]:
     return [q for q in evidence if q.verified and q.origin == PRIMARY]
 
 
-def _weight(quote: Evidence, today: str) -> float:
-    age = (date.fromisoformat(today) - date.fromisoformat(quote.date)).days
-    return 0.5 if age > HALF_WEIGHT_AFTER_DAYS else 1.0
+def _aged(ref: str, quotes: list[Evidence], today: str) -> bool:
+    """Whether the newest quote handed in for this source is older than 30 days, which is
+    how a source is aged once rather than each quote that cites it. A date that does not
+    parse is no proof of a recent signal, and neither is a footnote no quote here carries."""
+    seen = [d for q in quotes if q.source == ref if (d := _date(q.date)) is not None]
+    run = _date(today)
+    return run is None or not seen or (run - max(seen)).days > HALF_WEIGHT_AFTER_DAYS
+
+
+def _date(value: str) -> date | None:
+    """A value as the date the page grammar writes, or None when it is not one."""
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _derivable(statement: str) -> bool:
     """R5's script half: the two shapes a script can name without the repository in front
-    of it. Three or more paths in one statement is a file listing; a fence is a code
-    block. "Anything git already records" without either shape is the digest prompt's job
-    (design 8), and R5's preference for durable phrasing over stale figures is a
-    preference, not a bar."""
+    of it. Three or more file paths in one statement is a file listing; a fence is a code
+    block. A URL, a pair like ``US/UK`` and a version number name neither, and a reference
+    is a kind of its own whose pages hold URLs. "Anything git already records" without
+    either shape is the digest prompt's job (design 8), and R5's preference for durable
+    phrasing over figures that go stale is a preference, not a bar."""
     if "```" in statement:
         return True
     return len(_PATH_TOKEN.findall(statement)) >= 3
