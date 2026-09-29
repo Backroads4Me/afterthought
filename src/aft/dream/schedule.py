@@ -13,21 +13,23 @@ Before any project runs, the vault's uncommitted changes are looked at, because 
 writer that leaves changes uncommitted is a person editing the vault by hand. If any of
 them was modified within the quiet period, the person may still be typing, so no project
 runs this time. Otherwise they are committed on their own as ``checkpoint: human edits``,
-so a dream commit never carries a person's bytes and each can be reverted alone.
+so a dream commit never carries a person's bytes and each can be reverted alone. The
+bare bullets the person added to fact pages are then tagged ``[stated]`` in a commit of
+their own, citing that checkpoint as their source (R2: your own edit).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft import keys, queue, vault
+from aft import keys, page, pagewrite, queue, vault
 from aft.config import Config
 from aft.gitutil import git
-from aft.page import split_frontmatter
 from aft.registry import Registry
 
 DIGESTS = "digests"
@@ -55,6 +57,9 @@ class Run:
     checkpoint: str | None = None
     """The ``checkpoint: human edits`` commit this run made, if any."""
 
+    tagged: list[str] = field(default_factory=list)
+    """The pages whose hand-typed bullets this run tagged ``[stated]``."""
+
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
     """Run the dream once: every quiet project with waiting digests, one at a time."""
@@ -80,7 +85,7 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             return result
         if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
-            tag_hand_edits(config, result.checkpoint)
+            result.tagged = tag_hand_edits(config, result.checkpoint)
         for slug in ready:
             if process is not None:
                 process(config, slug, result.waiting[slug])
@@ -88,12 +93,136 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
         return result
 
 
-def tag_hand_edits(config: Config, checkpoint: str) -> None:
-    """Tag the lines a person added in ``checkpoint`` as ``[stated]`` (DESIGN 9 step 1).
+def tag_hand_edits(config: Config, checkpoint: str) -> list[str]:
+    """Tag the bare bullets a person added in ``checkpoint`` as ``[stated]``, in a second
+    commit ``aft: tag hand edits from <checkpoint>`` (DESIGN 9 step 1, R2).
 
-    Not yet written: which added lines count is a trust rule (R2) awaiting Ted's ruling,
-    so this tags nothing and the checkpoint holds the person's bytes unchanged.
+    A line counts when the checkpoint added it as ``- <text>`` with no tag, date or
+    footnote, in a kind section of a fact page (``projects/<slug>/*.md`` except
+    ``index.md``, and ``global/*.md``). It becomes ``- <text> [stated] <date> [^id]``,
+    dated with the checkpoint's UTC date, citing a new source ``aft://edit/<checkpoint>``
+    whose quote is the text. A line typed in full fact-line form keeps exactly what the
+    person wrote, and a page whose tagged lines would not read back as the statements they
+    carry is left as written. Returns the pages tagged.
     """
+    root = config.vault
+    stamp = int(git(["show", "-s", "--format=%ct", checkpoint], cwd=root).stdout.strip())
+    when = datetime.fromtimestamp(stamp, UTC).date().isoformat()
+    changed = git(
+        [
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=AM",
+            f"{checkpoint}~1",
+            checkpoint,
+        ],
+        cwd=root,
+    ).stdout.split("\0")
+    tagged = []
+    for rel in sorted(path for path in changed if _fact_page(path)):
+        added = _added_lines(root, checkpoint, rel)
+        text = _tagged(root / rel, added, checkpoint, when)
+        if text is not None:
+            (root / rel).write_text(text, encoding="utf-8")
+            tagged.append(rel)
+    if tagged:
+        vault.commit(root, tagged, f"aft: tag hand edits from {checkpoint}")
+    return tagged
+
+
+def _fact_page(rel: str) -> bool:
+    parts = rel.split("/")
+    if not rel.endswith(".md"):
+        return False
+    if len(parts) == 3 and parts[0] == "projects":
+        return parts[2] != "index.md"
+    return len(parts) == 2 and parts[0] == "global"
+
+
+_HUNK = re.compile(r"^@@ -\S+ \+(?P<start>\d+)(?:,(?P<count>\d+))? @@")
+
+
+def _added_lines(root: Path, checkpoint: str, rel: str) -> set[int]:
+    """The line numbers, in the checkpoint's version of ``rel``, that it added."""
+    diff = git(
+        ["diff", "-U0", "--no-color", "--no-renames", f"{checkpoint}~1", checkpoint, "--", rel],
+        cwd=root,
+    ).stdout
+    added: set[int] = set()
+    for line in diff.splitlines():
+        match = _HUNK.match(line)
+        if match:
+            start = int(match.group("start"))
+            count = 1 if match.group("count") is None else int(match.group("count"))
+            added.update(range(start, start + count))
+    return added
+
+
+# A bare bullet carries none of a fact line's tail: no source tag, no footnote, and no
+# date where a line's date would stand.
+_TAG = re.compile(r"\[(?:" + "|".join(page.SOURCES) + r")\]")
+_FOOTNOTE = re.compile(r"\[\^[A-Za-z0-9_-]+\]")
+_TRAILING_DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
+
+
+def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | None:
+    """The page with its added bare bullets tagged, or None when there is nothing to tag
+    or the tagged page would not read back as it should."""
+    text = path.read_text(encoding="utf-8")
+    before = page.parse(text, path)
+    bare = [
+        (number, line[2:].strip())
+        for number, section, line in _body_lines(text, before.body_start)
+        if number in added and section in page.KIND_SECTIONS and _bare(line)
+    ]
+    if not bare:
+        return None
+    try:
+        doc = pagewrite.PageDoc(text, path)
+        ids = [
+            doc.add_source(f"aft://edit/{checkpoint}", title=f"Hand edit {when}", quote=statement)
+            for _, statement in bare
+        ]
+    except pagewrite.WriteError:
+        return None
+    lines = doc.render().split("\n")
+    shift = len(lines) - len(text.split("\n"))  # add_source writes only frontmatter
+    for (number, statement), source in zip(bare, ids, strict=True):
+        lines[number - 1 + shift] = f"- {statement} [stated] {when} [^{source}]"
+    result = "\n".join(lines)
+    after = page.parse(result, path)
+    facts = {fact.line: fact for fact in after.facts}
+    for number, statement in bare:
+        fact = facts.get(number + shift)
+        if fact is None or fact.statement != statement or fact.source != "stated":
+            return None
+    if len(after.errors) != len(before.errors) - len(bare):
+        return None
+    return result
+
+
+def _body_lines(text: str, body_start: int):
+    """Each body line with its number and the ``##`` section it sits in."""
+    section = None
+    for number, line in enumerate(text.split("\n")[body_start - 1 :], start=body_start):
+        if line.startswith("## "):
+            section = line[3:].strip()
+        yield number, section, line
+
+
+def _bare(line: str) -> bool:
+    if not line.startswith("- "):
+        return False
+    body = line[2:].strip()
+    return bool(
+        body
+        and "~~" not in body
+        and not _TAG.search(body)
+        and not _FOOTNOTE.search(body)
+        and not _TRAILING_DATE.search(body)
+    )
 
 
 def waiting_digests(vault_path: Path) -> dict[str, list[Path]]:
@@ -108,7 +237,7 @@ def waiting_digests(vault_path: Path) -> dict[str, list[Path]]:
     root = vault_path / DIGESTS
     found: dict[str, list[tuple[str, Path]]] = {}
     for path in root.glob("*/*/*/*.md"):
-        frontmatter = split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
+        frontmatter = page.split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
         aft = frontmatter.get("aft")
         if isinstance(aft, dict) and aft.get("consumed"):
             continue

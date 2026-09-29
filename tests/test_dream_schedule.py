@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import queue, vault
+from aft import page, queue, vault
 from aft.cli import main
 from aft.dream import schedule
 from aft.events import SESSION_END, SessionEvent
@@ -134,8 +134,13 @@ def test_older_hand_edit_is_checkpointed_apart_from_the_dream_commit(widget, ini
 
     result = schedule.run(initialized, dream, now=NOW)
     assert result.ran == ["widget"]
-    assert subjects(initialized)[:2] == ["aft: dream widget", schedule.CHECKPOINT_MESSAGE]
-    assert result.checkpoint == run_git(["rev-parse", "HEAD~1"], initialized.vault)
+    assert subjects(initialized)[:3] == [
+        "aft: dream widget",
+        f"aft: tag hand edits from {result.checkpoint}",
+        schedule.CHECKPOINT_MESSAGE,
+    ]
+    assert result.checkpoint == run_git(["rev-parse", "HEAD~2"], initialized.vault)
+    assert result.tagged == ["global/preferences.md"]
     changed = run_git(
         ["show", "--name-only", "--format=", result.checkpoint], initialized.vault
     ).splitlines()
@@ -225,3 +230,97 @@ def test_cli_dream(widget, initialized, capsys):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
     assert main(["dream"]) == 0
     assert capsys.readouterr().out == "widget: 1 digest(s) taken up\n"
+
+
+PAGE = """\
+---
+type: Project
+title: widget
+description: The widget.
+sources:
+  - id: s1
+    resource: aft://session/claude/abc#entry-1
+    quote: "we use uv"
+aft:
+  project: p_1
+---
+
+## Decisions
+
+- The build uses uv. [stated] 2026-09-01 [^s1]
+- Old bare line typed before the checkpoint.
+
+> [!question] 2026-09-02
+> Is this still true?
+
+## Candidates
+
+- Maybe cache wheels. [inferred] 2026-09-01 [^s1] (signals 1/3, sessions 1/2)
+"""
+
+
+def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True)
+    overview.write_text(PAGE)
+    index = root / "projects" / "widget" / "index.md"
+    index.write_text("---\ntype: Index\n---\n")
+    vault.commit(root, ["projects"], "seed")
+    digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
+
+    edited = (
+        PAGE.replace(
+            "- Old bare line typed before the checkpoint.\n",
+            "- Old bare line typed before the checkpoint.\n"
+            "- Releases are cut from main only.\n"
+            "- Typed in full form. [observed] 2026-09-20 [^s1]\n",
+        )
+        .replace("> Is this still true?\n", "> Is this still true?\n> - yes, still true\n")
+        .replace("(signals 1/3, sessions 1/2)\n", "(signals 1/3, sessions 1/2)\n- A hunch.\n")
+    )
+    overview.write_text(edited)
+    index.write_text("---\ntype: Index\n---\n\n- hand line in an index\n")
+    for path in (overview, index):
+        age(path, LONG_AGO)
+
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    sha = result.checkpoint
+    assert run_git(["show", f"{sha}:projects/widget/overview.md"], root) + "\n" == edited
+    assert result.tagged == ["projects/widget/overview.md"]
+    assert subjects(initialized)[0] == f"aft: tag hand edits from {sha}"
+
+    day = (
+        datetime.fromtimestamp(int(run_git(["show", "-s", "--format=%ct", sha], root)), UTC)
+        .date()
+        .isoformat()
+    )
+    text = overview.read_text()
+    assert f"- Releases are cut from main only. [stated] {day} [^s2]\n" in text
+    assert "- Typed in full form. [observed] 2026-09-20 [^s1]\n" in text
+    assert "- Old bare line typed before the checkpoint.\n" in text
+    assert "> - yes, still true\n" in text
+    assert "(signals 1/3, sessions 1/2)\n- A hunch.\n" in text
+    assert (
+        f"  - id: s2\n    resource: aft://edit/{sha}\n    title: Hand edit {day}\n"
+        "    quote: Releases are cut from main only.\n"
+    ) in text
+    assert "- hand line in an index" in index.read_text()
+    assert run_git(["status", "--porcelain"], root) == ""
+    fact = next(f for f in page.parse(text, overview).facts if f.refs == ("s2",))
+    assert (fact.statement, fact.source, fact.kind) == (
+        "Releases are cut from main only.",
+        "stated",
+        "decision",
+    )
+
+
+def test_checkpoint_without_bare_bullets_makes_no_tag_commit(widget, initialized):
+    root = initialized.vault
+    digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
+    page_path = root / "global" / "preferences.md"
+    page_path.write_text(page_path.read_text().replace("description: Your", "description: My"))
+    age(page_path, LONG_AGO)
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    assert result.checkpoint and result.tagged == []
+    assert subjects(initialized)[0] == schedule.CHECKPOINT_MESSAGE
