@@ -89,13 +89,14 @@ class Fact:
 class Page:
     """The memory one page holds, and every problem the parser found reading it.
 
-    `facts` is what a consumer acts on. Any fact line the parser reports a problem with -
-    an unreadable tail, an unknown source tag, an invalid date, a marker that writes no
-    state - is named in `errors` and holds no fact, whichever part of the line reported it.
-    A consumer reading `facts` and `Fact.state` never acts on a line the parse complained
-    about, and every fact here carries the state a whole line wrote. A page with entries in
-    `errors` is a broken page: `aft lint` reports each one and checks the page's footnotes
-    over its text as written, which still holds the refused lines.
+    `facts` is what a consumer acts on. A line the parser reports a problem with - an
+    unreadable tail, an unknown source tag, an invalid date, a marker or a note that writes
+    no state - is named in `errors` and reaches nothing: a refused fact line holds no fact,
+    a refused note marks no fact. So every fact here carries the state its own whole line
+    and whole notes wrote, and a consumer reading `facts` and `Fact.state` never acts on a
+    fact line the parse complained about. A page with entries in `errors` is a broken page:
+    `aft lint` reports each one and checks the page's footnotes over its text as written,
+    which still holds the refused lines.
     """
 
     path: Path
@@ -182,12 +183,14 @@ def parse(text: str, path: Path) -> Page:
 
 
 def _start_callout(page: Page, line: str, number: int, fact: Fact | None) -> Callout | None:
+    """Mark the fact with a note; None when the note is refused and writes no state."""
     match = _CALLOUT_START.match(line)
     if not match or match.group("type") not in _CALLOUTS:
         page.errors.append((number, "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'"))
         return None
     if not _valid_date(match.group("date")):
         page.errors.append((number, f"invalid date {match.group('date')}"))
+        return None
     if fact is None:
         page.errors.append((number, "a callout must follow the fact it is about"))
         return None

@@ -231,6 +231,24 @@ def test_note_after_prose_in_a_fact_section_has_no_fact_to_be_about():
     assert actionable(result) == ["A fact."]
 
 
+def test_a_note_with_an_invalid_date_writes_no_state():
+    body = (
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "> [!conflict] 2026-13-01\n"
+        "> A session says otherwise.\n"
+    )
+    result = parse(fact_page(body))
+    assert [message for _, message in result.errors] == [
+        "invalid date 2026-13-01",
+        "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'",
+    ]
+    assert [(f.statement, f.state, f.callouts) for f in result.facts] == [
+        ("A fact.", page.ACTIVE, [])
+    ]
+    assert actionable(result) == ["A fact."]
+
+
 def test_trailing_text_rejected():
     assert (
         "unrecognized text" in errors_for("## Facts\n- A fact. [stated] 2026-01-01 [^a] maybe\n")[0]
