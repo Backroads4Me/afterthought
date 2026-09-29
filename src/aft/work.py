@@ -10,13 +10,14 @@ their sessions' watermarks unmoved, so the next run picks them up where this one
 (DESIGN 13: "when a budget runs out, work waits in the queue"). A job that belongs to one
 session and cannot be digested is left behind as the record of why, and the run moves on to
 the next session. A failure that would repeat for every job left - an endpoint that is down,
-a vault that is not there - ends the run instead, because working through the queue would
-stamp each of the day's jobs with the same sentence and leave no work behind to retry once
-a person has fixed the endpoint (DESIGN 14).
+a vault that is not there, a queue another run has locked - ends the run instead, because
+working through the queue would stamp each of the day's jobs with the same sentence and
+leave no work behind to retry once a person has fixed the endpoint (DESIGN 14).
 """
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -29,21 +30,20 @@ from aft.readers import ReaderError
 from aft.registry import RegistryError
 from aft.vault import VaultError
 
-# DESIGN 13 names a daily cap and this task names the stop; neither names a number, so this
-# is the design's own arithmetic: it expects about 55,000 input tokens a day of digests plus
-# a smaller amount of dreaming, and four times that bounds a loop that has gone wrong without
-# ever parking an ordinary day's work. The budget is read from this constant and nowhere
-# else, so settling the number later is one line (DESIGN 13).
-DAILY_TOKEN_BUDGET = 200_000
-
 # What a run reports as the reason it stopped early.
 STOP_BUDGET = "the day's token budget is spent"
 STOP_UNREACHABLE = "the model or the vault could not be reached"
+STOP_QUEUE = "the queue could not be used"
+
+# The queue's own failures: a row this process no longer holds, or a database another
+# worker keeps locked. Both are ordinary the moment two runs overlap, and while they last
+# no job can be opened or closed at all, so they belong to the run rather than to a session.
+QUEUE_LOST = (queue.QueueError, sqlite3.Error)
 
 # The failures that belong to the endpoint or the vault rather than to a session: every job
 # left in the queue would meet the same one, so the run ends on the first of them and what is
 # left stays queued, claimed only by a lease that the next run reclaims.
-STOPS_RUN = (ModelError, VaultError, GitError, RegistryError)
+STOPS_RUN = (ModelError, VaultError, GitError, RegistryError, *QUEUE_LOST)
 
 # The failures that belong to one session: the job is left behind with its reason and the
 # next session gets its turn.
@@ -83,31 +83,39 @@ def run(config: Config, now: datetime | None = None) -> Report:
     """
     vault.require(config)
     moment = now or datetime.now(UTC)
-    swept = len(capture.sweep(config, moment))
-    digested = empty = 0
+    swept = digested = empty = 0
     failures: list[str] = []
     stopped = ""
-    while True:
-        if model.tokens_used_today(config, moment) >= DAILY_TOKEN_BUDGET:
-            stopped = STOP_BUDGET
-            break
-        job = queue.next_job(config)
-        if job is None:
-            break
-        try:
-            if digest.digest_job(config, job, moment) is None:
-                empty += 1
-            else:
-                digested += 1
-        except STOPS_RUN as exc:
-            # The job stays claimed only by a lease: its session's watermark has not moved,
-            # so the next run reads the same chunk again once the endpoint answers.
-            failures.append(f"job {job.id} ({job.session_id}): {exc}")
-            stopped = STOP_UNREACHABLE
-            break
-        except FAILS_JOB as exc:
-            queue.fail(config, job, str(exc))
-            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+    budget = config.settings.work.daily_token_budget
+    # The sweep, the claim and the close all touch the queue's own database, and a run that
+    # cannot use it reports the queue's words on the line the timer reads rather than dying
+    # with a traceback (DESIGN 14).
+    try:
+        swept = len(capture.sweep(config, moment))
+        while True:
+            if model.tokens_used_today(config, moment) >= budget:
+                stopped = STOP_BUDGET
+                break
+            job = queue.next_job(config)
+            if job is None:
+                break
+            try:
+                if digest.digest_job(config, job, moment) is None:
+                    empty += 1
+                else:
+                    digested += 1
+            except STOPS_RUN as exc:
+                # The job stays claimed only by a lease: its session's watermark has not moved,
+                # so the next run reads the same chunk again once the endpoint answers.
+                failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+                break
+            except FAILS_JOB as exc:
+                failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                queue.fail(config, job, str(exc))
+    except QUEUE_LOST as exc:
+        failures.append(f"the queue: {exc}")
+        stopped = STOP_QUEUE
     return Report(
         swept=swept, digested=digested, empty=empty, failures=tuple(failures), stopped=stopped
     )

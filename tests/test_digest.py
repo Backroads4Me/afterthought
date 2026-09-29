@@ -138,6 +138,19 @@ def serve(cfg: Config, *answers: object) -> tuple[FakeEndpoint, Config]:
     return fake, configmod.load()
 
 
+def with_budget(cfg: Config, tokens: int) -> Config:
+    """The same config.toml with the day's token budget set, re-read from disk.
+
+    The budget is a config.toml setting like every other (DESIGN 6), so a test that needs
+    a small one sets it the way a person does rather than reaching into ``aft.work``.
+    """
+    path = cfg.home / configmod.CONFIG_NAME
+    text = path.read_text(encoding="utf-8")
+    kept = text[: text.index("[work]")] if "[work]" in text else text
+    path.write_text(f"{kept}[work]\ndaily_token_budget = {tokens}\n", encoding="utf-8")
+    return configmod.load()
+
+
 def said(
     statement: str = "Capture runs at session end, not per turn.",
     quote: str = "Capture runs at session end.",
@@ -351,12 +364,11 @@ def test_a_value_off_the_plans_list_never_reaches_memory(session: Session, broke
     refusal is the one the reason text above belongs to.
     """
     from aft import filter as filtermod
-    from aft.model import ModelError
     from aft.readers import read
 
     fake, cfg = serve(session.cfg, answer(said(**broken)))
     try:
-        with pytest.raises(ModelError):
+        with pytest.raises(digest.AnswerRefused):
             digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
     finally:
         fake.stop()
@@ -466,8 +478,9 @@ def test_a_fact_for_every_project_says_it_had_nowhere_to_go(session: Session):
     """The plan asks for a scope the page format has no field for: losing it is loud.
 
     The page format is the plan author's to settle, so a global fact is not relabelled as
-    one project's. It joins the record of dropped facts with how many went the same way, so
-    "the model found nothing global" and "there was nowhere to write it" read apart.
+    one project's. Each one is its own line of the dropped record, naming what it said, the
+    scope it carried and the entry it came from, so "the model found nothing global" and
+    "there was nowhere to write it" read apart.
     """
     wrote = digest_once(
         session,
@@ -478,9 +491,15 @@ def test_a_fact_for_every_project_says_it_had_nowhere_to_go(session: Session):
     )
     assert wrote.facts == ()
     dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
-    assert len(dropped) == 2
-    assert "scope global has no field on a digest page" in dropped[0]["reason"]
-    assert "2 of this digest's facts were dropped for it" in dropped[0]["reason"]
+    assert [fact["statement"] for fact in dropped] == [
+        "Capture runs at session end, not per turn.",
+        "Ted prefers a plain hyphen.",
+    ]
+    assert [fact["entry"] for fact in dropped] == ["e1", "e1"]
+    assert [fact["reason"] for fact in dropped] == [
+        "scope global has no field on a digest page (DESIGN 6 line grammar)",
+    ] * 2
+    assert "Ted prefers a plain hyphen" not in body(session.cfg, wrote.path)
 
 
 # ------------------------------------------------------- the order a crash leaves things in
@@ -550,7 +569,8 @@ def test_a_second_chunk_the_same_day_names_the_page_that_stands(session: Session
     The plan gives a session one digest path per day, so the second chunk has no page of
     its own to write. Overwriting the first digest would lose the earlier half of the day
     quietly; the job fails instead, and says why, with the chunk archived and the mark
-    left where the first digest put it.
+    left where the first digest put it. The page's path is known before a token is spent
+    on it, so a chunk that could never be filed is refused before the endpoint is called.
     """
     first = digest_once(session, answer(said()))
     grown = write_transcript(
@@ -567,6 +587,7 @@ def test_a_second_chunk_the_same_day_names_the_page_that_stands(session: Session
     finally:
         fake.stop()
     assert page_path() in str(raised.value)
+    assert fake.requests == [], "a chunk with no page to write was digested anyway"
     assert "one digest path per day" in str(raised.value)
     assert watermark(cfg) == first.watermark
     assert pages(cfg) == [below()]
@@ -614,6 +635,31 @@ def test_an_unregistered_repository_is_digested_under_its_own_name(session: Sess
     written = frontmatter(cfg, wrote.path)
     assert "project" not in written["aft"]
     assert written["description"] == "Built the capture hook."
+
+
+@pytest.mark.parametrize("escaped", ["../../escaped", "C:..outside"])
+def test_a_session_id_that_is_not_a_name_is_refused_before_a_path_is_made(
+    session: Session, escaped: str
+):
+    """A queue row's session id is another process's text, and a page is filed by it.
+
+    The hook payload only had to be non-empty, so an id that walks out of ``digests/``
+    reached a path, a directory, and a page before the commit refused the outcome. It is
+    refused as that job's own failure, naming the id, with nothing filed and nothing asked
+    of the model.
+    """
+    home_before = sorted(p.name for p in session.cfg.vault.parent.iterdir())
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        with pytest.raises(digest.DigestError) as raised:
+            digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd, session_id=escaped))
+    finally:
+        fake.stop()
+    assert escaped in str(raised.value)
+    assert fake.requests == [], "an id that could not be filed was digested anyway"
+    assert pages(cfg) == []
+    assert sorted(p.name for p in cfg.vault.parent.iterdir()) == home_before
+    assert watermark(cfg, escaped) is None
 
 
 def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: Session):
@@ -773,21 +819,56 @@ def test_work_sweeps_a_session_no_hook_reported_and_digests_it(session: Session,
     assert len(pages(cfg)) == 1
 
 
-def test_the_daily_budget_stops_the_work_and_leaves_the_rest_queued(session: Session, monkeypatch):
+def test_a_refused_answer_fails_its_own_job_and_the_run_carries_on(session: Session):
+    """One session's unusable answer is that session's loss, not the queue's wedged.
+
+    The plan's schema carries seven kinds and the model answers with an eighth, twice, so
+    the answer is refused. DESIGN 14 assigns malformed output a per-job outcome: the row is
+    left behind FAILED with the model's own reason and its watermark unmoved, the next
+    session is digested in the same run, and a run after that still digests.
+    """
+    refused = answer(said(kind="habit"))
+    second = session.transcript.with_name("second-of-many.jsonl")
+    shutil.copy(session.transcript, second)
+    third = session.transcript.with_name("third-of-many.jsonl")
+    shutil.copy(session.transcript, third)
+    fake, cfg = serve(session.cfg, refused, refused, answer(said()), answer(said()))
+    try:
+        queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="bad-1"))
+        queue.enqueue(cfg, event(second, session.cwd, session_id="good-1"))
+        first = work.run(cfg)
+        reached = pages(cfg)
+        queue.enqueue(cfg, event(third, session.cwd, session_id="later-1"))
+        later = work.run(cfg)
+    finally:
+        fake.stop()
+    assert first.digested == 1, "the refused answer stopped the whole run"
+    assert first.stopped == ""
+    assert len(first.failures) == 1
+    assert "bad-1" in first.failures[0]
+    assert "the answer failed its schema" in first.failures[0]
+    assert "'habit'" in first.failures[0], "the model's own reason did not reach the report"
+    assert rows(cfg, queue.FAILED) == ["bad-1"]
+    assert watermark(cfg, "bad-1") is None
+    assert reached == [below("good-1")], "the refused session's page was written anyway"
+    assert later.digested == 1, "the queue was still wedged behind the refused answer"
+    assert pages(cfg) == [below("good-1"), below("later-1")]
+
+
+def test_the_daily_budget_stops_the_work_and_leaves_the_rest_queued(session: Session):
     """The jobs a run never reached are queued, unread, and waiting for the next one."""
     fake, cfg = serve(session.cfg, answer(said()), answer(said()), answer(said()))
     for index in range(3):
         path = session.transcript.with_name(f"session-{index}.jsonl")
         shutil.copy(session.transcript, path)
         queue.enqueue(cfg, event(path, session.cwd, session_id=f"s-{index}"))
-    monkeypatch.setattr(work, "DAILY_TOKEN_BUDGET", 250)  # one call costs 200 + 50
+    cfg = with_budget(cfg, 250)  # one call costs 200 + 50
     try:
         first = work.run(cfg)
         reached = pages(cfg)
         waiting = rows(cfg, queue.PENDING)
         marks = {f"s-{index}": watermark(cfg, f"s-{index}") for index in range(3)}
-        monkeypatch.setattr(work, "DAILY_TOKEN_BUDGET", 100_000)
-        second = work.run(cfg)
+        second = work.run(with_budget(cfg, 100_000))  # the cap lifted, the same day
     finally:
         fake.stop()
     assert first.stopped == work.STOP_BUDGET
@@ -798,6 +879,57 @@ def test_the_daily_budget_stops_the_work_and_leaves_the_rest_queued(session: Ses
     assert second.stopped == ""
     assert second.digested == 2
     assert len(pages(cfg)) == 3
+
+
+def test_a_claim_another_worker_took_over_reaches_the_report_not_a_traceback(
+    session: Session, monkeypatch
+):
+    """A row reclaimed mid-digest is a reported stop, and its page is not undone.
+
+    A chunk that outran its claim lease while a second `aft work` was sweeping is the
+    ordinary way a claim is lost. The queue refuses to close a row another process holds,
+    and that refusal belongs on the report a person and a timer read (DESIGN 14) - along
+    with the page the digest had already committed, which the failed close does not erase.
+    """
+    real = digest.digest_job
+
+    def digest_while_it_is_taken(config, job, moment=None):
+        conn = sqlite3.connect(config.home / queue.QUEUE_NAME)
+        conn.execute(
+            "UPDATE jobs SET status = ?, claimed_pid = NULL WHERE id = ?",
+            (queue.PENDING, job.id),
+        )
+        conn.commit()
+        conn.close()
+        return real(config, job, moment)
+
+    fake, cfg = serve(session.cfg, answer(said()))
+    queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="taken-1"))
+    monkeypatch.setattr(digest, "digest_job", digest_while_it_is_taken)
+    try:
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.stopped == work.STOP_QUEUE
+    assert len(report.failures) == 1
+    assert "not held by this process" in report.failures[0]
+    assert below("taken-1") in pages(cfg), "the committed digest was lost with the close"
+    assert watermark(cfg, "taken-1") is None
+
+
+def test_a_queue_that_cannot_be_opened_stops_the_run_with_its_own_words(session: Session):
+    """A locked or unusable queue database is a reported stop, not a traceback (DESIGN 14)."""
+    (session.cfg.home / queue.QUEUE_NAME).mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.stopped == work.STOP_QUEUE
+    assert report.digested == 0
+    assert fake.requests == [], "a run with no queue asked the model anyway"
+    assert pages(cfg) == []
+    assert "unable to open database file" in report.failures[0]
 
 
 def test_one_unreadable_session_does_not_stop_the_others(session: Session):

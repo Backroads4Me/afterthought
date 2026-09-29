@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from aft import filter as filtermod
 from aft import registry as registrymod
 from aft.config import Config
 from aft.gitutil import GitError
+from aft.model import ModelError
 from aft.page import KIND_SECTIONS
 from aft.readers import USER, Entry
 
@@ -67,7 +69,28 @@ NO_HOME = "scope {scope} has no field on a digest page (DESIGN 6 line grammar)"
 
 class DigestError(Exception):
     """A job this digest cannot honour: no project to file under, no transcript to read,
-    or a page of this session's date that already stands and would be overwritten."""
+    a session id no path can be built from, or a page of this session's date that already
+    stands and would be overwritten."""
+
+
+class AnswerRefused(DigestError):
+    """The endpoint answered this chunk and its answer failed the digest schema.
+
+    The model's own words are what the job is left behind with and the endpoint is up,
+    so this is one session's failure and the run moves on (DESIGN 14)."""
+
+
+# What aft.model reports when the endpoint answered and the answer was the fault: the one
+# ModelError family a later job would not necessarily meet again. Every other ModelError is
+# the endpoint or its setup - unreachable, redirected, a key unset, an answer that cannot be
+# billed - and every job left in the queue would meet those alike, so they stay the run's
+# failure (DESIGN 14).
+ANSWER_REFUSED = "the answer failed its schema"
+
+# A session id reaches this module on a queue row another process wrote, and it goes into a
+# page's path, so it must be a name and nothing else: no separator, no drive form, and no
+# longer than the bound the endpoint's own schema-name rule uses.
+SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 
 
 @dataclass(frozen=True)
@@ -191,6 +214,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     job and leaves the watermark where it was: there was nothing to digest, so there is
     nothing to file and nothing new to read.
     """
+    _require_session_id(job.session_id)
     vault.require(config)
     resolution = keys.resolve(job.cwd, registrymod.Registry.load(config.registry_path), config.host)
     if resolution.slug is None:
@@ -214,6 +238,14 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         kept,
     )
 
+    # The page's path is known before a token is spent on it, so a day whose digest already
+    # stands is refused here - with the chunk archived and the watermark held - rather than
+    # after every part of it has been paid for. _write checks once more before the commit.
+    when = read[-1].time.astimezone(UTC).date()
+    rel = _path(resolution.slug, job.agent, job.session_id, when)
+    if (config.vault / rel).is_file():
+        raise DigestError(_collision(rel))
+
     facts: list[Fact] = []
     dropped: list[Dropped] = []
     summaries: list[str] = []
@@ -225,7 +257,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # last part's is the job's. Summaries are joined uncut - a page's description has no
     # cap, so nothing is truncated at the join, and a reader sees every part's own words.
     for part in parts(kept):
-        answer = model.complete_json(config, prompt, render(part), schema, MAX_OUTPUT_TOKENS)
+        answer = _model_answer(config, prompt, render(part), schema)
         part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"])
         facts.extend(part_facts)
         dropped.extend(part_dropped)
@@ -235,11 +267,10 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # A fact whose scope the page cannot carry is refused here, not written wrong.
     written, homeless = _homes(facts)
     dropped.extend(homeless)
-    when = read[-1].time.astimezone(UTC).date()
-    rel = _path(resolution.slug, job.agent, job.session_id, when)
     page, on_page, refused = _page(
         config,
         job,
+        rel,
         resolution.slug,
         resolution,
         summaries,
@@ -255,6 +286,23 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # away has been decided, and reading it again would decide it again (DESIGN 8).
     queue.complete(config, job, read[-1].id)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
+
+
+def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:
+    """One digest call and its answer, with a refused answer told as this job's failure.
+
+    An answer that failed its schema twice is this chunk's own problem: the job is left
+    behind with the model's reason, its watermark stays where it was, and the next session
+    gets its turn. Anything else aft.model raises is the endpoint or its setup, which
+    every job left would meet alike, so it stays a ModelError and the run stops with the
+    queue kept for a later attempt (DESIGN 14).
+    """
+    try:
+        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS)
+    except ModelError as exc:
+        if exc.__cause__ is None and ANSWER_REFUSED in str(exc):
+            raise AnswerRefused(str(exc)) from exc
+        raise
 
 
 def verify(
@@ -319,26 +367,39 @@ def _homes(facts: Sequence[Fact]) -> tuple[list[Fact], list[Dropped]]:
     A line's kind is its section, so a project fact arrives whole. ``scope: global`` says
     a fact applies in every project, and no field of the design's page format carries that
     (DESIGN 6), so a global fact written here would reach the next session as a project's
-    own. It is refused instead, with the count and the reason in the same record that
-    carries the verifier's refusals, so "the model found nothing global" and "there was
-    nowhere to write it" cannot read alike. The page format is the plan author's to settle.
+    own. Each is refused on its own line of the same record that carries the verifier's
+    refusals, naming its statement, its scope and the entry it came from, so "the model
+    found nothing global" and "there was nowhere to write it" cannot read alike. The page
+    format is the plan author's to settle.
     """
     homeless = [fact for fact in facts if fact.scope != "project"]
-    count = len(homeless)
     dropped = [
         Dropped(
             statement=fact.statement,
             kind=fact.kind,
             source=fact.source,
             entry=fact.entry,
-            reason=(
-                NO_HOME.format(scope=fact.scope)
-                + f"; {count} of this digest's facts were dropped for it"
-            ),
+            reason=NO_HOME.format(scope=fact.scope),
         )
         for fact in homeless
     ]
     return [fact for fact in facts if fact.scope == "project"], dropped
+
+
+def _require_session_id(session_id: str) -> None:
+    """The session id as a name a page can be filed under, or this job's refusal.
+
+    The id reaches this module on a queue row another process wrote, where the only check
+    was that it was not empty, and DESIGN 6 files a digest page by it - so a value that
+    could step outside ``digests/`` would have a directory created and a page written
+    outside the vault before the commit refused it. Refusing the name here closes every
+    use the digest makes of it: the page's path, and the ``aft://session/...`` source each
+    fact line cites, which is what ``aft trace`` and the dream's quote check follow.
+    """
+    if SESSION_ID.match(session_id) is None:
+        raise DigestError(
+            f"session id {session_id!r} is not a name a digest page can be filed under"
+        )
 
 
 def _path(slug: str, agent: str, session_id: str, when: date) -> str:
@@ -349,6 +410,7 @@ def _path(slug: str, agent: str, session_id: str, when: date) -> str:
 def _page(
     config: Config,
     job: queue.Job,
+    rel: str,
     slug: str,
     resolution: keys.Resolution,
     summaries: Sequence[str],
@@ -369,7 +431,6 @@ def _page(
     sources they cite go through the page writer, which refuses text its own parse would
     not read back, so a page that leaves here lints (DESIGN 6).
     """
-    rel = _path(slug, job.agent, job.session_id, when)
     frontmatter = _frontmatter(config, resolution, slug, summaries, handoff, dropped, when, stamp)
     text, written, refused = _written(frontmatter, rel, job, facts)
     if refused:
