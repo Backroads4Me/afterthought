@@ -350,15 +350,16 @@ def test_a_project_fact_sees_only_its_own_project_pages(vault):
     assert paths == {"projects/widget/overview.md"}
 
 
-def test_a_global_fact_sees_global_pages_as_well(vault):
+def test_a_global_fact_sees_only_global_pages(vault):
     lines = decide.related(vault, _fact(RGB, kind="preference", scope="global"), "widget")
     by_statement = {line.fact.statement: line for line in lines}
 
     assert lines[0].fact.statement == RGB
     assert by_statement[RGB].path == "global/preferences.md"
     assert by_statement[RGB].project is None
-    assert VLLM in by_statement
-    assert not any(line.path.startswith("projects/other/") for line in lines)
+    assert all(line.path.startswith("global/") for line in lines)
+    others = decide.related(vault, _fact(VLLM, scope="global"), "widget")
+    assert [line.fact.statement for line in others] == [RGB]
 
 
 def test_a_global_add_targets_a_global_page(vault):
