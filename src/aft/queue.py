@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft.config import Config
+from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
 
@@ -144,9 +144,12 @@ def enqueue(config: Config, event: SessionEvent) -> None:
     """Record one session event as capture work, in one transaction.
 
     One INSERT and one commit, so the hook that calls it stays inside its budget and
-    concurrent writers from both agents serialize on the write lock (DESIGN 8). Nothing
-    here opens the transcript, resolves a project, or touches a watermark.
+    concurrent writers from both agents serialize on the write lock (DESIGN 8). An excluded
+    session writes no row and leaves no trace. Nothing here opens the transcript, resolves
+    a project, or touches a watermark.
     """
+    if is_excluded(event.cwd, config):
+        return
     now = _now()
     with _writing(config) as conn:
         conn.execute(
@@ -168,16 +171,22 @@ def enqueue(config: Config, event: SessionEvent) -> None:
         )
 
 
-def next_job(config: Config) -> Job | None:
+def drop_job(config: Config, job: Job | str) -> None:
+    """Remove a job row from the queue without recording it as done or failed."""
+    job_id = job.id if isinstance(job, Job) else job
+    with _writing(config) as conn:
+        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
+def next_job(config: Config, *, role: str | None = None) -> Job | None:
     """Claim the oldest waiting job whose session has no other job being digested.
 
     A session digests one chunk at a time because it has one watermark to move, and the
     chunks go oldest first so a later chunk never reads past an earlier one.
 
-    A claim names the pid of the process that took it, so a worker that died between
-    reading a job and completing it leaves the job claimable again: the row it left
-    behind says who held it and when, and it goes back to the queue once that process is
-    gone or once the row's lease has run out.
+    When role is specified, only a job matching that role (primary or worker) is claimed.
+    When role is omitted, primary jobs take priority over worker jobs. Any row whose cwd is
+    under capture.exclude_paths is dropped.
     """
     now = _now()
     # The lease is the larger of the cadence the work timer runs at and the floor the
@@ -185,7 +194,7 @@ def next_job(config: Config) -> Job | None:
     lease = max(timedelta(minutes=config.settings.dream.interval_minutes), CLAIM_LEASE_FLOOR)
     with _writing(config) as conn:
         _reclaim_stale_claims(conn, now, lease)
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time"
             " FROM jobs j"
             " WHERE status = ?"
@@ -193,17 +202,61 @@ def next_job(config: Config) -> Job | None:
             "       SELECT 1 FROM jobs held"
             "       WHERE held.agent = j.agent AND held.session_id = j.session_id"
             "         AND held.status = ?)"
-            " ORDER BY created_time, id LIMIT 1",
+            " ORDER BY created_time, id",
             (PENDING, RUNNING),
-        ).fetchone()
-        if row is None:
-            return None
-        conn.execute(
-            "UPDATE jobs SET status = ?, claimed_pid = ?, claimed_time = ?, updated_time = ?"
-            " WHERE id = ?",
-            (RUNNING, os.getpid(), _text(now), _text(now), row[0]),
-        )
-        return _job(conn, row)
+        ).fetchall()
+        for row in rows:
+            cwd = Path(row[3])
+            if is_excluded(cwd, config):
+                conn.execute("DELETE FROM jobs WHERE id = ?", (row[0],))
+                continue
+            worker = is_worker(cwd, config)
+            if role == "primary" and worker:
+                continue
+            if role == "worker" and not worker:
+                continue
+            if role is None and worker:
+                has_pending_primary = any(
+                    not is_excluded(Path(r[3]), config) and not is_worker(Path(r[3]), config)
+                    for r in rows
+                )
+                if has_pending_primary:
+                    continue
+            conn.execute(
+                "UPDATE jobs SET status = ?, claimed_pid = ?, claimed_time = ?, updated_time = ?"
+                " WHERE id = ?",
+                (RUNNING, os.getpid(), _text(now), _text(now), row[0]),
+            )
+            return _job(conn, row)
+        return None
+
+
+def pending_jobs(config: Config, *, role: str | None = None) -> list[Job]:
+    """Waiting jobs, oldest first, optionally filtered by role."""
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time"
+            " FROM jobs j"
+            " WHERE status = ?"
+            "   AND NOT EXISTS ("
+            "       SELECT 1 FROM jobs held"
+            "       WHERE held.agent = j.agent AND held.session_id = j.session_id"
+            "         AND held.status = ?)"
+            " ORDER BY created_time, id",
+            (PENDING, RUNNING),
+        ).fetchall()
+        result = []
+        for row in rows:
+            cwd = Path(row[3])
+            if is_excluded(cwd, config):
+                continue
+            worker = is_worker(cwd, config)
+            if role == "primary" and worker:
+                continue
+            if role == "worker" and not worker:
+                continue
+            result.append(_job(conn, row))
+        return result
 
 
 def complete(

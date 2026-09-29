@@ -1593,3 +1593,244 @@ def test_the_schema_is_one_the_validator_reads():
             },
             digest.digest_schema(),
         )
+
+
+def with_capture(
+    cfg: Config,
+    *,
+    worker_paths: Sequence[str] = (),
+    exclude_paths: Sequence[str] = (),
+    budget: int | None = None,
+) -> Config:
+    """Rewrite config.toml with capture paths and optional token budget."""
+    path = cfg.home / configmod.CONFIG_NAME
+    text = path.read_text(encoding="utf-8")
+    wp = json.dumps(list(worker_paths))
+    ep = json.dumps(list(exclude_paths))
+    text = re.sub(r"\n\[capture\][\s\S]*?(?=\n\[|\Z)", "", text)
+    text = re.sub(r"\n\[work\][\s\S]*?(?=\n\[|\Z)", "", text)
+    text += f"\n[capture]\nworker_paths = {wp}\nexclude_paths = {ep}\n"
+    if budget is not None:
+        text += f"\n[work]\ndaily_token_budget = {budget}\n"
+    path.write_text(text, encoding="utf-8")
+    return configmod.load()
+
+
+def test_excluded_session_leaves_no_trace(session: Session, tmp_path):
+    """An excluded session is never read: no queue row kept, no evidence,
+    no index row, no digest.
+    """
+    excluded_dir = tmp_path / "private_repo"
+    excluded_dir.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        cfg = with_capture(cfg, exclude_paths=[str(excluded_dir)])
+
+        transcript = write_records(
+            tmp_path / "excluded.jsonl",
+            {"cwd": str(excluded_dir)},
+            record("e1", "user", "super secret prompt"),
+        )
+
+        swept = capture.sweep(cfg, NOW)
+        assert not any(ev.cwd == excluded_dir for ev in swept)
+        assert rows(cfg, queue.PENDING) == []
+
+        ev = event(transcript, excluded_dir, session_id="excluded-1")
+        queue.enqueue(cfg, ev)
+        assert rows(cfg, queue.PENDING) == []
+
+        conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME)
+        conn.execute(
+            "INSERT INTO jobs (id, agent, session_id, cwd, transcript_path, kind,"
+            " event_time, status, created_time, updated_time)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "job_ex",
+                CLAUDE,
+                "excluded-1",
+                str(excluded_dir),
+                str(transcript),
+                SESSION_END,
+                NOW.isoformat(),
+                queue.PENDING,
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        report = work.run(cfg)
+        assert report.digested == 0
+
+        conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME)
+        all_jobs = conn.execute("SELECT id FROM jobs WHERE session_id = 'excluded-1'").fetchall()
+        conn.close()
+        assert all_jobs == []
+
+        assert evidence.entries(cfg, "excluded-1") == []
+
+        index_db = cfg.home / "index.sqlite"
+        if index_db.exists():
+            conn = sqlite3.connect(index_db)
+            ev_count = conn.execute(
+                "SELECT count(*) FROM evidence WHERE session_id = 'excluded-1'"
+            ).fetchone()[0]
+            conn.close()
+            assert ev_count == 0
+
+        assert not (cfg.vault / "digests").exists() or not list(
+            (cfg.vault / "digests").rglob("*.md")
+        )
+    finally:
+        fake.stop()
+
+
+def test_worker_session_is_archived_and_indexed_but_not_digested_when_budget_is_short(
+    session: Session, tmp_path
+):
+    """A worker session is archived and indexed, but digested only when budget has room."""
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+
+        transcript = write_records(
+            tmp_path / "worker.jsonl",
+            {"cwd": str(worker_dir)},
+            record("e1", "user", "Worker prompt: the test suite failed with exit 1."),
+            record(
+                "e2", "assistant", "Understood, investigating the failure.", model="claude-real"
+            ),
+        )
+        queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-s1"))
+        assert rows(cfg, queue.PENDING) == ["worker-s1"]
+
+        report = work.run(cfg)
+
+        assert report.stopped == work.STOP_BUDGET
+        assert report.digested == 0
+        assert len(fake.requests) == 0
+
+        archived = evidence.entries(cfg, "worker-s1")
+        assert len(archived) >= 1
+        assert any("Worker prompt" in e.text for e in archived)
+
+        conn = sqlite3.connect(cfg.home / "index.sqlite")
+        indexed_count = conn.execute(
+            "SELECT count(*) FROM evidence WHERE session_id = 'worker-s1'"
+        ).fetchone()[0]
+        conn.close()
+        assert indexed_count > 0
+
+        assert pages(cfg) == []
+        assert rows(cfg, queue.PENDING) == ["worker-s1"]
+    finally:
+        fake.stop()
+
+
+def test_worker_session_digested_with_budget_left_after_primary(session: Session, tmp_path):
+    """Primary sessions are digested first; worker sessions are digested with leftover budget,
+    carrying aft.role: worker in frontmatter and facts.
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    fake, cfg = serve(
+        session.cfg,
+        answer(
+            said(
+                statement="Primary decision made.",
+                quote="Store the digest at session end",
+                entry="e1",
+            )
+        ),
+        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+    )
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=500_000)
+
+        primary_transcript = session.transcript
+        queue.enqueue(cfg, event(primary_transcript, session.cwd, session_id="primary-1"))
+
+        worker_transcript = write_records(
+            tmp_path / "worker.jsonl",
+            {"cwd": str(worker_dir)},
+            record("w1", "user", "Worker ran tests: all green."),
+            record("w2", "assistant", "Recorded test results.", model="claude-real"),
+        )
+        queue.enqueue(cfg, event(worker_transcript, worker_dir, session_id="worker-1"))
+
+        report = work.run(cfg)
+
+        assert report.digested == 2
+        assert report.stopped == ""
+
+        primary_pages = [p for p in pages(cfg) if "primary-1" in p]
+        assert len(primary_pages) == 1
+        fm_primary = frontmatter(cfg, f"digests/{primary_pages[0]}")
+        assert "role" not in fm_primary["aft"]
+        assert "role" not in fm_primary["aft"]["facts"][0]
+
+        worker_pages = [p for p in pages(cfg) if "worker-1" in p]
+        assert len(worker_pages) == 1
+        fm_worker = frontmatter(cfg, f"digests/{worker_pages[0]}")
+        assert fm_worker["aft"]["role"] == "worker"
+        assert fm_worker["aft"]["facts"][0]["role"] == "worker"
+    finally:
+        fake.stop()
+
+
+def test_worker_session_not_digested_when_primary_exhausts_budget(session: Session, tmp_path):
+    """When primary sessions spend the daily budget, worker sessions are archived
+    but not digested.
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    fake, cfg = serve(
+        session.cfg,
+        answer(
+            said(
+                statement="Primary decision made.",
+                quote="Store the digest at session end",
+                entry="e1",
+            )
+        ),
+        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+    )
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=250)
+
+        queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="primary-1"))
+
+        worker_transcript = write_records(
+            tmp_path / "worker.jsonl",
+            {"cwd": str(worker_dir)},
+            record("w1", "user", "Worker ran tests: failed with error."),
+            record("w2", "assistant", "Recorded failure.", model="claude-real"),
+        )
+        queue.enqueue(cfg, event(worker_transcript, worker_dir, session_id="worker-1"))
+
+        first = work.run(cfg)
+        assert first.digested == 1
+        assert first.stopped == work.STOP_BUDGET
+        assert any("primary-1" in p for p in pages(cfg))
+        assert not any("worker-1" in p for p in pages(cfg))
+
+        assert evidence.entries(cfg, "worker-1") != []
+        conn = sqlite3.connect(cfg.home / "index.sqlite")
+        count = conn.execute(
+            "SELECT count(*) FROM evidence WHERE session_id = 'worker-1'"
+        ).fetchone()[0]
+        conn.close()
+        assert count > 0
+
+        assert "worker-1" in rows(cfg, queue.PENDING)
+
+        second = work.run(with_budget(cfg, 100_000))
+        assert second.digested == 1
+        assert any("worker-1" in p for p in pages(cfg))
+        worker_page = [p for p in pages(cfg) if "worker-1" in p][0]
+        fm_worker = frontmatter(cfg, f"digests/{worker_page}")
+        assert fm_worker["aft"]["role"] == "worker"
+        assert fm_worker["aft"]["facts"][0]["role"] == "worker"
+    finally:
+        fake.stop()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from aft import config as configmod
@@ -53,3 +55,27 @@ def test_invalid_config(home, text, message):
 def test_default_config_text_loads(home):
     (home / "config.toml").write_text(configmod.DEFAULT_CONFIG_TEXT)
     assert configmod.load().settings == configmod.Settings()
+
+
+def test_path_matching_and_roles(home):
+    (home / "config.toml").write_text(
+        "[capture]\n"
+        'exclude_paths = ["~/secret", "/srv/excluded/"]\n'
+        'worker_paths = ["~/workers", "/srv/workers"]\n'
+    )
+    cfg = configmod.load()
+
+    secret_dir = Path.home() / "secret" / "project"
+    excluded_dir = Path("/srv/excluded/run1")
+    worker_dir = Path.home() / "workers" / "w1"
+    primary_dir = Path("/srv/other/normal")
+
+    assert configmod.is_excluded(secret_dir, cfg) is True
+    assert configmod.is_excluded(excluded_dir, cfg) is True
+    assert configmod.is_excluded(worker_dir, cfg) is False
+    assert configmod.is_excluded(primary_dir, cfg) is False
+
+    assert configmod.is_worker(worker_dir, cfg) is True
+    assert configmod.is_worker(Path("/srv/workers"), cfg) is True
+    assert configmod.is_worker(primary_dir, cfg) is False
+    assert configmod.is_worker(secret_dir, cfg) is False

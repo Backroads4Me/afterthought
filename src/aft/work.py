@@ -97,7 +97,7 @@ def run(config: Config, now: datetime | None = None) -> Report:
             if model.tokens_used_today(config, moment) >= budget:
                 stopped = STOP_BUDGET
                 break
-            job = queue.next_job(config)
+            job = queue.next_job(config, role="primary")
             if job is None:
                 break
             try:
@@ -122,6 +122,46 @@ def run(config: Config, now: datetime | None = None) -> Report:
                     failures.append(f"the queue: {lost}")
                     stopped = STOP_QUEUE
                     break
+
+        # Worker sessions: digested only with budget left after primary sessions.
+        # When budget is short, worker sessions are archived and indexed without digesting.
+        if stopped == STOP_BUDGET or model.tokens_used_today(config, moment) >= budget:
+            stopped = STOP_BUDGET
+            for job in queue.pending_jobs(config, role="worker"):
+                try:
+                    digest.archive_worker_job(config, job)
+                except Exception as exc:
+                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+        elif not stopped:
+            while True:
+                if model.tokens_used_today(config, moment) >= budget:
+                    stopped = STOP_BUDGET
+                    for job in queue.pending_jobs(config, role="worker"):
+                        try:
+                            digest.archive_worker_job(config, job)
+                        except Exception as exc:
+                            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    break
+                job = queue.next_job(config, role="worker")
+                if job is None:
+                    break
+                try:
+                    if digest.digest_job(config, job, moment) is None:
+                        empty += 1
+                    else:
+                        digested += 1
+                except STOPS_RUN as exc:
+                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+                    break
+                except FAILS_JOB as exc:
+                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    try:
+                        queue.fail(config, job, str(exc))
+                    except QUEUE_LOST as lost:
+                        failures.append(f"the queue: {lost}")
+                        stopped = STOP_QUEUE
+                        break
     except QUEUE_LOST as exc:
         failures.append(f"the queue: {exc}")
         stopped = STOP_QUEUE

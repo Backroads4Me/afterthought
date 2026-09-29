@@ -29,7 +29,7 @@ from aft import (
     vault,
     work,
 )
-from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
+from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, is_excluded, load, resolve_home
 from aft.dream import schedule
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
@@ -630,6 +630,8 @@ def _dispatch(event: SessionEvent) -> None:
     """
     if event.kind in (COMPACTION, SESSION_END):
         cfg = load()
+        if is_excluded(event.cwd, cfg):
+            return
         queue.enqueue(cfg, event)
         systemd_install.trigger_early(cfg)
 
