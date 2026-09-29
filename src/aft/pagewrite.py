@@ -13,7 +13,7 @@ Two rules keep the result valid:
   written that ``page.parse`` would reject or that ``aft.lint`` would report: a known
   kind, a known source tag, a real date, and footnotes whose source exists and carries
   a quote wherever the edit writes one: the footnotes of a line and any ``[^id]`` inside
-  a statement (design 6, design 9 R1). A statement is accepted by
+  a statement or a note (design 6, design 9 R1). A statement is accepted by
   round trip: the written line has to parse back to exactly that statement, so a statement
   ending in markup that only looks like a fact tail is carried as prose, and only blank
   text, ``~~``, an unresolved citation and a line break are refused by pattern.
@@ -26,7 +26,8 @@ Two rules keep the result valid:
 
 Nothing here decides what a fact should become. Which operation a decision turns into,
 and when a candidate has earned promotion, is the rules' job; the writer only records
-the state it is told to record.
+the state it is told to record. A note it is told to close travels out to the page's
+archive instead of being deleted: design 6 never loses text the tool did not write.
 """
 
 from __future__ import annotations
@@ -47,6 +48,10 @@ SIGNALS_GATE = 3
 SESSIONS_GATE = 2
 """Gate progress is written as ``(signals a/3, sessions c/2)``: design 9 R3 asks for 3
 signals across 2 sessions before a candidate leaves the Candidates section."""
+
+CALLOUT_TYPES = ("conflict", "question")
+"""The note types design 6's fact state writes under a line: ``[!conflict]`` for a
+dispute and ``[!question]`` for a question waiting on a person."""
 
 SECTION_FOR_KIND = {kind: section for section, kind in page.KIND_SECTIONS.items()}
 SECTION_ORDER = (*page.KIND_SECTIONS, page.CANDIDATES)
@@ -333,6 +338,103 @@ class PageDoc:
             at = self._append_line(section, line)
             return self._fact_written(at, found.statement)
 
+    def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
+        """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).
+
+        The note is what makes a line a conflict or a question, so the line keeps its
+        bytes. A line that is not active alone is refused: a struck, stale or candidate
+        line already carries a state, and so does a line under an open note.
+
+        Text already sitting under the line is refused too. A note inserted above it
+        would make what a person typed read as the text of ours, which design 6 then
+        injects beside the line.
+
+        The note is set off by a blank line, the way design 6 writes one, so it renders as
+        its own block rather than folded into the line above. Its citations resolve like
+        the line's: a note is read next to its fact, so ``aft lint`` checks every ``[^id]``
+        in it (design 6).
+        """
+        found = self._resolve(fact)
+        if found.state != page.ACTIVE:
+            raise WriteError(f"cannot add a callout to a {found.state} line")
+        below = self.lines[found.line].rstrip() if found.line < len(self.lines) else ""
+        if below.startswith(">"):
+            raise WriteError(f"cannot add a callout here; {below} is already quote text")
+        if type not in CALLOUT_TYPES:
+            raise WriteError(f"unknown callout [{type}]; expected {' '.join(CALLOUT_TYPES)}")
+        rows = [row.strip() for row in text.strip().split("\n")]
+        if not all(rows):
+            raise WriteError("a callout needs text and no blank lines in it")
+        if any("\r" in row for row in rows):
+            raise WriteError("a callout row is one line")
+        self._check_citations(text)
+        note = ["", f"> [!{type}] {_check_date(date)}", *[f"> {row}" for row in rows]]
+        self._apply(found.line, found.line, note)
+        return True
+
+    def resolve_callout(self, fact: page.Fact) -> bool:
+        """Move the note under a line to the archive: the dispute it records is closed.
+
+        Design 6 never deletes a note, so the whole block the parse read as this line's
+        note travels as it was read - the header and every row, including a row a person
+        typed under the header - with the line it was about written above them. The line
+        itself keeps its bytes and its place on the page, which is active again once its
+        note is off it.
+
+        The blank line that set the note apart goes with it, so closing a note leaves no
+        stack of blank lines behind. Text below the block stays on the page: it belongs to
+        the note only while the parse reads it as a note row.
+        """
+        found = self._resolve(fact)
+        if not found.callouts:
+            raise WriteError("the line has no callout to resolve")
+        callout = found.callouts[0]
+        start = callout.line - 1
+        stop = callout.line + len(callout.text)
+        cut = start - 1 if not self.lines[start - 1].strip() else start
+        block = [self.lines[found.line - 1], *self.lines[start:stop]]
+        with self._atomic():
+            self._apply(cut, stop, [])
+            self._archive(block)
+        return True
+
+    def _archive_file(self) -> Path:
+        """The file this page's resolved notes go to: ``archive/<slug>.md`` (design 6).
+
+        Design 6 keys the archive by a project's slug, and a project page names its
+        project by the directory it lives under, so the file sits beside the ``projects``
+        directory holding the page. A page outside ``projects/<slug>/`` has no slug to key
+        it by, so its notes have nowhere to be archived.
+        """
+        parts = self.path.parts
+        for index, part in enumerate(parts):
+            if part == "projects" and index + 2 < len(parts):
+                return Path(*parts[:index], "archive", f"{parts[index + 1]}.md")
+        raise WriteError(f"{self.path} is not a project page, so its notes have no archive")
+
+    def _archive(self, block: Sequence[str]) -> None:
+        """Append ``block`` to the archive behind a blank line, creating the file.
+
+        The rows go in as they were read. A file that does not exist yet starts with
+        frontmatter, so the vault still lints clean once the archive has a file in it.
+        """
+        path = self._archive_file()
+        if path.exists():
+            text = path.read_text()
+        else:
+            slug = path.stem
+            text = "\n".join(
+                (
+                    "---",
+                    "type: Archive",
+                    f"title: {_scalar(f'{slug} archive')}",
+                    f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
+                    "---",
+                )
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join([*text.rstrip("\n").split("\n"), "", *block]) + "\n")
+
     # Lines and frontmatter
 
     def fact(self, statement: str) -> page.Fact:
@@ -412,8 +514,10 @@ class PageDoc:
 
         ``_apply`` refuses its own edit before it writes; this covers the operation as a
         whole, so a refusal once an earlier edit is in place - a later edit, a statement
-        that does not read back, a move whose new line would not parse - cannot leave that
-        earlier edit behind.
+        that does not read back, a move whose new line would not parse, a note with
+        nowhere to be archived - cannot leave that earlier edit behind. Text is never left
+        in two places either: an operation writes its archive block last, so nothing can
+        fail after the block has been appended.
         """
         was, was_page = list(self.lines), self._page
         try:
