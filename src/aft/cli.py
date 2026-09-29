@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -47,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         UsageError,
         survey.SurveyError,
         manifest.ManifestError,
+        queue.QueueError,
+        sqlite3.Error,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -303,7 +306,7 @@ def cmd_lint(args) -> int:
 
 
 def cmd_work(args) -> int:
-    """Digest the queue within the day's budget, and say how far the run got.
+    """Digest the queue within the day's budget, say how far the run got, then dream.
 
     A job that could not be digested is an exit status a timer can see, not a line only
     the run's own log holds; the work it could not do stays queued either way (DESIGN 14).
@@ -313,6 +316,7 @@ def cmd_work(args) -> int:
     print(f"aft work: {report.line()}")
     for failure in report.failures:
         print(f"aft work: {failure}", file=sys.stderr)
+    _dream(config)
     return 1 if report.failures else 0
 
 
@@ -329,20 +333,26 @@ def cmd_reindex(args) -> int:
 
 
 def cmd_dream(args) -> int:
-    """Run the dream once. Everything it does is `aft.dream.schedule`'s; this says what it
-    did with each project that has digests waiting."""
-    result = schedule.run(load())
-    if not result.waiting:
-        print("no digests waiting")
-    if result.checkpoint:
-        print(f"committed hand edits as {result.checkpoint[:12]}")
-    for slug in result.ran:
-        print(f"{slug}: {len(result.waiting[slug])} digest(s) taken up")
-    for slug in result.active:
-        print(f"{slug}: skipped, a session was active within the quiet period")
-    for slug in result.edited:
-        print(f"{slug}: skipped, the vault has hand edits within the quiet period")
+    """Run the dream once. Everything it does is `aft.dream.schedule`'s."""
+    _dream(load())
     return 0
+
+
+def _dream(config: Config) -> None:
+    """Run the dream and say what it did with each project that has digests waiting."""
+    result = schedule.run(config)
+    if not result.waiting:
+        print("aft dream: no digests waiting")
+    if result.checkpoint:
+        print(f"aft dream: committed hand edits as {result.checkpoint[:12]}")
+    if result.tagged:
+        print(f"aft dream: tagged hand-typed lines [stated] in {', '.join(result.tagged)}")
+    for slug in result.ran:
+        print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug in result.active:
+        print(f"aft dream: {slug}: skipped, a session was active within the quiet period")
+    for slug in result.edited:
+        print(f"aft dream: {slug}: skipped, the vault has hand edits within the quiet period")
 
 
 def cmd_install_claude(args) -> int:
