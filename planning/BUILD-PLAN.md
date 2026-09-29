@@ -199,7 +199,8 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
     printed block
   - on `before_agent_start`: add the kept block as its own system prompt section (not a
     replacement of the prompt)
-  - on `session_compact`: re-run the hook as `compaction`, and refresh the kept block
+  - on `session_before_compact`: re-run the hook as `compaction`, and refresh the kept
+    block
   - on `session_shutdown`: run `aft hook pi session_end`, without waiting more than 2 s
 
   `aft install pi` copies the file to `~/.pi/agent/extensions/afterthought/index.ts`
@@ -257,21 +258,31 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   content yet yields no recognized entry raises `UnrecognizedTranscript`, so a changed
   transcript format is reported instead of reading as an empty session. Capture logs it,
   names it in the next report, and keeps the job for a retry after the reader is fixed.
-- **Tests:** fixture transcripts (small, hand-trimmed from real sessions, secrets removed)
-  for each agent, including a compaction, a tool error and a resumed session.
+  An unreadable file or malformed line is reported as a gap tied to the entry that
+  produced it, with a count for the active branch. A session holding only assistant text
+  and recognized harness notices yields no entries, because an assistant line never
+  becomes a fact's subject on its own.
+- **Tests:** fixture transcripts (synthetic, never copied from real sessions) for each
+  agent, including a compaction, a tool error and a resumed session, plus the gap report
+  and the assistant-only session.
 
 #### M2.2 Capture queue, capture hook and sweep
 
 - **Depends on:** M1.1, M2.1. **Design:** 8 (capture queue).
-- **Files:** `src/aft/queue.py`, `src/aft/capture.py`, `tests/test_queue.py`.
+- **Files:** `src/aft/queue.py`, `src/aft/capture.py`, `src/aft/cli.py` (wiring the
+  `compaction` and `session_end` events of `aft hook` to `enqueue`), `tests/test_queue.py`.
 - **Interface:** `enqueue(config, event) -> None`; `next_job(config) -> Job | None`;
   `complete(config, job, watermark)`; `fail(config, job, error)`; `sweep(config, now)`.
 - **Behavior:** the queue is `~/.afterthought/queue.sqlite` in WAL mode. `enqueue` writes one
   row inside `BEGIN IMMEDIATE` and returns; it never calls a model and never reads the
   transcript. A session has one watermark (the last digested entry id), updated only when
   its digest is written. `sweep` scans both agents' session directories for sessions
-  modified since the last sweep that have no pending job and are idle for 30 minutes or
-  have grown by 200 KB since their watermark, and enqueues them. Resolution to a project
+  modified in the last 7 days and compares each against its recorded watermark, not against
+  the time of the last sweep, so a session whose hook never fired is found whatever the
+  timer cadence. It enqueues any with no pending job that has new entries past its
+  watermark and is idle for 30 minutes, or has grown by 200 KB since its watermark. The
+  queue also stores, per session, whether an off-the-record span is still open at the
+  watermark (see M2.3). Resolution to a project
   happens at digest time, not in the hook.
 - **Tests:** two processes enqueue concurrently without loss; a crash between reading and
   completing leaves the job retryable; the hook path completes in under 50 ms with a
@@ -281,20 +292,27 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 
 - **Depends on:** M2.1. **Design:** 8 (filter), 12.
 - **Files:** `src/aft/filter.py`, `src/aft/redact.py`, `tests/test_filter.py`.
-- **Interface:** `filter_entries(entries, config) -> list[Entry]`;
+- **Interface:** `filter_entries(entries, config, off_record: bool = False) ->
+  tuple[list[Entry], bool]`, taking whether a span is open at the start of the chunk and
+  returning the kept entries and whether a span is still open at its end;
   `redact(text, patterns) -> str`.
 - **Behavior:** in this order: drop off-the-record spans (a user entry whose text begins,
   after whitespace, with `aft off` or `off the record`, case-insensitive, trailing
   punctuation ignored, starts a span; `aft on` or `on the record` ends it; the marker
-  entries themselves are dropped); keep user and assistant text; from tool entries keep
-  only lines matching error patterns (`error`, `failed`, `Traceback`, `exception`,
+  entries themselves are dropped; a span still open at the end of a chunk carries into the
+  next chunk of the same session through the queue, so a boundary never ends it); keep
+  user and assistant text; from a tool entry the agent flagged as an error, keep its first
+  500 characters plus any matching lines below; from other tool entries keep only lines
+  matching error patterns (`error`, `failed`, `Traceback`, `exception`,
   `FAILED`, non-zero exit) and `path:line` references; cap each entry at 1,500 characters
   on a word boundary with ` [...]`; redact. Built-in redaction covers private key blocks,
   `sk-`/`ghp_`/`github_pat_`/`xox[bp]-`/AWS key ids, `Authorization:` headers,
   `password=`-style assignments, and credentials in URLs, plus `capture.redact_patterns`.
   Redacted text becomes `[redacted]`.
 - **Tests:** each marker form; a marker mid-sentence does nothing; an unclosed span runs to
-  the end; each secret form; the cap; error-line extraction.
+  the end; a span opened in one chunk stays closed to capture in the next; each secret
+  form; the cap; error-line extraction; a flagged entry with no matching line keeps its
+  first 500 characters.
 
 #### M2.4 Evidence archive and retention
 
@@ -576,7 +594,8 @@ Give a reason of at most 200 characters that a person can check against the quot
 - **Behavior:** applies surviving outcomes through the page writer; creates
   `projects/<slug>/overview.md` and registers the project on its first curated fact;
   checks anchors with ripgrep against the default branch (skipping anchors whose commit is
-  not yet on it); moves superseded lines older than 90 days to `archive/<slug>.md`; flags
+  not yet on it), marking a broken anchor stale and clearing the mark when the words appear
+  again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<slug>.md`; flags
   pages over 12,000 characters in the report; regenerates each `index.md` and appends to
   `log.md`; runs lint and aborts the run without committing if lint fails; marks consumed
   digests with `aft.consumed: <commit>`; makes one commit per project run.
@@ -646,6 +665,24 @@ specification return the right document and page (DESIGN 15, M7).
   commands.
 - **M7.6 Facts from notes and instruction files:** the agent proposes facts with quotes;
   each is verified against its file and enters the dream as a candidate digest.
+
+### Follow-ups from rulings
+
+Rulings made after a task merged. Each is a small task of its own, briefed like the others.
+
+- **F1 Seed overwrite keeps curated text** (after M1.5). `--overwrite` refuses when the page
+  holds anything the seed did not write: a hand-written line, an extra tag or anchor, or a
+  state mark on a seeded line. The seed is a one-time bootstrap; after that the page is
+  curated memory. Test: each kind of curated edit makes `--overwrite` refuse.
+- **F2 Rejected lines stay visible** (after M0 and PR 6). `page.Page` gains `rejected: list`
+  of `(line, raw text, reason)` for fact lines the parser refused. They are never facts, so
+  memory consumers ignore them, but lint and the seed script can see them. Additive: nothing
+  existing changes. Tests: a refused line appears in `rejected` and not in `facts`.
+- **F3 Filter carries off-the-record across chunks and keeps flagged errors** (after M2.3,
+  with M2.2). Implements the M2.3 interface and behavior above.
+- **F4 Clear stale** (after M4.2). `PageDoc.clear_stale(fact, date)` removes a stale mark;
+  M4.5 uses it when an anchor's words reappear. Test: a cleared line parses as active and
+  lints.
 
 ## 6. Ted's checklists at milestone ends
 
