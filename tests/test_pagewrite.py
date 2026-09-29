@@ -2,13 +2,14 @@
 edit touches only its own lines: the rest of the page is compared byte for byte."""
 
 from __future__ import annotations
-from aft import config as configmod, vault as vaultmod
 
 from pathlib import Path
 
 import pytest
 
+from aft import config as configmod
 from aft import lint, page, pagewrite
+from aft import vault as vaultmod
 from aft.registry import Registry
 
 REL = Path("projects/widget/overview.md")
@@ -1422,7 +1423,8 @@ def test_a_note_on_a_global_page_archives_into_archive_global(initialized):
     doc = pagewrite.PageDoc.read(pref_path, vault=initialized.vault)
     assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
     assert (initialized.vault / "archive/global/preferences.md").is_file()
-    assert "> [!question] 2026-10-01" in (initialized.vault / "archive/global/preferences.md").read_text()
+    pref_archive = (initialized.vault / "archive/global/preferences.md").read_text()
+    assert "> [!question] 2026-10-01" in pref_archive
 
 
 def test_a_page_outside_the_vault_refuses_to_archive(initialized, tmp_path):

@@ -666,7 +666,7 @@ class PageDoc:
         return True
 
     def _archive_file(self) -> Path:
-        """The file this page's resolved notes go to: ``archive/<page path>`` (design 6, ruling 7943f9a).
+        """The file this page's resolved notes go to: ``archive/<page path>`` (design 6).
 
         The archive target mirrors the page's own path inside the vault - a project page's
         overview to ``archive/projects/<slug>/overview.md``, ``global/preferences.md`` to
@@ -726,6 +726,7 @@ class PageDoc:
     def _write_archive(self, path: Path, was: bytes | None, now: bytes) -> None:
         """Write the archive atomically, never truncating existing content (F1 fix)."""
         import os
+
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
         try:
@@ -734,8 +735,6 @@ class PageDoc:
         except Exception:
             tmp.unlink(missing_ok=True)
             raise
-
-
 
     # Lines and frontmatter
 
@@ -848,7 +847,9 @@ class PageDoc:
             self._page = was_page
             raise
 
-    def _apply(self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False) -> None:
+    def _apply(
+        self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False
+    ) -> None:
         """Replace lines ``start`` to ``stop`` (0-based) with ``new``, or refuse.
 
         The text the edit would produce is parsed before any of it is written, and the
