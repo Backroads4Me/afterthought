@@ -1,0 +1,427 @@
+"""The Claude Code installer (BUILD-PLAN M1.3).
+
+Every test here points the installer at a file under ``tmp_path``. Nothing in this file may
+read or write the real ``~/.claude/settings.json``, so the command-line tests redirect
+``HOME`` and then check that the path the command resolved is inside the temporary home
+before they run it.
+
+The properties BUILD-PLAN M1.3 is really about are read back out of the resulting file as
+data: what the file runs, in what order, and whether bytes moved.
+"""
+
+from __future__ import annotations
+
+import json
+import shlex
+import sys
+from pathlib import Path
+
+import pytest
+
+from aft.adapters.claude import EVENTS as CLAUDE_EVENTS
+from aft.cli import main
+from aft.install import claude as claude_install
+from aft.install.claude import InstallError
+
+FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+
+
+def settings_in(tmp_path) -> Path:
+    return tmp_path / ".claude" / "settings.json"
+
+
+def write_settings(settings: Path, document: object) -> str:
+    """Put a document in the file the way Claude Code files read, and return that text."""
+    text = json.dumps(document, indent=2) + "\n"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(text, encoding="utf-8")
+    return text
+
+
+def read_settings(settings: Path) -> dict:
+    return json.loads(settings.read_text(encoding="utf-8"))
+
+
+def command_order(settings_or_document) -> list[tuple[str, str]]:
+    """Every (event, command) the file runs, in the file's own order."""
+    document = (
+        settings_or_document
+        if isinstance(settings_or_document, dict)
+        else read_settings(settings_or_document)
+    )
+    hooks = document.get("hooks", {})
+    return [
+        (event, hook["command"])
+        for event, groups in hooks.items()
+        for group in groups
+        for hook in group["hooks"]
+    ]
+
+
+def aft_commands() -> set[str]:
+    return {f"aft hook claude {event}" for event in claude_install.HOOK_EVENTS}
+
+
+def foreign_commands(runs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The runs a file holds that afterthought did not add, in order."""
+    ours = aft_commands()
+    return [(event, command) for event, command in runs if command not in ours]
+
+
+PEOPLE = {
+    "$schema": "https://json.schemastore.org/claude-code-settings.json",
+    "model": "claude-opus",
+    "hooks": {
+        "PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]}
+        ],
+        "SessionStart": [
+            {
+                "matcher": "^(startup|resume|clear|compact|fork)$",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash ./hooks/herdr-agent-state.sh session",
+                        "timeout": 10,
+                    }
+                ],
+            },
+            {"matcher": "startup", "hooks": [{"type": "command", "command": "echo second"}]},
+        ],
+        "Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}],
+    },
+    "statusLine": {"type": "command", "command": "echo status"},
+}
+
+
+def test_install_writes_three_entries_into_an_empty_settings_file(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(settings, {})
+
+    assert claude_install.install(settings).changed is True
+
+    hooks = read_settings(settings)["hooks"]
+    assert list(hooks) == ["SessionStart", "PreCompact", "SessionEnd"]
+    for event in claude_install.HOOK_EVENTS:
+        assert hooks[event] == [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"aft hook claude {event}",
+                        "timeout": 5,
+                    }
+                ]
+            }
+        ]
+
+
+def test_install_creates_a_missing_file_and_backs_up_nothing(tmp_path):
+    settings = settings_in(tmp_path)
+
+    change = claude_install.install(settings)
+
+    assert change.changed is True and change.backup is None
+    assert set(read_settings(settings)["hooks"]) == set(claude_install.HOOK_EVENTS)
+    assert list(settings.parent.glob("*.bak")) == []
+
+
+def test_install_treats_an_empty_file_as_no_settings_yet(tmp_path):
+    settings = settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("", encoding="utf-8")
+
+    change = claude_install.install(settings)
+
+    assert change.changed is True and change.backup is None
+    assert set(read_settings(settings)["hooks"]) == set(claude_install.HOOK_EVENTS)
+
+
+def test_install_appends_its_own_entries_after_everyone_elses(tmp_path):
+    settings = settings_in(tmp_path)
+    theirs = command_order(PEOPLE)
+    text = write_settings(settings, PEOPLE)
+
+    claude_install.install(settings)
+
+    after = read_settings(settings)
+    assert command_order(after) == [
+        ("PreToolUse", "rtk hook claude"),
+        ("SessionStart", "bash ./hooks/herdr-agent-state.sh session"),
+        ("SessionStart", "echo second"),
+        ("SessionStart", "aft hook claude SessionStart"),
+        ("Stop", "echo done"),
+        ("PreCompact", "aft hook claude PreCompact"),
+        ("SessionEnd", "aft hook claude SessionEnd"),
+    ]
+    assert foreign_commands(command_order(after)) == theirs
+    assert after["hooks"]["PreToolUse"] == PEOPLE["hooks"]["PreToolUse"]
+    assert after["hooks"]["Stop"] == PEOPLE["hooks"]["Stop"]
+    assert after["hooks"]["SessionStart"][:2] == PEOPLE["hooks"]["SessionStart"]
+    assert list(after) == list(PEOPLE)
+    assert after["$schema"] == PEOPLE["$schema"]
+    assert after["model"] == PEOPLE["model"]
+    assert after["statusLine"] == PEOPLE["statusLine"]
+    # The other people's own text is still their text, in the same relative order.
+    written = settings.read_text(encoding="utf-8")
+    assert (
+        written.index("rtk hook claude")
+        < written.index("herdr-agent-state")
+        < written.index("echo second")
+    )
+    assert text.count("rtk hook claude") == written.count("rtk hook claude") == 1
+
+
+def test_installing_twice_changes_nothing(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(settings, PEOPLE)
+    claude_install.install(settings)
+    text = settings.read_text(encoding="utf-8")
+    backups = sorted(settings.parent.glob("*.bak"))
+
+    second = claude_install.install(settings)
+
+    assert second.changed is False and second.backup is None and second.diff == ""
+    assert settings.read_text(encoding="utf-8") == text
+    assert sorted(settings.parent.glob("*.bak")) == backups
+    entries = dict.fromkeys(claude_install.HOOK_EVENTS, 0)
+    for seen_event, command in command_order(settings):
+        if command in aft_commands():
+            entries[seen_event] += 1
+    assert entries == dict.fromkeys(claude_install.HOOK_EVENTS, 1)
+
+
+def test_reinstall_adds_only_the_entry_that_is_missing(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(settings, {})
+    claude_install.install(settings)
+
+    # The user removes one entry and puts one of their own ahead of another of ours.
+    document = read_settings(settings)
+    del document["hooks"]["PreCompact"]
+    document["hooks"]["SessionEnd"].insert(
+        0, {"hooks": [{"type": "command", "command": "echo mine"}]}
+    )
+    settings.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    assert claude_install.install(settings).changed is True
+
+    after = read_settings(settings)
+    assert after["hooks"]["PreCompact"] == [
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "aft hook claude PreCompact",
+                    "timeout": 5,
+                }
+            ]
+        }
+    ]
+    assert after["hooks"]["SessionEnd"][0]["hooks"][0]["command"] == "echo mine"
+    assert after["hooks"]["SessionStart"] == document["hooks"]["SessionStart"]
+
+
+def test_a_write_is_preceded_by_a_backup_holding_the_previous_text(tmp_path):
+    settings = settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    change = claude_install.install(settings)
+
+    assert change.backup is not None
+    assert change.backup.parent == settings.parent
+    assert change.backup.name.startswith("settings.json.aft-")
+    assert change.backup.name.endswith(".bak")
+    assert change.backup.read_text(encoding="utf-8") == text
+    assert read_settings(change.backup) == PEOPLE
+
+
+def test_uninstall_returns_the_file_to_what_it_was(tmp_path):
+    settings = settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    claude_install.install(settings)
+    assert claude_install.uninstall(settings).changed is True
+
+    assert settings.read_text(encoding="utf-8") == text
+
+
+def test_uninstall_returns_a_file_it_created_to_an_empty_document(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(settings, {"model": "claude-opus"})
+
+    claude_install.install(settings)
+    claude_install.uninstall(settings)
+
+    assert read_settings(settings) == {"model": "claude-opus"}
+
+
+def test_uninstall_keeps_a_group_it_did_not_add(tmp_path):
+    """A user who moved our command into their own group loses the command, not the group."""
+    settings = settings_in(tmp_path)
+    write_settings(
+        settings,
+        {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {"type": "command", "command": "echo theirs"},
+                            {
+                                "type": "command",
+                                "command": "aft hook claude SessionStart",
+                                "timeout": 5,
+                            },
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    claude_install.uninstall(settings)
+
+    assert read_settings(settings) == {
+        "hooks": {
+            "SessionStart": [
+                {"matcher": "startup", "hooks": [{"type": "command", "command": "echo theirs"}]}
+            ]
+        }
+    }
+
+
+def test_uninstall_of_a_file_without_our_entries_changes_nothing(tmp_path):
+    settings = settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    change = claude_install.uninstall(settings)
+
+    assert change.changed is False and change.backup is None and change.diff == ""
+    assert settings.read_text(encoding="utf-8") == text
+
+
+def test_the_installed_commands_are_the_hook_command_that_exists(tmp_path, monkeypatch, capsys):
+    """The entries install the command line M1.1 merged, for an event its adapter maps."""
+    settings = settings_in(tmp_path)
+    claude_install.install(settings)
+
+    for event, command in command_order(settings):
+        assert shlex.split(command) == ["aft", "hook", "claude", event]
+        assert event in CLAUDE_EVENTS
+
+    monkeypatch.setenv("AFT_HOME", str(tmp_path / "aft-home"))
+    payload = (FIXTURES / "claude-session-start.json").open(encoding="utf-8")
+    monkeypatch.setattr(sys, "stdin", payload)
+    assert main(["hook", "claude", "SessionStart"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def diff_body(diff_text: str, sign: str) -> list[str]:
+    """The lines one side of a diff carries, without the header line naming the file."""
+    return [
+        line[1:]
+        for line in diff_text.splitlines()
+        if line.startswith(sign) and not line.startswith(sign * 3)
+    ]
+
+
+def added_values(diff_text: str) -> list[object]:
+    """The JSON key-value lines a diff adds, each parsed as far as its own line goes."""
+    values = []
+    for line in diff_body(diff_text, "+"):
+        try:
+            values.append(json.loads("{" + line.strip().rstrip(",") + "}"))
+        except json.JSONDecodeError:
+            continue
+    return values
+
+
+def test_dry_run_prints_the_resulting_diff_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+
+    printed = capsys.readouterr().out
+    assert added_values(printed) == [
+        value
+        for event in claude_install.HOOK_EVENTS
+        for value in (
+            {"type": "command"},
+            {"command": f"aft hook claude {event}"},
+            {"timeout": 5},
+        )
+    ]
+    assert diff_body(printed, "-") == []
+    assert settings.read_text(encoding="utf-8") == text
+    assert list(settings.parent.glob("*.bak")) == []
+    assert list(settings.parent.glob("settings.json.aft-*")) == []
+
+
+def test_dry_run_of_an_installed_file_says_so(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    claude_install.install(settings)
+    text = settings.read_text(encoding="utf-8")
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+
+    assert "no changes" in capsys.readouterr().out
+    assert settings.read_text(encoding="utf-8") == text
+
+
+def test_the_command_installs_and_uninstalls_the_real_default_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    assert main(["install", "claude"]) == 0
+    assert "backed up" in capsys.readouterr().out
+    assert foreign_commands(command_order(settings)) == command_order(PEOPLE)
+    assert main(["install", "claude"]) == 0
+    assert "already" in capsys.readouterr().out
+    assert main(["install", "claude", "--uninstall"]) == 0
+    assert settings.read_text(encoding="utf-8") == text
+
+
+BROKEN = [
+    '{"hooks": {"SessionStart": [',
+    "not json at all",
+    "[1, 2, 3]",
+    '{"hooks": []}',
+    '{"hooks": {"SessionStart": {}}}',
+]
+
+
+@pytest.mark.parametrize("text", BROKEN)
+def test_a_settings_file_afterthought_cannot_read_aborts_without_writing(tmp_path, text):
+    settings = settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(text, encoding="utf-8")
+
+    for act in (claude_install.install, claude_install.uninstall):
+        with pytest.raises(InstallError) as refused:
+            act(settings)
+        assert str(settings) in str(refused.value)
+        assert settings.read_text(encoding="utf-8") == text
+        assert list(settings.parent.glob("*.bak")) == []
+        assert list(settings.parent.glob("settings.json.aft-*")) == []
+
+
+def test_the_command_reports_an_unreadable_settings_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"hooks": ', encoding="utf-8")
+
+    assert main(["install", "claude"]) == 2
+
+    assert "not valid JSON" in capsys.readouterr().err
+    assert settings.read_text(encoding="utf-8") == '{"hooks": '
+    assert list(settings.parent.glob("*.bak")) == []
