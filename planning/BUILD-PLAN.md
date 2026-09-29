@@ -278,7 +278,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Files:** `src/aft/queue.py`, `src/aft/capture.py`, `src/aft/cli.py` (wiring the
   `compaction` and `session_end` events of `aft hook` to `enqueue`), `tests/test_queue.py`.
 - **Interface:** `enqueue(config, event) -> None`; `next_job(config) -> Job | None`;
-  `complete(config, job, watermark, off_record)`, where `off_record` is required; `fail(config, job, error)`; `sweep(config, now)`.
+  `complete(config, job, watermark, *, off_record)`, where `off_record` is required; `fail(config, job, error)`; `sweep(config, now)`.
 - **Behavior:** the queue is `~/.afterthought/queue.sqlite` in WAL mode. `enqueue` writes one
   row inside `BEGIN IMMEDIATE` and returns; it never calls a model and never reads the
   transcript. A session has one watermark (the last digested entry id), updated only when
@@ -691,10 +691,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   memory consumers ignore them, but lint and the seed script can see them. Additive: nothing
   existing changes. Tests: a refused line appears in `rejected` and not in `facts`.
 - **F3 Filter carries off-the-record across chunks and keeps flagged errors** (after M2.3,
-  with M2.2). Implements the M2.3 interface and behavior above. A session with no stored
-  span state (captured before this landed) gets it by filtering its transcript from the
-  start up to its watermark; if the transcript cannot be read, the span is treated as open
-  and a one-line notice names the session. Tests: both cases.
+  with M2.2). Implements the M2.3 interface and behavior above. No queue file predates
+  this, so a queue file without per-session span state is refused, not migrated.
 - **F4 Clear stale** (after M4.2). `PageDoc.clear_stale(fact, date)` removes a stale mark;
   M4.5 uses it when an anchor's words reappear. Test: a cleared line parses as active and
   lints.
