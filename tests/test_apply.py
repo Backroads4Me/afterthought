@@ -1226,11 +1226,51 @@ def test_refusal_r6_global_fact_not_stated(initialized, home, fake):
         sources=[{"id": "s2", "resource": "aft://session/c/2#e2", "quote": "global python"}],
     )
 
+    fake.script = [reply("add", None, "global python")]
     res = schedule.run(cfg, now=NOW)
     report = res.reports["widget"]
-    assert len(report.skips) == 1
-    assert "global page changes only from [stated]" in report.skips[0].reason
+    assert len(report.rejected) == 1
+    assert report.rejected[0].rule == "R6"
     assert "global python" not in (cfg.vault / "global" / "environment.md").read_text()
+
+
+def test_overview_created_when_project_already_registered_without_overview(initialized, home, fake):
+    """When a project is already registered without overview.md, it is created before write."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    overview_path = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview_path.exists()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": "First fact on new overview.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/c/1#e1",
+                "quote": "First fact quote.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "first fact")]
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    assert overview_path.exists()
+    assert "First fact on new overview." in overview_path.read_text()
 
 
 def test_quote_not_in_archive_is_rejected(initialized, home, fake):

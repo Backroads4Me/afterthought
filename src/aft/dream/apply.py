@@ -250,16 +250,6 @@ def run_project(
                 )
                 continue
 
-            # R6 trust rule: global pages change only from [stated]
-            if new_fact.scope == "global" and new_fact.source != "stated":
-                report.skips.append(
-                    SkipFact(
-                        statement=new_fact.statement,
-                        reason=GLOBAL_NOT_STATED,
-                    )
-                )
-                continue
-
             quote_to_send = (
                 sources_map.get(verified_evidence[0].source, {}).get("quote", "")
                 if verified_evidence
@@ -362,21 +352,6 @@ def run_project(
                     record_write(config.registry_path)
                     registry.save()
                     run_project_id = project.id
-                    overview_path = vault_path / "projects" / slug / "overview.md"
-                    if not overview_path.exists():
-                        overview_path.parent.mkdir(parents=True, exist_ok=True)
-                        record_write(overview_path)
-                        overview_path.write_text(
-                            f"---\n"
-                            f"type: Project\n"
-                            f"title: {slug}\n"
-                            f"description: {slug}\n"
-                            f"sources: []\n"
-                            f"aft:\n"
-                            f"  project: {project.id}\n"
-                            f"---\n",
-                            encoding="utf-8",
-                        )
 
                 if new_fact.scope == "global":
                     target_file = (
@@ -393,6 +368,23 @@ def run_project(
                         target_file = vault_path / proposal.target.path
                     else:
                         target_file = vault_path / "projects" / slug / "overview.md"
+
+                if not target_file.exists():
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    proj_id = run_project_id or (project.id if project else f"p_{slug}")
+                    proj_title = project.title if project else slug.capitalize()
+                    record_write(target_file)
+                    target_file.write_text(
+                        f"---\n"
+                        f"type: Project\n"
+                        f"title: {proj_title}\n"
+                        f"description: {slug}\n"
+                        f"sources: []\n"
+                        f"aft:\n"
+                        f"  project: {proj_id}\n"
+                        f"---\n",
+                        encoding="utf-8",
+                    )
 
                 doc = pagewrite.PageDoc.read(target_file)
                 verified_refs = [e.source for e in verified_evidence]
