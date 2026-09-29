@@ -25,6 +25,7 @@ from aft import (
     lint,
     queue,
     redact,
+    search,
     vault,
     work,
 )
@@ -60,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         vault.VaultError,
         GitError,
         index.SearchIndexError,
+        search.SearchError,
         UsageError,
         survey.SurveyError,
         manifest.ManifestError,
@@ -136,6 +138,31 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("redigest", help="rebuild a session digest from archived evidence")
     p.add_argument("session_id", help="the session id to redigest")
     p.set_defaults(handler=cmd_redigest)
+
+    p = sub.add_parser("search", help="search memory with BM25 ranking")
+    p.add_argument("query", help="words to search for")
+    p.add_argument("--project", help="search within a project and global pages")
+    p.add_argument("--all", action="store_true", help="search across all projects")
+    p.add_argument("--archive", action="store_true", help="include archived superseded facts")
+    p.add_argument("--reports", action="store_true", help="include dream reports")
+    p.add_argument("--json", action="store_true", help="output hits as JSON")
+    p.add_argument("--limit", type=int, default=8, help="maximum number of hits (default 8)")
+    p.set_defaults(handler=cmd_search)
+
+    p = sub.add_parser("read", help="read a memory page at the specified depth")
+    p.add_argument("path", help="path to the page file")
+    p.add_argument(
+        "--level",
+        choices=["outline", "abstract", "full"],
+        default="full",
+        help="depth: outline, abstract, or full (default full)",
+    )
+    p.set_defaults(handler=cmd_read)
+
+    p = sub.add_parser("trace", help="trace a fact quote back to session evidence")
+    p.add_argument("page", help="path to the page")
+    p.add_argument("source_id", nargs="?", default=None, help="source id, e.g. s1 or [^s1]")
+    p.set_defaults(handler=cmd_trace)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
@@ -433,6 +460,30 @@ def cmd_redigest(args) -> int:
     result = digest.redigest(config, args.session_id)
     print(f"rebuilt digest at {result.path}")
     return 0
+
+
+def cmd_search(args) -> int:
+    config = load()
+    return search.search_command(
+        config,
+        args.query,
+        project=args.project,
+        all_projects=args.all,
+        archive=args.archive,
+        reports=args.reports,
+        as_json=args.json,
+        limit=args.limit,
+    )
+
+
+def cmd_read(args) -> int:
+    config = load()
+    return search.read_command(config, args.path, level=args.level)
+
+
+def cmd_trace(args) -> int:
+    config = load()
+    return search.trace_command(config, args.page, args.source_id)
 
 
 def cmd_install_claude(args) -> int:
