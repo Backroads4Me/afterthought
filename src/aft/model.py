@@ -80,6 +80,11 @@ def complete_json(
     """
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
+    try:
+        schemamod.check(schema)
+    except schemamod.SchemaError as exc:
+        raise ModelError(f"the schema aft was given is faulty: {exc}") from exc
+
     body = {
         "model": config.settings.model.name,
         "messages": [
@@ -173,17 +178,20 @@ def _chat(config: Config, body: dict) -> str:
     except urllib.error.HTTPError as exc:
         target = exc.headers.get("location")
         if 300 <= exc.code < 400 and target:
-            shown = target[:REPORT_CHARS]
-            if len(target) > REPORT_CHARS:
+            named = _quoted(config, target)
+            shown = named[:REPORT_CHARS]
+            if len(named) > REPORT_CHARS:
                 shown += " [truncated]"
-            raise ModelError(f"{url} redirected to {_quoted(config, shown)}") from exc
+            raise ModelError(f"{url} redirected to {shown}") from exc
         # A report carries REPORT_CHARS characters of the endpoint's own text at most, and
-        # reading that body is a request in itself: it can stop short or never arrive.
+        # reading that body is a request in itself: it can stop short or never arrive. The
+        # read overshoots the bound by the configured key, so a key straddling the cut
+        # arrives whole and comes out of the report instead of leaving its head behind.
         try:
-            detail = exc.read(REPORT_CHARS)
+            detail = exc.read(REPORT_CHARS + len(_key(config).encode()))
         except (OSError, http.client.HTTPException, ValueError):
             detail = b""
-        excerpt = _quoted(config, detail.decode(errors="replace")[:REPORT_CHARS])
+        excerpt = _quoted(config, detail.decode(errors="replace"))[:REPORT_CHARS]
         message = f"{url} returned {exc.code}: {excerpt}"
         if exc.code >= 500:
             raise _Retryable(message) from exc
@@ -197,21 +205,21 @@ def _chat(config: Config, body: dict) -> str:
     try:
         reply = json.loads(raw)
     except json.JSONDecodeError as exc:
-        echo = _quoted(config, raw[:200])
+        echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} did not answer with JSON: {echo}") from exc
     if not isinstance(reply, dict):
-        echo = _quoted(config, raw[:200])
+        echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} answered with JSON that is not an object: {echo}")
 
     _record_usage(config, started, reply.get("usage"))
     choices = reply.get("choices")
     if not isinstance(choices, list) or not choices:
-        echo = _quoted(config, raw[:200])
+        echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} returned no choices: {echo}")
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
-        echo = _quoted(config, raw[:200])
+        echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} returned no message content: {echo}")
     return content
 
@@ -233,6 +241,12 @@ def _headers(config: Config) -> dict[str, str]:
     return {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
 
 
+def _key(config: Config) -> str:
+    """The value of the environment variable ``model.api_key_env`` names, empty if unset."""
+    name = config.settings.model.api_key_env
+    return os.environ.get(name, "") if name else ""
+
+
 def _quoted(config: Config, said: str) -> str:
     """Text the endpoint wrote, made safe to put in a report.
 
@@ -242,8 +256,7 @@ def _quoted(config: Config, said: str) -> str:
     itself - the endpoint, the status, the kind of failure - never passes through, so a
     report keeps its diagnosis either way.
     """
-    name = config.settings.model.api_key_env
-    key = os.environ.get(name, "") if name else ""
+    key = _key(config)
     if not key or key not in said:
         return said
     return said.replace(key, "[redacted]") if len(key) >= MIN_KEY_CHARS else WITHHELD

@@ -31,13 +31,20 @@ SHAPES = {
     "maxItems": (int,),
 }
 
+# Nothing answers to it, so probing ``_is_type`` with it asks every name in a ``type``
+# list without any of them matching first.
+UNMATCHABLE = object()
+
 
 class SchemaError(Exception):
     pass
 
 
-def validate(value: Any, schema: dict, path: str = "$") -> None:
-    """Raise ``SchemaError`` describing the first problem, else return None."""
+def check(schema: Any, path: str = "$") -> None:
+    """Raise ``SchemaError`` for the first way ``schema`` misuses a keyword, whatever the
+    answer turns out to be. Nested schemas are walked as well, so a defect in one is
+    found before a call is made with it rather than only where an answer reaches.
+    """
     if not isinstance(schema, dict):
         raise SchemaError(f"the schema for {path} is {schema!r}, not an object")
     for keyword, kinds in SHAPES.items():
@@ -46,6 +53,18 @@ def validate(value: Any, schema: dict, path: str = "$") -> None:
         declared = schema[keyword]
         if declared is None or isinstance(declared, bool) or not isinstance(declared, kinds):
             raise SchemaError(f"the schema for {path} declares {keyword} as {declared!r}")
+    want = schema.get("type")
+    if want is not None:
+        _is_type(UNMATCHABLE, want)
+    for key, subschema in schema.get("properties", {}).items():
+        check(subschema, f"{path}.{key}")
+    if "items" in schema:
+        check(schema["items"], f"{path}[]")
+
+
+def validate(value: Any, schema: dict, path: str = "$") -> None:
+    """Raise ``SchemaError`` describing the first problem, else return None."""
+    check(schema, path)
 
     want = schema.get("type")
     if want is not None and not _is_type(value, want):

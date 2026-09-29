@@ -310,6 +310,23 @@ def test_a_short_key_withholds_only_what_the_endpoint_said(serve, monkeypatch):
     assert len(fake.requests) == 1
 
 
+def test_a_key_across_the_report_bound_still_does_not_appear(serve, monkeypatch):
+    # A gateway that quotes the request it refused can place the key across whatever bound
+    # a report cuts at, so the key comes out before the cut decides what is shown.
+    monkeypatch.setenv(KEY_VARIABLE, KEY_VALUE)
+    detail = b"x" * (model.REPORT_CHARS - len(KEY_VALUE) // 2) + KEY_VALUE.encode()
+    header = b"HTTP/1.1 400 Bad Request\r\nContent-Length: " + str(len(detail)).encode()
+    fake, cfg = serve(Reply(raw=header + b"\r\n\r\n" + detail), api_key_env=KEY_VARIABLE)
+    with pytest.raises(model.ModelError) as refusal:
+        call(cfg)
+    reported = str(refusal.value)
+    fragments = {KEY_VALUE[i : i + 4] for i in range(len(KEY_VALUE) - 3)}
+    assert [piece for piece in fragments if piece in reported] == []
+    assert "returned 400" in reported
+    assert "127.0.0.1" in reported
+    assert len(fake.requests) == 1
+
+
 def test_a_ledger_that_cannot_be_written_names_the_ledger(serve, monkeypatch):
     # The answer arrived and was usable: a write that did not happen is a local failure,
     # so its report names the file and gains no endpoint and no status it never touched.
@@ -477,3 +494,22 @@ def test_a_malformed_schema_reports_as_a_schema_problem(declared):
     # charged to the schema rather than arriving as an AttributeError over an answer.
     with pytest.raises(schema.SchemaError, match="the schema for"):
         schema.validate({"answer": "ok", "counts": [1]}, declared)
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"required": "answer"},
+        {"type": "nonsense"},
+        {"properties": {"answer": "string"}},
+    ],
+)
+def test_a_malformed_schema_costs_no_call_and_blames_the_right_side(serve, broken):
+    # The schema is the caller's own code, so a defect in it fails before the endpoint is
+    # reached: never retried, never billed, never charged to the model.
+    fake, cfg = serve({"answer": "ok"})
+    with pytest.raises(model.ModelError) as refusal:
+        model.complete_json(cfg, "You answer briefly.", "Is it working?", broken, 128)
+    assert "the schema aft was given is faulty" in str(refusal.value)
+    assert fake.requests == []
+    assert not model.usage_path(cfg).exists()
