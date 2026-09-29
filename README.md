@@ -25,5 +25,6 @@ directory; the test suite does this so it never touches real memory.
 |---|---|
 | `aft init` | Write a default `config.toml` if there is none, and create the vault |
 | `aft key [path]` | Show which project a directory belongs to; exits 1 when it is not registered |
+| `aft inject [path]` | Print the memory a session starts with; reads the vault's files only |
 | `aft project list\|add\|rename\|forget` | Manage the project registry |
 | `aft lint` | Check every page against OKF v0.2 and the fact-line grammar |
