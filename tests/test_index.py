@@ -1321,7 +1321,9 @@ def test_a_page_named_after_a_skipped_directory_is_still_indexed(initialized: Co
     assert filed not in hashes(initialized)
 
 
-def test_one_unreadable_page_is_reported_and_the_others_still_index(initialized: Config) -> None:
+def test_unreadable_pages_are_reported_and_the_good_page_still_indexes(
+    initialized: Config,
+) -> None:
     """A dangling symlink and a page of bytes that are not UTF-8 are named in the report while
     every other page indexes: the files are the memory, but one broken file is no reason for
     search to lose them all. Neither records a hash, so both are read again on the next
