@@ -178,7 +178,7 @@ never includes runtime state.
   projects/<slug>/
     index.md               generated list of the project's pages
     overview.md            the main page
-  digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md
+  digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>[-<n>].md
   archive/<slug>.md        superseded lines older than 90 days
   references/<name>/       reference pages for one library collection (section 11)
   library/<name>/          the collection's source files, read-only after import
@@ -316,7 +316,10 @@ A working directory resolves to one project:
 
 Each project has a stable id separate from its slug, so a rename rewrites nothing else.
 `aft project list`, `aft project rename` and `aft project forget` manage the registry.
-Global facts apply in every project.
+Global facts apply in every project. The digest keeps every verified fact with its scope.
+Dreaming files a global `[stated]` fact on `global/preferences.md` when it is a preference
+and on `global/environment.md` for every other kind; a global fact that is not `[stated]`
+is skipped and reported (R6).
 
 ## 8. Capture and digest
 
@@ -369,7 +372,9 @@ Sessions under configured worker paths (orchestrator worktrees, validation gates
 evidence of a lower rank. Their filtered text goes into the archive and the search index,
 which costs no model time, so an error like a failed test run stays findable. They are
 digested only when the day's model budget has room, and a fact from a worker session stays
-a candidate until a primary session corroborates it.
+a candidate until a primary session corroborates it. Worker evidence never confirms a
+standing line either: a `confirm` from a worker session is skipped and reported, so it
+adds no source and no date.
 
 ### The digest
 
@@ -405,7 +410,10 @@ then:
 
 - drops any fact whose quote does not appear in the cited entry (whitespace-normalized)
 - drops `[stated]` unless the cited entry is one of your turns
-- writes the digest as an OKF file (`type: Session Digest`) under `digests/`
+- writes the digest as an OKF file (`type: Session Digest`) under `digests/`: one page
+  per job. The first job for a session on a day writes `<date>-<agent>-<session>.md`, and
+  later jobs that day add `-2`, `-3` before `.md`. A digest's content never changes once
+  written; dreaming only marks it consumed, so each page is dreamed once, in session order.
 
 ## 9. Dreaming
 

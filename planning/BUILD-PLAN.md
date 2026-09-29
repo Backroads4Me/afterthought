@@ -158,7 +158,7 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
 - **Behavior:** reads files only; no model, no index. Layers in order, each trimmed to fit
   what remains of `inject.max_chars`, never cutting a fact line in half:
   1. `# Memory: <title>` and the overview's `description`
-  2. last session: `handoff` from the newest digest in `digests/<slug>/` (empty until M2)
+  2. last session: `handoff` from the newest digest in `digests/<slug>/` (the highest part on the newest day) (empty until M2)
   3. active and conflict/needs-you facts from `projects/<slug>/overview.md` in the order
      State, Decisions, Lessons, Procedures, Facts, References; a conflict or question is
      marked `(disputed)` or `(waiting on Ted)` after the line; source tags and footnotes are
@@ -272,7 +272,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Files:** `src/aft/queue.py`, `src/aft/capture.py`, `src/aft/cli.py` (wiring the
   `compaction` and `session_end` events of `aft hook` to `enqueue`), `tests/test_queue.py`.
 - **Interface:** `enqueue(config, event) -> None`; `next_job(config) -> Job | None`;
-  `complete(config, job, watermark)`; `fail(config, job, error)`; `sweep(config, now)`.
+  `complete(config, job, watermark, off_record)`, where `off_record` is required; `fail(config, job, error)`; `sweep(config, now)`.
 - **Behavior:** the queue is `~/.afterthought/queue.sqlite` in WAL mode. `enqueue` writes one
   row inside `BEGIN IMMEDIATE` and returns; it never calls a model and never reads the
   transcript. A session has one watermark (the last digested entry id), updated only when
@@ -357,8 +357,10 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Behavior:** for one job: resolve the project from the event's cwd; read entries after
   the watermark; filter; store evidence; render entries as `[<id>] <ROLE> <time>:\n<text>`;
   call the model with the prompt and schema below; verify each fact (quote found in its
-  entry; `stated` only from a user entry; `kind` and `scope` valid); write the digest to
-  `digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md` as an OKF page (`type: Session
+  entry; `stated` only from a user entry; `kind` and `scope` valid; a global fact is kept
+  with its scope, never dropped for it); write the digest to
+  `digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md` (a later job for the same
+  session and day adds `-2`, `-3` before `.md`; a written digest's content never changes) as an OKF page (`type: Session
   Digest`) with the summary, handoff, and verified facts, each fact carrying its source
   entry and quote; record dropped facts and the reason in the digest's frontmatter under
   `aft.dropped`; advance the watermark; commit under the vault lock. A chunk over
@@ -581,8 +583,11 @@ Give a reason of at most 200 characters that a person can check against the quot
   replaces a `preference` or `decision`, and contradicting one produces `needs you`;
   replacing requires evidence newer than the target's date; an inferred fact stays a
   candidate until 3 signals across 2 primary sessions, with signals older than 30 days
-  counting half; a worker-only fact stays a candidate; a global page changes only from
-  `[stated]`.
+  counting half; a worker-only fact stays a candidate, and a `confirm` from a worker session is skipped
+  and reported (no source, no date); a global page changes only from
+  `[stated]`, and a global fact that is not `[stated]` is skipped and reported. A global
+  `preference` goes to `global/preferences.md`; every other global kind goes to
+  `global/environment.md`.
 - **Tests:** one test per cell of the authority table and per rule, including every
   refusal. This file is where most of the build's tests live.
 - **Review checkpoint:** every PR touching this file.
@@ -679,7 +684,10 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   memory consumers ignore them, but lint and the seed script can see them. Additive: nothing
   existing changes. Tests: a refused line appears in `rejected` and not in `facts`.
 - **F3 Filter carries off-the-record across chunks and keeps flagged errors** (after M2.3,
-  with M2.2). Implements the M2.3 interface and behavior above.
+  with M2.2). Implements the M2.3 interface and behavior above. A session with no stored
+  span state (captured before this landed) gets it by filtering its transcript from the
+  start up to its watermark; if the transcript cannot be read, the span is treated as open
+  and a one-line notice names the session. Tests: both cases.
 - **F4 Clear stale** (after M4.2). `PageDoc.clear_stale(fact, date)` removes a stale mark;
   M4.5 uses it when an anchor's words reappear. Test: a cleared line parses as active and
   lints.
