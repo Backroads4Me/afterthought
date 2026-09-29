@@ -20,8 +20,8 @@ Two rules hold everything that is not afterthought's:
 * A write is preceded by a backup of the text it replaces, and a path that holds the wrong
   kind of thing - a file where a directory belongs, a directory where the extension belongs,
   a link of anybody's standing in place of either - is refused with nothing written. The two
-  paths this installer creates and removes are judged as themselves, never as what a link
-  behind them points at.
+  paths of afterthought's own footprint are judged as themselves, never as what a link behind
+  them points at.
 """
 
 from __future__ import annotations
@@ -143,11 +143,10 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
     replaced and are its own to take back, so they go with the file they were made beside -
     and a run that has to keep text of somebody's own leaves the whole footprint where it was.
     With nothing of anyone else's left inside, the directory of our own goes too; a directory
-    still holding anything keeps every byte of it, the extensions directory is never
-    removed, and a sibling
-    extension is never looked at, so an uninstall leaves whatever it did not install standing
-    where it stood. ``Change.removed`` names the paths it actually took - and so says nothing
-    when there was nothing of afterthought's there to take.
+    still holding anything keeps every byte of it, the extensions directory is never removed,
+    and a sibling extension is never looked at, so an uninstall leaves whatever it did not
+    install standing where it stood. ``Change.removed`` names the paths it actually took -
+    and so says nothing when there was nothing of afterthought's there to take.
     """
 
     try:
