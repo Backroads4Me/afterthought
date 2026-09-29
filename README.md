@@ -28,3 +28,4 @@ directory; the test suite does this so it never touches real memory.
 | `aft inject [path]` | Print the memory a session starts with; reads the vault's files only |
 | `aft project list\|add\|rename\|forget` | Manage the project registry |
 | `aft lint` | Check every page against OKF v0.2 and the fact-line grammar |
+| `aft reindex` | Drop the search index and rebuild it from the vault's files and the evidence archive |

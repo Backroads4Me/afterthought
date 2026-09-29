@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from aft import evidence, index, page, pagewrite
+from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
 
@@ -508,6 +509,31 @@ def test_reindex_drops_what_no_file_or_row_justifies(initialized: Config) -> Non
 
     assert search(initialized, "pages", "invented") == []
     assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+
+
+def test_aft_reindex_runs_the_rebuild_from_the_command_line(
+    initialized: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``aft reindex`` is the command the plan names (DESIGN 14). It is wiring: the rebuild is
+    `aft.index`'s, and what the command adds is the exit code and the file it says it wrote."""
+    write(initialized, REL, PAGE)
+
+    assert main(["reindex"]) == 0
+
+    printed = capsys.readouterr().out
+    assert f"rebuilt the search index at {initialized.home / index.INDEX_NAME}" in printed
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+
+
+def test_aft_reindex_refuses_a_vault_that_is_not_there(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A rebuild reads the vault, so with none it refuses rather than writing an index that
+    holds nothing but the archive."""
+    assert main(["reindex"]) == 2
+
+    assert "aft init" in capsys.readouterr().err
+    assert not (home / index.INDEX_NAME).exists()
 
 
 def test_title_and_description_outrank_the_line_text(initialized: Config) -> None:
