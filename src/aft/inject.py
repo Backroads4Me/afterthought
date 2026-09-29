@@ -82,14 +82,14 @@ def _heading(project: Project, overview: pagemod.Page | None) -> Part:
 
 
 def _handoff_part(config: Config, slug: str) -> Part:
-    """The handoff of the newest digest for the project, if there is one. Digests arrive
-    with M2.6, so until then this part is empty."""
+    """The "Last session" part: the handoff of the project's newest digest, and nothing
+    when the project has no digest."""
     return _part("Last session", _handoff(_newest_digest(config.vault / "digests" / slug)))
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The latest digest under ``directory``, which M2.6 files at
-    ``digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md`` (design 6)."""
+    """The latest digest under ``directory``, which the digest step files under ``digests/``
+    as design 6 lays out."""
     return max(directory.rglob("*.md"), key=_digest_date, default=None)
 
 
