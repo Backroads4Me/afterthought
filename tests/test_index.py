@@ -442,8 +442,34 @@ aft reindex --collection bronze
 Nothing was left open.
 """
 
-# A digest quoting markup that is itself a fenced block: the inner marks close the block the
-# outer marks opened, and the outer marks closing it leave the page outside a block again.
+# A digest quoting the marks of a fenced block: the marks it quotes carry a language name, and
+# marks carrying a name open a block rather than closing one, so only the bare marks below close
+# the block the digest opened.
+QUOTED_MARKUP_DIGEST = """---
+type: Session Digest
+title: widget session
+description: What the session on 2026-09-28 did.
+---
+
+## Summary
+
+How a digest quotes a command is itself worth quoting:
+
+~~~text
+~~~bash
+# ship it
+~~~
+
+That is the whole recipe.
+
+## Handoff
+
+Nothing was left open.
+"""
+
+# A digest quoting a document that is itself full of blocks: the quoted document's headings and
+# fenced blocks are quoted text, and only the outer marks, carrying nothing after them, end the
+# block the digest opened.
 NESTED_FENCE_DIGEST = """---
 type: Session Digest
 title: widget session
@@ -452,10 +478,21 @@ description: What the session on 2026-09-28 did.
 
 ## Summary
 
-A digest quoting markup has to quote the marks too:
+Quoting a document means quoting its own blocks:
 
 ````markdown
+# Memory: widget
+
+```yaml
+title: widget
+```
+
+## Decisions
+
+Bronze was chosen.
+
 ```bash
+# ship it
 aft reindex --collection bronze
 ```
 ````
@@ -961,16 +998,35 @@ def test_a_line_inside_a_code_fence_is_the_quoted_text_and_not_a_heading(
 def test_a_fence_opened_inside_a_fence_ends_the_block_the_other_one_started(
     initialized: Config,
 ) -> None:
-    """A digest quoting markup quotes the marks of a block with marks of their own, and the state
-    only ever toggles: the inner line closes the block the outer one opened, the next inner line
-    opens one, and the outer line ends the page outside a block - so the section after the quote
-    is still a section and not quoted text."""
+    """A digest quoting a document quotes that document's own headings and its own fenced blocks:
+    a heading of the quoted document and a comment inside its own block are quoted text, and the
+    quoted document's blocks do not end the block around them - the page comes out with the two
+    sections it has, and one row holding all of the quote."""
     rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", NESTED_FENCE_DIGEST)
 
     assert index.update(initialized) == []
     assert keys_of(initialized, "digests") == [f"{rel}#Handoff", f"{rel}#Summary"]
     body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
-    assert "aft reindex --collection bronze" in body
+    assert "# Memory: widget" in body
+    assert "## Decisions" in body
+    assert "# ship it" in body
+    assert search(initialized, "digests", "bronze") == [f"{rel}#Summary"]
+
+
+def test_marks_carrying_a_language_name_open_a_block_and_close_none(
+    initialized: Config,
+) -> None:
+    """A digest quoting the markup of a code block quotes its opening marks too, marks and language
+    name together: those are the way in, never the way out, or the block ends halfway through the
+    thing being quoted and everything after it belongs to someone else's section."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", QUOTED_MARKUP_DIGEST)
+
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "digests") == [f"{rel}#Handoff", f"{rel}#Summary"]
+    body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
+    assert "~~~bash" in body
+    assert "# ship it" in body
+    assert "That is the whole recipe." in body
 
 
 def test_a_fence_that_never_closes_keeps_the_rest_of_the_page_inside_it(
@@ -1209,6 +1265,20 @@ def test_a_page_that_will_not_parse_is_reported_and_the_rebuild_still_comes(
     write(initialized, broken, _a_page(statement="The gasket is nitrile."))
     assert index.update(initialized) == []
     assert f"{broken}#Decisions" in keys_of(initialized, "pages")
+
+
+def test_a_page_named_after_a_skipped_directory_is_still_indexed(initialized: Config) -> None:
+    """``library``, ``.git`` and ``.obsidian`` are directories the walk keeps out of the index, and
+    the directories a page sits in are what decide it: a page whose own file carries one of those
+    names is a page like any other, with its rows in the collection, its hash recorded, and
+    nothing about it named in the report."""
+    named = write(initialized, "references/library.md", _a_page(title="library"))
+    filed = write(initialized, "references/library/notes.md", _a_page(title="notes"))
+
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "pages") == [f"{named}#Decisions"]
+    assert named in hashes(initialized)
+    assert filed not in hashes(initialized)
 
 
 def test_one_unreadable_page_is_reported_and_the_others_still_index(initialized: Config) -> None:

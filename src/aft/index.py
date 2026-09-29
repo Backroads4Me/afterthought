@@ -85,8 +85,9 @@ a run left behind rather than what the index held, and it is why a rebuild remov
 Beyond those keys the file states which build wrote it. What a row *is* - its columns, the
 states a collection admits, the project a page's rows belong to - is decided here rather than
 in the vault, so rows written under other rules would answer a query looking exactly as
-trustworthy as fresh ones: a build that meets another's rows refuses and names `aft reindex`
-rather than adding to them, and only a rebuild, which drops them all first, meets them at all.
+trustworthy as fresh ones: a build that meets another's rows refuses and names `aft reindex` rather
+than adding to them, only a rebuild - which drops them all first - meets them at all, and a
+file holding no rows at all has nothing for that claim to protect and is written.
 
 A row's text is not the only thing a row is built from, so text alone does not say whether a
 row is current. A digest keeps its handoff note in frontmatter rather than in a body section,
@@ -299,11 +300,11 @@ _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
 
 # Opens and closes a fenced block: up to three spaces of indentation, then three of the same
-# character. A line matching it opens a block when none is open and closes the one that is,
-# and nothing else changes that state; a document ending inside a block simply ends there. A
-# `#` line inside a block is the comment of a quoted command rather than a heading of the page
-# (`_prose_chunks`).
-_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})")
+# character, and whatever follows the opening marks names the language. Only a line of those
+# marks alone - same character, at least as many of them, nothing after - closes the block, and
+# a page ending inside a block ends there. A `#` line inside a block is the comment of a quoted
+# command rather than a heading of the page (`_prose_chunks`).
+_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
@@ -376,8 +377,9 @@ def update(config: Config) -> list[str]:
     What it returns is the report: one line per file it could not read or parse, naming the
     file and the reason. None of those recorded a hash, so the next update reads them again.
 
-    Before a row of ours joins a file that was already there, that file has to say it was
-    written by this build (`_require_current_build`).
+    The file holding the index is asked which build wrote its rows before this one adds to them;
+    a file holding no rows at all has never been built and is written now
+    (`_require_current_build`).
     """
     with _writing(config) as conn:
         registry = _project_registry(config)
@@ -485,7 +487,7 @@ def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
                 continue
             for path in sorted(root.rglob("*.md")):
                 rel = path.relative_to(config.vault)
-                if lint.SKIP_DIRS.intersection(rel.parts):
+                if lint.SKIP_DIRS.intersection(rel.parts[:-1]):
                     continue
                 try:
                     found[rel.as_posix()] = _read_file(collection, path)
@@ -650,17 +652,23 @@ def _prose_chunks(body: str) -> list[tuple[str, str]]:
     rest of the block, to the section that holds it - not a heading, a row, or a ranking of its
     own.
 
-    A fence line opens a block when none is open and closes the one that is, and nothing else
-    changes that state, so the state cannot drift: a block that is never closed runs to the end
-    of the page and a block opened inside another ends at that inner line."""
+    A block opens at a marker line and closes at the next line of those same marks alone - same
+    character, at least as many of them, nothing after - so the marks of quoted markup stay
+    quoted rather than ending the block around them. A page that ends inside a block ends there,
+    its rest held by the section that opened the block."""
     chunks: list[tuple[str, list[str]]] = []
     heading = ""
     lines: list[str] = []
-    in_fence = False
+    fence = ""
     for line in body.split("\n"):
-        if _FENCE.match(line) is not None:
-            in_fence = not in_fence
-        elif not in_fence:
+        marker = _FENCE.match(line)
+        if marker is not None:
+            marks, rest = marker.group(1), marker.group(2)
+            if not fence:
+                fence = marks
+            elif marks[0] == fence[0] and len(marks) >= len(fence) and not rest.strip():
+                fence = ""
+        elif not fence:
             found = _PROSE_HEADING.match(line.rstrip())
             if found is not None:
                 chunks.append((heading, lines))
@@ -937,8 +945,8 @@ def _require_current_build(conn: sqlite3.Connection, path: Path) -> None:
 
     Two answers are refusals and say so differently: rows carrying another build's stamp mean
     what that build meant, and rows carrying no stamp at all came from a build that said nothing
-    about itself. An index with no stamp and no rows has never been built - its tables may be
-    there from a run that failed before writing a row - and is written now like any new one."""
+    about itself. A file with no stamp and no rows has nothing for the claim to protect - its
+    tables may be there from a run that failed before writing a row - and is written now."""
     recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
     if recorded is None:
         if conn.execute(_HOLDS_ROWS).fetchone()[0]:
@@ -968,9 +976,10 @@ def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Conne
     rows in turn rather than one of them failing on a busy database. An update that cannot
     finish leaves no part of itself behind to be read as a whole index.
 
-    A file that was already there has to name the build that wrote its rows before this one adds
-    to them. `rebuild` is the one operation allowed to meet rows it does not recognize, because
-    the first thing it does is drop every row in the file (`_require_current_build`)."""
+    The file is asked who wrote its rows before this one adds to them, and a file holding no rows
+    at all has never been built and answers that way. `rebuild` is the one operation allowed to
+    skip the asking, because the first thing it does is drop every row in the file
+    (`_require_current_build`)."""
     path = _db_path(config)
     conn = _connect(config, rebuild=rebuild)
     try:
@@ -995,11 +1004,11 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     this file is disposable - `reindex` rebuilds it from the vault and the archive - so it is
     opened without the archive's secure delete.
 
-    A file already holding rows is asked who wrote them, and an answer that is not this build's
-    is refused before a row of ours joins them - asked after the schema is created, so that a
-    file old enough to predate the stamp still answers the question instead of failing it.
-    `rebuild` is the one caller that may skip the asking, since what it drops is every row the
-    answer would be about."""
+    The file is asked who wrote its rows, and an answer that is not this build's is refused before
+    a row of ours joins them - asked after the schema is created, so that a file old enough to
+    predate the stamp still answers the question instead of failing it, and a file holding no rows
+    at all has never been built and is written now. `rebuild` is the one caller that may skip the
+    asking, since what it drops is every row the answer would be about."""
     path = _db_path(config)
     conn: sqlite3.Connection | None = None
     try:
