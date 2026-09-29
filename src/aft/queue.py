@@ -371,6 +371,7 @@ def _alive(pid: int) -> bool:
 def _reading(config: Config):
     conn = _connect(config)
     try:
+        _check_columns(conn)
         yield conn
     finally:
         conn.close()
@@ -387,6 +388,7 @@ def _writing(config: Config):
     conn = _connect(config)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _add_columns(conn)
         yield conn
         conn.commit()
     except BaseException:
@@ -412,7 +414,6 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
-    _add_columns(conn)
     return conn
 
 
@@ -421,12 +422,13 @@ def _add_columns(conn: sqlite3.Connection) -> None:
 
     A queue file an earlier version wrote keeps its rows and its own columns, so a column
     `_SCHEMA` has gained since has to arrive by ``ALTER TABLE`` before any statement names
-    it. A second process can win that race, and its column is the one this connection then
-    finds, so an ``ALTER`` that reports the name already taken is checked rather than
-    raised: the queue opened either way. Any other report the ``ALTER`` makes - a locked
-    database above all - is the queue's own trouble and is raised as it stands. A column
-    still missing after all that is a queue this version cannot read, and is reported
-    as one.
+    it, and only a writer brings it in, under the lock `_writing` already holds: a reader
+    never asks for that lock to make a column exist. A second process can win that race,
+    and its column is the one this connection then finds, so an ``ALTER`` that reports the
+    name already taken is checked rather than raised: the queue opened either way. Any
+    other report the ``ALTER`` makes - a locked database above all - is the queue's own
+    trouble and is raised as it stands. What is still missing afterwards, here or on a
+    read, is the same report `_check_columns` makes.
     """
     for table, column, definition in _ADDED_COLUMNS:
         if column in _columns(conn, table):
@@ -438,6 +440,16 @@ def _add_columns(conn: sqlite3.Connection) -> None:
                 raise
         else:
             _name_sessions_of_unknown_span(conn)
+    _check_columns(conn)
+
+
+def _check_columns(conn: sqlite3.Connection) -> None:
+    """Report a column of `_ADDED_COLUMNS` that ``conn``'s table does not have.
+
+    A reader that meets one absent says so rather than making it exist: the column
+    arrives on the write side, never under a read intent.
+    """
+    for table, column, _ in _ADDED_COLUMNS:
         if column not in _columns(conn, table):
             raise QueueError(f"queue table {table} has no {column} column to use")
 
@@ -448,7 +460,10 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _name_sessions_of_unknown_span(conn: sqlite3.Connection) -> None:
-    """Name the sessions whose span state was unknown when the queue gained ``off_record``."""
+    """Name the sessions whose span state was unknown when the queue gained ``off_record``.
+
+    This is the plan author's open question on that upgrade window, ruled at 050a56c.
+    """
     named = [
         f"{agent}/{session_id}"
         for agent, session_id in conn.execute(

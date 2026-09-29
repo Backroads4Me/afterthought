@@ -783,20 +783,26 @@ def test_a_span_opened_in_one_chunk_still_holds_the_next_chunk_of_its_session(
     ]
 
 
-def test_a_queue_written_before_the_span_column_keeps_its_watermark(
-    cfg: Config,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An earlier version's queue file gains the column on open rather than being rebuilt."""
-    (cfg.home / queue.QUEUE_NAME).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+def legacy_queue_file(config: Config) -> None:
+    """A queue file an earlier version wrote: ``sessions`` without the span column."""
+    (config.home / queue.QUEUE_NAME).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
     conn.executescript(
+        "PRAGMA journal_mode = wal;"
         "CREATE TABLE sessions ("
         " agent TEXT NOT NULL, session_id TEXT NOT NULL, watermark TEXT,"
         " PRIMARY KEY (agent, session_id));"
         "INSERT INTO sessions VALUES ('claude', 'legacy', 'l-9');"
     )
     conn.close()
+
+
+def test_a_queue_written_before_the_span_column_keeps_its_watermark(
+    cfg: Config,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An earlier version's queue file gains the column on its first write, not a rebuild."""
+    legacy_queue_file(cfg)
 
     queue.enqueue(cfg, event(session_id="legacy"))
     job = queue.next_job(cfg)
@@ -812,14 +818,11 @@ def test_a_queue_written_before_the_span_column_keeps_its_watermark(
     )
 
 
-def test_a_queue_locked_by_another_writer_is_not_read_as_a_missing_column(
+def test_a_writer_locked_out_reports_a_busy_file_not_a_missing_column(
     cfg: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A busy queue file says it is busy: a locked ALTER is never a missing column."""
-    queue.enqueue(cfg, event(session_id="locked"))
-    legacy = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
-    legacy.execute("ALTER TABLE sessions DROP COLUMN off_record")
-    legacy.close()
+    """A busy queue file says it is busy: a locked write is never a missing column."""
+    legacy_queue_file(cfg)
 
     monkeypatch.setattr(queue, "BUSY_TIMEOUT_MS", 50)
 
@@ -827,6 +830,32 @@ def test_a_queue_locked_by_another_writer_is_not_read_as_a_missing_column(
     held.execute("BEGIN IMMEDIATE")
     try:
         with pytest.raises(sqlite3.OperationalError):
-            queue.session_state(cfg, CLAUDE, "locked")
+            queue.enqueue(cfg, event(session_id="legacy"))
     finally:
         held.close()
+
+
+def test_a_reader_of_a_migrated_queue_takes_no_write_lock(cfg: Config) -> None:
+    """The write side brought the column in, so reading the state needs no lock."""
+    legacy_queue_file(cfg)
+    queue.enqueue(cfg, event(session_id="legacy"))
+
+    held = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    held.execute("BEGIN IMMEDIATE")
+    try:
+        assert queue.session_state(cfg, CLAUDE, "legacy") == queue.SessionState(
+            watermark="l-9", off_record=False, has_open_job=True
+        )
+    finally:
+        held.close()
+
+
+def test_a_reader_that_meets_an_unmigrated_queue_says_so(cfg: Config) -> None:
+    """A reader never repairs the schema: an absent column is reported, not added."""
+    legacy_queue_file(cfg)
+
+    with pytest.raises(queue.QueueError):
+        queue.session_state(cfg, CLAUDE, "legacy")
+
+    columns = {row[1] for row in query(cfg, "PRAGMA table_info(sessions)")}
+    assert "off_record" not in columns, "the reader left the schema as it found it"
