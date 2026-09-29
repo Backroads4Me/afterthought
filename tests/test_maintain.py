@@ -517,4 +517,3 @@ aft:
     by_ref = archived_fact.superseded_by
     assert by_ref in source_map
     assert source_map[by_ref]["quote"] == "replacement line quote"
-

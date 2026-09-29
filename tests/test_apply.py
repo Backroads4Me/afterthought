@@ -1724,7 +1724,11 @@ def test_gate_counts_line_footnotes_by_evidence_date_not_line_date(initialized, 
     seed_overview(
         cfg,
         "widget",
-        body="## Candidates\n\n- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] (signals 2/3, sessions 2/2)\n",
+        body=(
+            "## Candidates\n\n"
+            "- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] "
+            "(signals 2/3, sessions 2/2)\n"
+        ),
         sources=[
             {
                 "id": "s1",
@@ -1775,15 +1779,11 @@ def test_gate_counts_line_footnotes_by_evidence_date_not_line_date(initialized, 
     # Candidates: the weighted score of its evidence does not.
     assert "(signals 3/3, sessions 2/2)" in text
     parsed = page.parse(text, overview.relative_to(cfg.vault))
-    line = next(
-        f for f in parsed.facts if f.statement == "Sessions need checkpoint capture."
-    )
+    line = next(f for f in parsed.facts if f.statement == "Sessions need checkpoint capture.")
     assert line.state == page.CANDIDATE
 
 
-def test_line_footnote_of_a_worker_session_does_not_count_toward_the_gate(
-    initialized, home, fake
-):
+def test_line_footnote_of_a_worker_session_does_not_count_toward_the_gate(initialized, home, fake):
     """A target line's footnote reads its origin from the evidence entry and the digest of
     its session: a worker session's quote adds nothing to the gate, so the candidate
     stays below it."""
@@ -1840,7 +1840,11 @@ def test_line_footnote_of_a_worker_session_does_not_count_toward_the_gate(
     seed_overview(
         cfg,
         "widget",
-        body="## Candidates\n\n- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] (signals 2/3, sessions 2/2)\n",
+        body=(
+            "## Candidates\n\n"
+            "- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] "
+            "(signals 2/3, sessions 2/2)\n"
+        ),
         sources=[
             {
                 "id": "s1",
@@ -1884,9 +1888,7 @@ def test_line_footnote_of_a_worker_session_does_not_count_toward_the_gate(
 
     overview = cfg.vault / "projects" / "widget" / "overview.md"
     parsed = page.parse(overview.read_text(), overview.relative_to(cfg.vault))
-    line = next(
-        f for f in parsed.facts if f.statement == "Sessions need checkpoint capture."
-    )
+    line = next(f for f in parsed.facts if f.statement == "Sessions need checkpoint capture.")
     assert line.state == page.CANDIDATE
 
 
@@ -1898,7 +1900,7 @@ NOTES_PAGE = (
     "sources:\n"
     "  - id: s1\n"
     "    resource: aft://session/c/1#e1\n"
-    "    quote: \"existing quote\"\n"
+    '    quote: "existing quote"\n'
     "aft:\n"
     "  project: p_widget\n"
     "---\n\n"
@@ -1951,7 +1953,8 @@ def test_dream_commit_carries_only_the_paths_the_run_wrote(initialized, home, fa
     def deciding(config, new_fact, quote, slug):
         """The page changes after the model call, before any write of the run."""
         proposal = real_decide(config, new_fact, quote, slug)
-        notes.write_text(notes.read_text() + "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n")
+        extra = "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n"
+        notes.write_text(notes.read_text() + extra)
         return proposal
 
     monkeypatch.setattr(apply.decide, "decide", deciding)
@@ -1961,9 +1964,7 @@ def test_dream_commit_carries_only_the_paths_the_run_wrote(initialized, home, fa
     report = res.reports["widget"]
     assert report.commit is not None
 
-    files = run_git(
-        ["show", "--name-only", "--format=", report.commit], cfg.vault
-    ).splitlines()
+    files = run_git(["show", "--name-only", "--format=", report.commit], cfg.vault).splitlines()
     assert "projects/widget/overview.md" in files
     assert "projects/widget/notes.md" not in files
 
@@ -1997,7 +1998,8 @@ def test_lint_rollback_restores_run_writes_not_unrelated_edits(
     notes = cfg.vault / "projects" / "widget" / "notes.md"
     notes.write_text(NOTES_PAGE.replace("p_widget", p_id), encoding="utf-8")
     vault.commit(cfg.vault, ["projects/widget/notes.md"], "add notes")
-    notes.write_text(notes.read_text() + "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n")
+    extra = "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n"
+    notes.write_text(notes.read_text() + extra)
 
     dpath = write_digest(
         cfg,
@@ -2049,7 +2051,7 @@ def test_global_confirm_writes_to_the_targets_page(initialized, home, fake):
         "sources:\n"
         "  - id: s1\n"
         "    resource: aft://session/claude/sessP#e1\n"
-        "    quote: \"no rgb please\"\n"
+        '    quote: "no rgb please"\n'
         "---\n\n"
         "## Preferences\n\n"
         "- No RGB lighting. [stated] 2026-09-01 [^s1]\n",
