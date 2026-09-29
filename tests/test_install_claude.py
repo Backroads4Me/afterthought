@@ -46,19 +46,23 @@ def read_settings(settings: Path) -> dict:
 
 
 def command_order(settings_or_document) -> list[tuple[str, str]]:
-    """Every (event, command) the file runs, in the file's own order."""
+    """Every (event, command) the file runs, in the file's own order, at either depth."""
     document = (
         settings_or_document
         if isinstance(settings_or_document, dict)
         else read_settings(settings_or_document)
     )
-    hooks = document.get("hooks", {})
-    return [
-        (event, hook["command"])
-        for event, groups in hooks.items()
-        for group in groups
-        for hook in group["hooks"]
-    ]
+    runs = []
+    for event, elements in document.get("hooks", {}).items():
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            if "command" in element:
+                runs.append((event, element["command"]))
+            for hook in element.get("hooks") or []:
+                if isinstance(hook, dict) and "command" in hook:
+                    runs.append((event, hook["command"]))
+    return runs
 
 
 def aft_commands() -> set[str]:
@@ -255,6 +259,25 @@ def test_the_backup_carries_the_mode_of_the_settings_file_it_copies(tmp_path, mo
     assert stat.S_IMODE(settings.stat().st_mode) == mode
 
 
+def test_a_settings_file_afterthought_creates_takes_the_umask_default(tmp_path):
+    """A file aft invents gets the mode a plain write would have, not a flat 0644."""
+    plain = settings_in(tmp_path)
+    plain.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "dotfiles" / "settings.json"
+    linked = tmp_path / ".claude" / "linked.json"
+    linked.symlink_to(target)
+
+    umask = os.umask(0o077)
+    try:
+        claude_install.install(plain)
+        claude_install.install(linked)
+    finally:
+        os.umask(umask)
+
+    assert stat.S_IMODE(plain.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
 class ClockAt:
     """``datetime`` held at one instant, so two writes share one backup stamp."""
 
@@ -348,6 +371,74 @@ def test_uninstall_leaves_a_matcher_group_that_held_only_our_hook(tmp_path):
 
     assert read_settings(settings) == {
         "hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}]}
+    }
+
+
+def test_install_counts_one_entry_when_our_command_sits_in_the_event_list_itself(tmp_path):
+    """Our command one level above where an installer writes it still counts as installed."""
+    settings = settings_in(tmp_path)
+    write_settings(
+        settings,
+        {"hooks": {"SessionStart": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}},
+    )
+
+    claude_install.install(settings)
+
+    assert command_order(settings) == [
+        ("SessionStart", HOOK_COMMAND),
+        ("PreCompact", "aft hook claude PreCompact"),
+        ("SessionEnd", "aft hook claude SessionEnd"),
+    ]
+
+
+def test_uninstall_removes_our_command_from_the_event_list_itself(tmp_path):
+    """The entry aft put by hand into the list goes; the list someone else made stays."""
+    settings = settings_in(tmp_path)
+    write_settings(
+        settings,
+        {"hooks": {"SessionStart": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}},
+    )
+
+    assert claude_install.uninstall(settings).changed is True
+
+    assert read_settings(settings) == {"hooks": {"SessionStart": []}}
+
+
+def test_install_and_uninstall_find_our_entries_at_either_depth(tmp_path):
+    """Foreign hooks at both depths come back untouched and in order; aft's do not come back."""
+    settings = settings_in(tmp_path)
+    ours = {"type": "command", "command": HOOK_COMMAND, "timeout": 5}
+    elements = [
+        {"type": "command", "command": "echo direct"},
+        ours,
+        {"matcher": "startup", "hooks": [{"type": "command", "command": "echo nested"}]},
+        {"matcher": "clear", "hooks": [dict(ours)]},
+    ]
+    write_settings(settings, {"hooks": {"SessionStart": elements}})
+
+    claude_install.install(settings)
+
+    assert read_settings(settings)["hooks"]["SessionStart"] == elements
+
+    claude_install.uninstall(settings)
+
+    assert command_order(settings) == [
+        ("SessionStart", "echo direct"),
+        ("SessionStart", "echo nested"),
+    ]
+    assert read_settings(settings) == {
+        "hooks": {
+            "SessionStart": [
+                {"type": "command", "command": "echo direct"},
+                {
+                    "matcher": "startup",
+                    "hooks": [{"type": "command", "command": "echo nested"}],
+                },
+                {"matcher": "clear", "hooks": []},
+            ],
+            "PreCompact": [],
+            "SessionEnd": [],
+        }
     }
 
 

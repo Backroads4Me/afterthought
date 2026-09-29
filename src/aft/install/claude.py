@@ -17,12 +17,13 @@ file; `settings_path` is the default the command line uses.
 
 Three rules hold the user's own configuration safe:
 
-* A merge touches only what afterthought owns. Other people's hook entries keep their
-  position and their order, and uninstall removes command hooks and nothing else: every key
-  of the user's keeps its place, a matcher group keeps its matcher once our hook leaves it,
-  and an event list or the ``hooks`` object that uninstall empties stays empty rather than
-  going away. The file is read, edited in place, and written back with its key order
-  intact.
+* A merge touches only what afterthought owns, and it owns where its command line is: an
+  entry is found by that line whether it sits directly in one of our three event lists or
+  nested in a matcher group. Other people's hook entries keep their position and their
+  order, and uninstall removes command hooks and nothing else: every key of the user's
+  keeps its place, a matcher group keeps its matcher once our hook leaves it, and an event
+  list or the ``hooks`` object that uninstall empties stays empty rather than going away.
+  The file is read, edited in place, and written back with its key order intact.
 * A write goes to the file the settings path points at, so a symbolic link the user made
   there - into a version-controlled settings file, say - survives and keeps being read.
 * No settings file changes before a backup of its text is safe beside it, carrying that
@@ -91,11 +92,12 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     """Merge afterthought's three hook entries into ``settings``, creating the file.
 
     Every event that does not already run our command gets one group of our own, appended
-    after the groups already there: an entry is never inserted before, sorted among, or
+    after the elements already there: an entry is never inserted before, sorted among, or
     substituted for a hook someone else wrote. An event that already runs our command is
-    left exactly as it is, so installing twice changes nothing on the second run, and an
-    entry the user edited after installing - its timeout, its matcher - stays as they set
-    it. The command line is the whole identity of an entry, which is what makes our own
+    left exactly as it is, whether that command sits directly in the event list or inside
+    a matcher group, so installing twice changes nothing on the second run, and an entry
+    the user edited after installing - its timeout, its matcher - stays as they set it.
+    The command line is the whole identity of an entry, which is what makes our own
     entries findable again without a marker field of afterthought's in the user's file.
     """
     document, original = _read(settings)
@@ -104,7 +106,7 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     added = False
     for event in HOOK_EVENTS:
         groups = _groups(hooks, event)
-        if not _already_runs(groups, event):
+        if all(_remove(element, event) is element for element in groups):
             groups.append(_group(event))
             added = True
 
@@ -115,14 +117,15 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     """Remove exactly afterthought's own hook entries from ``settings``.
 
     Only the three events afterthought installs are read, and within them only the command
-    hooks running ``aft hook claude <event>``. Nothing else is deleted and nothing is
-    reordered: a group keeps its keys and its place, an event keeps its key, the ``hooks``
-    object keeps its key. A container stays where it is even when our hook was the last
-    thing in it, so an emptied event list is left as an empty list and an emptied
-    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only a group
-    left holding nothing but an empty ``hooks`` list goes, because such a group holds no
-    key of anyone's. Telling our own containers from the user's would mean remembering
-    what was installed; this rule needs no history to be right.
+    hooks running ``aft hook claude <event>``, wherever one sits: directly in the event
+    list, or nested in a matcher group. Nothing else is deleted and nothing is reordered:
+    an element that is not ours keeps its keys and its place, an event keeps its key, the
+    ``hooks`` object keeps its key. A container stays where it is even when our hook was
+    the last thing in it, so an emptied event list is left as an empty list and an emptied
+    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only an
+    element left holding nothing but an empty ``hooks`` list goes, because it holds no key
+    of anyone's. Telling our own containers from the user's would mean remembering what
+    was installed; this rule needs no history to be right.
     """
     document, original = _read(settings)
     hooks = document.get("hooks")
@@ -135,12 +138,12 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
         if not isinstance(groups, list):
             continue
         kept = []
-        for group in groups:
-            stripped = _strip(group, event)
-            if stripped is not group:
+        for element in groups:
+            left = _remove(element, event)
+            if left is not element:
                 removed = True
-            if stripped is not _EMPTY_GROUP:
-                kept.append(stripped)
+            if left is not _DROPPED:
+                kept.append(left)
         groups[:] = kept
 
     return _commit(settings, original, document, changed=removed, dry_run=dry_run)
@@ -164,47 +167,44 @@ def _group(event: str) -> dict:
     }
 
 
-def _runs(hook: object, event: str) -> bool:
-    """Whether one command hook is afterthought's own entry for this event."""
-    return isinstance(hook, dict) and hook.get("command") == hook_command(event)
+def _is_ours(element: object, event: str) -> bool:
+    """Whether one command object is afterthought's own entry for this event.
 
-
-def _already_runs(groups: list, event: str) -> bool:
-    """Whether these groups already run afterthought's own hook for this event."""
-    return any(
-        _runs(hook, event)
-        for group in groups
-        if isinstance(group, dict) and isinstance(group.get("hooks"), list)
-        for hook in group["hooks"]
-    )
-
-
-_EMPTY_GROUP = object()
-
-
-def _strip(group: object, event: str) -> object:
-    """A group with afterthought's own hook taken out of it.
-
-    The argument itself comes back when the group does not run our command, which is how
-    uninstall tells a group it rewrote from one it left alone. ``_EMPTY_GROUP``, compared by
-    identity, comes back for a group left holding nothing but an empty ``hooks``
-    list: such a group runs nothing for anyone, so dropping it removes no hook and no
-    key of the user's. A group with a matcher, or any other key of its own, keeps that
-    key even once our hook is gone, and a group that is not a group at all - a string,
-    a number, a JSON null - comes back untouched: uninstall removes command hooks, not
-    shapes it does not recognize.
+    The command line is the whole identity of an entry, and that shape is looked for wherever
+    it can sit: directly in an event list, which is how a person editing the file by hand
+    tends to leave it, or nested in a matcher group, which is how an install writes it.
     """
-    if not isinstance(group, dict):
-        return group
-    hooks = group.get("hooks")
+    return isinstance(element, dict) and element.get("command") == hook_command(event)
+
+
+_DROPPED = object()
+
+
+def _remove(element: object, event: str) -> object:
+    """One element of an event list with afterthought's own entry taken out of it.
+
+    The element itself comes back when it is not ours and holds none of ours, which is how
+    install and uninstall tell an element they rewrote from one they left alone. The
+    ``_DROPPED`` sentinel, compared by identity, comes back when nothing of anyone's is
+    sitting in the list, or a group left holding nothing but an empty ``hooks`` list. A group
+    with a matcher, or any other key of its own, keeps that key even once our hook is gone,
+    and an element that is not an object at all - a string, a number, a JSON null - comes
+    back untouched: uninstall takes out afterthought's own command hooks, never a shape of
+    someone else's.
+    """
+    if _is_ours(element, event):
+        return _DROPPED
+    if not isinstance(element, dict):
+        return element
+    hooks = element.get("hooks")
     if not isinstance(hooks, list):
-        return group
-    kept = [hook for hook in hooks if not _runs(hook, event)]
+        return element
+    kept = [hook for hook in hooks if not _is_ours(hook, event)]
     if len(kept) == len(hooks):
-        return group
-    if not kept and set(group) == {"hooks"}:
-        return _EMPTY_GROUP
-    stripped = dict(group)
+        return element
+    if not kept and set(element) == {"hooks"}:
+        return _DROPPED
+    stripped = dict(element)
     stripped["hooks"] = kept
     return stripped
 
@@ -336,19 +336,32 @@ def _backup(settings: Path, original: str | None) -> Path | None:
         return backup
 
 
+def _new_file_mode() -> int:
+    """The mode a plain write gives a file that does not exist yet: the create default.
+
+    Reading the umask is the only way to ask what that write would produce, and setting it
+    back happens before anything else does.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
 def _write(settings: Path, text: str, original: str | None) -> Path | None:
     """Put the new text in place in one step, and return the backup of the text it replaces.
 
     A half-written settings file costs the user their whole Claude Code configuration, so
     the new text goes to a temporary file in the same directory and ``os.replace`` moves it
-    over the old one, keeping that file's permissions. The previous text is backed up only
-    once the new one is staged and the replace is next, so a refusal never leaves behind a
-    copy of text that was never superseded. A directory afterthought cannot write in is
-    refused the same way a file it cannot read is.
+    over the old one, keeping that file's permissions. A file afterthought creates - one
+    not there yet, or the target of a dangling link - takes the mode a plain write would
+    have given it. The previous text is backed up only once the new one is staged and the
+    replace is next, so a refusal never leaves behind a copy of text that was never
+    superseded. A directory afterthought cannot write in is refused the same way a file it
+    cannot read is.
     """
     try:
         settings.parent.mkdir(parents=True, exist_ok=True)
-        mode = stat.S_IMODE(settings.stat().st_mode) if settings.exists() else 0o644
+        mode = stat.S_IMODE(settings.stat().st_mode) if settings.exists() else _new_file_mode()
         handle, temporary = tempfile.mkstemp(dir=settings.parent, prefix=f"{settings.name}.aft-")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as output:
