@@ -100,6 +100,7 @@ those says the row is stale on its own terms.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 import zlib
@@ -129,9 +130,10 @@ ARCHIVE = "archive"
 DIGESTS = "digests"
 EVIDENCE = "evidence"
 REPORTS = "reports"
+LIBRARY = "library"
 
-#: The collections this index maintains (DESIGN 10, BUILD-PLAN M3.1).
-COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS)
+#: The collections this index maintains (DESIGN 10, BUILD-PLAN M3.1, M7.3).
+COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS, LIBRARY)
 
 # Which top-level vault directories feed each file collection. ``pages`` takes the
 # directories whose pages hold curated fact lines, which is `aft.lint`'s list, so the index
@@ -265,6 +267,7 @@ _RECORD_ORIGIN = (
 # evidence row from the archive row beside it, not from the registry.
 _RESET_FILE_ROWS: tuple[str, ...] = (
     *(f"DELETE FROM {name}" for name in FILE_COLLECTIONS),
+    f"DELETE FROM {LIBRARY}",
     f"DELETE FROM {FILES_TABLE}",
 )
 
@@ -385,6 +388,7 @@ def update(config: Config) -> list[str]:
         registry = _project_registry(config)
         report = _sync_files(conn, config, registry)
         _sync_evidence(conn, config)
+        report.extend(_sync_library(conn, config))
         _record_build(conn)
         return report
 
@@ -402,6 +406,7 @@ def reindex(config: Config) -> list[str]:
         _create(conn, fresh=True)
         report = _sync_files(conn, config, _project_registry(config))
         _sync_evidence(conn, config)
+        report.extend(_sync_library(conn, config))
         _record_build(conn)
         return report
 
@@ -788,6 +793,130 @@ _SCAN_ARCHIVE = (
     "SELECT session_id, entry_id, agent, project_id, time, text FROM evidence"
     " ORDER BY session_id, entry_id"
 )
+
+
+def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
+    """Index extracted library documents, keeping them in step with references and cache."""
+    report: list[str] = []
+    refs_dir = config.vault / "references"
+    if not refs_dir.is_dir():
+        return report
+
+    recorded = dict(conn.execute(_SELECT_HASHES))
+    active_library_paths: set[str] = set()
+
+    for col_dir in sorted(refs_dir.iterdir()):
+        if not col_dir.is_dir():
+            continue
+        col_file = col_dir / "collection.md"
+        if not col_file.is_file():
+            continue
+        try:
+            col_text = col_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            report.append(f"{col_file.relative_to(config.vault).as_posix()}: cannot read: {exc}")
+            continue
+
+        frontmatter, _, _, _ = page.split_frontmatter(col_text)
+        aft = (frontmatter or {}).get("aft")
+        if not isinstance(aft, dict):
+            continue
+        col_name = aft.get("collection") or col_dir.name
+        col_desc = (frontmatter or {}).get("description") or ""
+        projects = aft.get("projects") or ()
+        files_dict = aft.get("files") or {}
+        if not isinstance(files_dict, dict):
+            continue
+
+        # Derived text is indexed in place of its original (DESIGN 11)
+        derived_targets: set[str] = set()
+        for doc_md in col_dir.glob("*.md"):
+            if doc_md.name == "collection.md":
+                continue
+            try:
+                doc_text = doc_md.read_text(encoding="utf-8")
+                doc_fm, _, _, _ = page.split_frontmatter(doc_text)
+                if doc_fm and doc_fm.get("aft", {}).get("role") == "derived":
+                    for line in doc_text.splitlines():
+                        if "derived-from:" in line:
+                            m = re.search(r"\[\[.*?\|(.*?)\]\]", line)
+                            if m:
+                                derived_targets.add(m.group(1).strip())
+            except OSError:
+                pass
+
+        for rel_path, f_hash in files_dict.items():
+            if rel_path in derived_targets:
+                continue
+            indexed_path = f"library/{col_name}/{rel_path}"
+            active_library_paths.add(indexed_path)
+
+            if recorded.get(indexed_path) == f_hash:
+                continue
+
+            conn.execute(_DELETE_BY_PATH[LIBRARY], (indexed_path,))
+
+            src_file = config.vault / indexed_path
+            cache_file = config.home / "library" / f"{f_hash}.json"
+            chunks: list[tuple[str, str]] = []
+            if cache_file.is_file():
+                try:
+                    cached_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    chunks = [
+                        (c["heading"], c["text"])
+                        for c in cached_data.get("chunks", [])
+                        if c.get("text")
+                    ]
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            if not chunks:
+                if src_file.is_file():
+                    from aft.library.importing import extract_document_chunks
+
+                    chunks = extract_document_chunks(src_file)
+
+            if not chunks:
+                conn.execute(_RECORD_HASH, (indexed_path, f_hash))
+                continue
+
+            doc_title = Path(rel_path).name
+            doc_desc = col_desc
+            project_ids = list(projects) if projects else [None]
+
+            for heading, text in chunks:
+                if not text:
+                    continue
+                for pid in project_ids:
+                    row = Row(
+                        title=doc_title,
+                        description=doc_desc,
+                        heading=heading,
+                        body=text,
+                        path=indexed_path,
+                        project_id=pid,
+                        agent=None,
+                        session_id=None,
+                        entry_id=None,
+                        time=(
+                            datetime.fromtimestamp(src_file.stat().st_mtime, UTC).isoformat()
+                            if src_file.exists()
+                            else ""
+                        ),
+                        row_key=_row_key(indexed_path, heading, pid, 1),
+                        entry_hash=f_hash,
+                    )
+                    _insert(conn, LIBRARY, row)
+
+            conn.execute(_RECORD_HASH, (indexed_path, f_hash))
+
+    # Drop any library files no longer in active collections
+    for old_path in list(recorded):
+        if old_path.startswith("library/") and old_path not in active_library_paths:
+            conn.execute(_DELETE_BY_PATH[LIBRARY], (old_path,))
+            conn.execute(_DROP_HASH, (old_path,))
+
+    return report
 
 
 def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:

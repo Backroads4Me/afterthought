@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -41,6 +42,81 @@ def lint_vault(vault: Path) -> list[Finding]:
         if SKIP_DIRS.intersection(rel.parts[:-1]) or rel.parts[0] in SKIP_DIRS:
             continue
         findings.extend(lint_file(vault, rel, registry))
+    findings.extend(lint_library(vault))
+    return findings
+
+
+def lint_library(vault: Path) -> list[Finding]:
+    """Check every library file against its recorded hash in references/<name>/collection.md."""
+    findings: list[Finding] = []
+    refs_dir = vault / "references"
+    if not refs_dir.is_dir():
+        return findings
+
+    for col_dir in sorted(refs_dir.iterdir()):
+        if not col_dir.is_dir():
+            continue
+        col_file = col_dir / "collection.md"
+        if not col_file.is_file():
+            continue
+        try:
+            col_text = col_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        frontmatter, _, _, _ = pagemod.split_frontmatter(col_text)
+        aft = (frontmatter or {}).get("aft")
+        if not isinstance(aft, dict):
+            continue
+        col_name = aft.get("collection") or col_dir.name
+        recorded_files = aft.get("files")
+        if not isinstance(recorded_files, dict):
+            continue
+
+        lib_dir = vault / "library" / col_name
+        if not lib_dir.is_dir():
+            findings.append(
+                Finding(f"library/{col_name}", 1, "library collection directory is missing")
+            )
+            continue
+
+        for rel_path, expected_hash in recorded_files.items():
+            fpath = lib_dir / rel_path
+            if not fpath.exists():
+                findings.append(
+                    Finding(
+                        f"library/{col_name}/{rel_path}",
+                        1,
+                        "library file missing; restore it from git or re-import the collection",
+                    )
+                )
+            elif fpath.is_file():
+                try:
+                    actual_hash = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                    if actual_hash != expected_hash:
+                        findings.append(
+                            Finding(
+                                f"library/{col_name}/{rel_path}",
+                                1,
+                                f"library file hash mismatch: expected {expected_hash}, "
+                                f"got {actual_hash}",
+                            )
+                        )
+                except OSError as exc:
+                    findings.append(
+                        Finding(f"library/{col_name}/{rel_path}", 1, f"cannot read file: {exc}")
+                    )
+
+        for f in sorted(lib_dir.rglob("*")):
+            if f.is_file() and not f.name.startswith("."):
+                rel = f.relative_to(lib_dir).as_posix()
+                if rel not in recorded_files:
+                    findings.append(
+                        Finding(
+                            f"library/{col_name}/{rel}",
+                            1,
+                            f"unrecorded file in library collection: '{rel}'",
+                        )
+                    )
     return findings
 
 
