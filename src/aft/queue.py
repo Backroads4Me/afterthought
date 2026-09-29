@@ -10,8 +10,11 @@ The file is ``queue.sqlite`` in the afterthought home, the same place as the oth
 per-host state (DESIGN 6). The vault holds memory; the queue holds work, and neither
 machine shares what is in here.
 
-A row carries session identity, never a project: resolution to a project happens at
-digest time (BUILD-PLAN M2.2).
+A jobs row carries session identity, never a project: resolution to a project happens at
+digest time (BUILD-PLAN M2.2). The one row a session has in the ``sessions`` table carries
+where its digest has read to - the entry it stopped on and whether an off-the-record span
+is open there - so the next chunk of that session continues the work instead of starting
+over (BUILD-PLAN M2.2, M2.3).
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent       TEXT NOT NULL,
     session_id  TEXT NOT NULL,
     watermark   TEXT,
+    off_record  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -89,13 +93,32 @@ CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs (status, created_time, id);
 CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 """
 
+# A column a shipped table gained afterwards, with the definition that adds it and the
+# default a row already in the file gets. ``CREATE TABLE IF NOT EXISTS`` leaves a queue an
+# earlier version wrote exactly as it is, so every later column is checked for and added
+# when the queue opens: a session already in the file keeps its watermark and starts with
+# no span open, the reading that captures text rather than holding a session off the
+# record without anyone having asked (M2.2, M2.3).
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("sessions", "off_record", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+# The queue files this process has brought to the current schema. A column once added stays
+# added, so a connect past the first one skips the check rather than paying for a table
+# read on every open: the capture hook holds a millisecond budget (DESIGN 8).
+_MIGRATED: set[Path] = set()
+
 
 @dataclass(frozen=True)
 class Job:
-    """One claim of capture work, and the watermark the digest has to read past.
+    """One claim of capture work, and where its session's digest has read to so far.
 
     ``transcript_path`` is absent for a pi event reported before the session was first
     written (adapters/pi.py); the row still stands, and the sweep finds the file later.
+    ``watermark`` and ``off_record`` are the two facts a digest needs to pick up where the
+    last chunk of this session left off: the entry to read on from, and whether an
+    off-the-record span is open at that point, so the chunk starts inside the span rather
+    than treating it as over (M2.2, M2.3).
     """
 
     id: str
@@ -106,19 +129,22 @@ class Job:
     kind: str
     event_time: datetime
     watermark: str | None
+    off_record: bool
 
 
 @dataclass(frozen=True)
 class SessionState:
-    """What the queue knows about one session, for the sweep's two tests.
+    """What the queue knows about one session, for the sweep's tests and for a reader.
 
     ``watermark`` is the id of its last digested entry, or None for a session never
-    digested. ``has_open_job`` covers a row awaiting a claim and one being digested now:
-    both are capture work in flight for that session, and a second row for either would
-    be a chunk the digest has already read.
+    digested. ``off_record`` is whether an off-the-record span is open at that watermark
+    (M2.3); a session with no row of its own has no span open. ``has_open_job`` covers a
+    row awaiting a claim and one being digested now: both are capture work in flight for
+    that session, and a second row for either would be a chunk the digest has already read.
     """
 
     watermark: str | None
+    off_record: bool
     has_open_job: bool
 
 
@@ -187,14 +213,27 @@ def next_job(config: Config) -> Job | None:
         return _job(conn, row)
 
 
-def complete(config: Config, job: Job, watermark: str | None) -> None:
-    """Close a job and record the watermark its digest reached.
+def complete(
+    config: Config,
+    job: Job,
+    watermark: str | None,
+    off_record: bool = False,
+) -> None:
+    """Close a job and record where its digest left this session: its watermark, and
+    whether an off-the-record span is open there.
 
     This is where a session's watermark moves, and nowhere else: the digest step calls it
     with the entry it ended on when it wrote that digest (DESIGN 8, BUILD-PLAN M2.2).
-    A watermark of None closes the job and leaves the session's where it was. Only the
-    process still holding the claim closes it, so a worker that outlived its claim - its
-    row already handed to another process - cannot close that row or move the
+    ``off_record`` is the second element of the ``filter_entries`` call over that chunk
+    (M2.3). It moves in the same statement as the watermark because the two describe one
+    moment: the end of what this session has been read through. Advance a watermark and
+    leave the span behind and the next chunk reads its first entry as though no span were
+    open; store a span against a watermark that did not move and the next chunk is held
+    off the record for text no digest has read yet. A watermark of None closes the job and
+    leaves both where they were, so those entries are read again and the span re-derived.
+
+    Only the process still holding the claim closes it, so a worker that outlived its
+    claim - its row already handed to another process - cannot close that row or move the
     watermark backwards. Closing a row this process does not hold is an error, not a
     success.
     """
@@ -209,9 +248,11 @@ def complete(config: Config, job: Job, watermark: str | None) -> None:
             raise QueueError(f"job {job.id} is not held by this process")
         if watermark:
             conn.execute(
-                "INSERT INTO sessions (agent, session_id, watermark) VALUES (?, ?, ?)"
-                " ON CONFLICT (agent, session_id) DO UPDATE SET watermark = excluded.watermark",
-                (job.agent, job.session_id, watermark),
+                "INSERT INTO sessions (agent, session_id, watermark, off_record)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT (agent, session_id) DO UPDATE SET"
+                " watermark = excluded.watermark, off_record = excluded.off_record",
+                (job.agent, job.session_id, watermark, int(off_record)),
             )
 
 
@@ -239,17 +280,26 @@ def fail(config: Config, job: Job, error: str) -> None:
 
 
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
-    """The queue's two facts about one session, for the sweep's tests."""
+    """The queue's facts about one session: where its digest read to, whether a span is open
+    there, and whether it has capture work in flight.
+
+    The state of a session the queue has no row for is no watermark and no span open, which
+    is what a first chunk of any session starts with.
+    """
     with _reading(config) as conn:
         row = conn.execute(
-            "SELECT watermark FROM sessions WHERE agent = ? AND session_id = ?",
+            "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
             (agent, session_id),
         ).fetchone()
         open_row = conn.execute(
             "SELECT 1 FROM jobs WHERE agent = ? AND session_id = ? AND status IN (?, ?) LIMIT 1",
             (agent, session_id, PENDING, RUNNING),
         ).fetchone()
-    return SessionState(watermark=row[0] if row else None, has_open_job=open_row is not None)
+    return SessionState(
+        watermark=row[0] if row else None,
+        off_record=bool(row[1]) if row else False,
+        has_open_job=open_row is not None,
+    )
 
 
 def last_sweep(config: Config) -> datetime | None:
@@ -362,7 +412,36 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
+    if path not in _MIGRATED:
+        _add_columns(conn)
+        _MIGRATED.add(path)
     return conn
+
+
+def _add_columns(conn: sqlite3.Connection) -> None:
+    """Add to ``conn`` any column of `_ADDED_COLUMNS` the table it names does not have yet.
+
+    A queue file an earlier version wrote keeps its rows and its own columns, so a column
+    `_SCHEMA` has gained since has to arrive by ``ALTER TABLE`` before any statement names
+    it. A second process can win that race, and its column is the one this connection then
+    finds, so an ``ALTER`` that reports the name already taken is checked rather than
+    raised: the queue opened either way. A column still missing after that is a queue this
+    version cannot read, and is reported as one.
+    """
+    for table, column, definition in _ADDED_COLUMNS:
+        if column in _columns(conn, table):
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError:
+            pass
+        if column not in _columns(conn, table):
+            raise QueueError(f"queue table {table} has no {column} column to use")
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """The names of ``table``'s columns as the file on disk has them."""
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
@@ -394,9 +473,14 @@ def _enter_wal(conn: sqlite3.Connection) -> None:
 
 
 def _job(conn: sqlite3.Connection, row: tuple) -> Job:
-    """The claimed row, plus the watermark its session has reached so far."""
-    watermark = conn.execute(
-        "SELECT watermark FROM sessions WHERE agent = ? AND session_id = ?",
+    """The claimed row, plus where its session's digest has read to: the watermark it
+    reached and whether an off-the-record span is open there.
+
+    The two come off the same row the claim is answered from, so a digest never gets one
+    without the other (M2.2, M2.3).
+    """
+    state = conn.execute(
+        "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
         (row[1], row[2]),
     ).fetchone()
     return Job(
@@ -407,7 +491,8 @@ def _job(conn: sqlite3.Connection, row: tuple) -> Job:
         transcript_path=None if row[4] is None else Path(row[4]),
         kind=row[5],
         event_time=datetime.fromisoformat(row[6]),
-        watermark=watermark[0] if watermark else None,
+        watermark=state[0] if state else None,
+        off_record=bool(state[1]) if state else False,
     )
 
 
