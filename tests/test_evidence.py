@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 import zlib
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,64 @@ def spoil(config: configmod.Config, entry_id: str, blob: bytes) -> None:
         conn.commit()
 
 
+# The ways a person says "keep everything" to a setting that has no value for it: windows
+# so wide that counting them back from now leaves the calendar behind.
+UNMEASURABLE_WINDOWS: list[Any] = [999_999_999, 10**18]
+
+# The ways a project is not a project id: a whole Path or a number, which the database
+# cannot bind, and a blank, which is a second spelling of the no project that is None.
+NOT_A_PROJECT_ID: list[Any] = ["", "   ", Path("/srv/work/api"), 7]
+
+# Text whose stored form is looked for in the archive's own bytes: `forget` has to leave
+# none of it behind, in the file or in whatever log of it is still open.
+FORGOTTEN_TEXT = (
+    "the cedar ledger whispers ninety-seven willow under the seventh bridge, "
+    "and the ledger keeps its own counsel about the vault"
+)
+
+
+def archive_files(config: configmod.Config) -> list[Path]:
+    """Every file the archive is made of: the database and the log it is keeping."""
+    return [f for f in db(config).parent.iterdir() if f.is_file()]
+
+
+@contextmanager
+def held_write_lock(config: configmod.Config) -> Iterator[None]:
+    """A second writer that keeps the archive to itself, the way a person with the file
+    open in the sqlite3 CLI, or an `aft` still running, does."""
+    holder = sqlite3.connect(db(config), isolation_level=None, timeout=0.05)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def connection_is_open(conn: sqlite3.Connection) -> bool:
+    """Whether the connection still holds its handle: a closed one refuses to work."""
+    try:
+        conn.execute("SELECT 1")
+    except sqlite3.ProgrammingError:
+        return False
+    return True
+
+
+def spy_on_opens(monkeypatch) -> list[sqlite3.Connection]:
+    """Every connection sqlite3 hands out from here on, so a test can see whether the
+    ones that failed to finish opening were given back."""
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def spy(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", spy)
+    return opened
+
+
 @pytest.fixture
 def make_config(tmp_path, monkeypatch):
     """A Config whose home is a temporary directory, with the retention window as asked."""
@@ -106,8 +165,8 @@ def cfg(make_config) -> configmod.Config:
 
 def test_entries_are_read_back_as_they_were_stored(cfg):
     entries = [
-        entry("e1", at(days=2), "user", "ship the archive first"),
-        entry("e2", at(days=2, seconds=30), "assistant", "the queue lands before it", True),
+        entry("e1", at(days=2, seconds=30), "user", "ship the archive first"),
+        entry("e2", at(days=2), "assistant", "the queue lands before it", True),
         entry("e3", at(days=1), "tool", "FAILED tests/test_evidence.py", True),
     ]
     evidence.store(cfg, "claude", "s1", "prj_one", entries)
@@ -182,6 +241,53 @@ def test_re_storing_a_chunk_that_overlaps_one_archived_adds_nothing(cfg):
 
     assert [row[0] for row in stored(cfg, "s1")] == ["e1", "e2", "e3"]
     assert row_count(cfg) == 3
+
+
+def test_a_session_stored_out_of_order_reads_back_in_time_order(cfg):
+    """A lost watermark reads a whole session again, so entries older than rows already in
+    the archive arrive last. `aft trace` prints the entries around a quote and
+    `aft redigest` hands the list to the model, so an order that followed write history
+    would show one session two ways depending on how the reads happened to fall."""
+    evidence.store(
+        cfg,
+        "claude",
+        "s1",
+        None,
+        [entry("first-read", at(days=1)), entry("second-read", at(days=2))],
+    )
+    evidence.store(cfg, "claude", "s1", None, [entry("missed-first", at(days=9))])
+
+    assert [e.id for e in evidence.entries(cfg, "s1")] == [
+        "missed-first",
+        "second-read",
+        "first-read",
+    ]
+    assert row_count(cfg) == 3
+
+
+def test_entries_sharing_one_timestamp_keep_the_order_they_were_written(cfg):
+    """A Claude message and the tool results split out of it carry one timestamp, so only
+    the order they were stored in says which came first."""
+    said = at(days=3)
+    evidence.store(
+        cfg,
+        "claude",
+        "s1",
+        None,
+        [
+            entry("user-message", said, "user", "run the tests"),
+            entry("tool-result", said, "tool", "12 passed"),
+            entry("answer", said, "assistant", "twelve passed, then"),
+            entry("next-day", at(days=1), "user", "and tomorrow?"),
+        ],
+    )
+
+    assert [e.id for e in evidence.entries(cfg, "s1")] == [
+        "user-message",
+        "tool-result",
+        "answer",
+        "next-day",
+    ]
 
 
 def test_an_entry_stored_again_takes_the_row_it_already_had(cfg):
@@ -268,6 +374,21 @@ def test_purge_refuses_a_window_that_is_not_a_window_and_changes_nothing(make_co
     before = stored(cfg, "s1")
 
     with pytest.raises(evidence.EvidenceError, match=r"retention_days = -1"):
+        evidence.purge(cfg, NOW)
+
+    assert stored(cfg, "s1") == before
+
+
+@pytest.mark.parametrize("window", UNMEASURABLE_WINDOWS, ids=["widest", "past-a-timedelta"])
+def test_purge_refuses_a_window_that_runs_off_the_calendar_and_changes_nothing(make_config, window):
+    """A huge retention_days is how someone writes "keep everything"; the setting has no"
+    such value, and a window that cannot be counted back is the bad setting it is, told"
+    on the way the negative one is."""
+    cfg = make_config(retention_days=window)
+    evidence.store(cfg, "claude", "s1", None, [entry("e1", at(days=400))])
+    before = stored(cfg, "s1")
+
+    with pytest.raises(evidence.EvidenceError, match=r"retention_days"):
         evidence.purge(cfg, NOW)
 
     assert stored(cfg, "s1") == before
@@ -380,6 +501,33 @@ def test_forget_removes_a_session_and_leaves_the_others_intact(cfg):
     assert row_count(cfg) == 2
 
 
+def test_forgetting_a_session_leaves_its_words_in_none_of_the_files(cfg):
+    """DESIGN 12 promises the content is gone from everything afterthought controls, so the
+    proof is the read-back an intruder would do: the raw bytes of the archive and of any
+    write-ahead log still beside it, searched for the stored form of the text. That the
+    session reads back empty would only prove the query."""
+    buried = [
+        entry(f"f{i}", text=f"filler that names no ledger at all, number {i}") for i in range(200)
+    ]
+    kept = [entry("k1", text="the kept session says nothing of ledgers")]
+    evidence.store(cfg, "claude", "gone", None, [entry("e1", text=FORGOTTEN_TEXT), *buried])
+    evidence.store(cfg, "pi", "kept", None, kept)
+    written = zlib.compress(FORGOTTEN_TEXT.encode("utf-8"))
+    size_before = db(cfg).stat().st_size
+
+    assert any(written in f.read_bytes() for f in archive_files(cfg)), (
+        "the text has to be in the archive for its absence afterwards to mean anything"
+    )
+
+    evidence.forget(cfg, "gone")
+
+    assert evidence.entries(cfg, "gone") == []
+    assert evidence.entries(cfg, "kept") == kept
+    for archived in archive_files(cfg):
+        assert written not in archived.read_bytes(), archived.name
+    assert db(cfg).stat().st_size < size_before, "the rewrite is what clears freed pages"
+
+
 def test_forget_of_a_session_that_is_not_there_changes_nothing(cfg):
     evidence.store(cfg, "claude", "s1", None, [entry("e1")])
     before = (row_count(cfg), stored(cfg, "s1"))
@@ -446,6 +594,86 @@ def test_an_id_that_is_not_there_is_refused_before_anything_is_written(cfg):
         evidence.find_quote(cfg, "s1", "", "the plan is zlib")
     with pytest.raises(evidence.EvidenceError, match="session id"):
         evidence.forget(cfg, "")
+    assert not db(cfg).exists()
+
+
+def test_a_locked_archive_is_reported_and_changes_nothing(cfg, monkeypatch):
+    """The archive is a plain file a person opens with the sqlite3 CLI, and M2.8 re-stores
+    the whole of it, so a writer still holding the write lock is a busy archive rather than
+    a crash. Each command fails as EvidenceError naming the file, and a reader gets past
+    the writer, which is what the write-ahead log is for."""
+    evidence.store(cfg, "claude", "s1", None, [entry("e1")])
+    before = (row_count(cfg), stored(cfg, "s1"))
+    monkeypatch.setattr(evidence, "BUSY_TIMEOUT_SECONDS", 0.05)
+
+    with held_write_lock(cfg):
+        assert evidence.entries(cfg, "s1") == [entry("e1")]
+        for write in (
+            lambda: evidence.store(cfg, "pi", "s2", None, [entry("e2")]),
+            lambda: evidence.purge(cfg, NOW),
+            lambda: evidence.forget(cfg, "s1"),
+        ):
+            with pytest.raises(evidence.EvidenceError) as excinfo:
+                write()
+            assert not isinstance(excinfo.value, sqlite3.Error)
+            assert "locked" in str(excinfo.value)
+            assert str(db(cfg)) in str(excinfo.value)
+
+    assert (row_count(cfg), stored(cfg, "s1")) == before
+
+
+def test_an_archive_that_will_not_give_its_text_back_is_reported_naming_it(cfg):
+    """An archive that cannot be read - unreadable, or damaged the way a half-written file
+    is - is the module's own error naming the file, not a database error escaping to
+    whatever command was reading it."""
+    evidence.store(cfg, "claude", "s1", None, [entry("e1")])
+    db(cfg).chmod(0o000)
+    try:
+        for read in (
+            lambda: evidence.entries(cfg, "s1"),
+            lambda: evidence.find_quote(cfg, "s1", "e1", "the plan is zlib"),
+        ):
+            with pytest.raises(evidence.EvidenceError) as excinfo:
+                read()
+            assert not isinstance(excinfo.value, sqlite3.Error)
+            assert str(db(cfg)) in str(excinfo.value)
+    finally:
+        db(cfg).chmod(0o644)
+
+
+def test_an_archive_that_refuses_the_write_ahead_log_leaves_no_handle(cfg, monkeypatch):
+    """WAL is what lets a reader go past a writer, so a file that will not take it is
+    reported rather than quietly used as another kind of journal. The connection that got
+    that far is one no caller ever received, so the failed open gives its handle back."""
+    with closing(sqlite3.connect(db(cfg), isolation_level=None)) as foreign:
+        foreign.execute("CREATE TABLE not_the_archive(x)")
+        foreign.commit()
+    db(cfg).chmod(0o444)
+    opened = spy_on_opens(monkeypatch)
+
+    try:
+        with pytest.raises(evidence.EvidenceError) as excinfo:
+            evidence.entries(cfg, "s1")
+    finally:
+        db(cfg).chmod(0o644)
+
+    assert str(db(cfg)) in str(excinfo.value)
+    assert opened
+    assert not any(connection_is_open(conn) for conn in opened)
+
+
+@pytest.mark.parametrize(
+    "project_id",
+    NOT_A_PROJECT_ID,
+    ids=["empty", "whitespace", "path", "number"],
+)
+def test_a_project_id_that_is_no_project_is_refused(cfg, project_id):
+    """None is the only spelling of a session that resolved to no project (DESIGN 7), and
+    a value the archive cannot bind would abort a whole chunk on a database error: both
+    are refused as the bad input they are, before anything is written."""
+    with pytest.raises(evidence.EvidenceError, match="project id"):
+        evidence.store(cfg, "pi", "s1", project_id, [entry("e1")])
+
     assert not db(cfg).exists()
 
 
