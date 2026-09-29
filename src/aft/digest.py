@@ -703,25 +703,33 @@ def _is_session_digest(path: Path, session_id: str) -> bool:
     if not path.is_file() or path.suffix != ".md":
         return False
     match = _DIGEST_NAME.match(path.stem)
-    if match is not None:
-        sess = match.group("session")
-        if sess == session_id:
-            return True
-        prefix, sep, suffix = sess.rpartition("-")
-        if sep and suffix.isdigit() and prefix == session_id:
-            return True
+    if match is None:
+        return False
+    sess = match.group("session")
+    is_exact = sess == session_id
+    prefix, sep, suffix = sess.rpartition("-")
+    is_multipart = bool(sep and suffix.isdigit() and prefix == session_id)
+    if not is_exact and not is_multipart:
+        return False
+
     try:
         text = path.read_text(encoding="utf-8")
         frontmatter, _, _, _ = page.split_frontmatter(text)
         if isinstance(frontmatter, dict):
-            for source in frontmatter.get("sources") or []:
-                if isinstance(source, dict):
-                    resource = str(source.get("resource", ""))
-                    if _is_session_resource(resource, session_id):
-                        return True
+            sources = frontmatter.get("sources")
+            if isinstance(sources, list):
+                session_sources = [
+                    str(s.get("resource", ""))
+                    for s in sources
+                    if isinstance(s, dict)
+                    and str(s.get("resource", "")).startswith("aft://session/")
+                ]
+                if session_sources:
+                    return any(_is_session_resource(res, session_id) for res in session_sources)
     except OSError:
         pass
-    return False
+
+    return is_exact
 
 
 def redigest(
@@ -835,6 +843,13 @@ def redigest(
                 if _is_session_digest(f, session_id) and f != target_path:
                     old_paths.append(f.relative_to(config.vault).as_posix())
                     f.unlink()
+                    parent = f.parent
+                    while parent != digests_root and parent.exists():
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
         try:
             os.replace(tmp, target_path)
         except OSError:

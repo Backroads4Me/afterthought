@@ -399,7 +399,8 @@ def cmd_forget_session(args) -> int:
     print(
         f"forgot session {args.session_id}: removed evidence, "
         f"{len(report.digests_removed)} digest file(s), "
-        f"withdrew {len(report.lines_withdrawn)} curated line(s)"
+        f"withdrew {len(report.lines_withdrawn)} curated line(s), "
+        f"removed {len(report.candidates_removed)} candidate line(s)"
     )
     if report.lines_unwithdrawn:
         print(

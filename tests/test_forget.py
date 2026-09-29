@@ -673,3 +673,250 @@ def test_cli_forget_and_redigest_usage_errors(initialized: Config, capsys):
         with pytest.raises(SystemExit) as excinfo:
             cli.main(args)
         assert excinfo.value.code == 2
+
+
+def test_forget_and_redigest_with_session_and_session_2_prefix_collision(
+    initialized: Config, capsys
+):
+    """Multipart digests ending in -2 do not collide with a separate session named session-2."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register widget"], initialized.vault)
+
+    sess1 = "session"
+    sess2 = "session-2"
+
+    entry1_1 = Entry("e1", NOW, "user", "entry one of session", False)
+    entry1_2 = Entry("e2", NOW, "assistant", "entry two of session", False)
+    entry2_1 = Entry("e3", NOW, "user", "entry one of session-2", False)
+
+    evidence.store(initialized, "claude", sess1, prj.id, [entry1_1, entry1_2])
+    evidence.store(initialized, "claude", sess2, prj.id, [entry2_1])
+
+    # sess1 has multipart digests: part 1 and part 2 (-2)
+    part1_sess1 = "digests/widget/2026/10/2026-10-01-claude-session.md"
+    part2_sess1 = "digests/widget/2026/10/2026-10-01-claude-session-2.md"
+    create_curated_page(
+        initialized.vault,
+        part1_sess1,
+        (
+            "---\n"
+            "type: Session Digest\n"
+            "title: Widget session part 1\n"
+            "sources:\n"
+            "  - id: s1\n"
+            f"    resource: aft://session/claude/{sess1}#e1\n"
+            '    quote: "entry one of session"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Part 1 decision. [stated] 2026-10-01 [^s1]\n"
+        ),
+    )
+    create_curated_page(
+        initialized.vault,
+        part2_sess1,
+        (
+            "---\n"
+            "type: Session Digest\n"
+            "title: Widget session part 2\n"
+            "sources:\n"
+            "  - id: s2\n"
+            f"    resource: aft://session/claude/{sess1}#e2\n"
+            '    quote: "entry two of session"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Part 2 decision. [stated] 2026-10-01 [^s2]\n"
+        ),
+    )
+
+    # sess2 has single digest on day 2
+    digest_sess2 = "digests/widget/2026/10/2026-10-02-claude-session-2.md"
+    create_curated_page(
+        initialized.vault,
+        digest_sess2,
+        (
+            "---\n"
+            "type: Session Digest\n"
+            "title: Widget session-2\n"
+            "sources:\n"
+            "  - id: s3\n"
+            f"    resource: aft://session/claude/{sess2}#e3\n"
+            '    quote: "entry one of session-2"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Session-2 decision. [stated] 2026-10-02 [^s3]\n"
+        ),
+    )
+
+    # Curated overview page citing both sessions and holding a candidate
+    overview_rel = "projects/widget/overview.md"
+    create_curated_page(
+        initialized.vault,
+        overview_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Widget\n"
+            "sources:\n"
+            "  - id: sf1\n"
+            f"    resource: aft://session/claude/{sess1}#e1\n"
+            '    quote: "entry one of session"\n'
+            "  - id: sf2\n"
+            f"    resource: aft://session/claude/{sess2}#e3\n"
+            '    quote: "entry one of session-2"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Decision from sess1. [stated] 2026-10-01 [^sf1]\n"
+            "- Decision from sess2. [stated] 2026-10-02 [^sf2]\n\n"
+            "## Candidates\n\n"
+            "- Candidate resting only on sess1. [inferred] 2026-10-01 [^sf1]"
+            " (signals 1/3, sessions 1/2)\n"
+        ),
+    )
+
+    # Redigest for sess1 does not delete sess2 digest
+    answer_sess1 = {
+        "summary": "Rebuilt summary for session.",
+        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "facts": [
+            {
+                "statement": "Session decision rebuilt.",
+                "kind": "decision",
+                "source": "stated",
+                "quote": "entry one of session",
+                "entry": "e1",
+                "scope": "project",
+            }
+        ],
+    }
+    _, cfg = serve(initialized, answer_sess1)
+    code = cli.main(["redigest", sess1])
+    assert code == 0
+    # sess2 digest is preserved despite session prefix
+    assert (cfg.vault / digest_sess2).exists()
+
+    # Forgetting sess1 removes its digests and candidate but preserves sess2
+    code = cli.main(["forget", "session", sess1])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert (
+        f"forgot session {sess1}: removed evidence, 1 digest file(s), "
+        "withdrew 1 curated line(s), removed 1 candidate line(s)"
+    ) in out
+
+    assert not (initialized.vault / part1_sess1).exists()
+    assert not (initialized.vault / part2_sess1).exists()
+    assert (initialized.vault / digest_sess2).exists()
+
+    # Evidence for sess2 remains intact
+    assert evidence.entries(initialized, sess2) == [entry2_1]
+    assert evidence.entries(initialized, sess1) == []
+
+    # Curated lines
+    doc = pagewrite.PageDoc.read(initialized.vault / overview_rel)
+    facts_by_statement = {f.statement: f for f in doc.page.facts}
+    assert facts_by_statement["Decision from sess1."].state == "withdrawn"
+    assert facts_by_statement["Decision from sess2."].state == "active"
+    assert "Candidate resting only on sess1." not in facts_by_statement
+
+    # Redigest for sess2 rebuilds its digest
+    answer_sess2 = {
+        "summary": "Rebuilt summary for session-2.",
+        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "facts": [
+            {
+                "statement": "Session-2 decision rebuilt.",
+                "kind": "decision",
+                "source": "stated",
+                "quote": "entry one of session-2",
+                "entry": "e3",
+                "scope": "project",
+            }
+        ],
+    }
+    _, cfg = serve(initialized, answer_sess2)
+    code = cli.main(["redigest", sess2])
+    assert code == 0
+    new_digest_sess2 = "digests/widget/2026/10/2026-10-01-claude-session-2.md"
+    assert (cfg.vault / new_digest_sess2).exists()
+
+    # Forgetting sess2 removes sess2 digest and withdraws remaining line
+    code = cli.main(["forget", "session", sess2])
+    assert code == 0
+    assert not (cfg.vault / new_digest_sess2).exists()
+    doc = pagewrite.PageDoc.read(initialized.vault / overview_rel)
+    facts_by_statement = {f.statement: f for f in doc.page.facts}
+    assert facts_by_statement["Decision from sess2."].state == "withdrawn"
+
+
+def test_redigest_prunes_empty_date_directories(initialized: Config, capsys):
+    """Redigest replaces an old digest in an older date directory and
+    removes empty parent directories."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register widget"], initialized.vault)
+
+    sess = "s-migrate"
+    user_quote = "Migrate date directory quote."
+    entry = Entry("e1", NOW, "user", user_quote, False)
+    evidence.store(initialized, "claude", sess, prj.id, [entry])
+
+    old_rel = "digests/widget/2026/08/2026-08-15-claude-s-migrate.md"
+    create_curated_page(
+        initialized.vault,
+        old_rel,
+        (
+            "---\n"
+            "type: Session Digest\n"
+            "title: Old august digest\n"
+            "sources:\n"
+            "  - id: s1\n"
+            f"    resource: aft://session/claude/{sess}#e1\n"
+            f'    quote: "{user_quote}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Old august decision. [stated] 2026-08-15 [^s1]\n"
+        ),
+    )
+
+    old_dir = initialized.vault / "digests/widget/2026/08"
+    assert old_dir.is_dir()
+
+    answer = {
+        "summary": "New october digest summary.",
+        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "facts": [
+            {
+                "statement": "New october decision.",
+                "kind": "decision",
+                "source": "stated",
+                "quote": user_quote,
+                "entry": "e1",
+                "scope": "project",
+            }
+        ],
+    }
+    _, cfg = serve(initialized, answer)
+
+    code = cli.main(["redigest", sess])
+    assert code == 0
+
+    new_rel = "digests/widget/2026/10/2026-10-01-claude-s-migrate.md"
+    assert (cfg.vault / new_rel).exists()
+    assert not (cfg.vault / old_rel).exists()
+    # The empty August date directory is pruned
+    assert not old_dir.exists()
