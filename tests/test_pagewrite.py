@@ -263,13 +263,21 @@ def test_an_edit_that_would_not_parse_is_refused_and_undone(doc):
 
 
 def test_a_statement_keeps_text_the_line_grammar_reads_as_a_tail(initialized, doc):
-    """Only the round trip judges a statement: markup that looks like a tail is prose."""
-    statement = "Trim the slug with [^a-z] before hashing."
+    """Only the round trip judges a statement: a footnote inside one is prose the line
+    grammar carries, and one that names no source is refused before anything is written.
+    """
+    statement = "Trim the slug with [^s2] before hashing."
     before = doc.render()
     doc.add_fact("state", statement, "observed", "2026-10-04", ("s1",))
     written(initialized, doc)
     assert edits(before, doc.render()) == ((), (f"- {statement} [observed] 2026-10-04 [^s1]",))
-    assert doc.fact(statement).statement == statement
+    assert doc.fact(statement).refs == ("s1",)
+    after = doc.render()
+    with pytest.raises(pagewrite.WriteError, match=r"source a-z is not in the frontmatter"):
+        doc.add_fact(
+            "state", "Trim the slug with [^a-z] before hashing.", "observed", "2026-10-04", ("s1",)
+        )
+    assert doc.render() == after
 
 
 def test_a_statement_ending_in_text_that_looks_like_a_tail_is_written_and_reads_back(
@@ -479,16 +487,23 @@ def test_a_source_value_a_quoted_scalar_would_fold_is_written_escaped(initialize
 
 
 def test_a_hand_typed_tail_makes_every_operation_on_the_candidate_refuse(initialized):
+    """A line the parse refused holds no fact: the writer names nothing where that line
+    sits, and a handle taken before the tail was typed cannot be used to rebuild it.
+    """
     counts = f"{CANDIDATE} (signals 1/3, sessions 1/2)"
-    doc = make(initialized, PAGE.replace(counts, f"{counts} pending review"))
+    doc = make(initialized, PAGE)
+    candidate = doc.fact("Long sessions need checkpoints.")
+    doc.path.write_text(doc.render().replace(counts, f"{counts} pending review"))
+    doc = pagewrite.PageDoc.read(doc.path)
     assert [message for _, message in doc.page.errors] == [
         "a candidate may end only with its signal counts"
     ]
     before = doc.render()
-    candidate = doc.fact("Long sessions need checkpoints.")
-    with pytest.raises(pagewrite.WriteError, match="text outside the grammar"):
+    with pytest.raises(pagewrite.WriteError, match="no fact line"):
+        doc.fact("Long sessions need checkpoints.")
+    with pytest.raises(pagewrite.WriteError, match="moved"):
         doc.update_counts(candidate)
-    with pytest.raises(pagewrite.WriteError, match="text outside the grammar"):
+    with pytest.raises(pagewrite.WriteError, match="moved"):
         doc.promote(candidate, "state")
     assert doc.render() == before
 
@@ -603,17 +618,19 @@ def test_promote_undoes_the_move_when_the_new_line_would_not_parse(initialized):
 
 def test_a_note_a_person_typed_under_a_candidate_stops_the_move(initialized):
     """A callout is text these operations do not own: a move that would change what it
-    reads as is refused, and the note stays where it was typed.
+    reads as is refused, and the note stays where it was typed. The row a person typed
+    under the header belongs to that note, so the page reports this note once.
     """
     line = f"{CANDIDATE} (signals 1/3, sessions 1/2)"
     note = f"{line}\n\n> [!question] 2026-10-01\n> Did the capture hook replace this?"
     doc = make(initialized, PAGE.replace(line, note))
     assert [message for _, message in doc.page.errors] == [
         "a callout cannot follow a candidate fact",
-        "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'",
     ]
     before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="a callout must follow the fact"):
+    with pytest.raises(
+        pagewrite.WriteError, match="a callout marks the fact line directly above it"
+    ):
         doc.promote(doc.fact("Long sessions need checkpoints."), "state")
     assert doc.render() == before
 
@@ -707,36 +724,45 @@ def test_a_handle_shifted_onto_its_twin_is_refused(initialized, doc):
 
 
 def test_a_struck_candidate_takes_no_edit_that_would_unstrike_it(initialized):
+    """A candidate line struck by hand is a line the parse refuses, so it holds no fact:
+    no operation can name it, and a handle taken before the strike cannot rewrite it.
+    """
     struck = "- ~~Long sessions need checkpoints.~~ [inferred] 2026-09-30 [^s2]"
-    doc = make(initialized, PAGE.replace(CANDIDATE, f"{struck} (signals 1/3, sessions 1/2)"))
+    doc = make(initialized, PAGE)
+    candidate = doc.fact("Long sessions need checkpoints.")
+    doc.path.write_text(doc.render().replace(CANDIDATE, f"{struck} (signals 1/3, sessions 1/2)"))
+    doc = pagewrite.PageDoc.read(doc.path)
     assert [message for _, message in doc.page.errors] == ["a candidate cannot be struck through"]
     before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="cannot update the counts of a struck line"):
-        doc.update_counts(doc.fact("Long sessions need checkpoints."))
-    with pytest.raises(pagewrite.WriteError, match="cannot promote a struck line"):
-        doc.promote(doc.fact("Long sessions need checkpoints."), "state")
+    with pytest.raises(pagewrite.WriteError, match="no fact line"):
+        doc.fact("Long sessions need checkpoints.")
+    with pytest.raises(pagewrite.WriteError, match="moved"):
+        doc.update_counts(candidate)
+    with pytest.raises(pagewrite.WriteError, match="moved"):
+        doc.promote(candidate, "state")
     assert doc.render() == before
 
 
-def test_the_refusal_names_only_the_line_the_edit_would_take_text_from(initialized):
-    """A line flagged the same way elsewhere is not this edit's loss to report."""
-    both = (
-        "- Long sessions need checkpoints. [inferred] 2026-09-30 [^s2] pending review\n"
-        "- The timer runs hourly. [observed] 2026-09-21 [^s1] pending review"
-    )
-    doc = make(initialized, PAGE.replace(CANDIDATE, both))
+def test_the_refusal_names_only_the_error_this_edit_would_add(initialized):
+    """A line flagged elsewhere on the page is not this edit's loss to report: the refusal
+    names what this edit would change and leaves the error already on the page alone.
+    """
+    doc = make(initialized, BROKEN)
     page_text = doc.render()
     assert [message for _, message in doc.page.errors] == [
-        "a candidate may end only with its signal counts",
-        "a candidate may end only with its signal counts",
+        "only fact lines are allowed in a fact section"
     ]
-    first, second = doc.fact("Long sessions need checkpoints."), doc.fact("The timer runs hourly.")
     with pytest.raises(
-        pagewrite.WriteError,
-        match=f"line {first.line}: a candidate may end only",
+        pagewrite.WriteError, match="unrecognized text after the sources"
     ) as refused:
-        doc.update_counts(first)
-    assert f"line {second.line}" not in str(refused.value)
+        doc.add_fact(
+            "state",
+            "Amperage is offset encoded. [stated] 2026-01-01 [^s1] maybe",
+            "observed",
+            "2026-10-04",
+            ("s1",),
+        )
+    assert "only fact lines" not in str(refused.value)
     assert doc.render() == page_text
 
 

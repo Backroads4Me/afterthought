@@ -12,10 +12,11 @@ Two rules keep the result valid:
 * Inputs are checked against the grammar before they are used, so a line is never
   written that ``page.parse`` would reject or that ``aft.lint`` would report: a known
   kind, a known source tag, a real date, and footnotes whose source exists and carries
-  a quote, on the line (design 9 R1). A statement is accepted by
+  a quote wherever the edit writes one: the footnotes of a line and any ``[^id]`` inside
+  a statement (design 6, design 9 R1). A statement is accepted by
   round trip: the written line has to parse back to exactly that statement, so a statement
   ending in markup that only looks like a fact tail is carried as prose, and only blank
-  text, ``~~`` and a line break are refused by pattern.
+  text, ``~~``, an unresolved citation and a line break are refused by pattern.
 * The text an edit would produce is parsed before anything is written, and the page's
   parse errors have to come out the set they were. An error the edit would add is a line
   the grammar rejects; an error the edit would make disappear is the edit deleting text
@@ -54,6 +55,8 @@ Candidates. A section the page lacks is created at this rank."""
 
 _ENTRY_LINE = re.compile(r"^(?P<indent>[ \t]*)-[ \t]")
 _SOURCE_ID = re.compile(r"s(?P<n>\d+)")
+_FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+"""A ``[^id]`` citation, as ``aft lint`` and the line grammar read it."""
 
 
 class WriteError(Exception):
@@ -136,18 +139,6 @@ def _check_date(value: str) -> str:
     return value
 
 
-def _check_statement(statement: str) -> str:
-    """A statement a page can carry on one line: not blank, no line break, no marker."""
-    statement = statement.strip()
-    if not statement:
-        raise WriteError("a fact needs a statement")
-    if "\n" in statement or "\r" in statement:
-        raise WriteError("a fact statement is one line")
-    if "~~" in statement:
-        raise WriteError("a fact statement cannot contain ~~")
-    return statement
-
-
 def _check_source_tag(tag: str) -> str:
     if tag not in page.SOURCES:
         raise WriteError(f"unknown source tag [{tag}]; expected {' '.join(page.SOURCES)}")
@@ -159,11 +150,6 @@ def _section_for(kind: str) -> str:
     if section is None:
         raise WriteError(f"unknown kind {kind!r}; expected {' '.join(sorted(SECTION_FOR_KIND))}")
     return section
-
-
-def _guard_struck(fact: page.Fact, action: str) -> None:
-    if fact.struck:
-        raise WriteError(f"cannot {action} a struck line; it carries its own marker")
 
 
 def _line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
@@ -178,6 +164,10 @@ class PageDoc:
     the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
     statement with ``fact()``; since an edit can move lines, a handle whose line has
     moved or changed since it was taken is refused rather than applied to the wrong line.
+
+    A line the parse reports a problem with holds no fact (``page.Page``), so no
+    operation is ever handed text outside the grammar to rebuild: ``fact()`` names only
+    lines the page read cleanly, and a handle a hand edit made stale is refused.
 
     Operations that create or move a line return its new ``page.Fact``, because its
     line number has changed; operations that edit a line in place return whether the
@@ -282,7 +272,7 @@ class PageDoc:
         ``date`` is the last date the fact was evidenced, which is what a line's date
         holds; the caller knows it from the evidence, so it is never guessed here.
         """
-        statement = _check_statement(statement)
+        statement = self._check_statement(statement)
         line = _fact_line(
             statement,
             _check_source_tag(tag),
@@ -296,7 +286,7 @@ class PageDoc:
     def add_candidate(self, statement: str, tag: str, date: str, refs: Sequence[str]) -> page.Fact:
         """Add a line to Candidates, with the gate progress its footnotes give it."""
         refs = self._check_refs(refs)
-        statement = _check_statement(statement)
+        statement = self._check_statement(statement)
         line = _fact_line(
             statement,
             _check_source_tag(tag),
@@ -313,7 +303,6 @@ class PageDoc:
         found = self._resolve(candidate)
         if found.section != page.CANDIDATES:
             raise WriteError("gate progress belongs to a candidate line")
-        _guard_struck(found, "update the counts of")
         index = found.line - 1
         line = _fact_line(
             found.statement,
@@ -337,7 +326,6 @@ class PageDoc:
         found = self._resolve(candidate)
         if found.section != page.CANDIDATES:
             raise WriteError("only a candidate line can be promoted")
-        _guard_struck(found, "promote")
         section = _section_for(kind)
         line = _fact_line(found.statement, found.source, found.date, found.refs)
         with self._atomic():
@@ -396,6 +384,27 @@ class PageDoc:
                 raise WriteError(f"source {ref} has no quote to cite")
             out.append(ref)
         return tuple(out)
+
+    def _check_statement(self, statement: str) -> str:
+        """A statement as a fact line carries it: one line, no marker, citations resolve."""
+        statement = statement.strip()
+        if not statement:
+            raise WriteError("a fact needs a statement")
+        if "\n" in statement or "\r" in statement:
+            raise WriteError("a fact statement is one line")
+        if "~~" in statement:
+            raise WriteError("a fact statement cannot contain ~~")
+        self._check_citations(statement)
+        return statement
+
+    def _check_citations(self, text: str) -> None:
+        """The ``[^id]`` citations inside text this writer puts onto a page.
+
+        Design 6 makes a footnote name a source of its page wherever it sits, and ``aft
+        lint`` reads the footnotes over the page as written, so a ``[^id]`` inside a
+        statement has to resolve just as the footnotes at the end of a line do.
+        """
+        self._check_refs(_FOOTNOTE.findall(text))
 
     @contextmanager
     def _atomic(self) -> Iterator[None]:
