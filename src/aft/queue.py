@@ -279,6 +279,18 @@ def fail(config: Config, job: Job, error: str) -> None:
             raise QueueError(f"job {job.id} is not held by this process")
 
 
+def ensure_schema(config: Config) -> None:
+    """Bring a queue file an earlier version wrote up to this version's schema.
+
+    Opening `_writing` is the act: what `_ADDED_COLUMNS` names arrives there, under the
+    ``BEGIN IMMEDIATE`` that transaction already holds. A process that reads the queue
+    before it has written anything - the sweep, on a host whose hooks never fired - calls
+    this so the repair comes from its own write rather than from some other process.
+    """
+    with _writing(config):
+        pass
+
+
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     """The queue's facts about one session: where its digest read to, whether a span is open
     there, and whether it has capture work in flight.
@@ -287,6 +299,7 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     is what a first chunk of any session starts with.
     """
     with _reading(config) as conn:
+        _check_columns(conn)
         row = conn.execute(
             "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
             (agent, session_id),
@@ -371,7 +384,6 @@ def _alive(pid: int) -> bool:
 def _reading(config: Config):
     conn = _connect(config)
     try:
-        _check_columns(conn)
         yield conn
     finally:
         conn.close()
@@ -446,8 +458,8 @@ def _add_columns(conn: sqlite3.Connection) -> None:
 def _check_columns(conn: sqlite3.Connection) -> None:
     """Report a column of `_ADDED_COLUMNS` that ``conn``'s table does not have.
 
-    A reader that meets one absent says so rather than making it exist: the column
-    arrives on the write side, never under a read intent.
+    Only a read that names the column asks, and it reports rather than making the column
+    exist: a schema change belongs to a write.
     """
     for table, column, _ in _ADDED_COLUMNS:
         if column not in _columns(conn, table):

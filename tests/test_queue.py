@@ -784,17 +784,40 @@ def test_a_span_opened_in_one_chunk_still_holds_the_next_chunk_of_its_session(
 
 
 def legacy_queue_file(config: Config) -> None:
-    """A queue file an earlier version wrote: ``sessions`` without the span column."""
+    """The queue file the released version wrote: every table, and no ``off_record``."""
     (config.home / queue.QUEUE_NAME).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
     conn.executescript(
         "PRAGMA journal_mode = wal;"
+        "CREATE TABLE jobs ("
+        " id TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL,"
+        " cwd TEXT NOT NULL, transcript_path TEXT, kind TEXT NOT NULL,"
+        " event_time TEXT NOT NULL, status TEXT NOT NULL, claimed_pid INTEGER,"
+        " error TEXT, created_time TEXT NOT NULL, updated_time TEXT NOT NULL);"
+        "CREATE INDEX jobs_by_status ON jobs (status, created_time, id);"
+        "CREATE INDEX jobs_by_session ON jobs (agent, session_id, status);"
         "CREATE TABLE sessions ("
         " agent TEXT NOT NULL, session_id TEXT NOT NULL, watermark TEXT,"
         " PRIMARY KEY (agent, session_id));"
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
         "INSERT INTO sessions VALUES ('claude', 'legacy', 'l-9');"
     )
     conn.close()
+
+
+def seed_sweep_window(config: Config, since: datetime) -> None:
+    """Write the sweep window into the file itself, as an earlier version's sweep left it."""
+    seed = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
+    seed.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        (queue.LAST_SWEEP, since.astimezone(UTC).isoformat()),
+    )
+    seed.close()
+
+
+def columns_of(config: Config, table: str) -> set[str]:
+    """The columns the queue file on disk actually has for ``table``."""
+    return {row[1] for row in query(config, f"PRAGMA table_info({table})")}
 
 
 def test_a_queue_written_before_the_span_column_keeps_its_watermark(
@@ -857,5 +880,40 @@ def test_a_reader_that_meets_an_unmigrated_queue_says_so(cfg: Config) -> None:
     with pytest.raises(queue.QueueError):
         queue.session_state(cfg, CLAUDE, "legacy")
 
-    columns = {row[1] for row in query(cfg, "PRAGMA table_info(sessions)")}
-    assert "off_record" not in columns, "the reader left the schema as it found it"
+    assert "off_record" not in columns_of(cfg, "sessions"), (
+        "the reader left the schema as it found it"
+    )
+
+
+def test_the_sweep_metadata_read_of_an_unmigrated_queue_still_answers(cfg: Config) -> None:
+    """A read that never names the span column is not gated by its absence."""
+    legacy_queue_file(cfg)
+    window = NOW - timedelta(minutes=40)
+    seed_sweep_window(cfg, window)
+
+    assert queue.last_sweep(cfg) == window
+    assert "off_record" not in columns_of(cfg, "sessions"), (
+        "the metadata read left the schema as it found it"
+    )
+
+
+def test_a_sweep_of_an_unmigrated_queue_still_enqueues_what_it_finds(
+    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep brings a released queue file current with its own write, then reads it."""
+    legacy_queue_file(cfg)
+    seed_sweep_window(cfg, NOW - timedelta(minutes=40))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: Path("~/.claude/projects")})
+    touched = NOW - timedelta(minutes=31)
+    path = session_file(tmp_path / ".claude/projects", CLAUDE, "missed", touched=touched)
+
+    found = capture.sweep(cfg, NOW)
+
+    assert [(e.agent, e.session_id) for e in found] == [(CLAUDE, path.stem)]
+    assert query(cfg, "SELECT status FROM jobs") == [(queue.PENDING,)]
+    assert "off_record" in columns_of(cfg, "sessions"), "the sweep wrote the column in"
+    assert queue.session_state(cfg, CLAUDE, path.stem) == queue.SessionState(
+        watermark=None, off_record=False, has_open_job=True
+    )
+    assert queue.last_sweep(cfg) == NOW, "the sweep closed its window"
