@@ -1,4 +1,5 @@
-"""The seed script writes a page that lints clean, and its quotes are verbatim (M1.5)."""
+"""The seed writes a page that lints clean with verbatim quotes (M1.5), and an overwrite
+refuses any page a person curated afterwards (F1)."""
 
 from __future__ import annotations
 
@@ -52,6 +53,36 @@ def page_of(cfg, seed) -> pagemod.Page:
 def source_ids(page: pagemod.Page) -> dict[str, dict]:
     sources = (page.frontmatter or {}).get("sources") or []
     return {str(s["id"]): s for s in sources}
+
+
+def seeded_line(seed, index: int) -> str:
+    """The exact line a fresh run writes for one fact, source id and today's date included."""
+    fact = seed.FACTS[index]
+    return f"- {fact.statement} [observed] {date.today().isoformat()} [^s{index + 1}]"
+
+
+def refuses(registered, seed, capsys, edit, reason: str) -> None:
+    """Seed a page, make one curated edit to it, and check that ``--overwrite`` refuses that edit.
+
+    The refused run has to leave the curated text, the working tree and the history untouched:
+    once a person edits the page, their text is the memory and the seed's is only a draft of
+    it, so naming the edit is all the run may do (BUILD-PLAN F1).
+    """
+    assert run(seed, registered.vault) == 0
+    path = registered.vault / seed.REL_PATH
+    text = path.read_text()
+    curated = edit(text)
+    assert curated != text, "the edit has to change the page the seed wrote"
+    path.write_text(curated)
+    vault.commit(registered.vault, [seed.REL_PATH], "aft: curate the seeded page")
+    history = run_git(["log", "--format=%s"], registered.vault)
+    assert run(seed, registered.vault, "--overwrite") == 2
+    err = capsys.readouterr().err
+    assert reason in err
+    assert str(path) in err
+    assert path.read_text() == curated
+    assert run_git(["status", "--porcelain"], registered.vault) == ""
+    assert run_git(["log", "--format=%s"], registered.vault) == history
 
 
 def test_seeded_page_lints_clean(registered, seed):
@@ -116,47 +147,129 @@ def test_overwrite_keeps_the_dates_of_unchanged_facts(registered, seed):
     assert run_git(["log", "--format=%s"], registered.vault) == first
 
 
-def test_overwrite_dates_a_fact_whose_statement_changed(registered, seed):
-    assert run(seed, registered.vault) == 0
-    path = registered.vault / seed.REL_PATH
-    past = (date.today() - timedelta(days=30)).isoformat()
-    aged = re.sub(r"\[observed\] \d{4}-\d{2}-\d{2}", f"[observed] {past}", path.read_text())
-    changed = seed.FACTS[0]
-    edited = aged.replace(
-        f"- {changed.statement} [observed]", f"- {changed.statement} (reworded) [observed]"
-    )
-    assert edited != aged
-    path.write_text(edited)
-    vault.commit(registered.vault, [seed.REL_PATH], "aft: reword a fact")
-    assert run(seed, registered.vault, "--overwrite") == 0
-    dates = {fact.statement: fact.date for fact in page_of(registered, seed).facts}
-    assert dates[changed.statement] == date.today().isoformat()
-    kept = [day for statement, day in dates.items() if statement != changed.statement]
-    assert len(kept) == len(dates) - 1
-    assert kept == [past] * len(kept)
+def test_overwrite_refuses_a_reworded_fact(registered, seed, capsys):
+    def reword(text: str) -> str:
+        return text.replace(
+            f"- {seed.FACTS[0].statement} [observed]",
+            f"- {seed.FACTS[0].statement} (as Ted reworded it) [observed]",
+            1,
+        )
+
+    refuses(registered, seed, capsys, reword, "wording the seed never wrote")
 
 
-def test_overwrite_dates_a_fact_whose_page_date_is_unreadable(registered, seed):
-    assert run(seed, registered.vault) == 0
-    path = registered.vault / seed.REL_PATH
-    past = (date.today() - timedelta(days=30)).isoformat()
-    aged = re.sub(r"\[observed\] \d{4}-\d{2}-\d{2}", f"[observed] {past}", path.read_text())
-    mistyped = seed.FACTS[0]
-    broken = aged.replace(
-        f"- {mistyped.statement} [observed] {past}",
-        f"- {mistyped.statement} [observed] 2026-13-45",
-        1,
-    )
-    assert broken != aged
-    path.write_text(broken)
-    vault.commit(registered.vault, [seed.REL_PATH], "aft: mistype a date")
-    assert run(seed, registered.vault, "--overwrite") == 0
-    assert lint.lint_vault(registered.vault) == []
-    dates = {fact.statement: fact.date for fact in page_of(registered, seed).facts}
-    assert dates[mistyped.statement] == date.today().isoformat()
-    kept = [day for statement, day in dates.items() if statement != mistyped.statement]
-    assert len(kept) == len(dates) - 1
-    assert kept == [past] * len(kept)
+def test_overwrite_refuses_a_hand_written_fact(registered, seed, capsys):
+    def written(text: str) -> str:
+        return text + "- Renew the TLS certificate before winter [observed] 2026-09-01 [^s1]\n"
+
+    refuses(registered, seed, capsys, written, "wording the seed never wrote")
+
+
+def test_overwrite_refuses_a_fact_moved_to_another_section(registered, seed, capsys):
+    def moved(text: str) -> str:
+        line = seeded_line(seed, 0)
+        return text.replace(f"{line}\n", "", 1) + f"{line}\n"
+
+    refuses(registered, seed, capsys, moved, "files the seed's fact under 'Facts'")
+
+
+def test_overwrite_refuses_a_seeded_fact_the_page_drops(registered, seed, capsys):
+    def dropped(text: str) -> str:
+        return text.replace(f"{seeded_line(seed, 0)}\n", "", 1)
+
+    refuses(registered, seed, capsys, dropped, "drops the fact the seed cites as [^s1]")
+
+
+def test_overwrite_refuses_a_seeded_fact_written_twice(registered, seed, capsys):
+    def twice(text: str) -> str:
+        return text + text.rstrip("\n").split("\n")[-1] + "\n"
+
+    refuses(registered, seed, capsys, twice, "repeats the fact the seed holds at line")
+
+
+def test_overwrite_refuses_a_different_source_tag(registered, seed, capsys):
+    def stated(text: str) -> str:
+        line = seeded_line(seed, 0)
+        return text.replace(line, line.replace(" [observed] ", " [stated] "), 1)
+
+    refuses(registered, seed, capsys, stated, "is tagged [stated]")
+
+
+def test_overwrite_refuses_a_candidate_on_the_page(registered, seed, capsys):
+    def candidate(text: str) -> str:
+        line = (
+            "- A candidate the seed never proposed [observed] 2026-09-01 [^s1]"
+            " (signals 1/3, sessions 1/2)"
+        )
+        return text + f"\n## Candidates\n\n{line}\n"
+
+    refuses(registered, seed, capsys, candidate, "holds a candidate")
+
+
+def test_overwrite_refuses_a_stale_mark_on_a_seeded_fact(registered, seed, capsys):
+    def staled(text: str) -> str:
+        return text.replace(" [^s1]\n", " [^s1] (stale 2026-09-01: the design moved)\n", 1)
+
+    refuses(registered, seed, capsys, staled, "is marked stale")
+
+
+def test_overwrite_refuses_a_superseded_seeded_fact(registered, seed, capsys):
+    def superseded(text: str) -> str:
+        marked = (
+            f"- ~~{seed.FACTS[0].statement}~~ [observed] {date.today().isoformat()} [^s1]"
+            " superseded 2026-09-02 by [^s2]"
+        )
+        return text.replace(seeded_line(seed, 0), marked, 1)
+
+    refuses(registered, seed, capsys, superseded, "is marked superseded")
+
+
+def test_overwrite_refuses_a_conflict_note_on_a_seeded_fact(registered, seed, capsys):
+    def disputed(text: str) -> str:
+        note = "> [!conflict] 2026-09-03\n> it disagrees with the design\n"
+        return text.replace(" [^s1]\n", f" [^s1]\n{note}", 1)
+
+    refuses(registered, seed, capsys, disputed, "is marked conflict")
+
+
+def test_overwrite_refuses_an_extra_frontmatter_key(registered, seed, capsys):
+    def owned(text: str) -> str:
+        return text.replace("type: Project\n", "type: Project\nowner: ted\n", 1)
+
+    refuses(registered, seed, capsys, owned, "adds the frontmatter key 'owner'")
+
+
+def test_overwrite_refuses_an_extra_tag(registered, seed, capsys):
+    def tagged(text: str) -> str:
+        return text.replace("- agents\n", "- agents\n- urgent\n", 1)
+
+    refuses(registered, seed, capsys, tagged, "adds the tag 'urgent'")
+
+
+def test_overwrite_refuses_an_anchor_under_aft(registered, seed, capsys):
+    def anchored(text: str) -> str:
+        anchor = (
+            "aft:\n  anchors:\n    s1:\n      path: src/aft/cli.py\n"
+            "      all_of: [aft inject]\n      commit: 6810f79\n  project: "
+        )
+        return text.replace("aft:\n  project: ", anchor, 1)
+
+    refuses(registered, seed, capsys, anchored, "adds aft.anchors")
+
+
+def test_overwrite_refuses_a_source_the_page_rewrites(registered, seed, capsys):
+    def rewritten(text: str) -> str:
+        quote = f"  quote: {seed.FACTS[0].quote}"
+        return text.replace(quote, f"{quote} (tightened by Ted)", 1)
+
+    refuses(registered, seed, capsys, rewritten, "rewrites source s1's quote")
+
+
+def test_overwrite_refuses_a_date_the_seed_cannot_read(registered, seed, capsys):
+    def mistyped(text: str) -> str:
+        return text.replace(f" [observed] {date.today().isoformat()}", " [observed] 2026-13-45", 1)
+
+    refuses(registered, seed, capsys, mistyped, "invalid date 2026-13-45")
 
 
 def test_overwrite_refuses_a_page_whose_frontmatter_it_cannot_read(registered, seed, capsys):
@@ -199,20 +312,11 @@ def test_overwrite_refuses_a_page_whose_source_quote_is_blank(registered, seed, 
     assert path.read_text() == broken
 
 
-def test_a_line_the_parser_rejects_is_named_in_the_run_report(registered, seed, capsys):
-    assert run(seed, registered.vault) == 0
-    path = registered.vault / seed.REL_PATH
-    text = path.read_text()
-    dropped = text.replace(" [^s1]\n", "\n", 1)
-    assert dropped != text
-    path.write_text(dropped)
-    vault.commit(registered.vault, [seed.REL_PATH], "aft: drop a fact's source tag")
-    assert run(seed, registered.vault, "--overwrite") == 0
-    report = capsys.readouterr().err
-    assert "rejected 1 of the old page's lines" in report
-    assert "fact line must read" in report
-    assert str(seed.REL_PATH) in report
-    assert lint.lint_vault(registered.vault) == []
+def test_overwrite_refuses_a_line_the_parser_rejects(registered, seed, capsys):
+    def untagged(text: str) -> str:
+        return text.replace(" [^s1]\n", "\n", 1)
+
+    refuses(registered, seed, capsys, untagged, "fact line must read")
 
 
 def test_an_unregistered_project_writes_nothing(initialized, seed, capsys):
