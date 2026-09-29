@@ -399,6 +399,26 @@ sources: []
 - ~~Ship it in steel.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s1]
 """
 
+# A digest whose writer kept the handoff where DESIGN 8 puts it - in the frontmatter, which is
+# what `aft inject` reads - so none of these words appears in a body section.
+HANDOFF_DIGEST = """---
+type: Session Digest
+title: widget session
+description: What the session on 2026-09-28 did.
+aft:
+  handoff:
+    in_flight: the gasket arrived oversize
+    failed:
+      - brazing the flange at 380 degrees
+    open:
+      - whether the jig holds tolerances
+---
+
+## Summary
+
+The widget gained a flange.
+"""
+
 
 def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     """Resting lines under ``archive/`` are a collection apart (DESIGN 10): a query-time read of
@@ -463,6 +483,24 @@ def test_a_deleted_page_loses_its_rows(initialized: Config) -> None:
     assert search(initialized, "pages", "SQLite") == []
 
 
+def test_removing_one_page_leaves_every_row_it_never_named(initialized: Config) -> None:
+    """A run's removals go out in one statement per collection naming the paths it means, so the
+    shape of it has to be proved and not assumed: the page it named loses its rows and its hash
+    record, and the page it never mentioned keeps its row field for field. A removal that swept
+    the collection alongside it would look identical until a search came up empty."""
+    gone = write(initialized, "projects/widget/scrapped.md", _a_page(title="scrapped"))
+    kept = write(initialized, "projects/widget/decisions.md", _a_page(title="decisions"))
+    index.update(initialized)
+    standing = tuple(row_for(initialized, "pages", f"{kept}#Decisions"))
+
+    (initialized.vault / gone).unlink()
+    assert index.update(initialized) == []
+
+    assert [tuple(row) for row in rows(initialized, "pages")] == [standing]
+    assert gone not in hashes(initialized)
+    assert search(initialized, "pages", "schedule") == [f"{kept}#Decisions"]
+
+
 def test_an_appended_evidence_row_is_indexed_once(initialized: Config) -> None:
     """Evidence is keyed by the archive's own row identity: an appended entry adds one row, and
     the archive being read again - a rerun, or the same entries archived a second time - does
@@ -500,26 +538,27 @@ def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config)
 def test_a_rewritten_archive_row_is_reindexed_at_its_own_size(initialized: Config) -> None:
     """``aft forget pattern`` redacts archived text under the row's own key (BUILD-PLAN M2.8),
     and DESIGN 12 requires the redaction to reach the index as well as the archive. The change
-    is caught on the bytes, not on what they happen to measure: these two texts compress to
-    the same length and under the same key, and the row still reads back as the new text."""
+    is caught on the bytes, not on what they happen to measure: these two texts compress to the
+    same length under the same key, and the row still reads back as the new text - while the
+    session the removal never names stays exactly where it was."""
     evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
-    first_size = stored_size(initialized, "abc", "e1")
+    evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
+    stored = stored_size(initialized, "abc", "e1")
+    assert stored_size(initialized, "def", "e1") == stored
     index.update(initialized)
     before = row_for(initialized, "evidence", "abc#e1")
+    untouched = row_for(initialized, "evidence", "def#e1")
     assert _column(before, "body") == FIRST_TEXT
 
-    # The second text archived under another session, so both rows sit in the archive at
-    # once and the equality can be read off the bytes it stores rather than recomputed.
-    evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
-    assert stored_size(initialized, "def", "e1") == first_size
-
+    # The redaction: the same key, the same number of stored bytes, other words.
     evidence.store(initialized, "claude", "abc", "p_widget", entries(SECOND_TEXT))
+    assert stored_size(initialized, "abc", "e1") == stored
     assert index.update(initialized) == []
 
     after = row_for(initialized, "evidence", "abc#e1")
     assert _column(after, "body") == SECOND_TEXT
     assert _column(after, "entry_hash") != _column(before, "entry_hash")
-    assert _column(after, "entry_rowid") == _column(before, "entry_rowid")
+    assert row_for(initialized, "evidence", "def#e1") == untouched
     assert sorted(search(initialized, "evidence", "nickel")) == ["abc#e1", "def#e1"]
     assert search(initialized, "evidence", "bronze") == []
 
@@ -536,6 +575,41 @@ def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> 
 
     assert rows(initialized, "evidence") == []
     assert search(initialized, "evidence", "flange") == []
+
+
+def test_forgetting_one_session_leaves_every_row_it_never_named(initialized: Config) -> None:
+    """The rows a forget or a retention purge leaves behind go out in one statement naming the
+    keys it means, so the session it never mentioned is still there afterwards - field for
+    field, and still searchable. Bulk removal that took the collection with it would only show
+    up as a search that comes back empty."""
+    evidence.store(initialized, "claude", "abc", "p_widget", entries("the flange is bronze"))
+    evidence.store(initialized, "pi", "def", "p_gizmo", entries("the gasket is nitrile"))
+    index.update(initialized)
+    standing = tuple(row_for(initialized, "evidence", "def#e1"))
+
+    evidence.forget(initialized, "abc")
+    assert index.update(initialized) == []
+
+    assert [tuple(row) for row in rows(initialized, "evidence")] == [standing]
+    assert search(initialized, "evidence", "nitrile") == ["def#e1"]
+
+
+def test_an_archive_row_whose_project_moved_is_read_again(initialized: Config) -> None:
+    """`aft project add` gives a directory an id, and the next chunk of a session already
+    archived from it is stored under that id while the entries it re-reads keep their text
+    (BUILD-PLAN M2.4): the archive row moves under its own key and the index row copied the
+    project, the agent and the time out of it. Text alone would leave that session's words
+    indexed as every project's memory for as long as they stayed word-for-word the same."""
+    evidence.store(initialized, "claude", "abc", None, entries(FIRST_TEXT))
+    assert index.update(initialized) == []
+    assert _column(row_for(initialized, "evidence", "abc#e1"), "project_id") is None
+
+    evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
+    assert index.update(initialized) == []
+
+    after = row_for(initialized, "evidence", "abc#e1")
+    assert _column(after, "project_id") == "p_widget"
+    assert _column(after, "body") == FIRST_TEXT
 
 
 def test_reindex_equals_the_incremental_result(initialized: Config) -> None:
@@ -679,6 +753,27 @@ def test_two_sections_under_one_heading_are_two_rows(initialized: Config) -> Non
     assert _column(row_for(initialized, "digests", f"{rel}#Summary 2"), "heading") == "Summary"
 
 
+def test_a_handoff_note_is_searchable_from_the_digests_collection(initialized: Config) -> None:
+    """DESIGN 10 files handoff notes under ``digests``, and M2.6 keeps one in the digest's
+    frontmatter (`aft.handoff`, DESIGN 8) rather than in a section a body reader would find -
+    it is what `aft inject` reads for a new session. The words whose whole job is to be found
+    by something looking for context reach search from the frontmatter then, as the block shows
+    them, under one heading a hit can name them by."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", HANDOFF_DIGEST)
+
+    assert index.update(initialized) == []
+
+    assert search(initialized, "digests", "oversize") == [f"{rel}#Handoff"]
+    assert search(initialized, "digests", "tolerances") == [f"{rel}#Handoff"]
+    note = _column(row_for(initialized, "digests", f"{rel}#Handoff"), "body")
+    assert "In flight: the gasket arrived oversize" in note
+    assert "Failed: brazing the flange at 380 degrees" in note
+    assert "Open: whether the jig holds tolerances" in note
+    assert _column(row_for(initialized, "digests", f"{rel}#Summary"), "body") == (
+        "The widget gained a flange."
+    )
+
+
 def _a_page(
     title: str = "A project",
     description: str = "Nothing about the word here.",
@@ -762,7 +857,7 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
     assert _column(evidence_row, "path") == "aft://session/claude/abc-123"
     assert _column(evidence_row, "project_id") == "p_widget"
     assert _column(evidence_row, "heading") == ""
-    assert _column(evidence_row, "entry_rowid") is not None
+    assert _column(evidence_row, "entry_hash") is not None
 
 
 def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
@@ -806,6 +901,36 @@ def test_a_registry_that_will_not_parse_stops_the_run_rather_than_guessing(
 
     assert rows(initialized, "digests") == []
     assert rows(initialized, "pages") == []
+
+
+def test_moving_a_slug_in_the_registry_refiles_the_rows_it_derived(initialized: Config) -> None:
+    """`aft project forget` leaves a project's pages where they are and a later `aft project add`
+    issues a fresh id, so the slug a page sits under can end up naming a different project than
+    the one its rows claim. The registry is an input those rows were derived from, so its bytes
+    are recorded and a run with no file touched re-derives them: no row is left attributing
+    memory to a project that no longer claims it."""
+    forgotten = register(initialized, "widget")
+    page = write(initialized, "projects/widget/index.md", _a_page())
+    digest = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
+    assert index.update(initialized) == []
+    assert _column(row_for(initialized, "pages", f"{page}#Decisions"), "project_id") == (
+        forgotten.id
+    )
+
+    registry = Registry.load(initialized.registry_path)
+    registry.remove("widget")
+    re_registered = registry.add("widget")
+    registry.save()
+    assert re_registered.id != forgotten.id
+
+    assert index.update(initialized) == []
+
+    assert _column(row_for(initialized, "pages", f"{page}#Decisions"), "project_id") == (
+        re_registered.id
+    )
+    digest_row = row_for(initialized, "digests", f"{digest}#Summary")
+    assert _column(digest_row, "project_id") == re_registered.id
+    assert _column(digest_row, "body") == "The widget gained a flange."
 
 
 def test_a_project_page_that_names_no_project_takes_its_directory(initialized: Config) -> None:

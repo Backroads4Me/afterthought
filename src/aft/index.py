@@ -15,7 +15,8 @@ Table       Built from                                             A row is
             ``references/``                                         curated lines
 ``archive`` the pages under ``archive/``                            one ``##`` section's
                                                                    resting lines
-``digests`` ``digests/<slug>/<yyyy>/<mm>/*.md``                     one heading section
+``digests`` ``digests/<slug>/<yyyy>/<mm>/*.md``                     one heading section or
+                                                                    its frontmatter handoff
 ``reports`` ``reports/**/*.md``                                     one heading section
 ``evidence``  one row of ``evidence.sqlite``                        one filtered entry
 =========== ====================================================== ==========================
@@ -44,23 +45,28 @@ project's memory (DESIGN 6), not a page whose project went missing.
 Two keys keep the index in step with what it is built from (BUILD-PLAN M3.1: "updated
 incrementally by file content hash and evidence row id"):
 
-* **Files.** ``files`` records the SHA-256 of every file the index has read. A file whose
-  hash is unchanged is not parsed, re-tokenized or touched again, so the content is the key
-  and a new modification time on unchanged text changes nothing. A file that is gone has its
-  rows removed: the files are the memory (DESIGN 14), so text from a deleted page has no
+* **Files.** ``files`` records the SHA-256 of every file the index has read, and ``origins``
+  records the bytes of the project registry those rows were filed against. A file whose hash
+  is unchanged is not parsed, re-tokenized or touched again, so the content is the key and a
+  new modification time on unchanged text changes nothing. What the file's bytes do not answer
+  is which project the row belongs to: the registry said that for every page filed under a
+  slug, and a registry that has since moved re-derives every file row rather than leaving
+  rows attributing memory to a project that no longer claims them. A file that is gone has
+  its rows removed: the files are the memory (DESIGN 14), so text from a deleted page has no
   memory left to be found, and `aft forget` in DESIGN 12 removes content "from everything
   afterthought controls".
-* **Evidence.** A row is keyed by the archive's own row identity, its ``(session_id,
-  entry_id)`` primary key, and records the archive rowid it was read from. Rows the index has
-  never seen are read and indexed once; rows the archive no longer holds - purged past the
-  retention window (DESIGN 8) or forgotten (DESIGN 12) - lose their index rows. The archive's
-  text is zlib-compressed (``aft.evidence._pack``), so the bytes of every row are digested
-  and only the rows whose digest moved are decompressed.
+* **Evidence.** A row is keyed by the archive's ``(session_id, entry_id)`` primary key, which
+  ``aft.evidence.store`` keeps unique across a rerun, and records the SHA-256 of the stored
+  payload beside it. Rows the index has not seen are read once; rows the archive no longer
+  holds - purged past the retention window (DESIGN 8) or forgotten (DESIGN 12) - lose their
+  index rows. The archive's text is zlib-compressed (``aft.evidence._pack``), so every
+  payload is digested as it is read and only the rows that moved are decompressed.
 
-A row whose text is rewritten in place under the same primary key is caught by that digest,
-whatever the compressed text happens to measure. The one writer that rewrites archived text
-in place is ``aft forget pattern`` (BUILD-PLAN M2.8), whose redaction has to reach the index
-to leave no unredacted words behind (DESIGN 12).
+A row is read again when its digest moved or when any field the index row copies from the
+archive row - its agent, its project and its time - moved with it. The one writer that
+rewrites archived text in place is ``aft forget pattern`` (BUILD-PLAN M2.8), whose redaction
+has to reach the index to leave no unredacted words behind (DESIGN 12), and an unregistered
+session's project moves under the index when its directory is registered.
 
 One damaged file does not stop a run. A page that cannot be read, is not UTF-8, or has
 frontmatter that will not parse is left out of the build, named by its path and its reason in
@@ -69,6 +75,19 @@ it, so the next update reads it again once it is repaired. ``aft inject`` skips 
 for the same reason and ``aft lint`` is where every broken page gets named. Only the index
 file's own failure stops a run, because that is the one failure `aft reindex` exists to answer
 (DESIGN 14).
+
+Whatever leaves the index leaves by name. FTS5 stores a row's path and its entry id beside it
+unindexed, so a delete over a collection reads every row the collection holds whatever it
+filters on: a run therefore removes nothing it never recorded, and sends what it does remove
+in statements that name a batch of keys each, which costs one such read per batch instead
+of one per row. A rebuild, having recorded nothing, removes nothing.
+
+A row's text is not the only thing a row is built from, so text alone does not say whether a
+row is current. A digest keeps its handoff note in frontmatter rather than in a body section,
+and it is indexed there as a section of its own, because DESIGN 10 files handoff notes under
+``digests``; a project's registry can move under a page that has not changed; and an archived
+row can be re-stored with a new project while its text stays word for word the same. Each of
+those says the row is stale on its own terms.
 """
 
 from __future__ import annotations
@@ -82,6 +101,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from aft import inject, lint, page
 from aft.config import Config
@@ -150,7 +170,7 @@ INDEXED_COLUMNS = ("title", "description", "heading", "body")
 
 #: The identifiers a row carries: path, project id, agent, session, time and a heading or
 #: entry id (BUILD-PLAN M3.1), stored so a hit reads back without opening its file again,
-#: plus the evidence row's archive rowid and the digest of its stored payload.
+#: plus the digest of the stored payload of an evidence row.
 IDENTITY_COLUMNS = (
     "path",
     "project_id",
@@ -159,7 +179,6 @@ IDENTITY_COLUMNS = (
     "entry_id",
     "time",
     "row_key",
-    "entry_rowid",
     "entry_hash",
 )
 
@@ -172,6 +191,15 @@ WEIGHTS = (TITLE_WEIGHT, DESCRIPTION_WEIGHT, HEADING_WEIGHT, BODY_WEIGHT) + (0.0
 
 FILES_TABLE = "files"
 
+# What an index row's project id was derived from, recorded beside the file hashes rather
+# than among them: the registry is no collection's source, so it is never walked, and keeping
+# it in a table of its own leaves every row of `files` a page that can be looked up by path.
+ORIGINS_TABLE = "origins"
+
+#: The `origins` record naming the project registry, the one non-file input rows are built
+#: from: it answered which project a page filed under a slug belongs to.
+PROJECTS_ORIGIN = "registry"
+
 # SQLite takes a table name in the statement text and never as a parameter, so every
 # statement that names one is written once here from `COLLECTIONS` and `FILES_TABLE` - this
 # module's own constants, never a caller's string.
@@ -180,21 +208,51 @@ _PLACEHOLDERS = ", ".join("?" * len(COLUMNS))
 _INSERT = {
     name: f"INSERT INTO {name} ({_COLUMNS_SQL}) VALUES ({_PLACEHOLDERS})" for name in COLLECTIONS
 }
-_DELETE_BY_PATH = {name: f"DELETE FROM {name} WHERE path = ?" for name in COLLECTIONS}
+# How many keys one removal statement names. FTS5 keeps a row's own path and entry id beside
+# it unindexed, so a delete over a collection reads every row it holds whatever the WHERE
+# clause says: naming a batch of keys in one statement costs that read once for the batch
+# rather than once per row, and the batch stays inside SQLite's limit on the parameters of
+# one statement.
+DELETE_BATCH = 500
+
+_DELETE_BY_PATH = {name: f"DELETE FROM {name} WHERE path IN ({{paths}})" for name in COLLECTIONS}
 _DELETE_BY_ENTRY = {
-    name: f"DELETE FROM {name} WHERE session_id = ? AND entry_id = ?" for name in COLLECTIONS
+    name: f"DELETE FROM {name} WHERE (session_id, entry_id) IN (VALUES {{keys}})"
+    for name in COLLECTIONS
 }
+_DELETE_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN ({{paths}})"
+# What the index recorded about each evidence row: the key it was stored under, the digest of
+# its stored payload, and the fields the row copied out of the archive beside it. A row is read
+# again when any of it moved.
+_EVIDENCE_STATE = (
+    f"SELECT session_id, entry_id, entry_hash, agent, project_id, time FROM {EVIDENCE}"
+)
 _SELECT_HASHES = f"SELECT path, digest FROM {FILES_TABLE}"
 _RECORD_HASH = (
     f"INSERT INTO {FILES_TABLE} (path, digest) VALUES (?, ?)"
     f" ON CONFLICT (path) DO UPDATE SET digest = excluded.digest"
 )
-_DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
+_SELECT_ORIGIN = f"SELECT digest FROM {ORIGINS_TABLE} WHERE input = ?"
+_RECORD_ORIGIN = (
+    f"INSERT INTO {ORIGINS_TABLE} (input, digest) VALUES (?, ?)"
+    f" ON CONFLICT (input) DO UPDATE SET digest = excluded.digest"
+)
+# What a moved project registry invalidates: every row built from a file, and the hashes that
+# said those files had been read. The evidence rows keep theirs - a project id reaches an
+# evidence row from the archive row beside it, not from the registry.
+_RESET_FILE_ROWS: tuple[str, ...] = (
+    *(f"DELETE FROM {name}" for name in FILE_COLLECTIONS),
+    f"DELETE FROM {FILES_TABLE}",
+)
 
-# The schema: a table of file hashes and one FTS5 table per collection, holding the indexed
-# columns and storing the identifiers beside them.
+# The schema: a table of file hashes, a table of the other inputs rows were derived from, and
+# one FTS5 table per collection, holding the indexed columns and storing the identifiers
+# beside them.
 _CREATE_FILES = (
     f"CREATE TABLE IF NOT EXISTS {FILES_TABLE} (path TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+)
+_CREATE_ORIGINS = (
+    f"CREATE TABLE IF NOT EXISTS {ORIGINS_TABLE} (input TEXT PRIMARY KEY, digest TEXT NOT NULL)"
 )
 _CREATE_COLLECTION = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS {collection} USING fts5("
@@ -205,12 +263,13 @@ _CREATE_COLLECTION = (
 )
 _SCHEMA_TABLES: tuple[tuple[str, str], ...] = (
     (FILES_TABLE, _CREATE_FILES),
+    (ORIGINS_TABLE, _CREATE_ORIGINS),
     *((name, _CREATE_COLLECTION.format(collection=name)) for name in COLLECTIONS),
 )
 # A rebuild drops every table before it recreates them, so nothing an earlier update got wrong
 # survives into it (DESIGN 14); an ordinary update only creates what is missing.
 _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
-    (name, f"DROP TABLE IF EXISTS {name}") for name in (*COLLECTIONS, FILES_TABLE)
+    (name, f"DROP TABLE IF EXISTS {name}") for name in (*COLLECTIONS, FILES_TABLE, ORIGINS_TABLE)
 )
 
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
@@ -219,6 +278,11 @@ _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<se
 # The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
 # an evidence hit is a session's text, and this is how a page already names one.
 SESSION_RESOURCE = "aft://session/"
+
+#: The heading a digest's handoff note is indexed under. The note itself lives in the digest's
+#: frontmatter (DESIGN 8) and `aft.inject` renders it for a new session; this is the name a
+#: search hit names it by, and DESIGN 10 files handoff notes under ``digests``.
+HANDOFF = "Handoff"
 
 
 class SearchIndexError(Exception):
@@ -250,7 +314,6 @@ class Row:
     entry_id: str | None = None
     time: str = ""
     row_key: str = ""
-    entry_rowid: int | None = None
     entry_hash: str | None = None
 
     def values(self) -> tuple:
@@ -273,15 +336,18 @@ def update(config: Config) -> list[str]:
     """Bring the index in step with the vault and the archive, leaving untouched rows alone.
 
     This is the incremental path BUILD-PLAN M3.1 names: a file is rebuilt only when its
-    content hash moved, an evidence row is read only when the index has not seen its stored
-    bytes, and whatever has disappeared from either loses its rows. Nothing here waits for a
-    model or a git commit; it reads the files as they are.
+    content hash moved or when the project registry the rows were filed against moved,
+    an evidence row is read only when the index has not seen its stored bytes or the archive
+    row beside them changed what the index row copies, and whatever has disappeared from
+    either loses its rows. Nothing here waits for a model or a git commit; it reads the files
+    as they are.
 
     What it returns is the report: one line per file it could not read or parse, naming the
     file and the reason. None of those recorded a hash, so the next update reads them again.
     """
     with _writing(config) as conn:
-        report = _sync_files(conn, config)
+        registry = _project_registry(config)
+        report = _sync_files(conn, config, registry)
         _sync_evidence(conn, config)
         return report
 
@@ -296,7 +362,7 @@ def reindex(config: Config) -> list[str]:
     """
     with _writing(config) as conn:
         _create(conn, fresh=True)
-        report = _sync_files(conn, config)
+        report = _sync_files(conn, config, _project_registry(config))
         _sync_evidence(conn, config)
         return report
 
@@ -318,36 +384,60 @@ def _require_collection(collection: str) -> None:
         )
 
 
+def _batches(keys: list[Any]) -> Iterator[list[Any]]:
+    """The keys a sync removes, in runs no longer than one statement can name."""
+    for start in range(0, len(keys), DELETE_BATCH):
+        yield keys[start : start + DELETE_BATCH]
+
+
+def _marks(count: int) -> str:
+    """`count` parameter markers. A removal statement is built from a count, never from a key."""
+    return ", ".join("?" * count)
+
+
 # Reading the vault
 
 
-def _sync_files(conn: sqlite3.Connection, config: Config) -> list[str]:
-    """Index every file whose content the index has not already read, and unindex the ones
-    that are gone.
+def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -> list[str]:
+    """Index every file whose content or project the index has not already read, and unindex
+    the ones that are gone.
 
     Returns the report: one line per file this could not index, naming the file and the
     reason. A file that is unreadable, not UTF-8, or has frontmatter that will not parse
     loses its rows and its hash record, exactly as `reindex` would leave it, so its words
     are not searched out from an older version of itself and a later update reads it again.
+
+    A moved registry asks for a full re-derivation rather than a per-file one, because it was
+    the registry and not the page that answered which project most of these rows belong to:
+    the bytes of a page say nothing about a slug the registry has since moved on from, so no
+    file hash can say which rows went stale. The evidence rows are not touched: an evidence
+    row takes its project from the archive row beside it, which the index compares directly.
     """
-    read = dict(conn.execute(_SELECT_HASHES))
+    recorded = dict(conn.execute(_SELECT_HASHES))
     found, report = _vault_files(config)
-    registry = _project_registry(config)
-    for rel in sorted(set(read) - set(found)):
-        _drop_path(conn, rel)
-    for rel, current in found.items():
-        if read.get(rel) == current.digest:
-            continue
+    filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
+    if filed_by is None or filed_by[0] != projects.digest:
+        _reset_files(conn)
+        rebuild = sorted(found)
+    else:
+        rebuild = sorted(
+            (set(recorded) - set(found))
+            | {rel for rel, current in found.items() if recorded.get(rel) != current.digest}
+        )
+        _drop_paths(conn, rebuild)
+    for rel in rebuild:
+        current = found.get(rel)
+        if current is None:
+            continue  # gone from the vault: the drop above was the whole job
         try:
-            rows = _file_rows(rel, current, registry)
+            rows = _file_rows(rel, current, projects.registry)
         except _Unreadable as exc:
             report.append(f"{rel}: {exc}")
-            _drop_path(conn, rel)
-            continue
-        _drop_path(conn, rel)
+            continue  # its rows and hash went with the drop, so a repaired page reads again
         for row in rows:
             _insert(conn, current.collection, row)
         conn.execute(_RECORD_HASH, (rel, current.digest))
+    conn.execute(_RECORD_ORIGIN, (PROJECTS_ORIGIN, projects.digest))
     return report
 
 
@@ -401,12 +491,36 @@ def _read_file(collection: str, path: Path) -> _File:
     )
 
 
-def _drop_path(conn: sqlite3.Connection, rel: str) -> None:
-    """Remove a file's rows and its hash record, wherever in the index its path lands."""
-    collection = _collection_of(rel)
-    if collection is not None:
-        conn.execute(_DELETE_BY_PATH[collection], (rel,))
-    conn.execute(_DROP_HASH, (rel,))
+def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
+    """Stop holding the rows and the hash record of every one of these vault paths.
+
+    Removals go out in batches, one statement per collection per batch: FTS5 stores a row's
+    path beside it unindexed and so reads the whole collection to find one path whatever the
+    WHERE clause says (`DELETE_BATCH`). Naming the paths a sync means in one statement costs
+    that read once for the batch instead of once per file, and names exactly the rows it
+    removes - the rows of a file it does not name stay where they are.
+    """
+    by_collection: dict[str, list[str]] = {}
+    for rel in rels:
+        collection = _collection_of(rel)
+        if collection is not None:
+            by_collection.setdefault(collection, []).append(rel)
+    for collection, paths in by_collection.items():
+        for batch in _batches(paths):
+            conn.execute(_DELETE_BY_PATH[collection].format(paths=_marks(len(batch))), batch)
+    for batch in _batches(rels):
+        conn.execute(_DELETE_HASHES.format(paths=_marks(len(batch))), batch)
+
+
+def _reset_files(conn: sqlite3.Connection) -> None:
+    """Stop holding every row built from a file and every hash that said a file was read.
+
+    This is what a moved project registry asks for: the registry answered the project of most
+    of those rows, so every one of them is re-derived from its file rather than trusted to
+    what was filed before the move. The evidence collection keeps its rows - the archive is
+    the other source, and it is compared row by row on its own."""
+    for statement in _RESET_FILE_ROWS:
+        conn.execute(statement)
 
 
 def _collection_of(rel: str) -> str | None:
@@ -428,6 +542,11 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
     (``digests``, ``reports``) is split under its headings, since what it holds is written
     prose rather than fact lines.
 
+    A digest's handoff note lives in its frontmatter rather than its body, so it joins the
+    digest's own sections as one more of them (`_handoff_chunks`) - DESIGN 10 files handoff
+    notes under ``digests``, and words no body section carries reach search from the frontmatter
+    or not at all.
+
     A page scoped to several projects contributes a row per project and a heading that
     repeats in one file contributes a row per occurrence, so every section of the file
     reaches search as a row of its own (`_row_key`).
@@ -435,13 +554,15 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
     frontmatter, body, _, error = page.split_frontmatter(current.text)
     if error:
         raise _Unreadable(f"cannot be indexed: {error}")
-    title = _one_line((frontmatter or {}).get("title")) or Path(rel).stem
-    description = _one_line((frontmatter or {}).get("description"))
+    title = inject.one_line((frontmatter or {}).get("title")) or Path(rel).stem
+    description = inject.one_line((frontmatter or {}).get("description"))
     scopes = _project_scopes(rel, frontmatter, registry)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
     if admitted is None:
         chunks = _prose_chunks(body)
+        if current.collection == DIGESTS:
+            chunks = [*chunks, *_handoff_chunks(frontmatter)]
     else:
         chunks = _fact_chunks(page.parse(current.text, Path(rel)), admitted)
     rows: list[Row] = []
@@ -513,26 +634,45 @@ def _prose_chunks(body: str) -> list[tuple[str, str]]:
     return [(heading, "\n".join(lines).strip()) for heading, lines in chunks]
 
 
-def _one_line(value: object) -> str:
-    """A frontmatter value as one line: a block scalar keeps its words and loses its breaks,
-    so no value reaches a row as a second line (as in `aft.inject`)."""
-    return " ".join(value.split()) if isinstance(value, str) else ""
+def _handoff_chunks(frontmatter: dict | None) -> list[tuple[str, str]]:
+    """The digest's handoff note as the section it contributes to its collection.
+
+    M2.6 writes a digest's handoff into its frontmatter - ``aft.handoff`` carrying what was in
+    flight, what failed and what is open (DESIGN 8) - and `aft.inject` shows those same lines
+    to a new session, so the note is indexed as the block reads it rather than from a second
+    reading of the field."""
+    lines = inject.handoff(frontmatter)
+    return [(HANDOFF, "\n".join(lines))] if lines else []
 
 
-def _project_registry(config: Config) -> Registry:
-    """The project registry, read once per sync as `aft.lint` reads it.
+@dataclass(frozen=True)
+class _Projects:
+    """The project registry, and the bytes it was read from.
+
+    Those bytes are what the project id of a row was derived from, so `update` keeps their
+    digest against `PROJECTS_ORIGIN`: a row filed by its path slug stays current only while
+    the registry still gives that slug the id the row carries."""
+
+    registry: Registry
+    digest: str
+
+
+def _project_registry(config: Config) -> _Projects:
+    """The project registry, read once per sync as `aft.lint` reads it, with its bytes digested.
 
     A registry that will not parse is an error rather than an empty one: it is what turns the
     slug of a digest, an archived page or an unlabelled project page into a project id, and
     reading it as empty would label all of those every project's memory.
     """
     try:
-        return Registry.load(config.registry_path)
-    except RegistryError as exc:
+        registry = Registry.load(config.registry_path)
+        stored = config.registry_path.read_bytes() if config.registry_path.exists() else b""
+    except (RegistryError, OSError) as exc:
         raise SearchIndexError(
             f"cannot read the project registry at {config.registry_path}"
             f" to file rows by project: {exc}"
         ) from exc
+    return _Projects(registry, hashlib.sha256(stored).hexdigest())
 
 
 def _project_scopes(
@@ -596,50 +736,79 @@ def _session_of(rel: str) -> tuple[str | None, str | None]:
 # Reading the evidence archive
 
 
+#: The archive's rows in one scan: the key, everything an index row copies out of the row, and
+#: the stored payload its digest is taken from. Ordered by the key, so a rebuild arrives the
+#: same way whatever order the archive's rows happen to sit in.
+_SCAN_ARCHIVE = (
+    "SELECT session_id, entry_id, agent, project_id, time, text FROM evidence"
+    " ORDER BY session_id, entry_id"
+)
+
+
 def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
-    """Index the archive rows this index has not seen, and unindex the ones it dropped.
+    """Index the archive rows this index has not seen, and stop holding the ones it dropped.
 
     The row identity is the archive's ``(session_id, entry_id)`` primary key, which the
     archive itself keeps unique across a rerun (``aft.evidence.store`` replaces a row rather
-    than adding a copy). The archive rowid rides along, because BUILD-PLAN M3.1 keys the
-    update on the evidence row, and is not trusted as the key itself: once the highest rowid
-    goes, SQLite hands that number to the next row inserted.
+    than adding a copy). What says whether a row is current is everything the index row copies
+    out of the archive row - the SHA-256 of the stored payload, and the agent, project and time
+    the row carries - so a redaction that rewrote archived text in place (`aft forget pattern`,
+    BUILD-PLAN M2.8) reaches the index whatever the compressed text measures, and so does a
+    session whose project moved because its directory was registered after it was archived.
+    The stored bytes are digested as they are read; only the rows that moved are decompressed.
 
-    A row is read again when its rowid moved or when the SHA-256 of its stored payload moved
-    with it, so a rewrite of archived text in place - `aft forget pattern`'s redaction
-    (BUILD-PLAN M2.8) - reaches the index whatever the compressed text measures. The stored
-    bytes are digested as they are read; only the rows that moved are decompressed.
+    Nothing is removed that was never recorded: a row and the state that says it was read land
+    in the same transaction, so a key the index holds no state for is a key with no row to
+    drop. What does go - rows whose archive row is gone, and rows whose copied state moved -
+    goes out in one statement per batch after the scan, which is why a rebuild over an
+    empty index deletes nothing at all (`_unindex`).
     """
-    seen = {
-        (session_id, entry_id): (rowid, digest)
-        for session_id, entry_id, rowid, digest in conn.execute(
-            "SELECT session_id, entry_id, entry_rowid, entry_hash FROM evidence"
-        )
+    recorded = {
+        (session_id, entry_id): (digest, agent, project_id, moment)
+        for session_id, entry_id, digest, agent, project_id, moment in conn.execute(_EVIDENCE_STATE)
     }
     archive = config.home / EVIDENCE_NAME
     if not archive.exists():
-        _unindex(conn, EVIDENCE, sorted(seen))
+        _unindex(conn, EVIDENCE, sorted(recorded))
         return
-    live: dict[tuple[str, str], tuple[int, str]] = {}
+    live: set[tuple[str, str]] = set()
+    rewritten: list[tuple[tuple[str, str], sqlite3.Row, bytes, str]] = []
     with _reading_archive(archive) as source:
-        for record in source.execute(
-            "SELECT rowid, session_id, entry_id, agent, project_id, time, text FROM evidence"
-            " ORDER BY session_id, entry_id"
-        ):
+        for record in source.execute(_SCAN_ARCHIVE):
             key = (record["session_id"], record["entry_id"])
             payload = bytes(record["text"])
             digest = hashlib.sha256(payload).hexdigest()
-            live[key] = (record["rowid"], digest)
-            if seen.get(key) == (record["rowid"], digest):
-                continue  # the same bytes at the same rowid: nothing moved
-            _unindex(conn, EVIDENCE, [key])
-            _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
-    _unindex(conn, EVIDENCE, sorted(set(seen) - set(live)))
+            live.add(key)
+            copied = (digest, record["agent"], record["project_id"], record["time"])
+            if recorded.get(key) == copied:
+                continue  # every field this row was built from is what it was built from
+            if key in recorded:
+                # Its rows are here from before, and they say what this row now says they
+                # should not: they go with the rest, and the fresh one follows the removal.
+                rewritten.append((key, record, payload, digest))
+            else:
+                _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+    _unindex(
+        conn,
+        EVIDENCE,
+        sorted(set(recorded) - live) + sorted(key for key, _, _, _ in rewritten),
+    )
+    for _, record, payload, digest in rewritten:
+        _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
 
 
 def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
-    """Drop indexed rows by the archive key that identifies each one."""
-    conn.executemany(_DELETE_BY_ENTRY[collection], keys)
+    """Stop holding the rows of these archive keys, in statements that name exactly them.
+
+    FTS5 keeps a row's own ``(session_id, entry_id)`` beside it unindexed, so a delete over a
+    collection reads every row it holds whatever the WHERE clause says; a batch of keys named
+    in one statement pays that read once for the batch instead of once per key
+    (`DELETE_BATCH`). Rows under keys the statement does not name keep their place."""
+    for batch in _batches(keys):
+        conn.execute(
+            _DELETE_BY_ENTRY[collection].format(keys=", ".join(["(?, ?)"] * len(batch))),
+            [value for key in batch for value in key],
+        )
 
 
 def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
@@ -666,7 +835,6 @@ def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
         entry_id=entry_id,
         time=record["time"],
         row_key=f"{session_id}#{entry_id}",
-        entry_rowid=record["rowid"],
         entry_hash=digest,
     )
 

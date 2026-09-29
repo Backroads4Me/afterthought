@@ -84,7 +84,8 @@ def _heading(project: Project, overview: pagemod.Page | None) -> Part:
 def _handoff_part(config: Config, slug: str) -> Part:
     """The handoff of the newest digest for the project, if there is one. Digests arrive
     with M2.6, so until then this part is empty."""
-    return _part("Last session", _handoff(_newest_digest(config.vault / "digests" / slug)))
+    digest = _newest_digest(config.vault / "digests" / slug)
+    return _part("Last session", [] if digest is None else handoff(_frontmatter(digest)))
 
 
 def _newest_digest(directory: Path) -> Path | None:
@@ -105,12 +106,11 @@ def _as_int(part: str) -> int:
     return int(part) if part.isdigit() else 0
 
 
-def _handoff(digest: Path | None) -> list[str]:
-    """The handoff note of one digest: what was in flight, what failed, and what is open,
-    as M2.6 writes it into the digest's frontmatter under ``aft.handoff`` (design 8)."""
-    if digest is None:
-        return []
-    aft = _frontmatter(digest).get("aft")
+def handoff(frontmatter: dict | None) -> list[str]:
+    """The handoff note of a digest: what was in flight, what failed, and what is open, as
+    M2.6 writes it into the digest's frontmatter under ``aft.handoff`` (design 8). The block
+    shows these lines and `aft.index` indexes them, so this is the one reading of the field."""
+    aft = (frontmatter or {}).get("aft")
     note = aft.get("handoff") if isinstance(aft, dict) else None
     if not isinstance(note, dict):
         return []
@@ -119,7 +119,7 @@ def _handoff(digest: Path | None) -> list[str]:
     for key in ("failed", "open"):
         items = note.get(key)
         if isinstance(items, list):
-            lines += [f"- {key.capitalize()}: {text}" for text in map(_line, items) if text]
+            lines += [f"- {key.capitalize()}: {text}" for text in map(one_line, items) if text]
     return lines
 
 
@@ -296,10 +296,13 @@ def _read(path: Path) -> str | None:
 
 
 def _text(mapping: dict | None, key: str) -> str:
-    return _line((mapping or {}).get(key))
+    return one_line((mapping or {}).get(key))
 
 
-def _line(value: object) -> str:
+def one_line(value: object) -> str:
     """A frontmatter value as one line: a block scalar keeps its words and loses its
-    breaks, so no value reaches the block as a second, unbulleted line."""
+    breaks, so no value reaches the injection block or the search index as a second line.
+
+    `aft.index` files a page's title and description through it too, so a row and the block
+    a session starts with read the same words."""
     return " ".join(value.split()) if isinstance(value, str) else ""
