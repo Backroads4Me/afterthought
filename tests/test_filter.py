@@ -66,10 +66,8 @@ OFF_FORMS = [
     "  aft off",
     "off the record",
     "Off The Record!",
-    "off-the-record,",
-    "aft-off",
 ]
-ON_FORMS = ["aft on", "AFT ON", "aft on.", "on the record", "On The Record?", "on-the-record"]
+ON_FORMS = ["aft on", "AFT ON", "aft on.", "on the record", "On The Record?"]
 
 
 @pytest.mark.parametrize("marker", OFF_FORMS)
@@ -95,6 +93,23 @@ def test_each_on_marker_form_ends_a_span(marker, cfg):
         answered("back to it", "e5"),
     ]
     assert kept(entries, cfg) == ["the plan", "back to it"]
+
+
+def test_a_hyphen_joined_marker_phrase_changes_nothing(cfg):
+    # The markers are the phrases the design names, spelled the way it spells them. Joining
+    # the words with hyphens makes another phrase, which neither opens nor closes a span.
+    entries = [
+        said("off-the-record", "e1"),
+        said("still talking", "e2"),
+        said("aft-off", "e3"),
+        said("aft off", "e4"),
+        said("hidden", "e5"),
+        said("on-the-record", "e6"),
+        answered("still hidden", "e7"),
+        said("aft on", "e8"),
+        said("back to it", "e9"),
+    ]
+    assert kept(entries, cfg) == ["off-the-record", "still talking", "aft-off", "back to it"]
 
 
 def test_the_span_between_two_markers_reopens_and_closes_again(cfg):
@@ -237,6 +252,18 @@ def test_no_secret_form_leaves_a_hint_of_what_it_removed(secret, body, remain, c
     assert body[-6:] not in result
 
 
+def test_a_word_that_happens_to_end_in_the_token_prefix_survives(cfg):
+    # The sk- family recognizes a prefix, not any word ending in those characters: these are
+    # the ticket ids and file names a build session quotes, and the archive is permanent.
+    texts = [
+        "TASK-2026-0115 is the ticket",
+        "the task-list-view.tsx component",
+        "see the risk-assessment doc",
+        "no /api/v1/task-tracking endpoint changes",
+    ]
+    assert kept([said(text) for text in texts], cfg) == texts
+
+
 def test_a_configured_pattern_adds_to_the_builtin_list(make_config):
     config = make_config([r"ACME-\d{6}"])
     text = f"the tenant is ACME-004915 and the key is {FAKE_KEY}"
@@ -248,6 +275,22 @@ def test_a_configured_pattern_that_is_not_a_regex_is_an_error(make_config):
     config = make_config(["sk-[A-Z("])
     with pytest.raises(BadPattern):
         filter_entries([said("anything at all")], config)
+
+
+def test_a_broken_configured_pattern_is_refused_before_anything_is_kept(make_config):
+    # A stream that keeps no text still reports the pattern. Going quiet here is how a
+    # capture goes on archiving exactly what the pattern was written to clear.
+    config = make_config(["sk-["])
+    with pytest.raises(BadPattern):
+        filter_entries([said("aft off"), said("a hidden planning note")], config)
+
+
+def test_an_empty_configured_pattern_is_an_error(make_config):
+    # An empty pattern matches between every character, so an empty entry in
+    # capture.redact_patterns would shred every kept text rather than redact nothing.
+    for source in ("", "   "):
+        with pytest.raises(BadPattern):
+            filter_entries([said("an ordinary prompt")], make_config([source]))
 
 
 def test_redaction_runs_on_every_path_that_returns_kept_text(cfg):
@@ -330,6 +373,24 @@ def test_a_tool_entry_keeps_only_the_lines_the_design_names(cfg):
 def test_a_tool_entry_keeps_a_line_that_only_names_a_place(cfg):
     text = "14 files checked\nsrc/aft/filter.py:112\n2 files skipped"
     assert kept([output(text)], cfg) == ["src/aft/filter.py:112"]
+
+
+def test_a_reference_without_an_extension_keeps_its_line(cfg):
+    # The design keeps path:line references, and the places a build session points at are not
+    # all named for their extension.
+    text = "14 files checked\nMakefile:12\nsrc/aft/cli:5\n2 files skipped"
+    assert kept([output(text)], cfg) == ["Makefile:12\nsrc/aft/cli:5"]
+
+
+def test_a_time_and_a_host_with_a_port_are_not_references(cfg):
+    text = "\n".join(
+        [
+            "the job ran at 12:30 and finished",
+            "GET https://api.example.com:8443/v1/health answered 200",
+            "listening on 0.0.0.0:9100 since boot",
+        ]
+    )
+    assert kept([output(text)], cfg) == []
 
 
 def test_a_reference_that_is_itself_a_credential_shape_keeps_its_line(cfg):

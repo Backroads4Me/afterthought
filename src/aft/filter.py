@@ -27,7 +27,7 @@ from dataclasses import replace
 
 from aft.config import Config
 from aft.readers import ASSISTANT, TOOL, USER, Entry
-from aft.redact import redact
+from aft.redact import compile_patterns, redact
 
 # A kept entry is at most this many characters of its own text, plus the marker. The
 # design caps "about 1,500 characters" (DESIGN 8); the number is the plan's (M2.3).
@@ -35,16 +35,17 @@ MAX_CHARS = 1500
 CAP_MARKER = " [...]"
 
 # An off-the-record marker, matched only at the start of a prompt's text: discussing the
-# markers never triggers them (DESIGN 12). Case and trailing punctuation do not matter,
-# which the lookahead leaves open - it asks only that the marker phrase ends here. A
-# hyphen may join the words of the phrase ("off-the-record"); a hyphen directly after a
-# marker word makes it a compound instead ("aft off-duty"), so it is not a marker.
+# An off-the-record marker, matched only at the start of a prompt's text: discussing the
+# markers never triggers them (DESIGN 12). The phrase is the one the design names, with
+# its words spaced; leading whitespace and case do not matter, and trailing punctuation
+# is fine because the lookahead asks only that the phrase ends here. A word joined on
+# after it makes a different word instead ("aft offline", "off-the-record").
 OFF_MARKER = re.compile(
-    r"^\s*(?:aft[\s-]+off|off[\s-]+the[\s-]+record)(?![\w-])",
+    r"^\s*(?:aft off|off the record)(?![\w-])",
     re.IGNORECASE,
 )
 ON_MARKER = re.compile(
-    r"^\s*(?:aft[\s-]+on|on[\s-]+the[\s-]+record)(?![\w-])",
+    r"^\s*(?:aft on|on the record)(?![\w-])",
     re.IGNORECASE,
 )
 
@@ -70,15 +71,20 @@ _ERROR: tuple[re.Pattern[str], ...] = tuple(
     re.compile(source, re.IGNORECASE) for source in _ERROR_SOURCES
 )
 
-# A source reference: a path whose file name carries an extension, then :line and the
-# :column some tools add. The extension has to start with a letter, so an address with a
-# port (10.0.0.1:8080) is not read as a file. A reference starts at a word boundary and
-# not just after a ]: the text redaction leaves behind is not evidence of a place, so a
-# path whose name was a credential leaves no half of a reference to point at.
+# A source reference: a path, then :line and the :column some tools add. A name that carries
+# an extension has to have one starting with a letter, so an address with a port
+# (10.0.0.1:8080) is not read as a file. A name without an extension is a path only when
+# something says it is one: it sits below a directory (src/aft/cli:5) or it is spelled the
+# way such files are (Makefile:12). A reference starts at a word boundary and not just
+# after a ]: the text redaction leaves behind is not evidence of a place, so a path whose
+# name was a credential leaves no half of a reference to point at.
 PATH_LINE = re.compile(
     r"(?<![\w./\]-])/?"  # not a word's tail; an absolute path starts with its slash
     r"(?:[\w.+@~+-]+/)*"
-    r"[\w.+@~+-]*[.][A-Za-z]\w{0,7}"
+    r"(?:"
+    r"[\w.+@~+-]*[.][A-Za-z]\w{0,7}"  # a file named for its extension
+    r"|(?:(?<=/)|[A-Z])[\w+@~+-]*[A-Za-z][\w+@~+-]*"  # a name without one, placed or capitalized
+    r")"
     r"(?::\d+)+"
     r"(?![\w-])"
 )
@@ -90,8 +96,12 @@ def filter_entries(entries: Iterable[Entry], config: Config) -> list[Entry]:
     Off-the-record spans go first, then the keep, then the cap, then redaction - see the
     module docstring for why that order is the behavior. Entries keep their id, time, role
     and error flag; only their text changes.
+
+    Ted's own redaction patterns are compiled here, before the first entry is looked at, so
+    a pattern that cannot be applied is refused before anything has been dropped rather than
+    halfway through a capture.
     """
-    patterns = config.settings.capture.redact_patterns
+    patterns = compile_patterns(config.settings.capture.redact_patterns)
     kept: list[Entry] = []
     for entry in _outside_spans(entries):
         text = _kept_text(entry)
@@ -106,8 +116,13 @@ def _outside_spans(entries: Iterable[Entry]) -> Iterator[Entry]:
 
     A prompt beginning with an off marker starts a span and one beginning with an on
     marker ends it; both markers are dropped along with everything between them, and a
-    span left open runs to the end of the entries. Only a prompt carries a marker: what
-    the assistant says is not Ted speaking for himself.
+    span left open runs to the end of the entries this call was given. Only a prompt
+    carries a marker: what the assistant says is not Ted speaking for himself.
+
+    A span is coextensive with the entries handed to this one call. Whether one is open is
+    state this generator holds for its own run and does not hand back, so a marker on the
+    last prompt of a batch does not reach the next batch of the same session, and the pair
+    typed in a later run opens no span.
 
     Each marker is decided on the entry's whole text, before any cap: a phrase that only
     appears deeper in a prompt is prose, however far in it sits.
