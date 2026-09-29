@@ -76,11 +76,17 @@ for the same reason and ``aft lint`` is where every broken page gets named. Only
 file's own failure stops a run, because that is the one failure `aft reindex` exists to answer
 (DESIGN 14).
 
-Whatever leaves the index leaves by name. FTS5 stores a row's path and its entry id beside it
-unindexed, so a delete over a collection reads every row the collection holds whatever it
-filters on: a run therefore removes nothing it never recorded, and sends what it does remove
-in statements that name a batch of keys each, which costs one such read per batch instead
-of one per row. A rebuild, having recorded nothing, removes nothing.
+Whatever leaves the index leaves by name: a run removes nothing it never recorded, and every
+removal names the one row it means by the path or archive key it was stored under. FTS5 keeps
+those columns beside the row unindexed, so a delete over a collection reads every row the
+collection holds however it filters; holding to recorded keys is what makes that read cost what
+a run left behind rather than what the index held, and it is why a rebuild removes nothing.
+
+Beyond those keys the file states which build wrote it. What a row *is* - its columns, the
+states a collection admits, the project a page's rows belong to - is decided here rather than
+in the vault, so rows written under other rules would answer a query looking exactly as
+trustworthy as fresh ones: a build that meets another's rows refuses and names `aft reindex`
+rather than adding to them, and only a rebuild, which drops them all first, meets them at all.
 
 A row's text is not the only thing a row is built from, so text alone does not say whether a
 row is current. A digest keeps its handoff note in frontmatter rather than in a body section,
@@ -101,7 +107,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from aft import inject, lint, page
 from aft.config import Config
@@ -199,6 +204,26 @@ ORIGINS_TABLE = "origins"
 #: The `origins` record naming the project registry, the one non-file input rows are built
 #: from: it answered which project a page filed under a slug belongs to.
 PROJECTS_ORIGIN = "registry"
+#: The build that wrote these rows, recorded in the file beside the hashes that say which files
+#: they came from. What a row *is* - its columns, the states its collection admits, the project
+#: it carries - is decided by this module rather than by any file, so rows written under another
+#: build answer a query looking exactly as trustworthy as fresh ones, and no query can tell.
+#: Bump the stamp whenever that changes; the repair for meeting another build's rows is
+#: DESIGN 14's `aft reindex` (`_require_current_build`).
+BUILD_STAMP = "rows-1"
+BUILD_TABLE = "build"
+
+#: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
+#: is written by one build at a time.
+_BUILD_KEY = "rows"
+_CREATE_BUILD = (
+    f"CREATE TABLE IF NOT EXISTS {BUILD_TABLE} (name TEXT PRIMARY KEY, stamp TEXT NOT NULL)"
+)
+_SELECT_BUILD = f"SELECT stamp FROM {BUILD_TABLE} WHERE name = ?"
+_RECORD_BUILD = (
+    f"INSERT INTO {BUILD_TABLE} (name, stamp) VALUES (?, ?)"
+    f" ON CONFLICT (name) DO UPDATE SET stamp = excluded.stamp"
+)
 
 # SQLite takes a table name in the statement text and never as a parameter, so every
 # statement that names one is written once here from `COLLECTIONS` and `FILES_TABLE` - this
@@ -208,19 +233,11 @@ _PLACEHOLDERS = ", ".join("?" * len(COLUMNS))
 _INSERT = {
     name: f"INSERT INTO {name} ({_COLUMNS_SQL}) VALUES ({_PLACEHOLDERS})" for name in COLLECTIONS
 }
-# How many keys one removal statement names. FTS5 keeps a row's own path and entry id beside
-# it unindexed, so a delete over a collection reads every row it holds whatever the WHERE
-# clause says: naming a batch of keys in one statement costs that read once for the batch
-# rather than once per row, and the batch stays inside SQLite's limit on the parameters of
-# one statement.
-DELETE_BATCH = 500
-
-_DELETE_BY_PATH = {name: f"DELETE FROM {name} WHERE path IN ({{paths}})" for name in COLLECTIONS}
+_DELETE_BY_PATH = {name: f"DELETE FROM {name} WHERE path = ?" for name in COLLECTIONS}
 _DELETE_BY_ENTRY = {
-    name: f"DELETE FROM {name} WHERE (session_id, entry_id) IN (VALUES {{keys}})"
-    for name in COLLECTIONS
+    name: f"DELETE FROM {name} WHERE session_id = ? AND entry_id = ?" for name in COLLECTIONS
 }
-_DELETE_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN ({{paths}})"
+_DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
 # What the index recorded about each evidence row: the key it was stored under, the digest of
 # its stored payload, and the fields the row copied out of the archive beside it. A row is read
 # again when any of it moved.
@@ -264,15 +281,23 @@ _CREATE_COLLECTION = (
 _SCHEMA_TABLES: tuple[tuple[str, str], ...] = (
     (FILES_TABLE, _CREATE_FILES),
     (ORIGINS_TABLE, _CREATE_ORIGINS),
+    (BUILD_TABLE, _CREATE_BUILD),
     *((name, _CREATE_COLLECTION.format(collection=name)) for name in COLLECTIONS),
 )
 # A rebuild drops every table before it recreates them, so nothing an earlier update got wrong
 # survives into it (DESIGN 14); an ordinary update only creates what is missing.
 _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
-    (name, f"DROP TABLE IF EXISTS {name}") for name in (*COLLECTIONS, FILES_TABLE, ORIGINS_TABLE)
+    (name, f"DROP TABLE IF EXISTS {name}")
+    for name in (*COLLECTIONS, FILES_TABLE, ORIGINS_TABLE, BUILD_TABLE)
 )
 
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
+
+# Opens or closes a fenced block: up to three spaces of indentation, then three of the same
+# character and whatever names the language on the way in. A line of those marks alone - same
+# character, at least as many of them, nothing after - closes the block. A `#` line inside one is
+# a comment in the quoted text rather than a heading of the page (`_prose_chunks`).
+_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
@@ -344,11 +369,15 @@ def update(config: Config) -> list[str]:
 
     What it returns is the report: one line per file it could not read or parse, naming the
     file and the reason. None of those recorded a hash, so the next update reads them again.
+
+    Before a row of ours joins a file that was already there, that file has to say it was
+    written by this build (`_require_current_build`).
     """
     with _writing(config) as conn:
         registry = _project_registry(config)
         report = _sync_files(conn, config, registry)
         _sync_evidence(conn, config)
+        _record_build(conn)
         return report
 
 
@@ -356,19 +385,22 @@ def reindex(config: Config) -> list[str]:
     """Drop the index and build it again from the files and the archive (DESIGN 14).
 
     Every table goes, shadow tables and all, before anything is rebuilt - so a row an
-    earlier update got wrong cannot survive into the result. The rebuild then runs the same
-    sync as an incremental update over an empty index, which is why a rebuild and an index
-    kept up to date come out with the same rows and the same report.
+    earlier update got wrong cannot survive into the result, and so this is the one operation
+    that may meet an index written by another build (`_require_current_build`). The rebuild then
+    runs the same sync as an incremental update over an empty index, which is why a rebuild and
+    an index kept up to date come out with the same rows and the same report.
     """
-    with _writing(config) as conn:
+    with _writing(config, rebuild=True) as conn:
         _create(conn, fresh=True)
         report = _sync_files(conn, config, _project_registry(config))
         _sync_evidence(conn, config)
+        _record_build(conn)
         return report
 
 
 def rank_expression(collection: str) -> str:
     """The ``bm25()`` expression that ranks one collection: title, description and heading above
+    the body text they were pulled from, and the stored identifiers not at all.
 
     Whoever queries the index orders on this (`aft search`, BUILD-PLAN M3.2); the weights go
     in column order, so the weighting is the index's to state and not each caller's to guess.
@@ -382,17 +414,6 @@ def _require_collection(collection: str) -> None:
         raise SearchIndexError(
             f"{collection!r} is not a collection; expected one of {', '.join(COLLECTIONS)}"
         )
-
-
-def _batches(keys: list[Any]) -> Iterator[list[Any]]:
-    """The keys a sync removes, in runs no longer than one statement can name."""
-    for start in range(0, len(keys), DELETE_BATCH):
-        yield keys[start : start + DELETE_BATCH]
-
-
-def _marks(count: int) -> str:
-    """`count` parameter markers. A removal statement is built from a count, never from a key."""
-    return ", ".join("?" * count)
 
 
 # Reading the vault
@@ -494,22 +515,18 @@ def _read_file(collection: str, path: Path) -> _File:
 def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
     """Stop holding the rows and the hash record of every one of these vault paths.
 
-    Removals go out in batches, one statement per collection per batch: FTS5 stores a row's
-    path beside it unindexed and so reads the whole collection to find one path whatever the
-    WHERE clause says (`DELETE_BATCH`). Naming the paths a sync means in one statement costs
-    that read once for the batch instead of once per file, and names exactly the rows it
-    removes - the rows of a file it does not name stay where they are.
-    """
+    One statement per path, naming that path and nothing else: FTS5 stores a row's path beside
+    it unindexed, so a delete over a collection reads every row it holds whatever it filters
+    on, which is why a run may only ever ask it for rows it knows are there. The rows of a path
+    this does not name keep their place."""
     by_collection: dict[str, list[str]] = {}
     for rel in rels:
         collection = _collection_of(rel)
         if collection is not None:
             by_collection.setdefault(collection, []).append(rel)
     for collection, paths in by_collection.items():
-        for batch in _batches(paths):
-            conn.execute(_DELETE_BY_PATH[collection].format(paths=_marks(len(batch))), batch)
-    for batch in _batches(rels):
-        conn.execute(_DELETE_HASHES.format(paths=_marks(len(batch))), batch)
+        conn.executemany(_DELETE_BY_PATH[collection], [(path,) for path in paths])
+    conn.executemany(_DROP_HASH, [(path,) for path in rels])
 
 
 def _reset_files(conn: sqlite3.Connection) -> None:
@@ -619,19 +636,34 @@ def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str
 
 
 def _prose_chunks(body: str) -> list[tuple[str, str]]:
-    """A page's prose under each heading, with the text before the first heading under none."""
+    """A page's prose under each heading, with the text before the first heading under none.
+
+    A line inside a fenced block is quoted text rather than the page's own structure: a digest
+    quoting the commands of the session it covers quotes `#` lines with it, so a heading-shaped
+    line in the middle of a code sample is the comment of that command and belongs, with the
+    rest of the block, to the section that holds it - not a heading, a row, or a ranking of its
+    own."""
     chunks: list[tuple[str, list[str]]] = []
     heading = ""
     lines: list[str] = []
+    fence = ""
     for line in body.split("\n"):
-        match = _PROSE_HEADING.match(line.rstrip())
-        if match:
-            chunks.append((heading, lines))
-            heading, lines = match.group(2) or "", []
-        else:
-            lines.append(line)
+        marker = _FENCE.match(line)
+        if marker is not None:
+            mark, rest = marker.group(1), marker.group(2)
+            if not fence:
+                fence = mark
+            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip():
+                fence = ""
+        elif not fence:
+            found = _PROSE_HEADING.match(line.rstrip())
+            if found is not None:
+                chunks.append((heading, lines))
+                heading, lines = found.group(2) or "", []
+                continue
+        lines.append(line)
     chunks.append((heading, lines))
-    return [(heading, "\n".join(lines).strip()) for heading, lines in chunks]
+    return [(held, "\n".join(text).strip()) for held, text in chunks]
 
 
 def _handoff_chunks(frontmatter: dict | None) -> list[tuple[str, str]]:
@@ -760,8 +792,8 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
     Nothing is removed that was never recorded: a row and the state that says it was read land
     in the same transaction, so a key the index holds no state for is a key with no row to
     drop. What does go - rows whose archive row is gone, and rows whose copied state moved -
-    goes out in one statement per batch after the scan, which is why a rebuild over an
-    empty index deletes nothing at all (`_unindex`).
+    goes out after the scan, each named by the key it was stored under, which is why a rebuild
+    over an empty index deletes nothing at all (`_unindex`).
     """
     recorded = {
         (session_id, entry_id): (digest, agent, project_id, moment)
@@ -798,17 +830,14 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
 
 
 def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
-    """Stop holding the rows of these archive keys, in statements that name exactly them.
+    """Stop holding the rows of these archive keys, one statement per key naming exactly it.
 
-    FTS5 keeps a row's own ``(session_id, entry_id)`` beside it unindexed, so a delete over a
-    collection reads every row it holds whatever the WHERE clause says; a batch of keys named
-    in one statement pays that read once for the batch instead of once per key
-    (`DELETE_BATCH`). Rows under keys the statement does not name keep their place."""
-    for batch in _batches(keys):
-        conn.execute(
-            _DELETE_BY_ENTRY[collection].format(keys=", ".join(["(?, ?)"] * len(batch))),
-            [value for key in batch for value in key],
-        )
+    ``(session_id, entry_id)`` is where an evidence row was stored, so it is what its removal
+    names. FTS5 keeps that key beside the row unindexed and so reads the whole collection for a
+    delete whatever the WHERE clause says, which is why the list it is handed is only ever keys
+    whose rows this index recorded itself: the read then costs what a run left behind. Rows
+    under a key this was not given keep their place."""
+    conn.executemany(_DELETE_BY_ENTRY[collection], keys)
 
 
 def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
@@ -892,15 +921,43 @@ def _insert(conn: sqlite3.Connection, collection: str, row: Row) -> None:
     conn.execute(_INSERT[collection], row.values())
 
 
+def _require_current_build(conn: sqlite3.Connection, path: Path) -> None:
+    """Refuse an index another build wrote, naming the one command that rebuilds it.
+
+    A row says what it holds and nothing about the rules that made it: its columns, which
+    states its collection admits, and the project it carries are decided here rather than in the
+    vault. An index written under other rules therefore answers a query looking exactly as
+    trustworthy as a fresh one, and the only honest answer to finding one is the rebuild that
+    replaces its rows. A file that recorded no stamp is the same case - it was written by rules
+    that said nothing about themselves."""
+    recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
+    if recorded is not None and recorded[0] == BUILD_STAMP:
+        return
+    raise SearchIndexError(
+        f"the index at {path} holds rows written by"
+        f" {recorded[0] if recorded else 'a build that recorded no stamp'}, not by build"
+        f" {BUILD_STAMP}: run aft reindex to rebuild it from the vault and the archive"
+    )
+
+
+def _record_build(conn: sqlite3.Connection) -> None:
+    """Say which build wrote these rows, in the same transaction as the rows themselves."""
+    conn.execute(_RECORD_BUILD, (_BUILD_KEY, BUILD_STAMP))
+
+
 @contextmanager
-def _writing(config: Config) -> Iterator[sqlite3.Connection]:
+def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Connection]:
     """One connection held for one transaction, its write lock taken before the first row.
 
     Two writers - a search that finds the index behind, and a run rebuilding it - land their
     rows in turn rather than one of them failing on a busy database. An update that cannot
-    finish leaves no part of itself behind to be read as a whole index."""
+    finish leaves no part of itself behind to be read as a whole index.
+
+    A file that was already there has to name the build that wrote its rows before this one adds
+    to them. `rebuild` is the one operation allowed to meet rows it does not recognize, because
+    the first thing it does is drop every row in the file (`_require_current_build`)."""
     path = _db_path(config)
-    conn = _connect(config)
+    conn = _connect(config, rebuild=rebuild)
     try:
         conn.execute("BEGIN IMMEDIATE")
         yield conn
@@ -915,14 +972,22 @@ def _writing(config: Config) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _connect(config: Config) -> sqlite3.Connection:
+def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     """Open the index, creating it on first use.
 
-    Connections stay in autocommit so the only transaction is the one `_writing` opens by
-    hand, and the journal is WAL so a search reads while a run writes. Unlike the evidence
-    archive this file is disposable - `reindex` rebuilds it from the vault and the archive -
-    so it is opened without the archive's secure delete."""
+    Connections stay in autocommit so the only transaction is the one `_writing` opens by hand,
+    and the journal is WAL so a search reads while a run writes. Unlike the evidence archive
+    this file is disposable - `reindex` rebuilds it from the vault and the archive - so it is
+    opened without the archive's secure delete.
+
+    A file that was already here is asked who wrote its rows, and an answer that is not this
+    A file that was already here is asked who wrote its rows, and an answer that is not this
+    build's is refused before a row of ours joins them - asked after the schema is created, so
+    that a file old enough to predate the stamp still answers the question instead of failing
+    it. `rebuild` is the one caller that may skip the asking, since what it drops is every row
+    the answer would be about."""
     path = _db_path(config)
+    already_there = path.exists()
     conn: sqlite3.Connection | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -930,6 +995,8 @@ def _connect(config: Config) -> sqlite3.Connection:
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
         _create(conn)
+        if already_there and not rebuild:
+            _require_current_build(conn, path)
     except BaseException as exc:
         if conn is not None:
             conn.close()

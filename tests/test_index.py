@@ -419,6 +419,53 @@ aft:
 The widget gained a flange.
 """
 
+# A digest quoting the commands of the session it covers: the comment inside the block is shaped
+# like a heading, and the words of the command are the only place they appear.
+FENCED_DIGEST = """---
+type: Session Digest
+title: widget session
+description: What the session on 2026-09-28 did.
+---
+
+## Summary
+
+The widget gained a flange, and this is how the build was run.
+
+```bash
+#!/usr/bin/env python3
+# ship it
+aft reindex --collection bronze
+```
+
+## Handoff
+
+Nothing was left open.
+"""
+
+# A digest quoting the markup of a code block: the marks it quotes carry a language name, so
+# they open nothing and close nothing on their own - only the bare marks below them do.
+QUOTED_MARKUP_DIGEST = """---
+type: Session Digest
+title: widget session
+description: What the session on 2026-09-28 did.
+---
+
+## Summary
+
+How a digest quotes a command is itself worth quoting:
+
+~~~text
+~~~bash
+# ship it
+~~~
+
+That is the whole recipe.
+
+## Handoff
+
+Nothing was left open.
+"""
+
 
 def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     """Resting lines under ``archive/`` are a collection apart (DESIGN 10): a query-time read of
@@ -594,6 +641,48 @@ def test_forgetting_one_session_leaves_every_row_it_never_named(initialized: Con
     assert search(initialized, "evidence", "nitrile") == ["def#e1"]
 
 
+def test_forgetting_more_rows_than_a_statement_may_carry_still_loses_every_one_of_them(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bulk forget drops its rows one statement per row, however many there were.
+
+    An ordinary SQLite takes 999 parameters in one statement (its default until 3.32), so a
+    removal that hands one statement a run's whole list of keys fails partway through it. The
+    limit is pinned down here rather than trusted from the SQLite this happens to be typed on."""
+    real_connect = sqlite3.connect
+
+    def connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        conn = real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    moment = datetime(2026, 9, 28, 12, tzinfo=UTC)
+    bulk = [
+        Entry(
+            id=f"e{number}",
+            time=moment,
+            role="user",
+            text=f"the archive holds entry {number}",
+            is_error=False,
+        )
+        for number in range(1, 502)
+    ]
+    evidence.store(initialized, "claude", "abc", "p_widget", bulk)
+    evidence.store(initialized, "pi", "def", "p_gizmo", entries("the gasket is nitrile"))
+    assert index.update(initialized) == []
+    assert len(rows(initialized, "evidence")) == 502
+
+    evidence.forget(initialized, "abc")
+    assert index.update(initialized) == []
+
+    assert search(initialized, "evidence", "entry") == []
+    assert [tuple(row) for row in rows(initialized, "evidence")] == [
+        tuple(row_for(initialized, "evidence", "def#e1"))
+    ]
+    assert search(initialized, "evidence", "nitrile") == ["def#e1"]
+
+
 def test_an_archive_row_whose_project_moved_is_read_again(initialized: Config) -> None:
     """`aft project add` gives a directory an id, and the next chunk of a session already
     archived from it is stored under that id while the entries it re-reads keep their text
@@ -664,6 +753,35 @@ def test_reindex_drops_what_no_file_or_row_justifies(initialized: Config) -> Non
 
     assert search(initialized, "pages", "invented") == []
     assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+
+
+def test_an_index_written_by_another_build_names_the_repair_rather_than_answering(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a row *is* is decided by the code that wrote it, not by the file holding it, so an
+    index carried across an upgrade answers rows nothing vouches for as though they were current.
+
+    The file states which build wrote it, and a build that is not that one refuses with the
+    repair in the sentence rather than adding rows of its own to rows it cannot vouch for -
+    including an index that stated no build at all, which is what every index written before
+    this claim existed looks like."""
+    rel = write(initialized, REL, PAGE)
+    assert index.update(initialized) == []
+
+    monkeypatch.setattr(index, "BUILD_STAMP", "the-next-build")
+    with pytest.raises(index.SearchIndexError, match="aft reindex"):
+        index.update(initialized)
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+
+    # the rebuild is the repair, and it leaves the rows it rebuilt
+    assert index.reindex(initialized) == []
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+    assert index.update(initialized) == []
+
+    with _open(initialized) as conn:
+        conn.execute(f"DELETE FROM {index.BUILD_TABLE}")
+    with pytest.raises(index.SearchIndexError, match="aft reindex"):
+        index.update(initialized)
 
 
 def test_aft_reindex_runs_the_rebuild_from_the_command_line(
@@ -772,6 +890,41 @@ def test_a_handoff_note_is_searchable_from_the_digests_collection(initialized: C
     assert _column(row_for(initialized, "digests", f"{rel}#Summary"), "body") == (
         "The widget gained a flange."
     )
+
+
+def test_a_line_inside_a_code_fence_is_the_quoted_text_and_not_a_heading(
+    initialized: Config,
+) -> None:
+    """A digest quoting the commands of the session it covers quotes `#` lines with them: a
+    comment in a code sample is not a section of the digest, and the words of the block are not
+    lifted out of the section holding it and given a heading of their own - which is what a
+    model-written digest of a terminal session is mostly made of."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", FENCED_DIGEST)
+
+    assert index.update(initialized) == []
+
+    assert keys_of(initialized, "digests") == [f"{rel}#Handoff", f"{rel}#Summary"]
+    body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
+    assert "# ship it" in body
+    assert "aft reindex" in body
+    # the command's words answer from the section that quotes them, under its heading
+    assert search(initialized, "digests", "reindex") == [f"{rel}#Summary"]
+    assert search(initialized, "digests", "bronze") == [f"{rel}#Summary"]
+
+
+def test_marks_carrying_a_language_name_close_no_fence(initialized: Config) -> None:
+    """A digest quoting the markup of a code block quotes its opening marks too, marks and
+    language name together: those are the way in, never the way out, or the block ends halfway
+    through the thing being quoted and everything after it belongs to someone else's section."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", QUOTED_MARKUP_DIGEST)
+
+    assert index.update(initialized) == []
+
+    assert keys_of(initialized, "digests") == [f"{rel}#Handoff", f"{rel}#Summary"]
+    body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
+    assert "~~~bash" in body
+    assert "# ship it" in body
+    assert "That is the whole recipe." in body
 
 
 def _a_page(
