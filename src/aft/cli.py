@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, inject, keys, lint, queue, vault
+from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         RegistryError,
         vault.VaultError,
         GitError,
+        index.SearchIndexError,
         UsageError,
         survey.SurveyError,
         manifest.ManifestError,
@@ -85,6 +86,9 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lint", help="check the vault's pages")
     p.set_defaults(handler=cmd_lint)
+
+    p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
+    p.set_defaults(handler=cmd_reindex)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
@@ -268,6 +272,18 @@ def cmd_lint(args) -> int:
     if findings:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_reindex(args) -> int:
+    """Rebuild the search index. Everything it does is `aft.index`'s; this names the file it
+    wrote and repeats the pages it could not read."""
+    config = load()
+    vault.require(config)
+    report = index.reindex(config)
+    for line in report:
+        print(line)
+    print(f"rebuilt the search index at {config.home / index.INDEX_NAME}")
     return 0
 
 
