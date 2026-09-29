@@ -84,7 +84,11 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
     isub = p.add_subparsers(metavar="agent")
     q = isub.add_parser("claude", help="install the Claude Code hooks in ~/.claude/settings.json")
-    q.add_argument("--dry-run", action="store_true", help="print the settings diff, write nothing")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the entries aft would add or remove, write nothing",
+    )
     q.add_argument(
         "--uninstall",
         action="store_true",
@@ -235,7 +239,7 @@ def cmd_install_claude(args) -> int:
         else claude_install.install(settings, dry_run=args.dry_run)
     )
     if args.dry_run:
-        print(change.diff or f"no changes to {settings}")
+        print(change.preview or f"no changes to {settings}")
         return 0
     if change.backup is not None:
         print(f"backed up {settings} to {change.backup}")

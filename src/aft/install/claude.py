@@ -17,13 +17,13 @@ file; `settings_path` is the default the command line uses.
 
 Three rules hold the user's own configuration safe:
 
-* A merge touches only what afterthought owns, and it owns where its command line is: an
-  entry is found by that line whether it sits directly in one of our three event lists or
-  nested in a matcher group. Other people's hook entries keep their position and their
-  order, and uninstall removes command hooks and nothing else: every key of the user's
-  keeps its place, a matcher group keeps its matcher once our hook leaves it, and an event
-  list or the ``hooks`` object that uninstall empties stays empty rather than going away.
-  The file is read, edited in place, and written back with its key order intact.
+* A merge touches only what afterthought owns: the command hooks it writes, found by their
+  command line inside the matcher groups of its three event lists. Other people's hook
+  entries keep their position and their order, and uninstall removes command hooks and
+  nothing else: every key of the user's keeps its place, a matcher group keeps its matcher
+  once our hook leaves it, and an event list or the ``hooks`` object that uninstall empties
+  stays empty rather than going away. The file is read, edited in place, and written back
+  with its key order intact.
 * A write goes to the file the settings path points at, so a symbolic link the user made
   there - into a version-controlled settings file, say - survives and keeps being read.
 * No settings file changes before a backup of its text is safe beside it, carrying that
@@ -34,7 +34,6 @@ Three rules hold the user's own configuration safe:
 
 from __future__ import annotations
 
-import difflib
 import itertools
 import json
 import os
@@ -69,13 +68,14 @@ class Change:
     """What one install or uninstall did, or would have done under ``--dry-run``.
 
     ``changed`` is False when the file already held exactly what was asked for, in which
-    case nothing was written and no backup was taken. ``diff`` is the unified diff of the
-    file's text before and after, and is empty when nothing changed.
+    case nothing was written and no backup was taken. ``preview`` names the entries of ours
+    the change adds or removes, each by its event and its own command line, and is empty
+    when nothing changed.
     """
 
     changed: bool
     backup: Path | None
-    diff: str
+    preview: str
 
 
 def settings_path() -> Path:
@@ -94,45 +94,48 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     Every event that does not already run our command gets one group of our own, appended
     after the elements already there: an entry is never inserted before, sorted among, or
     substituted for a hook someone else wrote. An event that already runs our command is
-    left exactly as it is, whether that command sits directly in the event list or inside
-    a matcher group, so installing twice changes nothing on the second run, and an entry
-    the user edited after installing - its timeout, its matcher - stays as they set it.
+    left exactly as it is, whether our command sits in the group an install wrote or in one
+    the user moved it into, so installing twice changes nothing on the second run, and an
+    entry the user edited after installing - its timeout, its matcher - stays as they set
+    it.
     The command line is the whole identity of an entry, which is what makes our own
     entries findable again without a marker field of afterthought's in the user's file.
     """
     document, original = _read(settings)
     hooks = _hooks(document)
 
-    added = False
+    entries = []
     for event in HOOK_EVENTS:
         groups = _groups(hooks, event)
         if all(_remove(element, event) is element for element in groups):
             groups.append(_group(event))
-            added = True
+            entries.append(event)
 
-    return _commit(settings, original, document, changed=added, dry_run=dry_run)
+    return _commit(settings, original, document, entries=entries, adding=True, dry_run=dry_run)
 
 
 def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     """Remove exactly afterthought's own hook entries from ``settings``.
 
     Only the three events afterthought installs are read, and within them only the command
-    hooks running ``aft hook claude <event>``, wherever one sits: directly in the event
-    list, or nested in a matcher group. Nothing else is deleted and nothing is reordered:
-    an element that is not ours keeps its keys and its place, an event keeps its key, the
-    ``hooks`` object keeps its key. A container stays where it is even when our hook was
-    the last thing in it, so an emptied event list is left as an empty list and an emptied
-    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only an
-    element left holding nothing but an empty ``hooks`` list goes, because it holds no key
-    of anyone's. Telling our own containers from the user's would mean remembering what
-    was installed; this rule needs no history to be right.
+    hooks running ``aft hook claude <event>`` inside a matcher group - the shape an install
+    writes, plus whatever the user changed inside such a group. Nothing else is deleted and
+    nothing is reordered: an element that is not ours keeps its keys and its place, an
+    event keeps its key, the ``hooks`` object keeps its key. A command line of ours that
+    someone wrote directly into an event list, one level above where an install writes,
+    is theirs and stays. A container stays where it is even when our hook was the last
+    thing in it, so an emptied event list is left as an empty list and an emptied
+    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only a group
+    left holding nothing but an empty ``hooks`` list goes, because it holds no key of
+    anyone's. Telling our own containers from the user's would mean remembering what was
+    installed; this rule needs no history to be right.
     """
     document, original = _read(settings)
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
-        return Change(changed=False, backup=None, diff="")
+        return Change(changed=False, backup=None, preview="")
 
-    removed = False
+    entries = []
     for event in HOOK_EVENTS:
         groups = hooks.get(event)
         if not isinstance(groups, list):
@@ -141,12 +144,12 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
         for element in groups:
             left = _remove(element, event)
             if left is not element:
-                removed = True
+                entries.append(event)
             if left is not _DROPPED:
                 kept.append(left)
         groups[:] = kept
 
-    return _commit(settings, original, document, changed=removed, dry_run=dry_run)
+    return _commit(settings, original, document, entries=entries, adding=False, dry_run=dry_run)
 
 
 def _group(event: str) -> dict:
@@ -167,14 +170,14 @@ def _group(event: str) -> dict:
     }
 
 
-def _is_ours(element: object, event: str) -> bool:
-    """Whether one command object is afterthought's own entry for this event.
+def _is_ours(hook: object, event: str) -> bool:
+    """Whether one command hook inside a matcher group is afterthought's own for this event.
 
-    The command line is the whole identity of an entry, and that shape is looked for wherever
-    it can sit: directly in an event list, which is how a person editing the file by hand
-    tends to leave it, or nested in a matcher group, which is how an install writes it.
+    The command line is the whole identity of an entry, which is what makes a hook we wrote
+    - or one the user has since edited inside that same group - findable again without a
+    marker field of afterthought's in the user's file.
     """
-    return isinstance(element, dict) and element.get("command") == hook_command(event)
+    return isinstance(hook, dict) and hook.get("command") == hook_command(event)
 
 
 _DROPPED = object()
@@ -183,17 +186,14 @@ _DROPPED = object()
 def _remove(element: object, event: str) -> object:
     """One element of an event list with afterthought's own entry taken out of it.
 
-    The element itself comes back when it is not ours and holds none of ours, which is how
-    install and uninstall tell an element they rewrote from one they left alone. The
-    ``_DROPPED`` sentinel, compared by identity, comes back when nothing of anyone's is
-    sitting in the list, or a group left holding nothing but an empty ``hooks`` list. A group
-    with a matcher, or any other key of its own, keeps that key even once our hook is gone,
-    and an element that is not an object at all - a string, a number, a JSON null - comes
-    back untouched: uninstall takes out afterthought's own command hooks, never a shape of
-    someone else's.
+    Only a group's own ``hooks`` list is searched for our command line, so every other
+    element - a bare command hook someone wrote by hand, a string, a number, a JSON null -
+    comes back as the element itself, which is how install and uninstall tell an element
+    they rewrote from one they left alone. The ``_DROPPED`` sentinel, compared by identity,
+    comes back for a group left holding nothing but an empty ``hooks`` list, the one shape
+    that holds no key of anyone's. A group with a matcher, or any other key of its own,
+    keeps that key even once our hook is gone.
     """
-    if _is_ours(element, event):
-        return _DROPPED
     if not isinstance(element, dict):
         return element
     hooks = element.get("hooks")
@@ -217,8 +217,8 @@ def _read(settings: Path) -> tuple[dict, str | None]:
     text that is not UTF-8, text that is not JSON, a JSON value that is not an object, a
     ``hooks`` key that is not an object, and a value where one of afterthought's three
     events lives that is not a list. Each is refused rather than overwritten, because a
-    file afterthought cannot read is a file it cannot show a diff against, and it is
-    somebody's working configuration. Text with nothing in it is the exception: an empty
+    file afterthought cannot read is a file it cannot merge into, and it is somebody's
+    working configuration. Text with nothing in it is the exception: an empty
     file is a file with no settings yet, not a broken one.
     """
     if not settings.exists():
@@ -279,7 +279,13 @@ def _target(settings: Path) -> Path:
 
 
 def _commit(
-    settings: Path, original: str | None, document: dict, *, changed: bool, dry_run: bool
+    settings: Path,
+    original: str | None,
+    document: dict,
+    *,
+    entries: list[str],
+    adding: bool,
+    dry_run: bool,
 ) -> Change:
     """Report the change, and write it unless nothing changed or this is a dry run.
 
@@ -287,23 +293,24 @@ def _commit(
     untouched and no backup behind. An unchanged merge is not reformatted either, which
     keeps a hand-written settings file hand-written. What is written goes to the file the
     settings path points at, so a symbolic link the user made there keeps working.
+
+    The preview ``--dry-run`` prints is built from ``entries``, the events this change
+    adds or removes, and never from the file's text: settings files routinely hold API
+    keys, so a preview of afterthought's own edit does not repeat the configuration the
+    user happened to leave beside it.
     """
-    if not changed:
-        return Change(changed=False, backup=None, diff="")
+    if not entries:
+        return Change(changed=False, backup=None, preview="")
     target = _target(settings)
-    after = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
-    diff = "\n".join(
-        difflib.unified_diff(
-            (original or "").splitlines(),
-            after.splitlines(),
-            fromfile=f"{target} (before)",
-            tofile=f"{target} (after)",
-            lineterm="",
-        )
-    )
+    verb, where = ("add", "to") if adding else ("remove", "from")
+    timeout = f", each with a {HOOK_TIMEOUT_SECONDS} second timeout" if adding else ""
+    lines = [f"{len(entries)} entries to {verb} {where} {target}{timeout}:"]
+    lines += [f"  {event}: {hook_command(event)}" for event in entries]
+    preview = "\n".join(lines)
     if dry_run:
-        return Change(changed=True, backup=None, diff=diff)
-    return Change(changed=True, backup=_write(target, after, original), diff=diff)
+        return Change(changed=True, backup=None, preview=preview)
+    after = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    return Change(changed=True, backup=_write(target, after, original), preview=preview)
 
 
 def _backup(settings: Path, original: str | None) -> Path | None:
@@ -336,37 +343,26 @@ def _backup(settings: Path, original: str | None) -> Path | None:
         return backup
 
 
-def _new_file_mode() -> int:
-    """The mode a plain write gives a file that does not exist yet: the create default.
-
-    Reading the umask is the only way to ask what that write would produce, and setting it
-    back happens before anything else does.
-    """
-    umask = os.umask(0)
-    os.umask(umask)
-    return 0o666 & ~umask
-
-
 def _write(settings: Path, text: str, original: str | None) -> Path | None:
     """Put the new text in place in one step, and return the backup of the text it replaces.
 
     A half-written settings file costs the user their whole Claude Code configuration, so
     the new text goes to a temporary file in the same directory and ``os.replace`` moves it
-    over the old one, keeping that file's permissions. A file afterthought creates - one
-    not there yet, or the target of a dangling link - takes the mode a plain write would
-    have given it. The previous text is backed up only once the new one is staged and the
-    replace is next, so a refusal never leaves behind a copy of text that was never
-    superseded. A directory afterthought cannot write in is refused the same way a file it
-    cannot read is.
+    over the old one, keeping that file's permissions. A file afterthought creates - one not
+    there yet, or the target of a dangling link - keeps the private mode its temporary
+    file was created under. The previous text is backed up only once the new one is
+    staged and the replace is next, so a refusal never leaves behind a copy of text that
+    was never superseded. A directory afterthought cannot write in is refused the same way
+    a file it cannot read is.
     """
     try:
         settings.parent.mkdir(parents=True, exist_ok=True)
-        mode = stat.S_IMODE(settings.stat().st_mode) if settings.exists() else _new_file_mode()
         handle, temporary = tempfile.mkstemp(dir=settings.parent, prefix=f"{settings.name}.aft-")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as output:
                 output.write(text)
-            os.chmod(temporary, mode)
+            if settings.exists():
+                os.chmod(temporary, stat.S_IMODE(settings.stat().st_mode))
             backup = _backup(settings, original)
             os.replace(temporary, settings)
         except OSError:

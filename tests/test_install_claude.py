@@ -46,23 +46,19 @@ def read_settings(settings: Path) -> dict:
 
 
 def command_order(settings_or_document) -> list[tuple[str, str]]:
-    """Every (event, command) the file runs, in the file's own order, at either depth."""
+    """Every (event, command) the file runs, in the file's own order."""
     document = (
         settings_or_document
         if isinstance(settings_or_document, dict)
         else read_settings(settings_or_document)
     )
-    runs = []
-    for event, elements in document.get("hooks", {}).items():
-        for element in elements:
-            if not isinstance(element, dict):
-                continue
-            if "command" in element:
-                runs.append((event, element["command"]))
-            for hook in element.get("hooks") or []:
-                if isinstance(hook, dict) and "command" in hook:
-                    runs.append((event, hook["command"]))
-    return runs
+    hooks = document.get("hooks", {})
+    return [
+        (event, hook["command"])
+        for event, groups in hooks.items()
+        for group in groups
+        for hook in group["hooks"]
+    ]
 
 
 def aft_commands() -> set[str]:
@@ -191,7 +187,7 @@ def test_installing_twice_changes_nothing(tmp_path):
 
     second = claude_install.install(settings)
 
-    assert second.changed is False and second.backup is None and second.diff == ""
+    assert second.changed is False and second.backup is None and second.preview == ""
     assert settings.read_text(encoding="utf-8") == text
     assert sorted(settings.parent.glob("*.bak")) == backups
     entries = dict.fromkeys(claude_install.HOOK_EVENTS, 0)
@@ -259,20 +255,16 @@ def test_the_backup_carries_the_mode_of_the_settings_file_it_copies(tmp_path, mo
     assert stat.S_IMODE(settings.stat().st_mode) == mode
 
 
-def test_a_settings_file_afterthought_creates_takes_the_umask_default(tmp_path):
-    """A file aft invents gets the mode a plain write would have, not a flat 0644."""
+def test_a_settings_file_afterthought_creates_is_private_to_its_owner(tmp_path):
+    """A file aft invents keeps the private mode its temporary file was made under."""
     plain = settings_in(tmp_path)
     plain.parent.mkdir(parents=True, exist_ok=True)
     target = tmp_path / "dotfiles" / "settings.json"
     linked = tmp_path / ".claude" / "linked.json"
     linked.symlink_to(target)
 
-    umask = os.umask(0o077)
-    try:
-        claude_install.install(plain)
-        claude_install.install(linked)
-    finally:
-        os.umask(umask)
+    claude_install.install(plain)
+    claude_install.install(linked)
 
     assert stat.S_IMODE(plain.stat().st_mode) == 0o600
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
@@ -374,43 +366,38 @@ def test_uninstall_leaves_a_matcher_group_that_held_only_our_hook(tmp_path):
     }
 
 
-def test_install_counts_one_entry_when_our_command_sits_in_the_event_list_itself(tmp_path):
-    """Our command one level above where an installer writes it still counts as installed."""
+def test_install_leaves_a_hand_written_element_of_the_event_list_where_it_is(tmp_path):
+    """An element one level above what an install writes is not aft's to rewrite or move."""
     settings = settings_in(tmp_path)
-    write_settings(
-        settings,
-        {"hooks": {"SessionStart": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}},
-    )
+    hand_written = {"type": "command", "command": HOOK_COMMAND, "timeout": 30}
+    write_settings(settings, {"hooks": {"SessionStart": [hand_written]}})
 
     claude_install.install(settings)
 
-    assert command_order(settings) == [
-        ("SessionStart", HOOK_COMMAND),
-        ("PreCompact", "aft hook claude PreCompact"),
-        ("SessionEnd", "aft hook claude SessionEnd"),
-    ]
+    after = read_settings(settings)["hooks"]["SessionStart"]
+    assert after[0] == hand_written
+    assert after[-1] == {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
 
 
-def test_uninstall_removes_our_command_from_the_event_list_itself(tmp_path):
-    """The entry aft put by hand into the list goes; the list someone else made stays."""
+def test_uninstall_leaves_a_hand_written_element_of_the_event_list(tmp_path):
+    """A command line of ours is not what makes an element ours: that one never installed."""
     settings = settings_in(tmp_path)
-    write_settings(
-        settings,
-        {"hooks": {"SessionStart": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}},
-    )
+    hand_written = {"type": "command", "command": HOOK_COMMAND, "timeout": 30}
+    text = write_settings(settings, {"hooks": {"SessionStart": [hand_written], "PreCompact": []}})
 
-    assert claude_install.uninstall(settings).changed is True
+    change = claude_install.uninstall(settings)
 
-    assert read_settings(settings) == {"hooks": {"SessionStart": []}}
+    assert change.changed is False and change.preview == ""
+    assert settings.read_text(encoding="utf-8") == text
 
 
-def test_install_and_uninstall_find_our_entries_at_either_depth(tmp_path):
-    """Foreign hooks at both depths come back untouched and in order; aft's do not come back."""
+def test_everything_aft_did_not_add_survives_install_and_uninstall_in_order(tmp_path):
+    """Foreign entries at every level, and a hand-written one of ours, keep their places."""
     settings = settings_in(tmp_path)
     ours = {"type": "command", "command": HOOK_COMMAND, "timeout": 5}
     elements = [
         {"type": "command", "command": "echo direct"},
-        ours,
+        {"type": "command", "command": HOOK_COMMAND, "timeout": 30},
         {"matcher": "startup", "hooks": [{"type": "command", "command": "echo nested"}]},
         {"matcher": "clear", "hooks": [dict(ours)]},
     ]
@@ -422,14 +409,11 @@ def test_install_and_uninstall_find_our_entries_at_either_depth(tmp_path):
 
     claude_install.uninstall(settings)
 
-    assert command_order(settings) == [
-        ("SessionStart", "echo direct"),
-        ("SessionStart", "echo nested"),
-    ]
     assert read_settings(settings) == {
         "hooks": {
             "SessionStart": [
                 {"type": "command", "command": "echo direct"},
+                {"type": "command", "command": HOOK_COMMAND, "timeout": 30},
                 {
                     "matcher": "startup",
                     "hooks": [{"type": "command", "command": "echo nested"}],
@@ -507,7 +491,7 @@ def test_uninstall_of_a_file_without_our_entries_changes_nothing(tmp_path):
 
     change = claude_install.uninstall(settings)
 
-    assert change.changed is False and change.backup is None and change.diff == ""
+    assert change.changed is False and change.backup is None and change.preview == ""
     assert settings.read_text(encoding="utf-8") == text
 
 
@@ -527,53 +511,63 @@ def test_the_installed_commands_are_the_hook_command_that_exists(tmp_path, monke
     assert capsys.readouterr().out == ""
 
 
-def diff_body(diff_text: str, sign: str) -> list[str]:
-    """The lines one side of a diff carries, without the header line naming the file."""
-    return [
-        line[1:]
-        for line in diff_text.splitlines()
-        if line.startswith(sign) and not line.startswith(sign * 3)
-    ]
+SECRET = "sk-ant-api03-NotForSomeonesTerminal"
+
+KEEPER = {
+    "model": "claude-opus",
+    "env": {"ANTHROPIC_API_KEY": SECRET},
+    "hooks": {},
+    "statusLine": {"type": "command", "command": "echo status"},
+}
 
 
-def added_values(diff_text: str) -> list[object]:
-    """The JSON key-value lines a diff adds, each parsed as far as its own line goes."""
-    values = []
-    for line in diff_body(diff_text, "+"):
-        try:
-            values.append(json.loads("{" + line.strip().rstrip(",") + "}"))
-        except json.JSONDecodeError:
-            continue
-    return values
-
-
-def test_dry_run_prints_the_resulting_diff_and_writes_nothing(tmp_path, monkeypatch, capsys):
+def test_the_add_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch, capsys):
+    """The preview says what aft will write, never what the user left beside it."""
     monkeypatch.setenv("HOME", str(tmp_path))
     settings = claude_install.settings_path()
     assert settings == settings_in(tmp_path)
-    text = write_settings(settings, PEOPLE)
+    text = write_settings(settings, KEEPER)
 
     assert main(["install", "claude", "--dry-run"]) == 0
 
     printed = capsys.readouterr().out
-    lines = printed.splitlines()
-    assert lines[0] == f"--- {settings} (before)"
-    assert lines[1] == f"+++ {settings} (after)"
-    assert lines[2].startswith("@@ ")
-    assert "" not in lines
-    assert added_values(printed) == [
-        value
-        for event in claude_install.HOOK_EVENTS
-        for value in (
-            {"type": "command"},
-            {"command": f"aft hook claude {event}"},
-            {"timeout": 5},
-        )
+    assert SECRET not in printed
+    assert "ANTHROPIC_API_KEY" not in printed
+    assert "echo status" not in printed
+    assert "claude-opus" not in printed
+    head, *entries = printed.splitlines()
+    assert head.startswith(f"3 entries to add to {settings}")
+    assert "5 second timeout" in head
+    assert entries == [
+        f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
     ]
-    assert diff_body(printed, "-") == []
     assert settings.read_text(encoding="utf-8") == text
-    assert list(settings.parent.glob("*.bak")) == []
     assert list(settings.parent.glob("settings.json.aft-*")) == []
+
+
+def test_the_removal_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch, capsys):
+    """The removal preview lists the entries aft is taking out, and nothing it is leaving."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    write_settings(settings, KEEPER)
+    claude_install.install(settings)
+    text = settings.read_text(encoding="utf-8")
+    backups = sorted(settings.parent.glob("*.bak"))
+
+    assert main(["install", "claude", "--uninstall", "--dry-run"]) == 0
+
+    printed = capsys.readouterr().out
+    assert SECRET not in printed
+    assert "ANTHROPIC_API_KEY" not in printed
+    assert "echo status" not in printed
+    assert "claude-opus" not in printed
+    head, *entries = printed.splitlines()
+    assert head.startswith(f"3 entries to remove from {settings}")
+    assert entries == [
+        f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
+    ]
+    assert settings.read_text(encoding="utf-8") == text
+    assert sorted(settings.parent.glob("*.bak")) == backups
 
 
 def test_dry_run_of_an_installed_file_says_so(tmp_path, monkeypatch, capsys):
