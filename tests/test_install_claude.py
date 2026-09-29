@@ -12,8 +12,11 @@ data: what the file runs, in what order, and whether bytes moved.
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import stat
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -60,6 +63,9 @@ def command_order(settings_or_document) -> list[tuple[str, str]]:
 
 def aft_commands() -> set[str]:
     return {f"aft hook claude {event}" for event in claude_install.HOOK_EVENTS}
+
+
+HOOK_COMMAND = claude_install.hook_command("SessionStart")
 
 
 def foreign_commands(runs: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -236,24 +242,136 @@ def test_a_write_is_preceded_by_a_backup_holding_the_previous_text(tmp_path):
     assert read_settings(change.backup) == PEOPLE
 
 
-def test_uninstall_returns_the_file_to_what_it_was(tmp_path):
+def test_a_backup_cannot_be_read_more_widely_than_the_file_it_copies(tmp_path):
     settings = settings_in(tmp_path)
-    text = write_settings(settings, PEOPLE)
+    write_settings(settings, PEOPLE)
+    os.chmod(settings, 0o600)
+
+    change = claude_install.install(settings)
+
+    assert change.backup is not None
+    assert stat.S_IMODE(change.backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(settings.stat().st_mode) == 0o600
+
+
+class ClockAt:
+    """``datetime`` held at one instant, so two writes share one backup stamp."""
+
+    @staticmethod
+    def now(tz):
+        return datetime(2026, 1, 2, 3, 4, 5, tzinfo=tz)
+
+
+def test_two_writes_in_one_second_leave_two_backups(tmp_path, monkeypatch):
+    settings = settings_in(tmp_path)
+    before = write_settings(settings, PEOPLE)
+    monkeypatch.setattr(claude_install, "datetime", ClockAt)
+
+    claude_install.install(settings)
+    installed = settings.read_text(encoding="utf-8")
+    claude_install.uninstall(settings)
+
+    backups = sorted(settings.parent.glob("*.bak"))
+    assert len(backups) == 2
+    assert {p.read_text(encoding="utf-8") for p in backups} == {before, installed}
+
+
+def test_uninstall_leaves_every_hook_of_the_users_own(tmp_path):
+    """What install added uninstall takes back, and nothing else moves."""
+    settings = settings_in(tmp_path)
+    theirs = command_order(PEOPLE)
+    write_settings(settings, PEOPLE)
 
     claude_install.install(settings)
     assert claude_install.uninstall(settings).changed is True
 
-    assert settings.read_text(encoding="utf-8") == text
+    after = read_settings(settings)
+    assert command_order(after) == theirs
+    assert after["hooks"]["PreToolUse"] == PEOPLE["hooks"]["PreToolUse"]
+    assert after["hooks"]["SessionStart"] == PEOPLE["hooks"]["SessionStart"]
+    assert after["hooks"]["Stop"] == PEOPLE["hooks"]["Stop"]
+    assert after["hooks"]["PreCompact"] == []
+    assert after["hooks"]["SessionEnd"] == []
+    assert list(after) == list(PEOPLE)
 
 
-def test_uninstall_returns_a_file_it_created_to_an_empty_document(tmp_path):
+def test_uninstall_leaves_the_containers_it_emptied(tmp_path):
+    """An emptied event list stays a list and an emptied ``hooks`` object stays one."""
     settings = settings_in(tmp_path)
     write_settings(settings, {"model": "claude-opus"})
 
     claude_install.install(settings)
     claude_install.uninstall(settings)
 
-    assert read_settings(settings) == {"model": "claude-opus"}
+    assert read_settings(settings) == {
+        "model": "claude-opus",
+        "hooks": {"SessionStart": [], "PreCompact": [], "SessionEnd": []},
+    }
+
+
+def test_uninstall_leaves_a_hooks_object_the_file_already_had(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(settings, {"hooks": {}})
+
+    claude_install.install(settings)
+    claude_install.uninstall(settings)
+
+    assert read_settings(settings) == {
+        "hooks": {"SessionStart": [], "PreCompact": [], "SessionEnd": []}
+    }
+
+
+def test_uninstall_leaves_a_matcher_group_that_held_only_our_hook(tmp_path):
+    settings = settings_in(tmp_path)
+    write_settings(
+        settings,
+        {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "aft hook claude SessionStart",
+                                "timeout": 5,
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    claude_install.uninstall(settings)
+
+    assert read_settings(settings) == {
+        "hooks": {"SessionStart": [{"matcher": "startup", "hooks": []}]}
+    }
+
+
+def test_uninstall_leaves_elements_of_an_event_list_it_cannot_read(tmp_path):
+    """Nothing but a command hook of ours can mean "remove this", not even a JSON null."""
+    settings = settings_in(tmp_path)
+    write_settings(
+        settings,
+        {
+            "hooks": {
+                "SessionStart": [
+                    None,
+                    "hand written",
+                    {"matcher": "startup"},
+                    {"hooks": [{"type": "command", "command": HOOK_COMMAND}]},
+                ]
+            }
+        },
+    )
+
+    assert claude_install.uninstall(settings).changed is True
+
+    assert read_settings(settings) == {
+        "hooks": {"SessionStart": [None, "hand written", {"matcher": "startup"}]}
+    }
 
 
 def test_uninstall_keeps_a_group_it_did_not_add(tmp_path):
@@ -378,15 +496,19 @@ def test_the_command_installs_and_uninstalls_the_real_default_path(tmp_path, mon
     monkeypatch.setenv("HOME", str(tmp_path))
     settings = claude_install.settings_path()
     assert settings == settings_in(tmp_path)
-    text = write_settings(settings, PEOPLE)
+    theirs = command_order(PEOPLE)
+    write_settings(settings, PEOPLE)
 
     assert main(["install", "claude"]) == 0
     assert "backed up" in capsys.readouterr().out
-    assert foreign_commands(command_order(settings)) == command_order(PEOPLE)
+    assert foreign_commands(command_order(settings)) == theirs
     assert main(["install", "claude"]) == 0
     assert "already" in capsys.readouterr().out
     assert main(["install", "claude", "--uninstall"]) == 0
-    assert settings.read_text(encoding="utf-8") == text
+
+    runs = command_order(settings)
+    assert foreign_commands(runs) == theirs
+    assert aft_commands().isdisjoint({command for _, command in runs})
 
 
 BROKEN = [
@@ -425,3 +547,29 @@ def test_the_command_reports_an_unreadable_settings_file(tmp_path, monkeypatch, 
     assert "not valid JSON" in capsys.readouterr().err
     assert settings.read_text(encoding="utf-8") == '{"hooks": '
     assert list(settings.parent.glob("*.bak")) == []
+
+
+def test_the_command_reports_a_settings_path_it_cannot_open(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    settings.mkdir(parents=True)
+
+    assert main(["install", "claude"]) == 2
+
+    assert capsys.readouterr().err.startswith("aft: cannot read")
+    assert settings.is_dir() and list(settings.iterdir()) == []
+
+
+def test_the_command_reports_a_settings_file_it_cannot_write(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    settings.parent.write_text("not a directory", encoding="utf-8")
+
+    assert main(["install", "claude"]) == 2
+
+    err = capsys.readouterr().err
+    assert err.startswith("aft: cannot write")
+    assert str(settings) in err
+    assert settings.parent.read_text(encoding="utf-8") == "not a directory"

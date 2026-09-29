@@ -18,17 +18,21 @@ file; `settings_path` is the default the command line uses.
 Two rules hold the user's own configuration safe:
 
 * A merge touches only what afterthought owns. Other people's hook entries keep their
-  position and their order, and every key afterthought does not own keeps its place in the
-  document, because the file is read, edited in place, and written back with its key order
+  position and their order, and uninstall removes command hooks and nothing else: every key
+  of the user's keeps its place, a matcher group keeps its matcher once our hook leaves it,
+  and an event list or the ``hooks`` object that uninstall empties stays empty rather than
+  going away. The file is read, edited in place, and written back with its key order
   intact.
-* Every write is preceded by a backup of the text it replaces, and nothing is written at
-  all to a file whose text afterthought cannot read as JSON. `install`, `uninstall`,
-  `_read` and `_backup` each state their rule where a reader of a write will find it.
+* Every write is preceded by a backup of the text it replaces, given that file's own mode,
+  and nothing is written at all to a file whose text afterthought cannot read as JSON.
+  `install`, `uninstall`, `_read` and `_backup` each state their rule where a reader of a
+  write will find it.
 """
 
 from __future__ import annotations
 
 import difflib
+import itertools
 import json
 import os
 import stat
@@ -109,11 +113,14 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     """Remove exactly afterthought's own hook entries from ``settings``.
 
     Only the three events afterthought installs are read, and within them only the command
-    hooks running ``aft hook claude <event>``. A group left with no hooks of its own is
-    dropped, since an empty group does nothing and the emptiness is ours; a group left with
-    any hook in it keeps its position and its matcher. An event list emptied this way, and a
-    ``hooks`` object emptied this way, are dropped too, so uninstalling what was just
-    installed leaves no trace of the keys afterthought added.
+    hooks running ``aft hook claude <event>``. Nothing else is deleted and nothing is
+    reordered: a group keeps its keys and its place, an event keeps its key, the ``hooks``
+    object keeps its key. A container stays where it is even when our hook was the last
+    thing in it, so an emptied event list is left as an empty list and an emptied
+    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only a group
+    left holding nothing but an empty ``hooks`` list goes, because such a group holds no
+    key of anyone's. Telling our own containers from the user's would mean remembering
+    what was installed; this rule needs no history to be right.
     """
     document, original = _read(settings)
     hooks = document.get("hooks")
@@ -123,17 +130,16 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     removed = False
     for event in HOOK_EVENTS:
         groups = hooks.get(event)
-        if not isinstance(groups, list) or _count(groups, event) == 0:
+        if not isinstance(groups, list):
             continue
-        kept = [group for group in (_strip(group, event) for group in groups) if group is not None]
-        removed = True
-        if kept:
-            hooks[event] = kept
-        else:
-            del hooks[event]
-
-    if removed and not hooks:
-        del document["hooks"]
+        kept = []
+        for group in groups:
+            stripped = _strip(group, event)
+            if stripped is not group:
+                removed = True
+            if stripped is not _EMPTY_GROUP:
+                kept.append(stripped)
+        groups[:] = kept
 
     return _commit(settings, original, document, changed=removed, dry_run=dry_run)
 
@@ -172,11 +178,20 @@ def _count(groups: list, event: str) -> int:
     )
 
 
-def _strip(group: object, event: str) -> object | None:
-    """A group with afterthought's own hook taken out of it, or None when nothing is left.
+_EMPTY_GROUP = object()
 
-    A group that is not ours, or that cannot be read as a group, comes back untouched:
-    uninstall removes command hooks, not shapes it does not recognize.
+
+def _strip(group: object, event: str) -> object:
+    """A group with afterthought's own hook taken out of it.
+
+    The argument itself comes back when the group does not run our command, which is how
+    uninstall tells a group it rewrote from one it left alone. ``_EMPTY_GROUP``, compared by
+    identity, comes back for a group left holding nothing but an empty ``hooks``
+    list: such a group runs nothing for anyone, so dropping it removes no hook and no
+    key of the user's. A group with a matcher, or any other key of its own, keeps that
+    key even once our hook is gone, and a group that is not a group at all - a string,
+    a number, a JSON null - comes back untouched: uninstall removes command hooks, not
+    shapes it does not recognize.
     """
     if not isinstance(group, dict):
         return group
@@ -186,8 +201,8 @@ def _strip(group: object, event: str) -> object | None:
     kept = [hook for hook in hooks if not _runs(hook, event)]
     if len(kept) == len(hooks):
         return group
-    if not kept:
-        return None
+    if not kept and set(group) == {"hooks"}:
+        return _EMPTY_GROUP
     stripped = dict(group)
     stripped["hooks"] = kept
     return stripped
@@ -197,12 +212,13 @@ def _read(settings: Path) -> tuple[dict, str | None]:
     """The document in ``settings`` and the text it came from; no file reads as no settings.
 
     BUILD-PLAN M1.3 requires an invalid settings file to abort without writing, and this is
-    the one place that decides what invalid means: text that is not UTF-8, text that is not
-    JSON, a JSON value that is not an object, a ``hooks`` key that is not an object, and a
-    value where one of afterthought's three events lives that is not a list. Each is refused
-    rather than overwritten, because a file afterthought cannot read is a file it cannot
-    show a diff against, and it is somebody's working configuration. Text with nothing in it
-    is the exception: an empty file is a file with no settings yet, not a broken one.
+    the one place that decides what invalid means: a file that cannot be opened at all,
+    text that is not UTF-8, text that is not JSON, a JSON value that is not an object, a
+    ``hooks`` key that is not an object, and a value where one of afterthought's three
+    events lives that is not a list. Each is refused rather than overwritten, because a
+    file afterthought cannot read is a file it cannot show a diff against, and it is
+    somebody's working configuration. Text with nothing in it is the exception: an empty
+    file is a file with no settings yet, not a broken one.
     """
     if not settings.exists():
         return {}, None
@@ -210,6 +226,8 @@ def _read(settings: Path) -> tuple[dict, str | None]:
         original = settings.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise InstallError(f"{settings} is not UTF-8 text ({exc}); nothing was written") from exc
+    except OSError as exc:
+        raise InstallError(f"cannot read {settings} ({exc}); nothing was written") from exc
     if not original.strip():
         return {}, original
     try:
@@ -278,34 +296,53 @@ def _backup(settings: Path, original: str | None) -> Path | None:
     rule, where a reader of a write meets it: settings.json changes only once its previous
     text is safe next to it.
 
-    The copy is named for the tool that made it and stamped with the UTC second, so one
-    install never overwrites another's backup and a user can find every version
-    afterthought kept. A file with no text of its own has nothing to keep, so no backup is
-    written to claim an empty settings file was lost.
+    The copy is named for the tool that made it and stamped with the UTC second, with a
+    bumped suffix whenever that name is already taken, so two writes in one second leave
+    two backups and one install never overwrites another's backup. It is created private
+    and then given the mode of the file it copies: settings.json routinely holds API keys,
+    and the backup holds their exact text, so a file the user keeps closed cannot leave a
+    copy anyone can read. A file with no text of its own has nothing to keep, so no backup
+    is written to claim an empty settings file was lost.
     """
     if not original:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup = settings.with_name(f"{settings.name}.aft-{stamp}.bak")
-    backup.write_text(original, encoding="utf-8")
-    return backup
+    try:
+        mode = stat.S_IMODE(settings.stat().st_mode)
+        for suffix in itertools.count():
+            tail = "" if suffix == 0 else f"-{suffix}"
+            backup = settings.with_name(f"{settings.name}.aft-{stamp}{tail}.bak")
+            try:
+                handle = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(handle, "w", encoding="utf-8") as output:
+                output.write(original)
+            os.chmod(backup, mode)
+            return backup
+    except OSError as exc:
+        raise InstallError(f"cannot back up {settings} ({exc}); nothing was written") from exc
 
 
 def _write(settings: Path, text: str) -> None:
     """Put the new text in place in one step, so a crash leaves the old file or the new one.
 
     A half-written settings file costs the user their whole Claude Code configuration, so
-    the text goes to a temporary file in the same directory and ``os.replace`` moves it over
-    the old one. The new file keeps the permissions of the one it replaces.
+    the text goes to a temporary file in the same directory and ``os.replace`` moves it
+    over the old one, keeping that file's permissions. A directory afterthought cannot
+    write in is refused the same way a file it cannot read is.
     """
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(settings.stat().st_mode) if settings.exists() else 0o644
-    handle, temporary = tempfile.mkstemp(dir=settings.parent, prefix=f"{settings.name}.aft-")
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as output:
-            output.write(text)
-        os.chmod(temporary, mode)
-        os.replace(temporary, settings)
-    except OSError:
-        os.unlink(temporary)
-        raise
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        mode = stat.S_IMODE(settings.stat().st_mode) if settings.exists() else 0o644
+        handle, temporary = tempfile.mkstemp(dir=settings.parent, prefix=f"{settings.name}.aft-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as output:
+                output.write(text)
+            os.chmod(temporary, mode)
+            os.replace(temporary, settings)
+        except OSError:
+            os.unlink(temporary)
+            raise
+    except OSError as exc:
+        raise InstallError(f"cannot write {settings} ({exc}); nothing was written") from exc
