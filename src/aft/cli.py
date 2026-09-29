@@ -11,12 +11,13 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, inject, keys, lint, vault, work
+from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault, work
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
-from aft.events import AdapterError, SessionEvent
+from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.library import manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -39,7 +40,10 @@ def main(argv: list[str] | None = None) -> int:
         RegistryError,
         vault.VaultError,
         GitError,
+        index.SearchIndexError,
         UsageError,
+        survey.SurveyError,
+        manifest.ManifestError,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -89,6 +93,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(handler=cmd_work)
 
+    p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
+    p.set_defaults(handler=cmd_reindex)
+
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
@@ -116,6 +123,18 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own extension and nothing else",
     )
     q.set_defaults(handler=cmd_install_pi)
+
+    p = sub.add_parser("library", help="import and manage library collections")
+    lsub = p.add_subparsers(metavar="action")
+    q = lsub.add_parser("survey", help="survey a collection directory before import")
+    q.add_argument("path", help="path to the collection directory")
+    q.add_argument("--json", action="store_true", help="output report as JSON")
+    q.set_defaults(handler=cmd_library_survey)
+
+    q = lsub.add_parser("validate", help="validate a collection manifest against DESIGN 11")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_validate)
     return parser
 
 
@@ -276,6 +295,18 @@ def cmd_work(args) -> int:
     return 1 if report.failures else 0
 
 
+def cmd_reindex(args) -> int:
+    """Rebuild the search index. Everything it does is `aft.index`'s; this names the file it
+    wrote and repeats the pages it could not read."""
+    config = load()
+    vault.require(config)
+    report = index.reindex(config)
+    for line in report:
+        print(line)
+    print(f"rebuilt the search index at {config.home / index.INDEX_NAME}")
+    return 0
+
+
 def cmd_install_claude(args) -> int:
     """Add or remove afterthought's hook entries in Claude Code's own settings file."""
     settings = claude_install.settings_path()
@@ -336,6 +367,14 @@ def cmd_install_pi(args) -> int:
     return 0
 
 
+def cmd_library_survey(args) -> int:
+    return survey.run(args.path, as_json=args.json)
+
+
+def cmd_library_validate(args) -> int:
+    return manifest.run(args.manifest, path_override=args.path)
+
+
 # An agent's session waits on this command, so the whole hook gets one hard budget
 # before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1). The
 # budget is split up front between the two steps that can block: the stdin read takes
@@ -376,11 +415,13 @@ def _hook_event(args, payload: object) -> SessionEvent:
 def _dispatch(event: SessionEvent) -> None:
     """Hand one normalized event to the part of afterthought that consumes it.
 
-    ``session_start`` prints the injection block (M1.2); ``compaction`` and
-    ``session_end`` enqueue capture (M2.2). Neither exists yet, so a parsed event is
-    recognized and dropped here: there is nothing to print and nothing to enqueue,
-    which is the no output and exit 0 the hook contract asks for in the meantime.
+    ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
+    returns: no model call, no transcript read, no project resolution (DESIGN 8, BUILD-PLAN
+    M2.2). ``session_start`` is injection's, which the agents run as `aft inject` (M1.2),
+    so it prints nothing here, and the hook contract asks for silence and exit 0.
     """
+    if event.kind in (COMPACTION, SESSION_END):
+        queue.enqueue(load(), event)
 
 
 @contextmanager
