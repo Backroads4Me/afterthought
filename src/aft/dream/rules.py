@@ -293,9 +293,11 @@ def check(
         return reject("R5")
 
     # A fact resting only on worker sessions is evidence of a lower rank: it stays a
-    # candidate until a primary session corroborates it, whatever its tag (design 8).
-    # Confirming is allowed because it only corroborates memory already standing.
-    if decision.action != "confirm" and not _primary(context.evidence):
+    # candidate until a primary session corroborates it, whatever its tag, and it never
+    # confirms a line, so it adds no source and no date to one (design 8).
+    if not _primary(context.evidence):
+        if decision.action == "confirm":
+            return reject("design 8 worker sessions")
         return downgrade("candidate", "design 8 worker sessions")
 
     if decision.action == "add":

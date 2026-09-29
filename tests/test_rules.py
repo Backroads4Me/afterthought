@@ -666,16 +666,16 @@ def test_a_worker_only_fact_marks_no_line_in_conflict():
     assert outcome == downgrade("candidate", "design 8 worker sessions")
 
 
-def test_a_worker_only_fact_still_corroborates_a_line_it_confirms():
-    """Confirming cites the new source on a line memory already holds and promotes nothing,
-    so the lower rank costs it nothing."""
+def test_a_worker_only_fact_never_confirms_a_standing_line():
+    """Worker evidence adds no source and no date to a line: the confirm is refused and
+    reported (design 8)."""
     outcome = check(
         decide("confirm"),
         new_fact(source="observed"),
         line(VLLM),
         ctx(sig("w1", NEWER, origin=rules.WORKER)),
     )
-    assert outcome == apply("confirm")
+    assert outcome == reject("design 8 worker sessions")
 
 
 def test_one_primary_session_corroborating_a_worker_fact_lifts_the_lower_rank():
@@ -1043,7 +1043,7 @@ def test_a_candidate_held_by_the_worker_rule_waits_without_a_primary_session():
             sig("w2", "2026-10-03", origin=rules.WORKER),
         ),
     )
-    assert outcome == apply("confirm")
+    assert outcome == reject("design 8 worker sessions")
 
 
 # conflict: a note, which replaces nothing and so needs neither authority nor newer dates.
