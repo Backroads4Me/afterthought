@@ -359,8 +359,9 @@ def _dispatch(event: SessionEvent) -> None:
     ``compaction`` and ``session_end`` are capture work, so each gets one row in the
     queue (DESIGN 8, BUILD-PLAN M2.2). Writing that row calls no model, opens no
     transcript, and resolves no project: the digest that reads the row does all three
-    later. Any other kind has no consumer yet, and the hook contract asks for silence and
-    exit 0 whatever the payload named.
+    later. ``session_start`` is injection's, and its block comes from `aft inject` (M1.2)
+    rather than from here; any other kind reaches no consumer at all, and the hook contract
+    asks for silence and exit 0 whatever the payload named.
     """
     if event.kind in (COMPACTION, SESSION_END):
         queue.enqueue(load(), event)

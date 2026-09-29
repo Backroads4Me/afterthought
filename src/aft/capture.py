@@ -26,7 +26,7 @@ from pathlib import Path
 from aft import readers
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
-from aft.queue import enqueue, last_sweep, record_sweep, session_state
+from aft.queue import begin_watching, enqueue, note_observed, session_state, watching_since
 from aft.readers import CLAUDE, PI
 
 # Where each agent keeps its session files, and the layout of one: Claude Code writes
@@ -72,26 +72,29 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
 
     Each session is compared with its own watermark, not with when the last sweep ran, so
     a session whose hook never fired is found whatever the timer's cadence (BUILD-PLAN
-    M2.2). It is capture work when the queue has no work in flight for it, its file has
-    moved within the last seven days, and it holds entries past its watermark that it has
-    either gone quiet on for 30 minutes or outgrown by 200 KB.
+    M2.2). It is capture work when the queue holds no work in flight for it and no failure
+    it has not explained, its file has moved within the last seven days, and it holds
+    entries past its watermark that it has either gone quiet on for 30 minutes or outgrown
+    by 200 KB.
 
-    Before the first sweep this home has never been watched, and up to seven days of
-    sessions that predate afterthought would fill the queue on its first tick. So the
-    opening sweep records that the watching has begun and enqueues nothing
-    (BUILD-PLAN M2.2).
+    Before this home has ever been watched there is nothing to measure its sessions
+    against, and up to seven days of sessions that predate afterthought would fill the
+    queue. So the opening sweep records that the watching has begun and captures nothing,
+    and from then on a session the queue has never digested is capture work only once its
+    file has moved (BUILD-PLAN M2.2).
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
     """
-    if last_sweep(config) is None:
-        record_sweep(config, now)
+    watching = watching_since(config)
+    if watching is None:
+        begin_watching(config, now)
         return []
     found: list[SessionEvent] = []
     for agent, directory in SESSION_DIRS.items():
         for path in _session_files(directory):
             try:
-                event = _candidate(config, agent, path, now)
+                event = _candidate(config, agent, path, now, watching)
             except OSError:
                 # An agent's own cleanup can remove a transcript between the scan and the
                 # read of it. The session it held is gone, and the sweep moves on.
@@ -100,17 +103,19 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
                 continue
             enqueue(config, event)
             found.append(event)
-    record_sweep(config, now)
     return found
 
 
-def _candidate(config: Config, agent: str, path: Path, now: datetime) -> SessionEvent | None:
+def _candidate(
+    config: Config, agent: str, path: Path, now: datetime, watching: datetime
+) -> SessionEvent | None:
     """The event one session file earns from this sweep, or None for no work.
 
-    The checks run cheapest first: a timestamp, the queue, the size of the file, and only
-    then the entries inside it.
+    The checks run cheapest first: four timestamps and the queue, then a read of the
+    file's tail, then the entries inside it, and last the head scan that finds its directory.
     """
-    touched = datetime.fromtimestamp(path.stat().st_mtime, UTC)
+    stat = path.stat()
+    touched = datetime.fromtimestamp(stat.st_mtime, UTC)
     if now - touched > SESSION_WINDOW:
         # Past the seven days the sweep looks over, whatever its watermark holds.
         return None
@@ -118,18 +123,33 @@ def _candidate(config: Config, agent: str, path: Path, now: datetime) -> Session
     state = session_state(config, agent, session_id)
     if state.has_open_job:
         return None
+    if state.has_unresolved_failure:
+        # The reason that chunk could not be digested is the session's last word. Queuing
+        # it again on this tick would add a row and bury the reason (BUILD-PLAN M2.1).
+        return None
+    if state.watermark is None and touched <= watching:
+        # Nothing has ever digested this session and its file predates the watching, so it
+        # is history from before afterthought rather than a hook it missed.
+        return None
+    if state.seen == (stat.st_mtime, stat.st_size):
+        # A sweep already read this file at this size and this watermark and called it
+        # finished. A transcript only grows, so the same bytes hold the same answer, and
+        # the parse of them is the sweep's one expensive check.
+        return None
     idle = now - touched >= IDLE_AFTER
-    if not idle and not _grown_since_watermark(path, state.watermark, agent):
+    if not idle and not _grown_since_watermark(path, stat.st_size, state.watermark, agent):
         return None
     if not _has_new_entries(agent, path, state.watermark):
         # The watermark names the session's last entry, so there is nothing left to digest
         # however long the session has been quiet or however big the file has become.
+        note_observed(config, agent, session_id, state.watermark, stat.st_mtime, stat.st_size)
         return None
 
     cwd = _cwd_of(path)
     if cwd is None:
         # Nothing in the file names the directory it was started in, so there is no cwd
         # for the digest to resolve and no event to hand it (BUILD-PLAN M2.6).
+        note_observed(config, agent, session_id, state.watermark, stat.st_mtime, stat.st_size)
         return None
     return SessionEvent(
         agent=agent,
@@ -186,7 +206,7 @@ def _cwd_of(path: Path) -> Path | None:
     return None
 
 
-def _grown_since_watermark(path: Path, watermark: str | None, agent: str) -> bool:
+def _grown_since_watermark(path: Path, size: int, watermark: str | None, agent: str) -> bool:
     """Whether a transcript has grown past the record its watermark names.
 
     The watermark is the last entry a digest read, so its record sits near the end of the
@@ -202,7 +222,6 @@ def _grown_since_watermark(path: Path, watermark: str | None, agent: str) -> boo
     pi's `parentId` after a `/tree` jump, Claude Code's `parentUuid` - and a reference to
     a record does not answer for the record itself.
     """
-    size = path.stat().st_size
     if size < GROWTH_AFTER:
         return False
     if watermark is None:

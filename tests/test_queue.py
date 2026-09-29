@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import capture, model, queue
+from aft import capture, model, queue, readers
 from aft.cli import main
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
@@ -114,21 +114,24 @@ def session_file(
     return path
 
 
-def conversation(agent: str, turn_ids: list[str]) -> list[dict]:
+def conversation(agent: str, turn_ids: list[str], *, pad: int = 0) -> list[dict]:
     """Records the readers recognize as entries, one record per id, in the order given.
 
     A file that holds no conversation is one the readers cannot read at all, so a test
     that asks what a session's entries are - which is what the sweep's watermark check
     answers - has to hand over real ones. pi chains ``parentId`` because only the branch
-    ending at its last record is that session's conversation (`readers/pi.py`).
+    ending at its last record is that session's conversation (`readers/pi.py`). ``pad``
+    lengthens each turn's text, which is how a test reaches a file past the sweep's
+    growth bound out of turns a reader reads rather than out of filler it cannot.
     """
+    texts = [f"turn {index}{'x' * pad}" for index in range(len(turn_ids))]
     if agent == CLAUDE:
         return [
             {
                 "type": "user",
                 "uuid": entry_id,
                 "timestamp": TURN_TIME,
-                "message": {"content": f"turn {index}"},
+                "message": {"content": texts[index]},
             }
             for index, entry_id in enumerate(turn_ids)
         ]
@@ -138,7 +141,7 @@ def conversation(agent: str, turn_ids: list[str]) -> list[dict]:
             "id": entry_id,
             "parentId": turn_ids[index - 1] if index else None,
             "timestamp": TURN_TIME,
-            "message": {"role": "user", "content": f"turn {index}"},
+            "message": {"role": "user", "content": texts[index]},
         }
         for index, entry_id in enumerate(turn_ids)
     ]
@@ -156,6 +159,25 @@ def digest_to(
     job = queue.next_job(config)
     assert job is not None and job.session_id == session_id, "the row the test queued is work"
     queue.complete(config, job, watermark)
+
+
+class ReaderCalls:
+    """Counts the calls a sweep makes at the reader's door, and delegates to the reader."""
+
+    def __init__(self, read) -> None:
+        self.count = 0
+        self.read = read
+
+    def __call__(self, agent: str, path: Path, after: str | None = None):
+        self.count += 1
+        return self.read(agent, path, after)
+
+
+def count_reads(monkeypatch) -> ReaderCalls:
+    """Wrap the reader the sweep calls, so a test can count the transcripts it parses."""
+    calls = ReaderCalls(capture.readers.read)
+    monkeypatch.setattr(capture.readers, "read", calls)
+    return calls
 
 
 def fill(config: Config, rows: int) -> None:
@@ -374,7 +396,13 @@ def test_the_sweep_finds_a_session_whose_hook_never_fired(
     )
     sessions = tmp_path / ".claude/projects"
     touched = NOW - timedelta(minutes=31)
-    path = session_file(sessions, CLAUDE, "missed", touched=touched)
+    path = session_file(
+        sessions,
+        CLAUDE,
+        "missed",
+        records=conversation(CLAUDE, ["entry-1", "entry-2", "entry-3"]),
+        touched=touched,
+    )
 
     assert capture.sweep(cfg, NOW - timedelta(hours=1)) == []
     assert query(cfg, "SELECT count(*) FROM jobs") == [(0,)], "an opening sweep captures nothing"
@@ -395,26 +423,72 @@ def test_the_sweep_finds_a_session_whose_hook_never_fired(
     assert query(cfg, "SELECT count(*) FROM sessions") == [(0,)]
 
 
+def test_the_first_sweep_of_a_home_watches_it_without_capturing_its_history(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """Two sweeps, counted: the net is reachable and it does not flood on install.
+
+    afterthought arrives on a home holding a week of sessions no hook ever reported. The
+    opening sweep records that the watching has begun and captures none of them; the very
+    next sweep runs the ordinary rule, so the one session that went on talking after the
+    watching began is capture work and the ones that stopped before it never are
+    (BUILD-PLAN M2.2).
+    """
+    sessions = tmp_path / "agent-sessions"
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+    turns = conversation(CLAUDE, ["entry-1", "entry-2", "entry-3"])
+    session_file(
+        sessions,
+        CLAUDE,
+        "stopped-before-install",
+        records=turns,
+        touched=NOW - timedelta(days=2),
+    )
+    session_file(
+        sessions,
+        CLAUDE,
+        "stopped-before-install-too",
+        records=turns,
+        touched=NOW - timedelta(days=3),
+    )
+
+    assert capture.sweep(cfg, NOW) == []
+    assert query(cfg, "SELECT count(*) FROM jobs") == [(0,)], "no history on the first tick"
+
+    # One of the two sessions goes on talking after the watching begins, then goes quiet.
+    session_file(
+        sessions,
+        CLAUDE,
+        "stopped-before-install",
+        records=[*turns, *conversation(CLAUDE, ["entry-4"])],
+        touched=NOW + timedelta(minutes=1),
+    )
+    found = capture.sweep(cfg, NOW + timedelta(minutes=31))
+
+    assert [(e.session_id, e.kind) for e in found] == [("stopped-before-install", SESSION_END)], (
+        "the file moved once the home was being watched, then went quiet"
+    )
+    assert query(cfg, "SELECT count(*) FROM jobs WHERE status = ?", (queue.PENDING,)) == [(1,)]
+
+
 def test_the_sweep_chunks_a_long_session_that_outgrew_its_watermark(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
     """DESIGN 8: a running session is digested in chunks, not all at the end."""
     sessions = tmp_path / "agent-sessions"
-    padding = [{"uuid": f"pad-{i}", "text": "x" * 900} for i in range(300)]
+    # Past the 200 KB the sweep calls a chunk worth, out of turns the reader reads, with
+    # the digested entry behind the tail it looks at.
     path = session_file(
         sessions,
         PI,
         "long-running",
-        records=[{"id": "entry-9", "type": "message"}, *padding],
+        records=conversation(PI, ["entry-9", *[f"turn-{i}" for i in range(300)]], pad=900),
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    queue.begin_watching(cfg, NOW - timedelta(minutes=10))
 
-    queue.enqueue(cfg, event(session_id="long-running", agent=PI, transcript=path))
-    job = queue.next_job(cfg)
-    assert job is not None
-    queue.complete(cfg, job, "entry-9")
+    digest_to(cfg, PI, "long-running", path, "entry-9")
 
     found = capture.sweep(cfg, NOW)
 
@@ -427,11 +501,16 @@ def test_the_sweep_leaves_alone_what_is_quiet_enough_or_already_queued(
 ) -> None:
     """The bounds it does not cross: too new and too small, and work already in flight."""
     sessions = tmp_path / "agent-sessions"
-    session_file(sessions, CLAUDE, "recent", touched=NOW - timedelta(minutes=1))
-    waiting = session_file(sessions, CLAUDE, "waiting", touched=NOW - timedelta(minutes=31))
-    digesting = session_file(sessions, CLAUDE, "digesting", touched=NOW - timedelta(minutes=31))
+    turns = conversation(CLAUDE, ["entry-1", "entry-2", "entry-3"])
+    session_file(sessions, CLAUDE, "recent", records=turns, touched=NOW - timedelta(minutes=1))
+    waiting = session_file(
+        sessions, CLAUDE, "waiting", records=turns, touched=NOW - timedelta(minutes=31)
+    )
+    digesting = session_file(
+        sessions, CLAUDE, "digesting", records=turns, touched=NOW - timedelta(minutes=31)
+    )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=40))
+    queue.begin_watching(cfg, NOW - timedelta(minutes=40))
 
     for session_id, path in (("digesting", digesting), ("waiting", waiting)):
         queue.enqueue(cfg, event(session_id=session_id, transcript=path))
@@ -466,7 +545,7 @@ def test_the_sweep_finds_a_session_the_last_sweep_ran_past(
         touched=NOW - timedelta(minutes=60),
     )
     digest_to(cfg, CLAUDE, "watermark-behind", path, "entry-2")
-    queue.record_sweep(cfg, NOW - timedelta(minutes=20))
+    queue.begin_watching(cfg, NOW - timedelta(minutes=20))
 
     found = capture.sweep(cfg, NOW)
 
@@ -507,7 +586,7 @@ def test_the_sweep_stops_at_the_seven_days_it_is_given_and_goes_no_further(
     )
     digest_to(cfg, CLAUDE, "eight-days-old", stale, "entry-1")
     digest_to(cfg, CLAUDE, "six-days-old", inside, "entry-1")
-    queue.record_sweep(cfg, NOW - timedelta(days=1))
+    queue.begin_watching(cfg, NOW - timedelta(days=1))
 
     found = capture.sweep(cfg, NOW)
 
@@ -543,7 +622,7 @@ def test_the_sweep_enqueues_nothing_whose_watermark_names_its_last_entry(
     )
     digest_to(cfg, CLAUDE, "mid-conversation", talking, "entry-3")
     digest_to(cfg, CLAUDE, "quiet-and-digested", quiet, "entry-3")
-    queue.record_sweep(cfg, NOW - timedelta(days=1))
+    queue.begin_watching(cfg, NOW - timedelta(days=1))
 
     assert capture.sweep(cfg, NOW) == []
     assert query(cfg, "SELECT status, count(*) FROM jobs GROUP BY status") == [(queue.DONE, 2)], (
@@ -551,14 +630,78 @@ def test_the_sweep_enqueues_nothing_whose_watermark_names_its_last_entry(
     )
 
 
-def test_a_failed_digest_leaves_the_watermark_where_the_next_sweep_can_find_it(
+def test_the_sweep_reads_a_session_file_only_when_that_file_has_moved(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
-    """A failure records why nothing was digested and moves nothing (BUILD-PLAN M2.2).
+    """A sweep that runs on a timer over a week of sessions reads an unchanged
+    transcript once and never again until it changes (BUILD-PLAN M2.2).
 
-    The session's first chunk reached its second turn and its second chunk then failed, so
-    the sweep has to pick the session up from that same watermark: nothing but a written
-    digest moves it, and the turns the failure could not read are still capture work.
+    Counted at the reader's own door: a digested session and a session the queue has never
+    digested are each parsed once, to find nothing to do, and a second sweep over the same
+    untouched directory parses nothing at all. The session going on talking is what earns
+    the next read, and the capture that comes with it.
+    """
+    sessions = tmp_path / "agent-sessions"
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+    turns = conversation(CLAUDE, ["entry-1", "entry-2", "entry-3"])
+    path = session_file(
+        sessions,
+        CLAUDE,
+        "quiet-and-digested",
+        records=turns,
+        touched=NOW - timedelta(minutes=40),
+    )
+    # A session the queue has never digested, whose records are all bookkeeping: readable,
+    # and with no entry for any watermark to be behind.
+    session_file(
+        sessions,
+        CLAUDE,
+        "bookkeeping-only",
+        records=[{"type": "mode", "mode": "code"}],
+        touched=NOW - timedelta(minutes=40),
+    )
+    digest_to(cfg, CLAUDE, "quiet-and-digested", path, "entry-3")
+    queue.begin_watching(cfg, NOW - timedelta(hours=1))
+    reads = count_reads(monkeypatch)
+
+    assert capture.sweep(cfg, NOW) == []
+    assert reads.count == 2, "each file read once, to find nothing left to digest"
+    assert query(
+        cfg,
+        "SELECT session_id, watermark IS NULL, seen_size IS NOT NULL,"
+        " seen_watermark IS watermark FROM sessions ORDER BY session_id",
+    ) == [("bookkeeping-only", 1, 1, 1), ("quiet-and-digested", 0, 1, 1)], (
+        "each file is observed at the watermark it was read against, and no watermark moved"
+    )
+
+    assert capture.sweep(cfg, NOW + timedelta(minutes=5)) == []
+    assert reads.count == 2, "the same bytes hold the same answers"
+
+    session_file(
+        sessions,
+        CLAUDE,
+        "quiet-and-digested",
+        records=[*turns, *conversation(CLAUDE, ["entry-4"])],
+        touched=NOW + timedelta(minutes=5),
+    )
+    found = capture.sweep(cfg, NOW + timedelta(minutes=35))
+
+    assert [e.session_id for e in found] == ["quiet-and-digested"]
+    assert reads.count == 3, "the file that moved is the one worth reading"
+
+
+def test_a_session_that_keeps_failing_stops_being_swept_and_keeps_its_reason(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A failure ends the sweep's interest and stands as the record of why (BUILD-PLAN
+    M2.2, DESIGN 14).
+
+    The session's first chunk reached its second turn and its second chunk then failed, and
+    keeps failing. Measured against its own watermark that chunk is eligible again on every
+    tick for the rest of the week, so the queue has to stop the retry rather than bury the
+    reason under the rows of it: three sweeps and two failures leave three rows, and the
+    failures name themselves. What settles a failure is a row that is not one, after which
+    the turns it never reached are capture work again.
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -570,17 +713,74 @@ def test_a_failed_digest_leaves_the_watermark_where_the_next_sweep_can_find_it(
         touched=NOW - timedelta(minutes=45),
     )
     digest_to(cfg, CLAUDE, "failed-midway", path, "entry-2")
-    queue.enqueue(cfg, event(session_id="failed-midway", transcript=path))
+    queue.begin_watching(cfg, NOW - timedelta(hours=1))
+
+    found = capture.sweep(cfg, NOW)
+    assert [e.session_id for e in found] == ["failed-midway"], "one turn past its watermark"
     chunk = queue.next_job(cfg)
-    assert chunk is not None, "the next chunk is the work the failure is about"
-    assert chunk.watermark == "entry-2", "and it reads on from the watermark it inherits"
+    assert chunk is not None
+    assert chunk.watermark == "entry-2", "the chunk reads on from the watermark it inherits"
     queue.fail(cfg, chunk, "the model endpoint was down")
 
     assert queue.session_state(cfg, CLAUDE, "failed-midway").watermark == "entry-2"
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    assert capture.sweep(cfg, NOW + timedelta(minutes=10)) == []
+    assert capture.sweep(cfg, NOW + timedelta(minutes=20)) == []
+    assert query(
+        cfg,
+        "SELECT status, error FROM jobs WHERE session_id = 'failed-midway' ORDER BY created_time",
+    ) == [
+        (queue.DONE, None),
+        (queue.FAILED, "the model endpoint was down"),
+    ], "the failure is the session's last word and it says why"
+
+    # The agent's own hook still reports its own session, and that chunk fails too.
+    queue.enqueue(cfg, event(session_id="failed-midway", transcript=path))
+    retry = queue.next_job(cfg)
+    assert retry is not None, "a hook is the agent's own report, not the sweep's guess"
+    queue.fail(cfg, retry, "the model endpoint is still down")
+    assert capture.sweep(cfg, NOW + timedelta(minutes=30)) == []
+    assert query(cfg, "SELECT count(*) FROM jobs") == [(3,)], "no third row for the same chunk"
+
+    # A digest that lands settles the failure, and the sweep measures the session against
+    # its watermark again: the third turn is still uncaptured.
+    queue.enqueue(cfg, event(session_id="failed-midway", transcript=path))
+    fixed = queue.next_job(cfg)
+    assert fixed is not None
+    queue.complete(cfg, fixed, "entry-2")
+
+    assert [e.session_id for e in capture.sweep(cfg, NOW + timedelta(minutes=40))] == [
+        "failed-midway"
+    ]
+
+
+def test_the_sweep_enqueues_a_transcript_its_reader_cannot_read(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """BUILD-PLAN M2.1: a file the reader refuses is capture work, not a session with
+    nothing to say, because a job row is how that failure reaches a report.
+
+    The fixture holds text and no record of it names a type, which is exactly what
+    ``readers.UnrecognizedTranscript`` is for. The last assertion hands the row over to the
+    same read a digest would, and that names the reason the sweep refused to call the
+    session empty.
+    """
+    sessions = tmp_path / "agent-sessions"
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+    path = session_file(sessions, CLAUDE, "unreadable-shape", touched=NOW - timedelta(minutes=45))
+    queue.begin_watching(cfg, NOW - timedelta(hours=1))
+
     found = capture.sweep(cfg, NOW)
 
-    assert [(e.agent, e.session_id) for e in found] == [(CLAUDE, "failed-midway")]
+    assert [(e.agent, e.session_id, e.kind, e.detail) for e in found] == [
+        (CLAUDE, "unreadable-shape", SESSION_END, "sweep")
+    ]
+    assert query(cfg, "SELECT transcript_path, kind, status FROM jobs") == [
+        (str(path), SESSION_END, queue.PENDING)
+    ]
+    job = queue.next_job(cfg)
+    assert job is not None
+    with pytest.raises(readers.UnrecognizedTranscript):
+        list(readers.read(job.agent, job.transcript_path, job.watermark))
 
 
 def test_the_sweep_finds_a_session_once_and_a_second_pass_adds_no_row(
@@ -598,7 +798,7 @@ def test_the_sweep_finds_a_session_once_and_a_second_pass_adds_no_row(
         records=conversation(CLAUDE, ["entry-1", "entry-2"]),
         touched=NOW - timedelta(minutes=45),
     )
-    queue.record_sweep(cfg, NOW - timedelta(hours=1))
+    queue.begin_watching(cfg, NOW - timedelta(hours=1))
 
     assert len(capture.sweep(cfg, NOW)) == 1, "uncaptured and quiet, so the pass finds it"
     rows = query(cfg, "SELECT id, session_id, status FROM jobs ORDER BY id")
@@ -656,7 +856,9 @@ def test_a_claim_whose_pid_was_recycled_to_a_live_process_ages_out(cfg: Config) 
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
     queue.complete(cfg, retry, "entry-3")
-    assert queue.session_state(cfg, CLAUDE, "recycled") == queue.SessionState("entry-3", False)
+    assert queue.session_state(cfg, CLAUDE, "recycled") == queue.SessionState(
+        "entry-3", False, False, None
+    )
 
 
 def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None:
@@ -681,7 +883,9 @@ def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
     queue.complete(cfg, retry, "entry-3")
-    assert queue.session_state(cfg, CLAUDE, "other-owner") == queue.SessionState("entry-3", False)
+    assert queue.session_state(cfg, CLAUDE, "other-owner") == queue.SessionState(
+        "entry-3", False, False, None
+    )
 
 
 def test_a_claim_younger_than_one_work_cadence_is_left_alone(cfg: Config) -> None:
@@ -721,7 +925,9 @@ def test_a_worker_that_lost_its_claim_cannot_move_the_watermark(cfg: Config) -> 
     with pytest.raises(queue.QueueError):
         queue.complete(cfg, stale, "entry-99")
 
-    assert queue.session_state(cfg, CLAUDE, "slow-worker") == queue.SessionState(None, True)
+    assert queue.session_state(cfg, CLAUDE, "slow-worker") == queue.SessionState(
+        None, True, False, None
+    )
     assert query(cfg, "SELECT status, claimed_pid FROM jobs") == [(queue.RUNNING, holder)]
 
 
@@ -739,7 +945,9 @@ def test_a_worker_that_lost_its_claim_cannot_mark_the_row_failed(cfg: Config) ->
     assert query(cfg, "SELECT status, claimed_pid, error FROM jobs") == [
         (queue.RUNNING, holder, None)
     ]
-    assert queue.session_state(cfg, CLAUDE, "slow-failure") == queue.SessionState(None, True)
+    assert queue.session_state(cfg, CLAUDE, "slow-failure") == queue.SessionState(
+        None, True, False, None
+    )
 
 
 def test_closing_a_row_the_queue_no_longer_holds_is_an_error(cfg: Config) -> None:
@@ -756,31 +964,79 @@ def test_closing_a_row_the_queue_no_longer_holds_is_an_error(cfg: Config) -> Non
     assert query(cfg, "SELECT count(*) FROM sessions") == [(0,)]
 
 
+def test_a_queue_file_from_before_the_sweep_observation_still_opens(cfg: Config) -> None:
+    """The queue file outlives a release, so the old one has to open and keep its rows.
+
+    The fixture is that file: the `sessions` table as a previous revision wrote it, with a
+    digested session in it. Opening it adds the columns this revision reads and leaves the
+    watermark it already held exactly where it was.
+    """
+    queue.begin_watching(cfg, NOW - timedelta(days=1))
+    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TABLE sessions")
+        conn.execute(
+            "CREATE TABLE sessions (agent TEXT NOT NULL, session_id TEXT NOT NULL,"
+            " watermark TEXT, PRIMARY KEY (agent, session_id))"
+        )
+        conn.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?)", (CLAUDE, "from-an-older-file", "entry-7")
+        )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    assert queue.session_state(cfg, CLAUDE, "from-an-older-file") == queue.SessionState(
+        "entry-7", False, False, None
+    ), "the watermark survived, and nothing has been observed yet"
+
+
+def test_a_sweeps_note_never_moves_a_sessions_watermark(cfg: Config) -> None:
+    """Only a digest moves a watermark (BUILD-PLAN M2.2), so the cheap observation a sweep
+    leaves behind is stored beside it and cannot overwrite it.
+
+    A digest can move the watermark between the sweep reading the session and its note
+    arriving, which is the shape of the first call here: the note lands, the digest's
+    answer stands, and the observation names a watermark that is no longer the session's -
+    so it answers for nothing until the file is read again.
+    """
+    queue.enqueue(cfg, event(session_id="noted"))
+    first = queue.next_job(cfg)
+    assert first is not None
+    queue.complete(cfg, first, "entry-7")
+
+    queue.note_observed(cfg, CLAUDE, "noted", "entry-6", 1234.5, 4096)
+
+    assert query(cfg, "SELECT watermark, seen_watermark FROM sessions") == [
+        ("entry-7", "entry-6")
+    ], "the note refreshed and moved nothing else"
+    assert queue.session_state(cfg, CLAUDE, "noted").seen is None, "a stale note is no verdict"
+
+    queue.note_observed(cfg, CLAUDE, "noted", "entry-7", 1234.5, 4096)
+    assert queue.session_state(cfg, CLAUDE, "noted").seen == (1234.5, 4096)
+
+
 def test_a_watermark_quoted_only_as_a_parent_is_no_watermark_at_all(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
     """A later record that names the watermark's entry proves the file grew."""
     sessions = tmp_path / "agent-sessions"
-    padding = [{"uuid": f"pad-{i}", "text": "x" * 900} for i in range(300)]
     # A pi session resumed with /tree goes back to an entry already digested and appends
-    # a new child of it, so the watermark's id survives as that child's parent.
+    # a new child of it, so the watermark's id survives as that child's parent. The turns
+    # in between carry the file past the 200 KB tail the growth check reads.
+    digested, new_branch = conversation(PI, ["entry-9", "branch-1"])
+    turns = conversation(PI, [f"turn-{i}" for i in range(300)], pad=900)
     path = session_file(
         sessions,
         PI,
         "tree-jumped",
-        records=[
-            {"id": "entry-9", "type": "message"},
-            *padding,
-            {"id": "branch-1", "parentId": "entry-9", "type": "message"},
-        ],
+        records=[digested, *turns, new_branch],
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
-    queue.enqueue(cfg, event(session_id="tree-jumped", agent=PI, transcript=path))
-    job = queue.next_job(cfg)
-    assert job is not None
-    queue.complete(cfg, job, "entry-9")
+    queue.begin_watching(cfg, NOW - timedelta(minutes=10))
+    digest_to(cfg, PI, "tree-jumped", path, "entry-9")
 
     found = capture.sweep(cfg, NOW)
 

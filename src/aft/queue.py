@@ -60,8 +60,9 @@ FAILED = "failed"
 # (DESIGN 8, BUILD-PLAN M2.2): a bound on correctness cannot rest on that number alone.
 CLAIM_LEASE_FLOOR = timedelta(minutes=30)
 
-# The one key of the meta table this module uses.
-LAST_SWEEP = "last_sweep"
+# The one key of the meta table this module uses: the instant this home began being
+# watched, written by the opening sweep and never rewritten.
+WATCHING_SINCE = "watching_since"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -79,15 +80,22 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_time    TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
-    agent       TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    watermark   TEXT,
+    agent           TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    watermark       TEXT,
+    seen_mtime      REAL,
+    seen_size       INTEGER,
+    seen_watermark  TEXT,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs (status, created_time, id);
 CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 """
+
+# The `sessions` columns a queue file written before this revision does not have. SQLite
+# leaves an existing table exactly as it found it, so each one is added when it is missing.
+SESSION_COLUMNS = {"seen_mtime": "REAL", "seen_size": "INTEGER", "seen_watermark": "TEXT"}
 
 
 @dataclass(frozen=True)
@@ -110,16 +118,22 @@ class Job:
 
 @dataclass(frozen=True)
 class SessionState:
-    """What the queue knows about one session, for the sweep's two tests.
+    """What the queue knows about one session, for the sweep's tests.
 
     ``watermark`` is the id of its last digested entry, or None for a session never
     digested. ``has_open_job`` covers a row awaiting a claim and one being digested now:
     both are capture work in flight for that session, and a second row for either would
-    be a chunk the digest has already read.
+    be a chunk the digest has already read. ``has_unresolved_failure`` is true while the
+    session's newest row is a failed one, so the reason that chunk could not be digested
+    is still its last word and the queue is not waiting on anything. ``seen`` is the
+    ``(mtime, size)`` of the file a sweep last read through at this same watermark and
+    called finished, or None once anything has moved.
     """
 
     watermark: str | None
     has_open_job: bool
+    has_unresolved_failure: bool
+    seen: tuple[float, int] | None
 
 
 def enqueue(config: Config, event: SessionEvent) -> None:
@@ -220,10 +234,14 @@ def fail(config: Config, job: Job, error: str) -> None:
 
     A failed row is not handed out again: it is the report's line, and DESIGN 14 leaves
     the work queued rather than retrying it in the same run. Nothing moved the
-    session's watermark, so the next sweep or hook for that session enqueues the same
-    chunk again, and a session whose transcript is fixed gets digested then (BUILD-PLAN
-    M2.1). As when a job closes, only the process still holding the claim records its
-    failure, so a worker whose row has gone on to another process cannot mark that row
+    session's watermark, so the turns this chunk could not read are still capture work, but
+    the failed row is also the session's last word: the sweep leaves a session whose newest
+    row is this failure alone, rather than queueing the same chunk on every tick for a week
+    and burying the reason under the rows. What resumes it is a row that is not a failure -
+    the hook the agent fires itself, or any later digest that lands - after which the sweep
+    measures the session against its own watermark again (BUILD-PLAN M2.1, M2.2). As when
+    a job closes, only the process still holding the claim records its failure, so a
+    worker whose row has gone on to another process cannot mark that row
     failed or clear that process's claim. Recording a failure on a row this process does
     not hold - one already handed on, or one no longer in the queue - is an error, not a
     silence: why the digest could not run has to reach the report.
@@ -239,42 +257,86 @@ def fail(config: Config, job: Job, error: str) -> None:
 
 
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
-    """The queue's two facts about one session, for the sweep's tests."""
+    """What the queue knows about one session, for the sweep's tests.
+
+    The session's last word is its newest row, so a row written after a failure - a hook's
+    own event or a digest that landed - is what settles that failure; nothing is cleared.
+    """
     with _reading(config) as conn:
         row = conn.execute(
-            "SELECT watermark FROM sessions WHERE agent = ? AND session_id = ?",
+            "SELECT watermark, seen_mtime, seen_size, seen_watermark FROM sessions"
+            " WHERE agent = ? AND session_id = ?",
             (agent, session_id),
         ).fetchone()
         open_row = conn.execute(
             "SELECT 1 FROM jobs WHERE agent = ? AND session_id = ? AND status IN (?, ?) LIMIT 1",
             (agent, session_id, PENDING, RUNNING),
         ).fetchone()
-    return SessionState(watermark=row[0] if row else None, has_open_job=open_row is not None)
+        newest = conn.execute(
+            "SELECT status FROM jobs WHERE agent = ? AND session_id = ?"
+            " ORDER BY created_time DESC, id DESC LIMIT 1",
+            (agent, session_id),
+        ).fetchone()
+    watermark = row[0] if row else None
+    # A sweep's observation belongs to the watermark it was made against: a digest that
+    # moved the watermark ended its claim, and the file is worth reading again.
+    seen = None
+    if row is not None and row[1] is not None and row[2] is not None and row[3] == watermark:
+        seen = (row[1], row[2])
+    return SessionState(
+        watermark=watermark,
+        has_open_job=open_row is not None,
+        has_unresolved_failure=newest is not None and newest[0] == FAILED,
+        seen=seen,
+    )
 
 
-def last_sweep(config: Config) -> datetime | None:
-    """When the last completed sweep ran, or None before there has been one.
+def watching_since(config: Config) -> datetime | None:
+    """When this home began being watched, or None until the first sweep says so.
 
-    The sweep compares each session with its own watermark rather than with this, so the
-    value answers one question: whether this home has ever been swept. A home that has
-    not gets an opening sweep that records the fact and captures none of the sessions
-    that predate afterthought (BUILD-PLAN M2.2).
+    The sweep measures each session against its own watermark, so a home that has never
+    been watched holds nothing to measure the sessions that predate afterthought against
+    either. The instant stored here is what they are held against (BUILD-PLAN M2.2).
     """
     with _reading(config) as conn:
-        row = conn.execute("SELECT value FROM meta WHERE key = ?", (LAST_SWEEP,)).fetchone()
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (WATCHING_SINCE,)).fetchone()
     return None if row is None else datetime.fromisoformat(row[0])
 
 
-def record_sweep(config: Config, now: datetime) -> None:
-    """Record that a sweep has run up to ``now``.
+def begin_watching(config: Config, now: datetime) -> None:
+    """Say this home has been watched from ``now`` on - once, and never again.
 
-    The stored time is what tells the next sweep it is not this home's first.
+    The opening sweep writes the marker and no later sweep rewrites it, so what that sweep
+    left uncaptured stays uncaptured. That is what keeps up to seven days of sessions that
+    predate afterthought out of the queue (BUILD-PLAN M2.2).
     """
     with _writing(config) as conn:
         conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?)"
-            " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            (LAST_SWEEP, _text(now)),
+            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+            (WATCHING_SINCE, _text(now)),
+        )
+
+
+def note_observed(
+    config: Config, agent: str, session_id: str, watermark: str | None, mtime: float, size: int
+) -> None:
+    """Record the file a sweep just read through and called finished.
+
+    The pair is the cheap answer to "has anything happened here since": a transcript only
+    grows, so a file at the same modification time and the same size as the one a sweep
+    read to no work holds no more than that sweep found. The watermark goes in beside the
+    pair because it is what made the read a no-work read, and it is the digest's own
+    column to move: a conflict refreshes the observation and leaves ``watermark`` exactly
+    as the digest left it (BUILD-PLAN M2.2).
+    """
+    with _writing(config) as conn:
+        conn.execute(
+            "INSERT INTO sessions (agent, session_id, watermark, seen_mtime, seen_size,"
+            " seen_watermark) VALUES (?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (agent, session_id) DO UPDATE SET"
+            " seen_mtime = excluded.seen_mtime, seen_size = excluded.seen_size,"
+            " seen_watermark = excluded.seen_watermark",
+            (agent, session_id, watermark, mtime, size, watermark),
         )
 
 
@@ -367,7 +429,28 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
+    _add_missing_columns(conn)
     return conn
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Give a queue file written before this revision the columns it never got.
+
+    ``CREATE TABLE IF NOT EXISTS`` leaves a table that already exists exactly as it found
+    it, so a column added since that file was written has to arrive by ``ALTER TABLE``. A
+    column an older file does not have reads back as None, which is an unobserved session.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    for name, type_ in SESSION_COLUMNS.items():
+        if name in present:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {type_}")
+        except sqlite3.OperationalError as race:
+            # Two first connections to an old file can reach this together; the loser of
+            # the race already has the column it asked for.
+            if "duplicate column" not in str(race):
+                raise
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
