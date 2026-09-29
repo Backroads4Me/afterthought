@@ -37,7 +37,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import __version__, evidence, keys, model, pagewrite, queue, readers, vault
+from aft import __version__, evidence, index, keys, model, page, pagewrite, queue, readers, vault
 from aft import filter as filtermod
 from aft import registry as registrymod
 from aft.config import Config
@@ -95,6 +95,7 @@ ANSWER_REFUSED = "the answer failed its schema"
 # page's path, so it must be a name and nothing else: no separator, no drive form, and no
 # longer than the bound the endpoint's own schema-name rule uses.
 SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+_DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # A page is staged through a temporary in the directory that will hold it. The suffix is not
 # a page extension because a run killed before the rename leaves the file in the vault,
@@ -103,6 +104,14 @@ PAGE_TEMP_PREFIX = ".digest-"
 PAGE_TEMP_SUFFIX = ".tmp"
 # A digest page holds one session's conversation, so the file belongs to its owner alone.
 PAGE_MODE = 0o600
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """A reference to a session: its agent and session id."""
+
+    agent: str
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -428,7 +437,7 @@ def _path(config: Config, slug: str, agent: str, session_id: str, when: date) ->
 
 def _page(
     config: Config,
-    job: queue.Job,
+    session: queue.Job | SessionRef,
     rel: str,
     slug: str,
     resolution: keys.Resolution,
@@ -454,7 +463,7 @@ def _page(
     frontmatter = _frontmatter(
         config, resolution, slug, summaries, handoff, facts, dropped, when, stamp
     )
-    text, written, refused = _written(frontmatter, rel, job, facts)
+    text, written, refused = _written(frontmatter, rel, session, facts)
     if refused:
         # A line the writer would not take never reached the page, so the record beside it
         # names it as dropped and keeps the kept list to the lines a reader can find.
@@ -469,7 +478,7 @@ def _page(
             when,
             stamp,
         )
-        text, written, _ = _written(frontmatter, rel, job, facts)
+        text, written, _ = _written(frontmatter, rel, session, facts)
     return text, tuple(written), tuple(refused)
 
 
@@ -518,7 +527,7 @@ def _frontmatter(
 def _written(
     frontmatter: dict,
     rel: str,
-    job: queue.Job,
+    session: queue.Job | SessionRef,
     facts: Sequence[Fact],
 ) -> tuple[str, list[Fact], list[Dropped]]:
     """The page these facts make, and the ones the page writer would not take.
@@ -533,7 +542,7 @@ def _written(
     for fact in facts:
         before = doc.render()
         try:
-            _add(doc, job, fact)
+            _add(doc, session, fact)
         except pagewrite.WriteError as exc:
             doc = pagewrite.PageDoc(before, rel)
             refused.append(_refused(_words(fact), str(exc)))
@@ -542,15 +551,15 @@ def _written(
     return doc.render(), written, refused
 
 
-def _add(doc: pagewrite.PageDoc, job: queue.Job, fact: Fact) -> None:
+def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) -> None:
     """One fact onto the page, with the source its line cites (DESIGN 6).
 
     The source names the session and the entry the quote came from, so `aft trace` and
     the dream's quote check both find the words again where the page says they are.
     """
     source = doc.add_source(
-        f"aft://session/{job.agent}/{job.session_id}#{fact.entry}",
-        title=f"{job.agent} session {job.session_id}",
+        f"aft://session/{session.agent}/{session.session_id}#{fact.entry}",
+        title=f"{session.agent} session {session.session_id}",
         quote=fact.quote,
     )
     doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, [source])
@@ -675,3 +684,180 @@ def _write(config: Config, rel: str, text: str, choose: Callable[[], str]) -> st
             git(["reset", "-q", "--", rel], cwd=config.vault, check=False)
             raise
     return rel
+
+
+def _is_session_resource(resource: str, session_id: str) -> bool:
+    """Whether an aft:// URI cites ``session_id``."""
+    if not resource:
+        return False
+    uri = resource.split("#", 1)[0]
+    if uri.startswith("aft://session/"):
+        parts = uri.removeprefix("aft://session/").split("/")
+        if parts[-1] == session_id:
+            return True
+    return False
+
+
+def _is_session_digest(path: Path, session_id: str) -> bool:
+    """Whether ``path`` is a digest file belonging to ``session_id``."""
+    if not path.is_file() or path.suffix != ".md":
+        return False
+    match = _DIGEST_NAME.match(path.stem)
+    if match is None:
+        return False
+    sess = match.group("session")
+    is_exact = sess == session_id
+    prefix, sep, suffix = sess.rpartition("-")
+    is_multipart = bool(sep and suffix.isdigit() and prefix == session_id)
+    if not is_exact and not is_multipart:
+        return False
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        frontmatter, _, _, _ = page.split_frontmatter(text)
+        if isinstance(frontmatter, dict):
+            sources = frontmatter.get("sources")
+            if isinstance(sources, list):
+                session_sources = [
+                    str(s.get("resource", ""))
+                    for s in sources
+                    if isinstance(s, dict)
+                    and str(s.get("resource", "")).startswith("aft://session/")
+                ]
+                if session_sources:
+                    return any(_is_session_resource(res, session_id) for res in session_sources)
+    except OSError:
+        pass
+
+    return is_exact
+
+
+def redigest(
+    config: Config,
+    session_id: str,
+    now: datetime | None = None,
+) -> Digest:
+    """Rebuild a digest from archived evidence alone (DESIGN 8, BUILD-PLAN M2.8).
+
+    The entries come from the evidence archive rather than a transcript, so this works
+    even when the transcript has expired or is no longer present. The resulting digest
+    replaces any existing digest page for that session in the vault.
+    """
+    _require_session_id(session_id)
+    vault.require(config)
+
+    entries = evidence.entries(config, session_id)
+    if not entries:
+        raise DigestError(f"no archived evidence for session {session_id!r}")
+
+    info = evidence.session_info(config, session_id)
+    agent = info[0] if info else None
+    project_id = info[1] if info else None
+
+    registry = registrymod.Registry.load(config.registry_path)
+    project = registry.by_id(project_id) if project_id else None
+    slug = project.slug if project else None
+
+    if slug is None:
+        digests_root = config.vault / "digests"
+        if digests_root.exists():
+            for f in digests_root.rglob("*.md"):
+                if _is_session_digest(f, session_id):
+                    rel_parts = f.relative_to(config.vault).parts
+                    if len(rel_parts) >= 2:
+                        slug = rel_parts[1]
+                        project = registry.by_slug(slug)
+                        break
+
+    if slug is None:
+        raise DigestError(
+            f"session {session_id!r} resolves to no project,"
+            " so this session has nowhere to be filed"
+        )
+
+    if agent is None:
+        agent = "claude"
+
+    when = entries[-1].time.astimezone(UTC).date()
+    rel = f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
+
+    resolution = keys.Resolution(
+        kind=keys.PATH,
+        cwd=Path("."),
+        project=project,
+        slug=slug,
+        root=None,
+        alias_added=False,
+    )
+
+    facts: list[Fact] = []
+    dropped: list[Dropped] = []
+    summaries: list[str] = []
+    handoffs: list[dict[str, object]] = []
+    prompt = prompt_text()
+    schema = digest_schema()
+
+    for part in parts(entries):
+        answer = _model_answer(config, prompt, render(part), schema)
+        part_facts, part_dropped = verify(config, session_id, part, answer["facts"])
+        facts.extend(part_facts)
+        dropped.extend(part_dropped)
+        summaries.append(answer["summary"])
+        handoffs.append(answer["handoff"])
+
+    page_text, on_page, refused = _page(
+        config,
+        SessionRef(agent=agent, session_id=session_id),
+        rel,
+        slug,
+        resolution,
+        summaries,
+        handoffs[-1],
+        facts,
+        dropped,
+        when,
+        now or datetime.now(UTC),
+    )
+    dropped.extend(refused)
+
+    target_path = config.vault / rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    _reap_orphans(target_path.parent)
+
+    handle, tmp = tempfile.mkstemp(
+        dir=target_path.parent, prefix=PAGE_TEMP_PREFIX, suffix=PAGE_TEMP_SUFFIX
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(page_text)
+        os.chmod(tmp, PAGE_MODE)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+    with vault.locked(config):
+        digests_root = config.vault / "digests"
+        old_paths: list[str] = []
+        if digests_root.exists():
+            for f in list(digests_root.rglob("*.md")):
+                if _is_session_digest(f, session_id) and f != target_path:
+                    old_paths.append(f.relative_to(config.vault).as_posix())
+                    f.unlink()
+                    parent = f.parent
+                    while parent != digests_root and parent.exists():
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
+        try:
+            os.replace(tmp, target_path)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+        paths_to_commit = list(set([*old_paths, rel]))
+        vault.commit(config.vault, paths_to_commit, f"aft: redigest {session_id}")
+
+    index.update(config)
+    return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=entries[-1].id)

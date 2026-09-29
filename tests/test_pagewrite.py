@@ -1123,3 +1123,69 @@ def test_archive_superseded_refuses_active_fact(doc):
     with pytest.raises(pagewrite.WriteError, match="only a superseded line can be archived"):
         doc.archive_superseded(active)
     assert doc.render() == before
+
+
+def test_scrub_source_replaces_quote_and_title_with_marker(initialized):
+    """Scrubbing a source replaces quote and title with the marker and preserves other sources."""
+    page_text = (
+        "---\n"
+        "type: Project\n"
+        "title: Demo\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-1#e1\n"
+        '    title: "Session 1"\n'
+        '    quote: "secret words 1"\n'
+        "  - id: s2\n"
+        "    resource: aft://session/claude/s-2#e2\n"
+        '    quote: "keep words 2"\n'
+        "aft:\n"
+        "  project: p_demo\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- Decision 1. [stated] 2026-10-01 [^s1]\n"
+    )
+    doc = make(initialized, page_text)
+    changed = doc.scrub_source("s1", "[forgotten]")
+    assert changed is True
+    assert doc.sources["s1"]["quote"] == "[forgotten]"
+    assert doc.sources["s1"]["title"] == "[forgotten]"
+    assert doc.sources["s2"]["quote"] == "keep words 2"
+
+    assert doc.scrub_source("s1", "[forgotten]") is False
+
+    with pytest.raises(pagewrite.WriteError, match="not in the frontmatter"):
+        doc.scrub_source("s99")
+
+
+def test_remove_candidate_removes_line_and_refuses_non_candidate_or_open_note(initialized):
+    """Removing a candidate removes the line; non-candidates or lines with notes refuse."""
+    page_text = (
+        "---\n"
+        "type: Project\n"
+        "title: Demo\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-1#e1\n"
+        '    quote: "words 1"\n'
+        "aft:\n"
+        "  project: p_demo\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- Standing fact. [stated] 2026-10-01 [^s1]\n\n"
+        "## Candidates\n\n"
+        "- Candidate to remove. [inferred] 2026-10-01 [^s1] (signals 1/3, sessions 1/2)\n"
+        "- Candidate with note. [inferred] 2026-10-01 [^s1] (signals 1/3, sessions 1/2)\n"
+        "> [!question] 2026-10-01\n"
+        "> An open note on candidate.\n"
+    )
+    doc = make(initialized, page_text)
+    with pytest.raises(pagewrite.WriteError, match="only a candidate line can be removed"):
+        doc.remove_candidate(doc.fact("Standing fact."))
+
+    with pytest.raises(pagewrite.WriteError, match="open note"):
+        doc.remove_candidate(doc.fact("Candidate with note."))
+
+    doc.remove_candidate(doc.fact("Candidate to remove."))
+    assert "Candidate to remove." not in doc.render()
+    assert "Candidate with note." in doc.render()

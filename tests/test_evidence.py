@@ -927,3 +927,25 @@ def test_reads_of_a_session_that_was_never_archived_are_empty(cfg):
     evidence.store(cfg, "claude", "s1", None, [entry("e1")])
     assert evidence.entries(cfg, "another-session") == []
     assert stored(cfg, "another-session") == []
+
+
+def test_session_info_returns_agent_and_project_id(cfg):
+    assert evidence.session_info(cfg, "s1") is None
+    evidence.store(cfg, "claude", "s1", "prj-1", [entry("e1")])
+    assert evidence.session_info(cfg, "s1") == ("claude", "prj-1")
+    assert evidence.session_info(cfg, "s2") is None
+
+
+def test_redact_pattern_rewrites_matching_rows_and_drains_log(cfg):
+    entries = [
+        entry("e1", text="secret key is sk-live-9876543210"),
+        entry("e2", text="clean entry with no secrets"),
+    ]
+    evidence.store(cfg, "claude", "s1", None, entries)
+    rewritten = evidence.redact_pattern(cfg, r"sk-live-[0-9]+")
+    assert rewritten == 1
+    assert log_bytes(cfg) == 0
+    read_back = evidence.entries(cfg, "s1")
+    assert read_back[0].text == "secret key is [redacted]"
+    assert read_back[1].text == "clean entry with no secrets"
+    assert zlib.compress(b"sk-live-9876543210") not in db(cfg).read_bytes()
