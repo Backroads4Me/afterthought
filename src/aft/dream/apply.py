@@ -22,12 +22,11 @@ from pathlib import Path
 import yaml
 
 from aft import evidence, lint, page, pagewrite
+from aft import vault as vaultmod
 from aft.config import Config
 from aft.dream import decide, maintain, rules
 from aft.gitutil import git
 from aft.registry import Registry
-
-GLOBAL_NOT_STATED = "a global page changes only from [stated]"
 
 
 class ApplyError(Exception):
@@ -359,7 +358,33 @@ def run_project(
                         / "global"
                         / ("preferences.md" if new_fact.kind == "preference" else "environment.md")
                     )
+                    if not target_file.exists():
+                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                        record_write(target_file)
+                        content = (
+                            vaultmod.PREFERENCES
+                            if new_fact.kind == "preference"
+                            else vaultmod.ENVIRONMENT
+                        )
+                        target_file.write_text(content, encoding="utf-8")
                 else:
+                    overview_path = vault_path / "projects" / slug / "overview.md"
+                    if not overview_path.exists():
+                        overview_path.parent.mkdir(parents=True, exist_ok=True)
+                        proj_id = run_project_id or (project.id if project else f"p_{slug}")
+                        proj_title = project.title if project else slug.capitalize()
+                        record_write(overview_path)
+                        overview_path.write_text(
+                            f"---\n"
+                            f"type: Project\n"
+                            f"title: {proj_title}\n"
+                            f"description: {slug}\n"
+                            f"sources: []\n"
+                            f"aft:\n"
+                            f"  project: {proj_id}\n"
+                            f"---\n",
+                            encoding="utf-8",
+                        )
                     if proposal.target is not None and outcome.action in (
                         "confirm",
                         "supersede",
@@ -367,24 +392,7 @@ def run_project(
                     ):
                         target_file = vault_path / proposal.target.path
                     else:
-                        target_file = vault_path / "projects" / slug / "overview.md"
-
-                if not target_file.exists():
-                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                    proj_id = run_project_id or (project.id if project else f"p_{slug}")
-                    proj_title = project.title if project else slug.capitalize()
-                    record_write(target_file)
-                    target_file.write_text(
-                        f"---\n"
-                        f"type: Project\n"
-                        f"title: {proj_title}\n"
-                        f"description: {slug}\n"
-                        f"sources: []\n"
-                        f"aft:\n"
-                        f"  project: {proj_id}\n"
-                        f"---\n",
-                        encoding="utf-8",
-                    )
+                        target_file = overview_path
 
                 doc = pagewrite.PageDoc.read(target_file)
                 verified_refs = [e.source for e in verified_evidence]

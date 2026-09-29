@@ -337,3 +337,72 @@ aft:
     broken, cleared = maintain.check_anchors(root, proj, TODAY, initialized.host)
     assert len(broken) == 1
     assert broken[0].statement == "The index uses SQLite."
+
+
+def test_fact_with_two_anchors_remains_stale_when_one_anchor_is_broken(initialized, tmp_path):
+    repo = make_repo(tmp_path / "widget")
+    (repo / "index.py").write_text("def search(): pass\n")
+    (repo / "db.py").write_text("postgres = True\n")
+    run_git(["add", "index.py", "db.py"], repo)
+    run_git(["commit", "-m", "initial files"], repo)
+    commit_sha = run_git(["rev-parse", "HEAD"], repo)
+
+    registry = Registry.load(initialized.registry_path)
+    proj = registry.add("widget", "Widget")
+    registry.add_path(proj, path_key(initialized.host, repo))
+    registry.save()
+
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(f"""---
+type: Project
+title: widget
+sources:
+  - id: s1
+    resource: aft://session/claude/123#e1
+    quote: "we use sqlite"
+  - id: s2
+    resource: aft://session/claude/123#e2
+    quote: "we use postgres"
+aft:
+  project: {proj.id}
+  anchors:
+    s1: {{path: index.py, all_of: ["sqlite3"], commit: {commit_sha}}}
+    s2: {{path: db.py, all_of: ["postgres"], commit: {commit_sha}}}
+---
+
+## Facts
+
+- Dual anchor fact. [observed] 2026-09-30 [^s1] [^s2]
+""")
+    vault.commit(root, ["projects"], "seed")
+
+    # s1 is broken (sqlite3 missing from index.py), s2 is intact (postgres present in db.py)
+    broken, cleared = maintain.check_anchors(root, proj, TODAY, initialized.host)
+    assert len(broken) == 1
+    assert broken[0].sid == "s1"
+    assert cleared == []
+
+    p = page.parse(overview.read_text(), overview.relative_to(root))
+    assert p.facts[0].state == page.STALE
+
+    # Second check: fact must remain stale and must not be cleared by the intact s2 anchor
+    broken2, cleared2 = maintain.check_anchors(root, proj, TODAY, initialized.host)
+    assert len(broken2) == 1
+    assert broken2[0].sid == "s1"
+    assert cleared2 == []
+    p2 = page.parse(overview.read_text(), overview.relative_to(root))
+    assert p2.facts[0].state == page.STALE
+
+    # When s1 words reappear, both anchors are intact, so the stale mark clears
+    (repo / "index.py").write_text("import sqlite3\ndef search(): pass\n")
+    run_git(["add", "index.py"], repo)
+    run_git(["commit", "-m", "restore sqlite"], repo)
+
+    broken3, cleared3 = maintain.check_anchors(root, proj, TODAY, initialized.host)
+    assert broken3 == []
+    assert len(cleared3) == 2
+    assert {c.sid for c in cleared3} == {"s1", "s2"}
+    p3 = page.parse(overview.read_text(), overview.relative_to(root))
+    assert p3.facts[0].state == page.ACTIVE

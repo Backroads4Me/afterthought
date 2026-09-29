@@ -1102,3 +1102,24 @@ def test_a_hand_typed_tail_makes_every_state_operation_refuse(initialized):
         with pytest.raises(pagewrite.WriteError, match="moved"):
             operation()
         assert doc.render() == before
+
+
+def test_archive_superseded_removes_line_and_returns_content(initialized, doc):
+    source = new_source(doc)
+    old = doc.fact("The index is plain SQLite.")
+    doc.supersede(old, "The index is SQLite FTS5.", "stated", "2026-10-04", (source,))
+    struck = next(fact for fact in doc.page.facts if fact.state == page.SUPERSEDED)
+    assert struck.statement == "The index is plain SQLite."
+    line = doc.archive_superseded(struck)
+    assert "~~The index is plain SQLite.~~" in line
+    assert "superseded 2026-10-04 by" in line
+    assert "The index is plain SQLite." not in doc.render()
+    assert all(fact.statement != "The index is plain SQLite." for fact in doc.page.facts)
+
+
+def test_archive_superseded_refuses_active_fact(doc):
+    active = doc.fact("The GPU host runs vLLM.")
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="only a superseded line can be archived"):
+        doc.archive_superseded(active)
+    assert doc.render() == before

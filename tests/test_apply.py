@@ -1273,6 +1273,54 @@ def test_overview_created_when_project_already_registered_without_overview(initi
     assert "First fact on new overview." in overview_path.read_text()
 
 
+def test_overview_created_for_project_registered_with_project_add(
+    initialized, home, fake, tmp_path
+):
+    """A project registered with aft project add has no overview.md initially;
+    it is created before the first curated fact is written.
+    """
+    from aft.cli import main
+
+    repo = make_repo(tmp_path / "custom-repo")
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    ret = main(["project", "add", str(repo), "--title", "Custom Repo"])
+    assert ret == 0
+
+    overview_path = cfg.vault / "projects" / "custom-repo" / "overview.md"
+    assert not overview_path.exists()
+
+    write_digest(
+        cfg,
+        "custom-repo",
+        "d-cli-add",
+        facts=[
+            {
+                "statement": "Fact for project registered with CLI.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/c/1#e1",
+                "quote": "Fact for project registered with CLI.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "add fact")]
+    res = schedule.run(cfg, now=NOW)
+    assert "custom-repo" in res.ran
+    assert overview_path.exists()
+    assert "Fact for project registered with CLI." in overview_path.read_text()
+    doc = pagewrite.PageDoc.read(overview_path)
+    assert doc.fact("Fact for project registered with CLI.").state == page.ACTIVE
+
+
 def test_quote_not_in_archive_is_rejected(initialized, home, fake):
     """A fact whose quote is not in the archive is rejected under R1."""
     cfg = config_with_fake(home, initialized.vault, fake)

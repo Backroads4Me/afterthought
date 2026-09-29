@@ -478,6 +478,16 @@ class PageDoc:
             at = self._append_line(section, line)
             return self._fact_written(at, found.statement)
 
+    def archive_superseded(self, fact: page.Fact) -> str:
+        """Remove an expired superseded line from the page, returning its text (design 9)."""
+        found = self._resolve(fact)
+        if found.state != page.SUPERSEDED:
+            raise WriteError(f"only a superseded line can be archived; this one is {found.state}")
+        line_content = self.lines[found.line - 1]
+        with self._atomic():
+            self._apply(found.line - 1, found.line, [])
+        return line_content
+
     # Lines and frontmatter
 
     def fact(self, statement: str) -> page.Fact:

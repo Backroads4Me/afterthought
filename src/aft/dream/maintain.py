@@ -102,6 +102,7 @@ def check_anchors(
             continue
 
         modified = False
+        anchor_status: dict[str, tuple[bool, str]] = {}
         for sid, anchor_info in anchors.items():
             if not isinstance(anchor_info, dict):
                 continue
@@ -147,10 +148,18 @@ def check_anchors(
                             is_broken = True
                             break
 
-            for fact in list(doc.page.facts):
-                if sid not in fact.refs:
-                    continue
-                if is_broken:
+            reason = f"anchor words gone from {anchor_path}" if is_broken else ""
+            anchor_status[sid] = (is_broken, reason)
+
+        for fact in list(doc.page.facts):
+            checked_sids = [sid for sid in fact.refs if sid in anchor_status]
+            if not checked_sids:
+                continue
+
+            broken_sids = [sid for sid in checked_sids if anchor_status[sid][0]]
+            if broken_sids:
+                for sid in broken_sids:
+                    _, reason = anchor_status[sid]
                     if fact.callouts:
                         broken_list.append(
                             BrokenAnchor(
@@ -162,7 +171,6 @@ def check_anchors(
                             )
                         )
                     elif fact.state == page.ACTIVE:
-                        reason = f"anchor words gone from {anchor_path}"
                         if doc.mark_stale(fact, reason, today):
                             modified = True
                         broken_list.append(
@@ -180,14 +188,15 @@ def check_anchors(
                                 page=rel,
                                 statement=fact.statement,
                                 sid=sid,
-                                reason=fact.reason or "anchor words gone",
+                                reason=fact.reason or reason,
                                 reported_only=False,
                             )
                         )
-                else:
-                    if fact.state == page.STALE:
-                        if doc.clear_stale(fact, today):
-                            modified = True
+            else:
+                if fact.state == page.STALE:
+                    if doc.clear_stale(fact, today):
+                        modified = True
+                    for sid in checked_sids:
                         cleared_list.append(
                             ClearedAnchor(
                                 page=rel,
@@ -227,34 +236,27 @@ def archive_superseded(
             continue
         rel = page_path.relative_to(vault).as_posix()
         try:
-            text = page_path.read_text(encoding="utf-8")
-        except OSError:
+            doc = pagewrite.PageDoc.read(page_path)
+        except (OSError, pagewrite.WriteError):
             continue
 
-        p = page.parse(text, page_path.relative_to(vault))
-        fm, _, _, _ = page.split_frontmatter(text)
-        sources_map = {
-            str(s["id"]): s
-            for s in (fm or {}).get("sources") or []
-            if isinstance(s, dict) and s.get("id") is not None
-        }
-
-        expired = [
+        initial_expired = [
             f
-            for f in p.facts
+            for f in doc.page.facts
             if f.state == page.SUPERSEDED
             and f.state_date is not None
             and _is_older_than(f.state_date, today_date, ANCHOR_AGE_DAYS)
         ]
-        if not expired:
+        if not initial_expired:
             continue
 
         archive_path = vault / "archive" / rel
         archive_path.parent.mkdir(parents=True, exist_ok=True)
 
         if archive_path.exists():
-            archive_text = archive_path.read_text(encoding="utf-8")
+            doc_archive = pagewrite.PageDoc.read(archive_path)
         else:
+            fm, _, _, _ = page.split_frontmatter(doc.render())
             title = (fm or {}).get("title") or page_path.stem
             archive_text = (
                 f"---\n"
@@ -264,45 +266,48 @@ def archive_superseded(
                 f"sources: []\n"
                 f"---\n"
             )
+            doc_archive = pagewrite.PageDoc(archive_text, archive_path)
 
-        doc_archive = pagewrite.PageDoc(archive_text, archive_path)
-        raw_lines = text.split("\n")
-        lines_to_remove: set[int] = set()
-
-        for fact in expired:
+        while True:
+            expired = [
+                f
+                for f in doc.page.facts
+                if f.state == page.SUPERSEDED
+                and f.state_date is not None
+                and _is_older_than(f.state_date, today_date, ANCHOR_AGE_DAYS)
+            ]
+            if not expired:
+                break
+            fact = expired[0]
             needed_refs = list(fact.refs)
             if fact.superseded_by and fact.superseded_by not in needed_refs:
                 needed_refs.append(fact.superseded_by)
             for ref in needed_refs:
                 if ref not in doc_archive.sources:
-                    src_entry = sources_map.get(ref)
+                    src_entry = doc.sources.get(ref)
                     if src_entry:
                         doc_archive.add_source(
                             resource=src_entry.get("resource", ""),
                             title=src_entry.get("title", ""),
                             quote=src_entry.get("quote", ""),
                         )
-            line_idx = fact.line - 1
-            if 0 <= line_idx < len(raw_lines):
-                line_content = raw_lines[line_idx]
-                section = fact.section or "Decisions"
-                doc_archive._append_line(section, line_content)
-                lines_to_remove.add(line_idx)
-                archived.append(
-                    ArchivedLine(
-                        page=rel,
-                        archive_page=f"archive/{rel}",
-                        statement=fact.statement,
-                        superseded_date=fact.state_date or "",
-                    )
+            section = fact.section or "Decisions"
+            line_content = doc.archive_superseded(fact)
+            doc_archive._append_line(section, line_content)
+            archived.append(
+                ArchivedLine(
+                    page=rel,
+                    archive_page=f"archive/{rel}",
+                    statement=fact.statement,
+                    superseded_date=fact.state_date or "",
                 )
+            )
 
         if record_write is not None:
             record_write(archive_path)
             record_write(page_path)
         archive_path.write_text(doc_archive.render(), encoding="utf-8")
-        remaining_lines = [line for idx, line in enumerate(raw_lines) if idx not in lines_to_remove]
-        page_path.write_text("\n".join(remaining_lines), encoding="utf-8")
+        page_path.write_text(doc.render(), encoding="utf-8")
 
     return archived
 
