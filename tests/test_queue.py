@@ -783,137 +783,15 @@ def test_a_span_opened_in_one_chunk_still_holds_the_next_chunk_of_its_session(
     ]
 
 
-def legacy_queue_file(config: Config) -> None:
-    """The queue file the released version wrote: every table, and no ``off_record``."""
-    (config.home / queue.QUEUE_NAME).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
-    conn.executescript(
-        "PRAGMA journal_mode = wal;"
-        "CREATE TABLE jobs ("
-        " id TEXT PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT NOT NULL,"
-        " cwd TEXT NOT NULL, transcript_path TEXT, kind TEXT NOT NULL,"
-        " event_time TEXT NOT NULL, status TEXT NOT NULL, claimed_pid INTEGER,"
-        " error TEXT, created_time TEXT NOT NULL, updated_time TEXT NOT NULL);"
-        "CREATE INDEX jobs_by_status ON jobs (status, created_time, id);"
-        "CREATE INDEX jobs_by_session ON jobs (agent, session_id, status);"
-        "CREATE TABLE sessions ("
-        " agent TEXT NOT NULL, session_id TEXT NOT NULL, watermark TEXT,"
-        " PRIMARY KEY (agent, session_id));"
-        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-        "INSERT INTO sessions VALUES ('claude', 'legacy', 'l-9');"
+def test_a_queue_file_without_span_state_is_refused(cfg: Config) -> None:
+    """A queue file from before sessions carried span state is refused, never guessed at."""
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    conn.execute(
+        "CREATE TABLE sessions (agent TEXT NOT NULL, session_id TEXT NOT NULL,"
+        " watermark TEXT, PRIMARY KEY (agent, session_id))"
     )
     conn.close()
 
-
-def seed_sweep_window(config: Config, since: datetime) -> None:
-    """Write the sweep window into the file itself, as an earlier version's sweep left it."""
-    seed = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
-    seed.execute(
-        "INSERT INTO meta (key, value) VALUES (?, ?)",
-        (queue.LAST_SWEEP, since.astimezone(UTC).isoformat()),
-    )
-    seed.close()
-
-
-def columns_of(config: Config, table: str) -> set[str]:
-    """The columns the queue file on disk actually has for ``table``."""
-    return {row[1] for row in query(config, f"PRAGMA table_info({table})")}
-
-
-def test_a_queue_written_before_the_span_column_keeps_its_watermark(
-    cfg: Config,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An earlier version's queue file gains the column on its first write, not a rebuild."""
-    legacy_queue_file(cfg)
-
-    queue.enqueue(cfg, event(session_id="legacy"))
-    job = queue.next_job(cfg)
-    assert job is not None
-    assert (job.watermark, job.off_record) == ("l-9", False), (
-        "the row stands, the span starts closed"
-    )
-    queue.complete(cfg, job, "l-12", off_record=True)
-
-    assert query(cfg, "SELECT watermark, off_record FROM sessions") == [("l-12", 1)]
-    assert "claude/legacy" in caplog.text, (
-        "the upgrade names the session whose span state it could not know"
-    )
-
-
-def test_a_writer_locked_out_reports_a_busy_file_not_a_missing_column(
-    cfg: Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A busy queue file says it is busy: a locked write is never a missing column."""
-    legacy_queue_file(cfg)
-
-    monkeypatch.setattr(queue, "BUSY_TIMEOUT_MS", 50)
-
-    held = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
-    held.execute("BEGIN IMMEDIATE")
-    try:
-        with pytest.raises(sqlite3.OperationalError):
-            queue.enqueue(cfg, event(session_id="legacy"))
-    finally:
-        held.close()
-
-
-def test_a_reader_of_a_migrated_queue_takes_no_write_lock(cfg: Config) -> None:
-    """The write side brought the column in, so reading the state needs no lock."""
-    legacy_queue_file(cfg)
-    queue.enqueue(cfg, event(session_id="legacy"))
-
-    held = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
-    held.execute("BEGIN IMMEDIATE")
-    try:
-        assert queue.session_state(cfg, CLAUDE, "legacy") == queue.SessionState(
-            watermark="l-9", off_record=False, has_open_job=True
-        )
-    finally:
-        held.close()
-
-
-def test_a_reader_that_meets_an_unmigrated_queue_says_so(cfg: Config) -> None:
-    """A reader never repairs the schema: an absent column is reported, not added."""
-    legacy_queue_file(cfg)
-
-    with pytest.raises(queue.QueueError):
-        queue.session_state(cfg, CLAUDE, "legacy")
-
-    assert "off_record" not in columns_of(cfg, "sessions"), (
-        "the reader left the schema as it found it"
-    )
-
-
-def test_the_sweep_metadata_read_of_an_unmigrated_queue_still_answers(cfg: Config) -> None:
-    """A read that never names the span column is not gated by its absence."""
-    legacy_queue_file(cfg)
-    window = NOW - timedelta(minutes=40)
-    seed_sweep_window(cfg, window)
-
-    assert queue.last_sweep(cfg) == window
-    assert "off_record" not in columns_of(cfg, "sessions"), (
-        "the metadata read left the schema as it found it"
-    )
-
-
-def test_a_sweep_of_an_unmigrated_queue_still_enqueues_what_it_finds(
-    cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The sweep brings a released queue file current with its own write, then reads it."""
-    legacy_queue_file(cfg)
-    seed_sweep_window(cfg, NOW - timedelta(minutes=40))
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: Path("~/.claude/projects")})
-    touched = NOW - timedelta(minutes=31)
-    path = session_file(tmp_path / ".claude/projects", CLAUDE, "missed", touched=touched)
-
-    found = capture.sweep(cfg, NOW)
-
-    assert [(e.agent, e.session_id) for e in found] == [(CLAUDE, path.stem)]
-    assert query(cfg, "SELECT status FROM jobs") == [(queue.PENDING,)]
-    assert "off_record" in columns_of(cfg, "sessions"), "the sweep wrote the column in"
-    assert queue.session_state(cfg, CLAUDE, path.stem) == queue.SessionState(
-        watermark=None, off_record=False, has_open_job=True
-    )
-    assert queue.last_sweep(cfg) == NOW, "the sweep closed its window"
+    with pytest.raises(queue.QueueError, match="off-the-record"):
+        queue.enqueue(cfg, event(session_id="old"))

@@ -19,7 +19,6 @@ over (BUILD-PLAN M2.2, M2.3).
 
 from __future__ import annotations
 
-import logging
 import os
 import sqlite3
 import time
@@ -33,8 +32,6 @@ from aft.events import SessionEvent
 from aft.ids import new_id
 
 QUEUE_NAME = "queue.sqlite"
-
-LOGGER = logging.getLogger(__name__)
 
 
 class QueueError(Exception):
@@ -95,16 +92,6 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs (status, created_time, id);
 CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 """
-
-# A column a shipped table gained afterwards, with the definition that adds it and the
-# default a row already in the file gets. ``CREATE TABLE IF NOT EXISTS`` leaves a queue an
-# earlier version wrote exactly as it is, so every later column is checked for and added
-# when the queue is written: a session already in the file keeps its watermark and starts with
-# no span open, the reading that captures text rather than holding a session off the
-# record without anyone having asked (M2.2, M2.3).
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
-    ("sessions", "off_record", "INTEGER NOT NULL DEFAULT 0"),
-)
 
 
 @dataclass(frozen=True)
@@ -279,18 +266,6 @@ def fail(config: Config, job: Job, error: str) -> None:
             raise QueueError(f"job {job.id} is not held by this process")
 
 
-def ensure_schema(config: Config) -> None:
-    """Bring a queue file an earlier version wrote up to this version's schema.
-
-    Opening `_writing` is the act: what `_ADDED_COLUMNS` names arrives there, under the
-    ``BEGIN IMMEDIATE`` that transaction already holds. A process that reads the queue
-    before it has written anything - the sweep, on a host whose hooks never fired - calls
-    this so the repair comes from its own write rather than from some other process.
-    """
-    with _writing(config):
-        pass
-
-
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     """The queue's facts about one session: where its digest read to, whether a span is open
     there, and whether it has capture work in flight.
@@ -299,7 +274,6 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     is what a first chunk of any session starts with.
     """
     with _reading(config) as conn:
-        _check_columns(conn)
         row = conn.execute(
             "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
             (agent, session_id),
@@ -400,7 +374,6 @@ def _writing(config: Config):
     conn = _connect(config)
     try:
         conn.execute("BEGIN IMMEDIATE")
-        _add_columns(conn)
         yield conn
         conn.commit()
     except BaseException:
@@ -426,58 +399,13 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    if "off_record" not in columns:
+        conn.close()
+        raise QueueError(
+            f"{path} predates off-the-record state per session; delete it to start the queue over"
+        )
     return conn
-
-
-def _add_columns(conn: sqlite3.Connection) -> None:
-    """Add to ``conn`` any column of `_ADDED_COLUMNS` the table it names does not have yet.
-
-    A queue file an earlier version wrote keeps its rows and its own columns, so a column
-    `_SCHEMA` has gained since has to arrive by ``ALTER TABLE`` before any statement names
-    it. `_writing` calls this with ``BEGIN IMMEDIATE`` already held: that is the lock the
-    ``ALTER`` needs and the lock no other connection can be holding while it runs, so any
-    report the ``ALTER`` makes is the queue's own trouble and is raised as it stands.
-    """
-    for table, column, definition in _ADDED_COLUMNS:
-        if column in _columns(conn, table):
-            continue
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        _name_sessions_of_unknown_span(conn)
-
-
-def _check_columns(conn: sqlite3.Connection) -> None:
-    """Report a column of `_ADDED_COLUMNS` that ``conn``'s table does not have.
-
-    Only a read that names the column asks, and it reports rather than making the column
-    exist: a schema change belongs to a write.
-    """
-    for table, column, _ in _ADDED_COLUMNS:
-        if column not in _columns(conn, table):
-            raise QueueError(f"queue table {table} has no {column} column to use")
-
-
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
-    """The names of ``table``'s columns as the file on disk has them."""
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-
-
-def _name_sessions_of_unknown_span(conn: sqlite3.Connection) -> None:
-    """Name the sessions whose span state was unknown when the queue gained ``off_record``.
-
-    This is the plan author's open question on that upgrade window, ruled at 050a56c.
-    """
-    named = [
-        f"{agent}/{session_id}"
-        for agent, session_id in conn.execute(
-            "SELECT agent, session_id FROM sessions WHERE watermark IS NOT NULL LIMIT 10"
-        )
-    ]
-    if named:
-        LOGGER.warning(
-            "queue gained off_record: sessions resuming on the record with no span stored"
-            " include %s; open question on BUILD-PLAN M2.3",
-            ", ".join(named),
-        )
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:

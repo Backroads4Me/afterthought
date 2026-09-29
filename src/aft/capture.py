@@ -25,7 +25,7 @@ from pathlib import Path
 
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
-from aft.queue import enqueue, ensure_schema, last_sweep, record_sweep, session_state
+from aft.queue import enqueue, last_sweep, record_sweep, session_state
 from aft.readers import CLAUDE, PI
 
 # Where each agent keeps its session files, and the layout of one: Claude Code writes
@@ -80,7 +80,6 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
     if since is None:
         record_sweep(config, now)
         return []
-    ensure_schema(config)
     found: list[SessionEvent] = []
     for agent, directory in SESSION_DIRS.items():
         for path in _session_files(directory):
