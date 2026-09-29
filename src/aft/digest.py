@@ -345,6 +345,7 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
         return False
     if job.transcript_path is None:
         return False
+    vault.require(config)
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
     if not read:
         return False
@@ -355,7 +356,10 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     try:
         resolution = keys.resolve(job.cwd, registry, config.host)
         project_id = resolution.project.id if resolution.project else None
-    except Exception:
+    except GitError:
+        # Archiving files no page, so the project it would resolve to is a label rather
+        # than a requirement: a directory that has gone away still gets its words stored.
+        # Anything else the resolver raises is a bug or a host failure, and travels up.
         project_id = None
     evidence.store(config, job.agent, job.session_id, project_id, kept)
     index.update(config)

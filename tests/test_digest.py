@@ -43,8 +43,11 @@ from aft import (
     work,
 )
 from aft import config as configmod
+from aft import index as indexmod
 from aft.config import Config
 from aft.events import SESSION_END, SessionEvent
+from aft.gitutil import GitError
+from aft.model import ModelError
 from aft.readers import CLAUDE, PI, Entry
 from aft.readers.claude import SYNTHETIC_MODEL
 from conftest import make_repo
@@ -293,6 +296,30 @@ def rows(cfg: Config, status: str) -> list[str]:
 
 def watermark(cfg: Config, session_id: str = SESSION) -> str | None:
     return queue.session_state(cfg, CLAUDE, session_id).watermark
+
+
+def indexed_words(cfg: Config, needle: str) -> dict[str, int]:
+    """How many rows of each search collection hold ``needle``, indexed or not.
+
+    The count is read out of the index file rather than from what a function returned,
+    because the question this answers is whether the words are searchable, and an empty
+    result from an index that was never built would look like the same answer as an empty
+    result from a session that was kept out (BUILD-PLAN M2.7).
+    """
+    counts: dict[str, int] = {}
+    if not (cfg.home / indexmod.INDEX_NAME).exists():
+        return counts
+    conn = sqlite3.connect(cfg.home / indexmod.INDEX_NAME)
+    try:
+        for name in indexmod.COLLECTIONS:
+            counts[name] = conn.execute(
+                f"SELECT count(*) FROM {name}"
+                " WHERE title LIKE ? OR description LIKE ? OR heading LIKE ? OR body LIKE ?",
+                (f"%{needle}%",) * 4,
+            ).fetchone()[0]
+    finally:
+        conn.close()
+    return counts
 
 
 def head(cfg: Config) -> str:
@@ -1616,9 +1643,18 @@ def with_capture(
     return configmod.load()
 
 
+# The words of a session whose directory sits under capture.exclude_paths. Finding them in
+# the queue, the archive, the index or the vault is the failure this task exists to prevent.
+SECRET_WORDS = "super secret prompt"
+
+
 def test_excluded_session_leaves_no_trace(session: Session, tmp_path):
-    """An excluded session is never read: no queue row kept, no evidence,
-    no index row, no digest.
+    """An excluded session leaves no queue row, no evidence, no index row, and no digest.
+
+    Each of the four is checked where it would have been written: the queue by the sweep and
+    again by an enqueue of the session's event, the evidence and the index by a whole
+    `aft work`, the digest by the page directory. The index is built before it is read,
+    because an index file that was never written answers "not there" to every question.
     """
     excluded_dir = tmp_path / "private_repo"
     excluded_dir.mkdir()
@@ -1629,7 +1665,7 @@ def test_excluded_session_leaves_no_trace(session: Session, tmp_path):
         transcript = write_records(
             tmp_path / "excluded.jsonl",
             {"cwd": str(excluded_dir)},
-            record("e1", "user", "super secret prompt"),
+            record("e1", "user", SECRET_WORDS),
         )
 
         swept = capture.sweep(cfg, NOW)
@@ -1671,18 +1707,61 @@ def test_excluded_session_leaves_no_trace(session: Session, tmp_path):
 
         assert evidence.entries(cfg, "excluded-1") == []
 
-        index_db = cfg.home / "index.sqlite"
-        if index_db.exists():
-            conn = sqlite3.connect(index_db)
-            ev_count = conn.execute(
-                "SELECT count(*) FROM evidence WHERE session_id = 'excluded-1'"
-            ).fetchone()[0]
-            conn.close()
-            assert ev_count == 0
+        indexmod.update(cfg)
+        assert indexed_words(cfg, SECRET_WORDS) == dict.fromkeys(indexmod.COLLECTIONS, 0)
 
-        assert not (cfg.vault / "digests").exists() or not list(
-            (cfg.vault / "digests").rglob("*.md")
+        assert not list((cfg.vault / "digests").rglob("*.md"))
+    finally:
+        fake.stop()
+
+
+def test_an_excluded_job_is_dropped_before_its_transcript_is_read(session: Session, tmp_path):
+    """The digest step refuses an excluded job before opening its file.
+
+    The job names a transcript that does not exist: a guard placed after the read would
+    fail this test with the reader's own error rather than the quiet None the guard
+    returns, so the assertion is the proof that nothing was opened (DESIGN 12).
+    """
+    excluded_dir = tmp_path / "private_repo"
+    excluded_dir.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        cfg = with_capture(cfg, exclude_paths=[str(excluded_dir)])
+        missing = tmp_path / "never-opened.jsonl"
+
+        job = queue.Job(
+            id="job_ex",
+            agent=CLAUDE,
+            session_id="excluded-1",
+            cwd=excluded_dir,
+            transcript_path=missing,
+            kind=SESSION_END,
+            event_time=NOW,
+            watermark=None,
+            off_record=False,
         )
+        assert digest.digest_job(cfg, job) is None
+
+        assert evidence.entries(cfg, "excluded-1") == []
+        assert len(fake.requests) == 0, "an excluded session reached the model"
+    finally:
+        fake.stop()
+
+
+def test_a_digested_sessions_words_do_reach_the_index(session: Session):
+    """The other half of the exclusion claim: a session that was read is searchable.
+
+    Without this the empty index counts in the exclusion tests prove nothing, since the
+    same zeros appear when the index holds nothing at all.
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        report = work.run(cfg)
+        assert report.digested == 1
+
+        found = indexed_words(cfg, USER_PROMPT[:32])
+        assert found[indexmod.EVIDENCE] > 0, "the session's own words are not searchable"
     finally:
         fake.stop()
 
@@ -1832,5 +1911,167 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
         fm_worker = frontmatter(cfg, f"digests/{worker_page}")
         assert fm_worker["aft"]["role"] == "worker"
         assert fm_worker["aft"]["facts"][0]["role"] == "worker"
+    finally:
+        fake.stop()
+
+
+def _two_waiting_workers(session: Session, tmp_path) -> tuple[Config, FakeEndpoint]:
+    """A config whose whole budget is spent and two worker sessions waiting in the queue."""
+    directories = [make_repo(tmp_path / f"worker_{name}").resolve() for name in ("one", "two")]
+    fake, cfg = serve(session.cfg)
+    cfg = with_capture(cfg, worker_paths=[str(d) for d in directories], budget=0)
+    for directory, name in zip(directories, ("one", "two"), strict=True):
+        transcript = write_records(
+            tmp_path / f"worker-{name}.jsonl",
+            {"cwd": str(directory)},
+            record("w1", "user", f"Worker {name} prompt: the suite is red."),
+        )
+        queue.enqueue(cfg, event(transcript, directory, session_id=f"worker-{name}"))
+    return cfg, fake
+
+
+def test_one_worker_failing_to_archive_leaves_the_other_workers_stored(
+    session: Session, tmp_path, monkeypatch
+):
+    """An archiving failure that belongs to one job stops that job and nothing else.
+
+    Both workers wait behind the same spent budget, so a loop that treated any failure as
+    the run's own would leave the second worker's words out of the archive while still
+    reporting the budget as why it stopped (BUILD-PLAN M2.7).
+    """
+    cfg, fake = _two_waiting_workers(session, tmp_path)
+    real = digest.archive_worker_job
+
+    def reject_one(config: Config, job: queue.Job) -> bool:
+        if job.session_id == "worker-one":
+            raise digest.DigestError("this session could not be filed")
+        return real(config, job)
+
+    monkeypatch.setattr(digest, "archive_worker_job", reject_one)
+    try:
+        report = work.run(cfg)
+
+        assert report.digested == 0
+        assert report.stopped == work.STOP_BUDGET
+        assert len(report.failures) == 1
+        assert "worker-one" in report.failures[0]
+        assert len(evidence.entries(cfg, "worker-two")) >= 1
+        assert len(fake.requests) == 0
+    finally:
+        fake.stop()
+
+
+def test_archiving_workers_stops_with_the_run_that_cannot_continue(
+    session: Session, tmp_path, monkeypatch
+):
+    """An archiving failure that stops the run is recorded once, not once per worker."""
+    cfg, fake = _two_waiting_workers(session, tmp_path)
+
+    def endpoint_is_down(config: Config, job: queue.Job) -> bool:
+        raise ModelError("the endpoint did not answer")
+
+    monkeypatch.setattr(digest, "archive_worker_job", endpoint_is_down)
+    try:
+        report = work.run(cfg)
+
+        assert report.stopped == work.STOP_UNREACHABLE
+        assert len(report.failures) == 1
+        assert evidence.entries(cfg, "worker-two") == []
+    finally:
+        fake.stop()
+
+
+def _one_waiting_worker(session: Session, tmp_path) -> tuple[Config, FakeEndpoint]:
+    """A spent budget and one worker session waiting in the queue."""
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    fake, cfg = serve(session.cfg)
+    cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+    transcript = write_records(
+        tmp_path / "worker.jsonl",
+        {"cwd": str(worker_dir)},
+        record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+    )
+    queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+    return cfg, fake
+
+
+def test_a_worker_whose_directory_is_gone_still_has_its_words_stored(
+    session: Session, tmp_path, monkeypatch
+):
+    """A worker directory that will not answer as a project costs its label, not its text.
+
+    Archiving files no page, so the project id is a label beside the words rather than a
+    requirement for storing them; the directory belongs to whatever ran the session and
+    goes away with it (DESIGN 8, M2.7).
+    """
+    cfg, fake = _one_waiting_worker(session, tmp_path)
+
+    def no_project(*args: object, **kwargs: object) -> object:
+        raise GitError("not a repository")
+
+    monkeypatch.setattr(digest.keys, "resolve", no_project)
+    try:
+        report = work.run(cfg)
+
+        assert report.failures == ()
+        assert report.stopped == work.STOP_BUDGET
+        archived = evidence.entries(cfg, "worker-1")
+        assert any("nitrile gasket" in entry.text for entry in archived)
+        assert "worker-1" in rows(cfg, queue.PENDING), "the digest lost its place"
+    finally:
+        fake.stop()
+
+
+def test_archiving_without_a_vault_stops_rather_than_indexing_nothing(session: Session, tmp_path):
+    """Archiving names the missing vault instead of storing text no index can read.
+
+    The walk that builds the index reads the vault, so an archive step that ran without one
+    would report the worker as stored while indexing none of it (DESIGN 14).
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    cfg = with_capture(session.cfg, worker_paths=[str(worker_dir)], budget=0)
+    transcript = write_records(
+        tmp_path / "worker.jsonl",
+        {"cwd": str(worker_dir)},
+        record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+    )
+    job = queue.Job(
+        id="job_v",
+        agent=CLAUDE,
+        session_id="worker-v",
+        cwd=worker_dir,
+        transcript_path=transcript,
+        kind=SESSION_END,
+        event_time=NOW,
+        watermark=None,
+        off_record=False,
+    )
+    shutil.rmtree(cfg.vault)
+
+    with pytest.raises(vault.VaultError):
+        digest.archive_worker_job(cfg, job)
+    assert evidence.entries(cfg, "worker-v") == []
+
+
+def test_an_archiving_failure_that_is_not_a_lost_directory_reaches_the_run(
+    session: Session, tmp_path, monkeypatch
+):
+    """Only the failure archiving can absorb is absorbed; the rest is said out loud.
+
+    An archiving step that caught every error to keep going would report a clean run with
+    the worker's words stored under a project that never existed (BUILD-PLAN M2.7).
+    """
+    cfg, fake = _one_waiting_worker(session, tmp_path)
+
+    def disk_is_gone(*args: object, **kwargs: object) -> object:
+        raise OSError("the disk went away")
+
+    monkeypatch.setattr(digest.keys, "resolve", disk_is_gone)
+    try:
+        report = work.run(cfg)
+
+        assert len(report.failures) == 1
+        assert "worker-1" in report.failures[0]
+        assert evidence.entries(cfg, "worker-1") == []
     finally:
         fake.stop()

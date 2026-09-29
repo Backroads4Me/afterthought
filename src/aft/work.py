@@ -75,6 +75,27 @@ class Report:
         return ", ".join(said)
 
 
+def _archive_workers(config: Config, failures: list[str]) -> str:
+    """Park every waiting worker session in the evidence archive and the index.
+
+    A worker's words stay searchable while it waits for budget, and its job keeps its
+    watermark unmoved, so the digest that budget eventually buys still reads the chunk this
+    run skipped. One job's failure is that job's own; a failure that stops the run stops
+    this loop too, rather than being logged once per worker (BUILD-PLAN M2.7).
+
+    Returns the reason the run stops, or "" when every worker was parked.
+    """
+    for job in queue.pending_jobs(config, role="worker"):
+        try:
+            digest.archive_worker_job(config, job)
+        except FAILS_JOB as exc:
+            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+        except STOPS_RUN as exc:
+            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+            return STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+    return ""
+
+
 def run(config: Config, now: datetime | None = None) -> Report:
     """Sweep for the sessions no hook reported, then digest queued jobs until told to stop.
 
@@ -126,21 +147,11 @@ def run(config: Config, now: datetime | None = None) -> Report:
         # Worker sessions: digested only with budget left after primary sessions.
         # When budget is short, worker sessions are archived and indexed without digesting.
         if stopped == STOP_BUDGET or model.tokens_used_today(config, moment) >= budget:
-            stopped = STOP_BUDGET
-            for job in queue.pending_jobs(config, role="worker"):
-                try:
-                    digest.archive_worker_job(config, job)
-                except Exception as exc:
-                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+            stopped = _archive_workers(config, failures) or STOP_BUDGET
         elif not stopped:
             while True:
                 if model.tokens_used_today(config, moment) >= budget:
-                    stopped = STOP_BUDGET
-                    for job in queue.pending_jobs(config, role="worker"):
-                        try:
-                            digest.archive_worker_job(config, job)
-                        except Exception as exc:
-                            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    stopped = _archive_workers(config, failures) or STOP_BUDGET
                     break
                 job = queue.next_job(config, role="worker")
                 if job is None:
