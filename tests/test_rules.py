@@ -1,11 +1,13 @@
-"""Every rule of design 9 and every cell of the authority table, in both directions.
+"""The rules ``aft.dream.rules`` checks (design 9 R1 to R6 and R9) and every cell of the
+authority table, in both directions. R7's size caps and R8's anchors belong to M4.5's
+maintenance, and no outcome here could name them.
 
 A rule whose whole job is to refuse proves nothing tested only where it permits, so each
 row of the table is tested as the supersede it allows and as the refusal, conflict or
 needs-you it comes to when the evidence is weaker or older. Every outcome names the rule
 behind it, and no test reads or writes a file: the existing lines come from a page text
-parsed in memory, and the dates, sessions and counts come from the context the rules are
-handed."""
+parsed in memory, and the quotes, their footnotes, their entries and their dates come
+from the context they are handed."""
 
 from __future__ import annotations
 
@@ -31,9 +33,10 @@ THIRTY_DAYS = "2026-09-05"
 LONG_AGO = "2026-08-05"
 YOUR_LINE_DATE = "2026-09-20"
 OBSERVED_LINE_DATE = "2026-09-30"
-"""Dates the tests name: the fixture's stated lines are dated 2026-09-20 and its observed
-lines 2026-09-30, and every supersede cell below carries its own date so which side is
-newer is written in the test rather than inherited from a default."""
+"""Dates the tests name: the standing lines a supersede targets read 2026-09-20 when
+they are yours and 2026-09-30 when a run observed them. Every supersede cell below
+carries its own date, so which side is newer is written in the test rather than
+inherited from a default."""
 
 S1_RESOURCE = "aft://session/claude/2c1e9d0a#entry-148"
 S2_RESOURCE = "aft://session/pi/01a0e256#entry-88"

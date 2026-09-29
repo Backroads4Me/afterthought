@@ -1,8 +1,8 @@
 """The rules that decide whether one dream decision becomes memory (design 9).
 
 ``check`` takes the model's decision about one candidate fact (design 9 step 3), the fact,
-the existing line the decision names if any, and the numbers the decision is judged on,
-and answers with one of three outcomes:
+the existing line the decision names if any, and the quotes and dates the decision is
+judged on, and answers with one of three outcomes:
 
 * ``apply(action)`` - make the edit the decision asked for.
 * ``downgrade(to_action, rule)`` - the decision lost its force; make this edit instead,
@@ -114,7 +114,7 @@ class Evidence:
     """One quote the fact would cite, as the caller found it.
 
     The digest verifies a quote when it writes it (design 8); the dream re-checks it from
-    these values rather than opening the archive (R1, R2, R3)."""
+    these values rather than opening the archive (R1, R2, R3 and R4)."""
 
     source: str
     """The footnote id the quote would be cited under on the resulting line (design 6,
