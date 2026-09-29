@@ -645,8 +645,8 @@ def test_the_span_and_the_watermark_move_in_one_close_or_not_at_all(cfg: Config)
         queue.complete(cfg, third, "c-9", off_record=False)
 
 
-def test_a_close_that_names_no_span_state_is_refused(cfg: Config) -> None:
-    """The span is an argument a caller supplies, never a default it can forget."""
+def test_a_close_must_name_the_span_state(cfg: Config) -> None:
+    """Every close names the span's state: ``off_record`` is a required keyword (M2.3)."""
     stored = "SELECT watermark, off_record FROM sessions WHERE session_id = ?"
 
     queue.enqueue(cfg, event(session_id="unspoken"))

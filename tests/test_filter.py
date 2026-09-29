@@ -518,9 +518,7 @@ def test_a_flagged_output_keeps_its_head_when_no_line_matches(cfg):
     [text] = kept([output(quiet, "t1", is_error=True)], cfg)
     head = text.removesuffix(CAP_MARKER)
     assert text.endswith(CAP_MARKER), "a head cut short says it is cut"
-    assert quiet.startswith(head)
-    assert len(head) <= FLAG_HEAD_CHARS, "the 500-character budget still holds"
-    assert quiet[len(head)].isspace(), "the cut falls between words, never inside one"
+    assert head == quiet[:FLAG_HEAD_CHARS], "the head is those 500 characters, by the number"
 
 
 def test_a_flagged_output_keeps_the_matching_lines_below_its_head(cfg):
@@ -533,7 +531,7 @@ def test_a_flagged_output_keeps_the_matching_lines_below_its_head(cfg):
     head, lines = kept_text.split(CAP_MARKER, 1)
     assert lines == "\nerror: the pipe broke\nsrc/aft/queue.py:41"
     assert text.startswith(head)
-    assert len(head) <= FLAG_HEAD_CHARS
+    assert len(head) == FLAG_HEAD_CHARS, "the head is the budget, by the number"
 
 
 def test_the_error_flag_is_what_lets_an_outputs_head_through(cfg):
@@ -568,8 +566,8 @@ def test_a_flagged_output_is_redacted_like_every_other_kept_text(cfg):
 
 
 def test_a_secret_that_straddles_the_head_cut_leaves_no_fragment_behind(cfg):
-    # A cut may not hand redaction half a key: the head stops at a word, so a secret is
-    # either whole inside it, where the patterns know it, or whole outside it.
+    # The budget cuts at 500 whatever sits there, so redaction runs first: the key is the
+    # marker before the cut reaches it, and no piece of a key can be left behind.
     text = "the deploy failed\n" + "word " * 94 + "one " + FAKE_KEY + " was rejected"
     start = text.index(FAKE_KEY)
     assert start < FLAG_HEAD_CHARS < start + len(FAKE_KEY), "the key straddles the cut"

@@ -99,7 +99,7 @@ CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 # A column a shipped table gained afterwards, with the definition that adds it and the
 # default a row already in the file gets. ``CREATE TABLE IF NOT EXISTS`` leaves a queue an
 # earlier version wrote exactly as it is, so every later column is checked for and added
-# when the queue opens: a session already in the file keeps its watermark and starts with
+# when the queue is written: a session already in the file keeps its watermark and starts with
 # no span open, the reading that captures text rather than holding a session off the
 # record without anyone having asked (M2.2, M2.3).
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
@@ -434,25 +434,15 @@ def _add_columns(conn: sqlite3.Connection) -> None:
 
     A queue file an earlier version wrote keeps its rows and its own columns, so a column
     `_SCHEMA` has gained since has to arrive by ``ALTER TABLE`` before any statement names
-    it, and only a writer brings it in, under the lock `_writing` already holds: a reader
-    never asks for that lock to make a column exist. A second process can win that race,
-    and its column is the one this connection then finds, so an ``ALTER`` that reports the
-    name already taken is checked rather than raised: the queue opened either way. Any
-    other report the ``ALTER`` makes - a locked database above all - is the queue's own
-    trouble and is raised as it stands. What is still missing afterwards, here or on a
-    read, is the same report `_check_columns` makes.
+    it. `_writing` calls this with ``BEGIN IMMEDIATE`` already held: that is the lock the
+    ``ALTER`` needs and the lock no other connection can be holding while it runs, so any
+    report the ``ALTER`` makes is the queue's own trouble and is raised as it stands.
     """
     for table, column, definition in _ADDED_COLUMNS:
         if column in _columns(conn, table):
             continue
-        try:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError as lost_race:
-            if "duplicate column name" not in str(lost_race):
-                raise
-        else:
-            _name_sessions_of_unknown_span(conn)
-    _check_columns(conn)
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        _name_sessions_of_unknown_span(conn)
 
 
 def _check_columns(conn: sqlite3.Connection) -> None:

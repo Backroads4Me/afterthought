@@ -16,6 +16,9 @@ so every path that returns kept text - a prompt, an answer, extracted tool lines
 remnant of a cap - is capped and redacted the same way. There is no path that hands back
 kept text and misses them.
 
+A flagged head is redacted before its 500-character budget cuts it, so a cut can never
+leave half a secret behind for the patterns to miss.
+
 Two things the design asks of capture are not here because an entry stream cannot answer
 them: session exclusions and the two-prompt floor both need the session a stream came
 from, which is the queue's and the digest's to know (M2.2, M2.6, M2.7).
@@ -126,7 +129,7 @@ def filter_entries(
     outside, off_record = _outside_spans(entries, off_record)
     kept: list[Entry] = []
     for entry in outside:
-        text = _kept_text(entry)
+        text = _kept_text(entry, patterns)
         if text is None:
             continue
         kept.append(replace(entry, text=redact(_cap(text), patterns)))
@@ -164,7 +167,7 @@ def _outside_spans(entries: Iterable[Entry], off_record: bool) -> tuple[list[Ent
     return outside, off_record
 
 
-def _kept_text(entry: Entry) -> str | None:
+def _kept_text(entry: Entry, patterns: tuple[re.Pattern[str], ...]) -> str | None:
     """The text to keep from one entry, or None to drop the entry.
 
     Prompts and answers keep their text whole. From a tool entry the agent flagged as an
@@ -176,27 +179,28 @@ def _kept_text(entry: Entry) -> str | None:
     if entry.role in (USER, ASSISTANT):
         return entry.text
     if entry.role == TOOL:
-        return _flagged_output(entry.text) if entry.is_error else _tool_lines(entry.text)
+        return _flagged_output(entry.text, patterns) if entry.is_error else _tool_lines(entry.text)
     return None
 
 
-def _flagged_output(text: str) -> str | None:
+def _flagged_output(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None:
     """The head of an output the agent flagged as an error, with the lines below it to keep.
 
     The agent's flag is its own verdict, so what it reported is evidence whatever its lines
-    happen to look like: the whole words within its first ``FLAG_HEAD_CHARS`` characters are
-    kept even when none of them matches a pattern (M2.3). Below the head the rule for an
-    unflagged output still holds, so a long dump contributes its failure lines and its
-    references rather than everything after the head. Head and lines then run through the
-    same cap and redaction as every other kept text, so a flagged entry is bounded like
-    any other.
+    happen to look like: the first ``FLAG_HEAD_CHARS`` characters are kept, by that number,
+    even when none of them matches a pattern (M2.3). Redaction runs before that budget cuts
+    the text, so a secret straddling the cut is the marker there rather than a fragment of
+    itself. Below the head the rule for an unflagged output still holds, so a long dump
+    contributes its failure lines and its references rather than everything after the head.
+    Head and lines then run through the same cap and redaction as every other kept text, so
+    a flagged entry is bounded like any other.
     """
-    end = _word_end(text, FLAG_HEAD_CHARS) or min(FLAG_HEAD_CHARS, len(text))
-    head = text[:end]
-    below = _tool_lines(text[end:])
+    redacted = redact(text, patterns)
+    head = redacted[:FLAG_HEAD_CHARS]
+    below = _tool_lines(redacted[FLAG_HEAD_CHARS:])
     if not head.strip():
         return below
-    head = head + (CAP_MARKER if end < len(text) else "")
+    head = head + (CAP_MARKER if len(redacted) > FLAG_HEAD_CHARS else "")
     return "\n".join([head, below]) if below else head
 
 
