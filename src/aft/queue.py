@@ -32,8 +32,9 @@ QUEUE_NAME = "queue.sqlite"
 
 
 class QueueError(Exception):
-    """A queue operation that cannot be honoured as asked: a row that is not there to
-    close, or a journal mode that never becomes WAL."""
+    """A queue operation that cannot be honoured as asked: a row this process may no
+    longer close - gone from the queue, or gone on to another worker - or a journal mode
+    that never becomes WAL."""
 
 
 # The journal mode the queue is kept in: one writer and many readers at once, which is
