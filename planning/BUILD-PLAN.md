@@ -550,7 +550,8 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
 - **Files:** `src/aft/dream/decide.py`, `src/aft/prompts/decide.md`,
   `src/aft/prompts/decide.schema.json`, `tests/test_decide.py`.
 - **Behavior:** for each verified fact from a waiting digest, search the project's pages
-  (and global pages for global facts) for the ten most related active or candidate lines,
+  for a project fact, or only the global pages for a global fact (R6 lets a global fact edit
+  nothing else; reference pages scoped to several projects are outside v1), for the ten most related active or candidate lines,
   number them `L1` to `L10`, and ask the model for one decision.
 - **Prompt** (`src/aft/prompts/decide.md`):
 
