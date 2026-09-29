@@ -27,6 +27,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from aft import keys, page, pagewrite, queue, vault
 from aft.config import Config
@@ -36,7 +37,7 @@ from aft.registry import Registry
 DIGESTS = "digests"
 CHECKPOINT_MESSAGE = "checkpoint: human edits"
 
-Process = Callable[[Config, str, Sequence[Path]], None]
+Process = Callable[[Config, str, Sequence[Path]], Any]
 """What a run does with one project that is ready: its slug and its waiting digests, in
 session order. The decisions, rules and apply steps (M4.3 to M4.5) fill this in."""
 
@@ -60,6 +61,9 @@ class Run:
 
     tagged: list[str] = field(default_factory=list)
     """The pages whose hand-typed bullets this run tagged ``[stated]``."""
+
+    reports: dict[str, Any] = field(default_factory=dict)
+    """Structured report data from each project run (M4.5, M4.6)."""
 
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
@@ -89,7 +93,13 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             result.tagged = tag_hand_edits(config, result.checkpoint)
         for slug in ready:
             if process is not None:
-                process(config, slug, result.waiting[slug])
+                rep = process(config, slug, result.waiting[slug])
+            else:
+                from aft.dream import apply
+
+                rep = apply.run_project(config, slug, result.waiting[slug], now=now)
+            if rep is not None:
+                result.reports[slug] = rep
             result.ran.append(slug)
         return result
 
