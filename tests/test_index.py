@@ -772,6 +772,24 @@ def test_reindex_equals_the_incremental_result(initialized: Config) -> None:
     write(initialized, "archive/steel.md", _ALL_DEAD)
     write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
     write(initialized, "reports/2026-09-28.md", REPORT)
+    write(initialized, "library/widget/notes.txt", "Library notes for widget\n")
+    write(
+        initialized,
+        "references/widget/collection.md",
+        """---
+type: Reference
+title: Widget Library
+description: Reference materials for widget
+aft:
+  collection: widget
+  projects:
+    - p_widget
+  files:
+    notes.txt: 44fe67898e8cca3b8252ddb6234814147b5dca7f1ea020a3baf7f032ec7dcff4
+---
+# Widget Library
+""",
+    )
     write(initialized, "projects/widget/broken.md", UNCLOSED_PAGE)
     evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
     evidence.store(initialized, "pi", "def", "p_widget", entries("another flange"))
