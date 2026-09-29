@@ -1,0 +1,7 @@
+{
+  "session_id": "019f17a3-2b64-7a1f-9c2e-4f6d8a1b3c5d",
+  "transcript_path": "/home/ted/.pi/agent/sessions/--home-ted-src-widget--/2026-06-30T14-22-08-517Z_019f17a3-2b64-7a1f-9c2e-4f6d8a1b3c5d.jsonl",
+  "cwd": "/home/ted/src/widget",
+  "hook_event_name": "session_shutdown",
+  "reason": "quit"
+}

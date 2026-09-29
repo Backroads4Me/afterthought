@@ -47,6 +47,23 @@ def parse(text: str) -> page.Page:
     return page.parse(text, Path("projects/widget/overview.md"))
 
 
+def fact_page(body: str, page_type: str = "Project") -> str:
+    return f"---\ntype: {page_type}\nsources: []\n---\n{body}"
+
+
+INJECTED = {page.ACTIVE, page.CONFLICT, page.NEEDS_YOU}
+
+
+def actionable(result: page.Page) -> list[str]:
+    """The statements a consumer that reads only `page.parse` would put before an agent.
+
+    Injection shows active, conflict and needs-you facts and excludes candidates, stale,
+    superseded and withdrawn lines (design section 10, BUILD-PLAN M1.2), so a line reaches
+    memory exactly when it is in `facts` with one of those three states.
+    """
+    return [f.statement for f in result.facts if f.state in INJECTED]
+
+
 def test_valid_page_parses_every_state():
     result = parse(VALID)
     assert result.errors == []
@@ -86,8 +103,7 @@ def test_line_numbers_count_frontmatter():
 
 
 def errors_for(body: str, page_type: str = "Project") -> list[str]:
-    text = f"---\ntype: {page_type}\nsources: []\n---\n{body}"
-    return [message for _, message in parse(text).errors]
+    return [message for _, message in parse(fact_page(body, page_type)).errors]
 
 
 def test_unknown_section():
@@ -124,10 +140,112 @@ def test_invalid_date():
     ]
 
 
-def test_struck_fact_needs_a_reason():
-    assert (
-        "struck fact must end" in errors_for("## Facts\n- ~~Old.~~ [stated] 2026-01-01 [^a]\n")[0]
+def test_a_line_the_parser_reports_on_is_not_memory():
+    refused = [
+        # The hand-typed line that only missed the strikethrough.
+        (
+            "## Facts",
+            "- The index is SQLite. [stated] 2026-01-01 [^s1] superseded 2026-01-02 by [^s2]",
+            "unrecognized text after the sources",
+        ),
+        # Trailing text that leaves the stale marker unreadable.
+        (
+            "## Facts",
+            "- Capture takes 12 ms. [observed] 2026-01-01 [^s1] (stale 2026-01-02: gone) more",
+            "unrecognized text after the sources",
+        ),
+        # A struck line naming a state the parser does not know, and one naming none at all.
+        ("## Facts", "- ~~Old.~~ [stated] 2026-01-01 [^s1] retired last year", "a struck fact"),
+        ("## Facts", "- ~~Old.~~ [stated] 2026-01-01 [^s1]", "a struck fact"),
+        # A line whose own fields are wrong.
+        ("## Facts", "- A fact. [rumored] 2026-01-01 [^s1]", "unknown source tag"),
+        ("## Facts", "- A fact. [stated] 2026-13-01 [^s1]", "invalid date"),
+        # A candidate line the Candidates rules reject.
+        (
+            "## Candidates",
+            "- ~~Old.~~ [inferred] 2026-01-01 [^s1] withdrawn 2026-01-02",
+            "a candidate cannot be struck through",
+        ),
+        (
+            "## Candidates",
+            "- New. [inferred] 2026-01-01 [^s1] (stale 2026-01-02: x)",
+            "a candidate may end only with its signal counts",
+        ),
+    ]
+    for section, line, expected in refused:
+        text = fact_page(f"{section}\n{line}\n")
+        result = parse(text)
+        assert len(result.errors) == 1, (line, result.errors)
+        number, message = result.errors[0]
+        assert text.split("\n")[number - 1] == line
+        assert expected in message
+        assert result.facts == []
+        assert actionable(result) == []
+
+
+def test_struck_fact_with_a_recognized_suffix_is_not_injected():
+    body = (
+        "## Decisions\n"
+        "- ~~Use FTS5.~~ [stated] 2026-01-01 [^a] superseded 2026-01-02 by [^a]\n"
+        "- ~~Use Redis.~~ [stated] 2026-01-01 [^a] withdrawn 2026-01-03\n"
     )
+    result = parse(fact_page(body))
+    assert result.errors == []
+    assert [(f.statement, f.state, f.struck) for f in result.facts] == [
+        ("Use FTS5.", page.SUPERSEDED, True),
+        ("Use Redis.", page.WITHDRAWN, True),
+    ]
+    assert actionable(result) == []
+
+
+def test_plain_fact_is_active_memory():
+    result = parse(fact_page("## Facts\n- A fact. [stated] 2026-01-01 [^a]\n"))
+    assert result.errors == []
+    assert [(f.statement, f.state, f.struck) for f in result.facts] == [
+        ("A fact.", page.ACTIVE, False)
+    ]
+    assert actionable(result) == ["A fact."]
+
+
+def test_note_after_a_rejected_struck_line_has_no_fact_to_be_about():
+    body = (
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "- ~~Old.~~ [stated] 2026-01-01 [^a] retired\n"
+        "> [!conflict] 2026-01-03\n"
+    )
+    result = parse(fact_page(body))
+    assert "a callout cannot mark a refused fact line" in [m for _, m in result.errors]
+    assert actionable(result) == ["A fact."]
+
+
+def test_note_after_prose_in_a_fact_section_has_no_fact_to_be_about():
+    body = (
+        "## Facts\n"
+        "- A fact. [stated] 2026-01-01 [^a]\n"
+        "A sentence someone typed by hand.\n"
+        "> [!conflict] 2026-01-03\n"
+    )
+    result = parse(fact_page(body))
+    assert "a callout marks the fact line directly above it" in [m for _, m in result.errors]
+    assert actionable(result) == ["A fact."]
+
+
+def test_a_note_with_an_invalid_date_writes_no_state():
+    body = (
+        "## Facts\n"
+        "- The index is SQLite. [stated] 2026-09-28 [^a]\n"
+        "\n"
+        "> [!conflict] 2026-09-31\n"
+        "> A session says the index changed, and this is my answer.\n"
+        "> The answer lines are mine and are not broken callouts.\n"
+    )
+    result = parse(fact_page(body))
+    assert [message for _, message in result.errors] == ["invalid date 2026-09-31"]
+    assert [(f.statement, f.state, f.callouts) for f in result.facts] == [
+        ("The index is SQLite.", page.ACTIVE, [])
+    ]
+    assert actionable(result) == ["The index is SQLite."]
 
 
 def test_trailing_text_rejected():
@@ -145,7 +263,7 @@ def test_candidate_rules():
 
 def test_callout_rules():
     orphan = "## Facts\n> [!conflict] 2026-01-01\n"
-    assert errors_for(orphan) == ["a callout must follow the fact it is about"]
+    assert errors_for(orphan) == ["a callout marks the fact line directly above it"]
     bad = "## Facts\n- A. [stated] 2026-01-01 [^a]\n> [!note] 2026-01-01\n"
     assert "expected '> [!conflict]" in errors_for(bad)[0]
     struck = (

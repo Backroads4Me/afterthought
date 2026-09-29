@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, gitutil, inject, keys, lint, vault
-from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load
+from aft import __version__, adapters, gitutil, inject, keys, lint, vault
+from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
+from aft.events import AdapterError, SessionEvent
 from aft.gitutil import GitError
+from aft.install import claude as claude_install
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -25,7 +31,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.handler(args)
-    except (ConfigError, RegistryError, vault.VaultError, GitError, UsageError) as exc:
+    except (
+        ConfigError,
+        claude_install.InstallError,
+        RegistryError,
+        vault.VaultError,
+        GitError,
+        UsageError,
+    ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
 
@@ -67,6 +80,25 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lint", help="check the vault's pages")
     p.set_defaults(handler=cmd_lint)
+
+    p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
+    p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
+    p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
+    p.set_defaults(handler=cmd_hook)
+    p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
+    isub = p.add_subparsers(metavar="agent")
+    q = isub.add_parser("claude", help="install the Claude Code hooks in ~/.claude/settings.json")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the entries aft would add or remove, write nothing",
+    )
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's own hook entries and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_claude)
     return parser
 
 
@@ -211,3 +243,138 @@ def cmd_lint(args) -> int:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_install_claude(args) -> int:
+    """Add or remove afterthought's hook entries in Claude Code's own settings file."""
+    settings = claude_install.settings_path()
+    change = (
+        claude_install.uninstall(settings, dry_run=args.dry_run)
+        if args.uninstall
+        else claude_install.install(settings, dry_run=args.dry_run)
+    )
+    if args.dry_run:
+        print(change.preview or f"no changes to {settings}")
+        return 0
+    if change.backup is not None:
+        print(f"backed up {settings} to {change.backup}")
+    if args.uninstall:
+        print(
+            f"removed afterthought's hooks from {settings}"
+            if change.changed
+            else f"no afterthought hooks to remove in {settings}"
+        )
+    else:
+        print(
+            f"installed afterthought's hooks in {settings}"
+            if change.changed
+            else f"afterthought's hooks are already in {settings}"
+        )
+    return 0
+
+
+# An agent's session waits on this command, so the whole hook gets one hard budget
+# before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1). The
+# budget is split up front between the two steps that can block: the stdin read takes
+# the larger share, the failure-line write keeps the remainder named below, so no step
+# can hang and the hook as a whole never holds a session past the bound.
+HOOK_TIMEOUT_SECONDS = 2
+HOOK_LOG_TIMEOUT_SECONDS = 0.5
+
+
+def cmd_hook(args) -> int:
+    """Handle one agent lifecycle event: read a payload, build the event, dispatch it.
+
+    An agent can do nothing useful with a hook failure, so this command never raises,
+    never prints on a failure, and always exits 0. The one line it leaves in the hook
+    log is the whole record of what went wrong (BUILD-PLAN M1.1).
+    """
+    try:
+        with _hook_time_limit(HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS):
+            payload = json.load(sys.stdin)
+            _dispatch(_hook_event(args, payload))
+    except Exception as exc:
+        _log_hook_failure(args.agent, args.event, exc)
+    return 0
+
+
+def _hook_event(args, payload: object) -> SessionEvent:
+    """The event named on the command line, built from the payload read off stdin."""
+    parse = adapters.PARSERS.get(args.agent)
+    if parse is None:
+        raise AdapterError(
+            f"unknown agent {args.agent!r}, expected one of {' or '.join(adapters.PARSERS)}"
+        )
+    if not isinstance(payload, dict):
+        raise AdapterError(f"{args.agent} payload is not a JSON object")
+    return parse(args.event, payload, datetime.now(UTC))
+
+
+def _dispatch(event: SessionEvent) -> None:
+    """Hand one normalized event to the part of afterthought that consumes it.
+
+    ``session_start`` prints the injection block (M1.2); ``compaction`` and
+    ``session_end`` enqueue capture (M2.2). Neither exists yet, so a parsed event is
+    recognized and dropped here: there is nothing to print and nothing to enqueue,
+    which is the no output and exit 0 the hook contract asks for in the meantime.
+    """
+
+
+@contextmanager
+def _hook_time_limit(seconds: float) -> Iterator[None]:
+    """Bound one blocking step of the hook to its share of the hook budget.
+
+    The two callers pass the two shares of HOOK_TIMEOUT_SECONDS, so every blocking step
+    is bounded on its own and the hook as a whole still fits the bound in that constant.
+    Where SIGALRM is unavailable the limit is not enforced here and the agent's own hook
+    timeout is the bound.
+    """
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def expire(signum, frame) -> None:
+        raise TimeoutError(f"the hook gave up after {seconds} seconds")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+# The one line a hook failure leaves behind, in characters.
+HOOK_LOG_LINE_LIMIT = 500
+
+# What one caller-supplied argument may take of that line.
+HOOK_LOG_FIELD_LIMIT = 64
+
+
+def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
+    """Append the one line a failed hook is allowed to leave behind.
+
+    Agent, event and the failure's own words all come from outside this process, so
+    the whole line is flattened and capped: whatever they contain, a failed hook
+    leaves one bounded line and nothing else. Each caller-supplied argument is clamped
+    to its own budget and the event name goes last, so a runaway argument loses its
+    own tail rather than the reason for the failure. Best effort all the way down, and
+    inside the share of the hook budget HOOK_LOG_TIMEOUT_SECONDS reserves for this write:
+    a home that cannot be resolved or written to, a line that cannot be built or
+    written, and an expiry that lands mid-write are a lost record, not a reason to
+    fail the agent.
+    """
+    try:
+        line = (
+            f"{datetime.now(UTC).isoformat()} {agent[:HOOK_LOG_FIELD_LIMIT]}"
+            f" {type(exc).__name__}: {exc} | {event[:HOOK_LOG_FIELD_LIMIT]}"
+        )
+        line = " ".join(line.split())[:HOOK_LOG_LINE_LIMIT]
+        with _hook_time_limit(HOOK_LOG_TIMEOUT_SECONDS):
+            home = resolve_home()
+            (home / "logs").mkdir(parents=True, exist_ok=True)
+            with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except Exception:
+        pass

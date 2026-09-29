@@ -150,3 +150,43 @@ def test_plain_brackets_in_a_note_are_not_footnotes(initialized):
     note = "\n> [!question] 2026-10-01\n> Is [this] still true? See [s9] and [^ not a ref].\n"
     write(initialized, "projects/widget/overview.md", PAGE.format(project_id=project.id) + note)
     assert messages(initialized) == []
+
+
+def test_struck_fact_without_a_state_marker_is_a_finding(initialized):
+    project = register(initialized)
+    text = PAGE.format(project_id=project.id).replace(
+        "- The index is SQLite. [stated] 2026-09-28 [^s1]",
+        "- ~~The index is SQLite.~~ [stated] 2026-09-28 [^s1] no longer true",
+    )
+    write(initialized, "projects/widget/overview.md", text)
+    assert messages(initialized) == [
+        "projects/widget/overview.md:16: a struck fact must end "
+        "'superseded <date> by [^id]' or 'withdrawn <date>'"
+    ]
+
+
+def test_a_refused_lines_footnotes_are_still_checked(initialized):
+    project = register(initialized)
+    text = (
+        PAGE.format(project_id=project.id).replace(
+            "- The index is SQLite. [stated] 2026-09-28 [^s1]",
+            "- ~~The index is SQLite.~~ [stated] 2026-09-28 [^s9] no longer true",
+        )
+        + "\n> [!conflict] 2026-09-30\n> Neither citation resolves: [^s9] and [^s8].\n"
+    )
+    write(initialized, "projects/widget/overview.md", text)
+    found = messages(initialized)
+    assert any("a struck fact must end" in m for m in found), found
+    assert "projects/widget/overview.md:16: footnote [^s9] is not defined in sources" in found
+    assert "projects/widget/overview.md:19: footnote [^s9] is not defined in sources" in found
+    assert "projects/widget/overview.md:19: footnote [^s8] is not defined in sources" in found
+
+
+def test_typed_answers_under_a_refused_note_are_not_findings(initialized):
+    project = register(initialized)
+    text = PAGE.format(project_id=project.id) + (
+        "\n> [!conflict] 2026-09-31\n> That day does not exist, but this answer is mine.\n"
+        "> It is not a broken callout header.\n"
+    )
+    write(initialized, "projects/widget/overview.md", text)
+    assert messages(initialized) == ["projects/widget/overview.md:18: invalid date 2026-09-31"]

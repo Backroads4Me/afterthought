@@ -487,10 +487,14 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
 
 - **Depends on:** M0. **Design:** 6 (page format, fact state).
 - **Files:** `src/aft/pagewrite.py`, `tests/test_pagewrite.py`.
-- **Interface:** edit operations on a parsed page, rendered back to text: `add_fact`,
-  `add_source`, `confirm(fact, source)`, `supersede(fact, new_fact, source)`,
-  `withdraw(fact)`, `mark_stale(fact, reason)`, `add_callout(fact, type, text)`,
-  `resolve_callout`, `add_candidate`, `update_counts`, `promote(candidate)`.
+- **Interface:** a `PageDoc` read from a path, with edit operations rendered back to text:
+  `add_source(resource, title, quote) -> id`, `add_fact`, `add_candidate(statement, tag,
+  date, refs)`, `confirm(fact, source, date)`, `update_counts(candidate)`,
+  `supersede(fact, ..., tag, date)`, `withdraw(fact, date)`, `mark_stale(fact, reason,
+  date)`, `add_callout(fact, type, text, date)`, `resolve_callout(fact)`,
+  `promote(candidate, kind)`, and `fact(statement)` to look a fact up by its statement
+  (an error unless exactly one fact matches). The dates, tag and kind are required because
+  the grammar records them; M4.3 to M4.5 build against these signatures.
 - **Behavior:** edits change only the lines they touch; everything else is preserved byte
   for byte. The result always parses and lints. Rulings (DESIGN 6):
   - Never lose text the tool did not write. An operation on a line or note that carries text

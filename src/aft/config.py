@@ -26,6 +26,7 @@ class ConfigError(Exception):
 class ModelConfig:
     endpoint: str = "http://localhost:8000/v1"
     name: str = ""
+    api_key_env: str = ""
 
 
 @dataclass(frozen=True)
@@ -172,6 +173,10 @@ vault = "~/afterthought"
 # An OpenAI-compatible endpoint used for digests and dreaming.
 endpoint = "http://localhost:8000/v1"
 name = ""
+# The environment variable holding this endpoint's API key, sent as a bearer token.
+# aft stores the name of a key and never the key itself. Empty means the endpoint
+# takes no key.
+# api_key_env = ""
 
 [capture]
 # Sessions under these paths are worker sessions: archived and searchable, digested
@@ -179,7 +184,10 @@ name = ""
 worker_paths = []
 # Sessions under these paths are never captured.
 exclude_paths = []
-# Extra regular expressions to redact, on top of the built-in secret patterns.
+# Extra regular expressions to redact, on top of the built-in secret patterns
+# (see aft.redact). They match case-insensitively and are applied after the
+# built-ins. One that does not compile, or that holds nothing to match, is an error
+# raised before any text is filtered, never a silent no-op.
 redact_patterns = []
 
 [evidence]
