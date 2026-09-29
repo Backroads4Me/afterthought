@@ -308,6 +308,20 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     )
 
 
+def last_events(config: Config) -> dict[Path, datetime]:
+    """The newest event time the queue holds for each working directory, whatever became
+    of the job it arrived on.
+
+    This is a session's last sign of life as the queue knows it, which the dream's quiet
+    period is measured from (DESIGN 9, BUILD-PLAN M4.1). It is keyed by directory, not by
+    project, because a row carries no project (M2.2): the reader resolves each directory.
+    """
+    with _reading(config) as conn:
+        # Every event time is stored as UTC ISO 8601 (_text), so the newest sorts last.
+        rows = conn.execute("SELECT cwd, max(event_time) FROM jobs GROUP BY cwd").fetchall()
+    return {Path(cwd): datetime.fromisoformat(text) for cwd, text in rows}
+
+
 def watching_since(config: Config, now: datetime) -> datetime:
     """When this host began watching for sessions, recording ``now`` the first time.
 
