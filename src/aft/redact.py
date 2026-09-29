@@ -40,8 +40,9 @@ _TOKENS = (
     # Model and vendor API keys: OpenAI, Anthropic, and everything else that is sk- prefixed.
     # The guard is that prefix: without it the family also matches the inside of any word
     # ending in those letters, and the archive loses a ticket id or a file name that was
-    # never a secret.
-    r"(?<![\w-])sk-[A-Za-z0-9_-]{8,}",
+    # never a secret. A hyphen is not a word character, so a key glued onto a name with one
+    # - openai-sk-<key> - is still a prefix and still redacts.
+    r"(?<!\w)sk-[A-Za-z0-9_-]{8,}",
     # GitHub: ghp_ personal access tokens, and the ghs_/gho_/ghu_/ghr_ server and app tokens.
     r"gh[pousr]_[A-Za-z0-9]{20,}",
     r"github_pat_[A-Za-z0-9_]{20,}",

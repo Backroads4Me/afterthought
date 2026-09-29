@@ -263,6 +263,11 @@ def test_a_word_that_happens_to_end_in_the_token_prefix_survives(cfg):
     ]
     assert kept([said(text) for text in texts], cfg) == texts
 
+    # The guard stops at a hyphen, which is not a word character: a key that a name is
+    # joined to with one is still a key, and the archive keeps no half of it.
+    [joined] = kept([said(f"the openai-{FAKE_KEY} is live")], cfg)
+    assert joined == f"the openai-{REDACTED} is live"
+
 
 def test_a_configured_pattern_adds_to_the_builtin_list(make_config):
     config = make_config([r"ACME-\d{6}"])
