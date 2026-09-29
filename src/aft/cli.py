@@ -238,18 +238,14 @@ def cmd_install_pi(args) -> int:
     if not change.changed:
         print(_install_pi_status(args, target=target, extensions=extensions))
         return 0
-    if args.dry_run:
-        # The change itself is what --dry-run reports: replaced or removed text as a
-        # diff, and afterthought's own directory by name for the one change a diff
-        # cannot show, the empty directory the extension file already left behind.
-        print(change.diff or f"would remove {target.parent}")
-        return 0
+    if args.dry_run and change.diff:
+        print(change.diff)
     if change.backup is not None:
         print(f"backed up the previous {target.name} to {change.backup}")
     if args.uninstall:
-        # With no text to diff, what an uninstall took away was the directory.
-        print(f"removed {target if change.diff else target.parent}")
-    else:
+        removed = ", ".join(str(path) for path in change.removed)
+        print(f"would remove {removed}" if args.dry_run else f"removed {removed}")
+    elif not args.dry_run:
         print(f"installed {target}")
     return 0
 

@@ -18,13 +18,14 @@ Two rules hold everything that is not afterthought's:
   never read, entered, reordered or removed, and the extensions directory itself is never
   removed, whether or not this installer created it.
 * A write is preceded by a backup of the text it replaces, and a path that holds the wrong
-  kind of thing - a file where a directory belongs, a directory where the extension belongs -
-  is refused with nothing written.
+  kind of thing - a file where a directory belongs, a directory where the extension belongs,
+  a link of anybody's standing in place of either - is refused with nothing written. The two
+  paths this installer creates and removes are judged as themselves, never as what a link
+  behind them points at.
 """
 
 from __future__ import annotations
 
-import contextlib
 import difflib
 import os
 import stat
@@ -53,14 +54,18 @@ class InstallError(Exception):
 class Change:
     """What one install or uninstall did, or would have done under ``--dry-run``.
 
-    ``changed`` is False when the target already held exactly what was asked for, in which
-    case nothing was written and no backup was taken. ``diff`` is the unified diff of the
-    extension file's text before and after, and is empty when nothing changed.
+    ``changed`` is False when the paths already held exactly what was asked for, in which
+    case nothing was written or removed and no backup was taken. ``diff`` is the unified diff
+    of the extension file's text before and after; it is empty whenever that text did not
+    change, which is why an uninstall reports the paths it took away in ``removed`` rather
+    than leaving them to be inferred from a diff. An install replaces text and takes nothing
+    away, so its ``removed`` is empty.
     """
 
     changed: bool
     backup: Path | None
     diff: str
+    removed: tuple[Path, ...] = ()
 
 
 def extensions_dir() -> Path:
@@ -128,60 +133,85 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
     anyone else's left inside, the directory of our own goes too; a directory still holding
     anything keeps every byte of it, the extensions directory is never removed, and a sibling
     extension is never looked at, so an uninstall leaves whatever it did not install standing
-    where it stood.
+    where it stood. ``Change.removed`` names the paths it actually took - and so says nothing
+    when there was nothing of afterthought's there to take.
     """
 
     try:
         target = _target(extensions)
         container = target.parent
         original = _text(target)
-        if original is None and not _is_our_empty_dir(container):
-            return Change(changed=False, backup=None, diff="")
+        # Text of somebody's own gets a copy beside the file it removes, so whether an
+        # uninstall will leave such a copy behind decides whether our own directory can go
+        # with the file or has to stay holding it.
+        keep = original if original and original != _shipped() else None
+        # What the uninstall takes away, named before any of it happens so the dry run, the
+        # report and the filesystem end up describing the same act: afterthought's own file
+        # when one stands there, and the directory of our own once that file has left behind
+        # nothing of anybody else's.
+        removed: list[Path] = []
+        if original is not None:
+            removed.append(target)
+        if keep is None and _is_ours_to_remove(container, target):
+            removed.append(container)
+        changed = bool(removed)
         diff = _diff(target, original, "")
         if dry_run:
-            return Change(changed=True, backup=None, diff=diff)
-        backup = _backup(target, None if original == _shipped() else original)
-        if target.exists():
+            return Change(changed=changed, backup=None, diff=diff, removed=tuple(removed))
+        backup = _backup(target, keep)
+        if target in removed:
             target.unlink()
-        if _is_our_empty_dir(container):
-            # The extension file is what uninstalling means. A container that will
-            # not go away - one symlinked to a directory of somebody's own, say - is
-            # theirs to keep, and leaving it does not undo the removal above.
-            with contextlib.suppress(OSError):
-                container.rmdir()
-        return Change(changed=True, backup=backup, diff=diff)
+        if container in removed:
+            container.rmdir()
+        return Change(changed=changed, backup=backup, diff=diff, removed=tuple(removed))
     except OSError as exc:
         raise InstallError(f"cannot uninstall from {extensions}: {exc}") from exc
 
 
-def _is_our_empty_dir(container: Path) -> bool:
-    """True when ``container`` exists as a directory holding nothing.
+def _is_ours_to_remove(container: Path, target: Path) -> bool:
+    """True when ``container`` is a directory holding nothing but afterthought's own file.
 
-    An empty one is afterthought's own - the installer created it and nobody else has
-    put anything in it - so removing it is ours to do, and there is nothing left of
-    afterthought's in it to remove. Anything else standing in the way, including a
-    directory still holding somebody else's files, is not ours to touch.
+    Empty, or holding only the entry point the uninstall is taking away with it, the
+    directory is afterthought's own - it created it and nobody else has put anything in it -
+    so it goes. A directory holding anything else keeps every byte of it, and where there is
+    no directory at all there is nothing to remove.
     """
-    return container.is_dir() and not any(container.iterdir())
+    return container.is_dir() and all(entry == target for entry in container.iterdir())
 
 
 def _target(extensions: Path) -> Path:
     """The file afterthought owns, once the paths leading to it are the right kind of thing.
 
     A path that exists as the wrong kind of thing is refused rather than worked around. The
-    extensions directory and afterthought's own directory are somebody else's in the general
-    case - pi's install put one there, or a user's hand did - and flattening either to make a
-    write succeed would be the uninstall's exact failure: removing a container afterthought
-    did not create.
+    extensions directory is somebody else's in the general case - pi's install put one there,
+    or a user's hand did - and flattening it to make a write succeed would be the uninstall's
+    exact failure: removing a container afterthought did not create.
+
+    Afterthought's own two paths are judged as themselves, by ``lstat``, never as whatever a
+    link behind them points at. A symlink at either one is a person's own arrangement - an
+    ``index.ts`` whose dotfiles are not on this machine, a directory of theirs standing in
+    afterthought's name - and writing or unlinking there would take their link away, with no
+    text of it to back up and no removal to report.
     """
     container = extensions / EXTENSION_DIR
-    for path in (extensions, container):
-        if path.exists() and not path.is_dir():
-            raise InstallError(f"{path} is not a directory; nothing was written")
+    if extensions.exists() and not extensions.is_dir():
+        raise InstallError(f"{extensions} is not a directory; nothing was written")
+    container_mode = _own_mode(container)
+    if container_mode is not None and not stat.S_ISDIR(container_mode):
+        raise InstallError(f"{container} is not a directory; nothing was written")
     target = container / EXTENSION_FILE
-    if target.exists() and not target.is_file():
+    target_mode = _own_mode(target)
+    if target_mode is not None and not stat.S_ISREG(target_mode):
         raise InstallError(f"{target} is not a file; nothing was written")
     return target
+
+
+def _own_mode(path: Path) -> int | None:
+    """The mode of ``path`` itself, a link un-followed; None where nothing stands."""
+    try:
+        return path.lstat().st_mode
+    except OSError:
+        return None
 
 
 def _text(target: Path) -> str | None:

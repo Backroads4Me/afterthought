@@ -12,6 +12,8 @@ filesystem: which bytes landed where, which directories appeared, and which file
 
 from __future__ import annotations
 
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -54,6 +56,45 @@ def added_lines(diff: str) -> list[str]:
         for line in diff.splitlines()
         if line.startswith("+") and not line.startswith("+++")
     ]
+
+
+def tree(root: Path) -> dict[str, str]:
+    """What the filesystem under ``root`` looks like, links un-followed: each path keyed to
+    its link target, its kind if it is a directory, or its text."""
+    state: dict[str, str] = {}
+    for entry in sorted(root.rglob("*")):
+        where = str(entry.relative_to(root))
+        if entry.is_symlink():
+            state[where] = f"link -> {entry.readlink()}"
+        elif entry.is_dir():
+            state[where] = "directory"
+        else:
+            state[where] = entry.read_text(encoding="utf-8")
+    return state
+
+
+def stand_a_symlink(kind: str, extensions: Path, dotfiles: Path) -> Path:
+    """Stand somebody's own symlink where one of afterthought's two paths goes, and return
+    the path that was linked.
+
+    ``container`` links afterthought's directory to a directory of theirs holding an
+    extension; ``file`` links the entry point to a file of theirs; ``dangling`` links the entry
+    point to a file that is not on this machine, the one layout whose text no backup can reach.
+    """
+    dotfiles.mkdir(parents=True)
+    container = extensions / pi_install.EXTENSION_DIR
+    if kind == "container":
+        (dotfiles / pi_install.EXTENSION_FILE).write_text("// theirs\n", encoding="utf-8")
+        container.symlink_to(dotfiles)
+        return container
+    container.mkdir()
+    target = container / pi_install.EXTENSION_FILE
+    if kind == "file":
+        (dotfiles / pi_install.EXTENSION_FILE).write_text("// theirs\n", encoding="utf-8")
+        target.symlink_to(dotfiles / pi_install.EXTENSION_FILE)
+    else:
+        target.symlink_to(dotfiles / "not-on-this-machine.ts")
+    return target
 
 
 def test_install_copies_the_shipped_extension(extensions):
@@ -180,7 +221,39 @@ def test_uninstall_of_a_directory_we_left_empty(extensions):
     change = pi_install.uninstall(extensions)
 
     assert change.changed is True
+    assert change.removed == (extensions / pi_install.EXTENSION_DIR,)
     assert names(extensions) == set()
+
+
+def test_uninstall_reports_every_path_it_took_away(extensions):
+    target = install(extensions)
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.changed is True
+    assert change.removed == (target, target.parent)
+    assert not target.exists()
+    assert not target.parent.exists()
+    assert extensions.is_dir(), "pi's own extensions directory is never removed"
+
+
+def test_uninstall_reports_the_extension_it_took_that_had_no_text_to_diff(extensions):
+    """A 0-byte extension leaves no diff behind, so the diff cannot be what the report is
+    read from: the file went, and the directory of ours stayed because it holds a note."""
+    target = pi_install.target_path(extensions)
+    target.parent.mkdir(parents=True)
+    target.write_text("", encoding="utf-8")
+    note = target.parent / "notes.md"
+    note.write_text("# theirs\n", encoding="utf-8")
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.changed is True
+    assert change.diff == "", "there is no text change to point at"
+    assert change.removed == (target,)
+    assert not target.exists()
+    assert note.read_text(encoding="utf-8") == "# theirs\n"
+    assert target.parent.is_dir()
 
 
 def test_uninstall_removes_nothing_twice(extensions):
@@ -190,6 +263,7 @@ def test_uninstall_removes_nothing_twice(extensions):
     change = pi_install.uninstall(extensions)
 
     assert change.changed is False
+    assert change.removed == ()
     assert backups(extensions) == set()
 
 
@@ -217,21 +291,21 @@ def test_uninstall_leaves_a_directory_of_nothing_of_ours(extensions):
     assert names(extensions) == {pi_install.EXTENSION_DIR}
 
 
-def test_uninstall_through_a_symlink_of_somebody_elses(extensions, tmp_path):
-    """A user who keeps pi extensions in dotfiles can point afterthought's directory at
-    one of their own. The extension goes, their symlink stays, and the run says so."""
-    theirs = tmp_path / "dotfiles" / "afterthought"
-    theirs.mkdir(parents=True)
-    container = extensions / pi_install.EXTENSION_DIR
-    container.symlink_to(theirs)
-    pi_install.target_path(extensions).write_text(SHIPPED, encoding="utf-8")
+@pytest.mark.parametrize("kind", ["container", "file", "dangling"])
+def test_a_symlink_of_somebody_elses_is_refused_with_nothing_written(kind, extensions, tmp_path):
+    """Afterthought creates and removes its own two paths, so it refuses to follow a link
+    standing at either one: the link is the person's, and a write through it would leave them
+    with a file where their link was and no copy of the link to put back."""
+    linked = stand_a_symlink(kind, extensions, tmp_path / "dotfiles")
+    before = tree(tmp_path)
 
-    change = pi_install.uninstall(extensions)
+    for command in (pi_install.install, pi_install.uninstall):
+        for dry_run in (True, False):
+            with pytest.raises(InstallError):
+                command(extensions, dry_run=dry_run)
 
-    assert change.changed is True
-    assert names(extensions) == {pi_install.EXTENSION_DIR}, "their symlink is theirs to keep"
-    assert names(theirs) == set()
-    assert change.backup is None, "the shipped text needs no copy to survive it"
+    assert tree(tmp_path) == before
+    assert stat.S_ISLNK(linked.lstat().st_mode), f"{linked} is still the person's own link"
 
 
 def cli_env(monkeypatch, tmp_path, *, use_agent_dir: bool) -> Path:
@@ -306,6 +380,26 @@ def test_cli_uninstall_names_the_empty_directory_it_takes_away(monkeypatch, tmp_
     assert not container.exists()
 
 
+def test_cli_uninstall_names_every_path_the_run_takes_away(monkeypatch, tmp_path, capsys):
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    extensions.mkdir(parents=True)
+    target = pi_install.target_path(extensions)
+    target.parent.mkdir()
+    target.write_text(SHIPPED, encoding="utf-8")
+
+    assert main(["install", "pi", "--dry-run", "--uninstall"]) == 0
+
+    assert target.is_file() and target.parent.is_dir(), "a dry run removes nothing"
+    assert capsys.readouterr().out.splitlines()[-1] == f"would remove {target}, {target.parent}"
+
+    assert main(["install", "pi", "--uninstall"]) == 0
+
+    assert capsys.readouterr().out == f"removed {target}, {target.parent}\n"
+    assert not target.exists()
+    assert not target.parent.exists()
+    assert extensions.is_dir()
+
+
 def test_cli_reports_what_it_refused_and_fails(monkeypatch, tmp_path, capsys):
     extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
     extensions.parent.mkdir(parents=True)
@@ -316,16 +410,22 @@ def test_cli_reports_what_it_refused_and_fails(monkeypatch, tmp_path, capsys):
     assert f"{extensions} is not a directory" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory anyway")
 def test_cli_reports_a_write_the_os_refuses(monkeypatch, tmp_path, capsys):
-    """A dangling symlink where afterthought's directory belongs is a dotfiles user's
-    doing. The answer is one line and exit 2, not a traceback out of the installer."""
+    """The OS can still refuse - afterthought's directory of somebody's own is read-only -
+    and that answer is one aft line and exit 2, not a traceback out of the installer."""
     extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
     extensions.mkdir(parents=True)
-    (extensions / pi_install.EXTENSION_DIR).symlink_to(tmp_path / "dotfiles" / "afterthought")
+    container = extensions / pi_install.EXTENSION_DIR
+    container.mkdir()
+    container.chmod(0o500)
 
-    assert main(["install", "pi"]) == 2
+    code = main(["install", "pi"])
+    container.chmod(0o700)
 
+    assert code == 2
     assert f"cannot install into {extensions}" in capsys.readouterr().err
+    assert tree(container) == {}, "nothing was written into the directory that refused"
 
 
 def test_cli_help_lists_the_agent_it_installs(capsys):
