@@ -150,7 +150,7 @@ FILE_COLLECTIONS: dict[str, tuple[str, ...]] = {
 # path component: ``projects/<slug>/``, ``digests/<slug>/`` and ``archive/<slug>.md``. The
 # rest name no project: ``global/`` is every project's memory, ``references/`` lists the
 # projects a page covers, and a report day spans them all.
-PROJECT_DIRS = ("projects", DIGESTS, ARCHIVE)
+PROJECT_DIRS = vault.PROJECT_DIRS
 
 # Which fact states a collection admits, read off the state table in DESIGN 6 and the
 # collection table in DESIGN 10. ``pages`` holds "active curated lines", which are the lines

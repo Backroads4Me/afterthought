@@ -82,6 +82,17 @@ def install(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
         raise InstallError(f"cannot install skill into {skills_dir}: {exc}") from exc
 
 
+def check_target(skills_dir: Path) -> Path:
+    """Validate that the skill target path and container are valid and readable."""
+    try:
+        target = _target(skills_dir)
+        _text(target)
+        skill_text()
+        return target
+    except OSError as exc:
+        raise InstallError(f"cannot install skill into {skills_dir}: {exc}") from exc
+
+
 def uninstall(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
     """Remove the library-import skill from ``skills_dir``."""
     try:
@@ -90,17 +101,20 @@ def uninstall(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
         original = _text(target)
         shipped = _shipped()
         keep = original if original and original != shipped else None
-        copies = _own_copies(container) if original is not None and keep is None else []
 
         removed: list[Path] = []
         if original is not None:
             removed.append(target)
-        removed += copies
-        if keep is None and _is_ours_to_remove(container, removed):
+        backup = _backup(target, keep, dry_run=dry_run)
+
+        will_be_empty = container.is_dir() and not any(
+            entry for entry in container.iterdir() if entry != target
+        )
+        if original is not None and will_be_empty:
             removed.append(container)
+
         changed = bool(removed)
         diff = _diff(target, original, "")
-        backup = _backup(target, keep, dry_run=dry_run)
         if dry_run:
             return SkillChange(
                 changed=changed,
@@ -111,9 +125,7 @@ def uninstall(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
             )
         if target in removed:
             target.unlink()
-        for copy in copies:
-            copy.unlink()
-        if container in removed:
+        if container in removed and container.is_dir() and not any(container.iterdir()):
             container.rmdir()
         return SkillChange(
             changed=changed,

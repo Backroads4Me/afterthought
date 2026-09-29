@@ -1363,6 +1363,8 @@ def test_path_slug_handles_all_vault_layouts():
     assert vault.path_slug("projects") is None
     assert vault.path_slug("digests/widget/2026/09/2026-09-30-session.md") == "widget"
     assert vault.path_slug("archive/projects/widget/overview.md") == "widget"
+    assert vault.path_slug("archive/digests/widget/2026/09/2026-09-30-session.md") == "widget"
+    assert vault.PROJECT_DIRS == index.PROJECT_DIRS
     assert vault.path_slug("archive/projects/widget") == "widget"
     assert vault.path_slug("archive/widget.md") == "widget"
     assert vault.path_slug("archive/index.md") is None

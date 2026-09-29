@@ -174,3 +174,30 @@ def test_pi_adapter_skills_wiring(tmp_path, monkeypatch):
     uninst = pi_install.uninstall_skill(skills)
     assert uninst.changed is True
     assert not target.exists()
+
+
+def test_install_with_backup_then_uninstall_keeps_the_persons_text(tmp_path):
+    """Installing over custom text creates a backup, and uninstalling removes only the
+    shipped skill, preserving the backup holding the person's text.
+    """
+    skills = tmp_path / "skills"
+    target = skill_install.target_path(skills)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    custom_text = "# My Custom Import Procedure\n"
+    target.write_text(custom_text, encoding="utf-8")
+
+    # Install creates backup of custom text and writes shipped content
+    change = skill_install.install(skills)
+    assert change.changed is True
+    assert change.backup is not None
+    assert change.backup.is_file()
+    assert change.backup.read_text(encoding="utf-8") == custom_text
+    assert target.read_text(encoding="utf-8") == skill_install.skill_text()
+
+    # Uninstall removes shipped SKILL.md, but preserves the backup with person's text
+    un_change = skill_install.uninstall(skills)
+    assert un_change.changed is True
+    assert not target.exists()
+    assert change.backup.is_file()
+    assert change.backup.read_text(encoding="utf-8") == custom_text
+    assert target.parent.is_dir()

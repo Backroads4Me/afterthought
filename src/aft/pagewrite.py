@@ -868,35 +868,23 @@ class PageDoc:
         added = errors - known
         if added:
             raise WriteError("; ".join(sorted(added)))
-        gone = known - errors
-        if gone:
-            if carried_off:
-                removed_errors = Counter(
-                    message
-                    for line, message in self._page.errors
-                    if (start + 1 <= line <= stop)
-                    or message.startswith("a callout cannot follow a ")
-                )
-                disallowed = gone - removed_errors
+        remaining_now = list(now.errors)
+        flagged = []
+        for line, message in self._page.errors:
+            is_exempt = carried_off and (
+                (start + 1 <= line <= stop) or message.startswith("a callout cannot follow a ")
+            )
+            if is_exempt:
+                continue
+            expected_line = line if line <= start else line - (stop - start) + len(new)
+            candidate = (expected_line, message)
+            if candidate in remaining_now:
+                remaining_now.remove(candidate)
             else:
-                disallowed = gone
-            if disallowed:
-                still = dict(disallowed)
-                flagged = []
-                lost = sorted(
-                    [
-                        (line, message)
-                        for line, message in self._page.errors
-                        if message in still and (not carried_off or not (start + 1 <= line <= stop))
-                    ],
-                    key=lambda hit: not (start + 1 <= hit[0] <= stop),
-                )
-                for line, message in lost:
-                    if still.get(message, 0) > 0:
-                        still[message] -= 1
-                        flagged.append(f"line {line}: {message}")
-                detail = "; ".join(flagged)
-                raise WriteError(f"this edit would drop text outside the grammar: {detail}")
+                flagged.append(f"line {line}: {message}")
+        if flagged:
+            detail = "; ".join(flagged) if flagged else f"line {start + 1}"
+            raise WriteError(f"this edit would drop text outside the grammar: {detail}")
         self.lines[:] = lines
         self._page = now
 

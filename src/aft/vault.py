@@ -150,6 +150,9 @@ def require(config: Config) -> None:
         raise VaultError(f"no vault at {config.vault}; run `aft init` first")
 
 
+PROJECT_DIRS: tuple[str, ...] = ("projects", "digests", "archive")
+
+
 def path_slug(rel: str | Path) -> str | None:
     """The project slug for a vault-relative path, or None for pages outside projects.
 
@@ -157,6 +160,7 @@ def path_slug(rel: str | Path) -> str | None:
     - projects/<slug>/...
     - digests/<slug>/...
     - archive/projects/<slug>/... (ruling 7943f9a layout)
+    - archive/digests/<slug>/...
     - archive/<slug>.md (legacy archive layout)
     """
     parts = Path(rel).parts
@@ -165,7 +169,7 @@ def path_slug(rel: str | Path) -> str | None:
     if parts[0] in ("projects", "digests"):
         return parts[1] if len(parts) > 1 else None
     if parts[0] == "archive":
-        if len(parts) >= 3 and parts[1] == "projects":
+        if len(parts) >= 3 and parts[1] in ("projects", "digests"):
             return parts[2]
         if len(parts) == 2 and parts[1].endswith(".md"):
             stem = Path(parts[1]).stem

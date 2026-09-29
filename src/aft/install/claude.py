@@ -425,6 +425,11 @@ def install_skill(skills: Path, *, dry_run: bool = False) -> skill_install.Skill
     return skill_install.install(skills, dry_run=dry_run)
 
 
+def check_skill_target(skills: Path) -> Path:
+    """Validate that the skill target path and container are valid and readable."""
+    return skill_install.check_target(skills)
+
+
 def uninstall_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
     """Remove the library-import skill from Claude Code's skills directory."""
     return skill_install.uninstall(skills, dry_run=dry_run)

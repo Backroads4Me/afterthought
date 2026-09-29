@@ -35,6 +35,7 @@ from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.install import skill as skill_install
 from aft.install import systemd as systemd_install
 from aft.library import importing, manifest, map_evidence, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         claude_install.InstallError,
         pi_install.InstallError,
+        skill_install.InstallError,
         systemd_install.InstallError,
         RegistryError,
         vault.VaultError,
@@ -334,16 +336,28 @@ def cmd_project_rename(args) -> int:
         registry.rename(args.old, args.new)
         registry.save()
         changed = ["registry.yaml"]
-        for old, new in (
-            (f"projects/{args.old}", f"projects/{args.new}"),
-            (f"digests/{args.old}", f"digests/{args.new}"),
-            (f"archive/projects/{args.old}", f"archive/projects/{args.new}"),
-            (f"archive/{args.old}.md", f"archive/{args.new}.md"),
-        ):
-            if (config.vault / old).exists():
-                (config.vault / new).parent.mkdir(parents=True, exist_ok=True)
-                (config.vault / old).rename(config.vault / new)
-                changed += [old, new]
+        renamed: list[tuple[str, str]] = []
+        try:
+            for old, new in (
+                (f"projects/{args.old}", f"projects/{args.new}"),
+                (f"digests/{args.old}", f"digests/{args.new}"),
+                (f"archive/projects/{args.old}", f"archive/projects/{args.new}"),
+                (f"archive/{args.old}.md", f"archive/{args.new}.md"),
+            ):
+                if (config.vault / old).exists():
+                    (config.vault / new).parent.mkdir(parents=True, exist_ok=True)
+                    (config.vault / old).rename(config.vault / new)
+                    renamed.append((old, new))
+                    changed += [old, new]
+        except OSError as exc:
+            for old, new in reversed(renamed):
+                try:
+                    (config.vault / new).rename(config.vault / old)
+                except OSError:
+                    pass
+            registry.rename(args.new, args.old)
+            registry.save()
+            raise vault.VaultError(f"cannot rename project directories: {exc}") from exc
         vault.commit(config.vault, changed, f"aft: rename {args.old} to {args.new}")
     print(f"renamed {args.old} to {args.new}")
     return 0
@@ -498,6 +512,12 @@ def cmd_install_claude(args) -> int:
     """Add or remove afterthought's hook entries and skill in Claude Code's configuration."""
     settings = claude_install.settings_path()
     skills = claude_install.skills_dir(settings)
+    try:
+        if settings.exists():
+            _ = settings.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise claude_install.InstallError(f"cannot read {settings}: {exc}") from exc
+    skill_install.check_target(skills)
     change = (
         claude_install.uninstall(settings, dry_run=args.dry_run)
         if args.uninstall
@@ -517,6 +537,10 @@ def cmd_install_claude(args) -> int:
             preview_lines.append(f"{verb} skill {skill_change.target}")
             if skill_change.diff:
                 preview_lines.append(skill_change.diff)
+        if skill_change.backup is not None:
+            preview_lines.append(
+                f"would back up {skill_change.target.name} to {skill_change.backup}"
+            )
         if not preview_lines:
             print(f"no changes to {settings}")
         else:
@@ -553,6 +577,7 @@ def cmd_install_pi(args) -> int:
     """Copy or remove afterthought's extension and skill in pi's configuration."""
     extensions = pi_install.extensions_dir()
     skills = pi_install.skills_dir(extensions)
+    skill_install.check_target(skills)
     change = (
         pi_install.uninstall(extensions, dry_run=args.dry_run)
         if args.uninstall

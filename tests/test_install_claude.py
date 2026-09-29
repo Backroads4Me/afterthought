@@ -798,3 +798,45 @@ def test_install_through_a_dangling_link_writes_its_target(tmp_path):
     assert change.changed is True and change.backup is None
     assert settings.is_symlink()
     assert set(read_settings(real)["hooks"]) == set(claude_install.HOOK_EVENTS)
+
+
+def test_main_install_claude_on_symlinked_skill_returns_2_and_leaves_settings_unchanged(
+    tmp_path, monkeypatch, capsys
+):
+    """A symlinked SKILL.md is refused before hooks are written, leaving settings.json unchanged."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    initial_text = '{\n  "model": "claude-opus"\n}\n'
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(initial_text, encoding="utf-8")
+
+    skills = claude_install.skills_dir(settings)
+    skill_container = skills / "library-import"
+    skill_container.mkdir(parents=True, exist_ok=True)
+    symlink_target = tmp_path / "somewhere_else.md"
+    symlink_target.write_text("some external text", encoding="utf-8")
+    skill_file = skill_container / "SKILL.md"
+    skill_file.symlink_to(symlink_target)
+
+    ret = main(["install", "claude"])
+    assert ret == 2
+    err = capsys.readouterr().err
+    assert "aft:" in err
+    assert "not a file; nothing was written" in err
+    assert settings.read_text(encoding="utf-8") == initial_text
+
+
+def test_claude_dry_run_prints_the_bak_the_run_would_create(tmp_path, monkeypatch, capsys):
+    """When a custom skill file exists, --dry-run prints the .bak the run would create."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    skills = claude_install.skills_dir(settings)
+    target = claude_install.skill_target(skills)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("Custom user skill text\n", encoding="utf-8")
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert ".bak" in out
+    assert "would back up SKILL.md to" in out
