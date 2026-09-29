@@ -10,10 +10,11 @@ model only judges meaning, and the rules and the page writer decide what changes
 Where the lines come from:
 
 * **The pages the run may edit.** A project fact searches ``projects/<slug>/``; a global
-  fact searches those and ``global/`` as well (BUILD-PLAN M4.3). Digests, the archive and
-  reports are never read: a run must never cite its own reports (design 6). Reference
-  pages are outside M4.3's list: one carries ``aft.projects`` rather than one project, so
-  no run owns it under R6 as the rules read a page's project.
+  fact searches only ``global/``, since R6 lets it edit nothing else (BUILD-PLAN M4.3).
+  Digests, the archive and reports are never read: a run must never cite its own
+  reports (design 6). Reference pages are outside M4.3's list: one carries
+  ``aft.projects`` rather than one project, so no run owns it under R6 as the rules read
+  a page's project.
 * **The pages as they are now, not the search index.** A run applies earlier facts before
   it decides later ones (design 9), so a line added a moment ago has to be found, and the
   index is only brought up to date after the run commits. An index row is also a whole
@@ -220,9 +221,10 @@ def _target(decision: rules.Decision, lines: Sequence[Line]) -> Line | None:
 
 def _pages(vault: Path, scope: str, slug: str | None) -> list[Path]:
     """The pages a fact's decision may edit, in path order."""
-    roots = [vault / PROJECT_PAGES / slug] if slug else []
     if scope == "global":
-        roots.append(vault / GLOBAL_PAGES)
+        roots = [vault / GLOBAL_PAGES]
+    else:
+        roots = [vault / PROJECT_PAGES / slug] if slug else []
     return [path for root in roots if root.is_dir() for path in sorted(root.rglob("*.md"))]
 
 
