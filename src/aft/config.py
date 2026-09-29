@@ -184,7 +184,10 @@ name = ""
 worker_paths = []
 # Sessions under these paths are never captured.
 exclude_paths = []
-# Extra regular expressions to redact, on top of the built-in secret patterns.
+# Extra regular expressions to redact, on top of the built-in secret patterns
+# (see aft.redact). They match case-insensitively and are applied after the
+# built-ins. One that does not compile, or that holds nothing to match, is an error
+# raised before any text is filtered, never a silent no-op.
 redact_patterns = []
 
 [evidence]
