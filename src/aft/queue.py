@@ -63,8 +63,9 @@ FAILED = "failed"
 # (DESIGN 8, BUILD-PLAN M2.2): a bound on correctness cannot rest on that number alone.
 CLAIM_LEASE_FLOOR = timedelta(minutes=30)
 
-# The one key of the meta table this module uses.
-LAST_SWEEP = "last_sweep"
+# The one key of the meta table this module uses: when this host began watching for
+# sessions. The first sweep writes it and nothing rewrites it.
+WATCHING_SINCE = "watching_since"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     event_time      TEXT NOT NULL,
     status          TEXT NOT NULL,
     claimed_pid     INTEGER,
+    claimed_time    TEXT,
     error           TEXT,
     created_time    TEXT NOT NULL,
     updated_time    TEXT NOT NULL
@@ -126,11 +128,16 @@ class SessionState:
     (M2.3); a session with no row of its own has no span open. ``has_open_job`` covers a
     row awaiting a claim and one being digested now: both are capture work in flight for
     that session, and a second row for either would be a chunk the digest has already read.
+    ``read_at`` is when the newest finished digest of the session claimed its job, so a
+    transcript untouched since then holds nothing that digest did not read. ``failed_at``
+    is when the session's newest job failed, or None when that job did not fail.
     """
 
     watermark: str | None
     off_record: bool
     has_open_job: bool
+    read_at: datetime | None = None
+    failed_at: datetime | None = None
 
 
 def enqueue(config: Config, event: SessionEvent) -> None:
@@ -192,8 +199,9 @@ def next_job(config: Config) -> Job | None:
         if row is None:
             return None
         conn.execute(
-            "UPDATE jobs SET status = ?, claimed_pid = ?, updated_time = ? WHERE id = ?",
-            (RUNNING, os.getpid(), _text(now), row[0]),
+            "UPDATE jobs SET status = ?, claimed_pid = ?, claimed_time = ?, updated_time = ?"
+            " WHERE id = ?",
+            (RUNNING, os.getpid(), _text(now), _text(now), row[0]),
         )
         return _job(conn, row)
 
@@ -282,32 +290,38 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
             "SELECT 1 FROM jobs WHERE agent = ? AND session_id = ? AND status IN (?, ?) LIMIT 1",
             (agent, session_id, PENDING, RUNNING),
         ).fetchone()
+        read = conn.execute(
+            "SELECT max(claimed_time) FROM jobs WHERE agent = ? AND session_id = ? AND status = ?",
+            (agent, session_id, DONE),
+        ).fetchone()
+        newest = conn.execute(
+            "SELECT status, updated_time FROM jobs WHERE agent = ? AND session_id = ?"
+            " ORDER BY created_time DESC, id DESC LIMIT 1",
+            (agent, session_id),
+        ).fetchone()
     return SessionState(
         watermark=row[0] if row else None,
         off_record=bool(row[1]) if row else False,
         has_open_job=open_row is not None,
+        read_at=_moment(read[0]),
+        failed_at=_moment(newest[1]) if newest and newest[0] == FAILED else None,
     )
 
 
-def last_sweep(config: Config) -> datetime | None:
-    """When the last completed sweep ran, or None before there has been one.
+def watching_since(config: Config, now: datetime) -> datetime:
+    """When this host began watching for sessions, recording ``now`` the first time.
 
-    A sweep records this only after it has enqueued everything it found, so a sweep that
-    died partway leaves the window it was working open and finds those sessions again.
+    A session the queue has never digested counts as capture work only if it moved after
+    this moment, so a new home with weeks of transcripts does not spend the model budget
+    on sessions that predate afterthought (BUILD-PLAN M2.2).
     """
-    with _reading(config) as conn:
-        row = conn.execute("SELECT value FROM meta WHERE key = ?", (LAST_SWEEP,)).fetchone()
-    return None if row is None else datetime.fromisoformat(row[0])
-
-
-def record_sweep(config: Config, now: datetime) -> None:
-    """Close the sweep window at ``now``: the next one looks at sessions touched after it."""
     with _writing(config) as conn:
         conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?)"
-            " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            (LAST_SWEEP, _text(now)),
+            "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            (WATCHING_SINCE, _text(now)),
         )
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (WATCHING_SINCE,)).fetchone()
+    return datetime.fromisoformat(row[0])
 
 
 def _reclaim_stale_claims(conn: sqlite3.Connection, now: datetime, lease: timedelta) -> None:
@@ -399,11 +413,13 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
-    if "off_record" not in columns:
+    sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "off_record" not in sessions or "claimed_time" not in jobs:
         conn.close()
         raise QueueError(
-            f"{path} predates off-the-record state per session; delete it to start the queue over"
+            f"{path} was written by an earlier build of afterthought; delete it to start"
+            " the queue over"
         )
     return conn
 
@@ -458,6 +474,10 @@ def _job(conn: sqlite3.Connection, row: tuple) -> Job:
         watermark=state[0] if state else None,
         off_record=bool(state[1]) if state else False,
     )
+
+
+def _moment(text: str | None) -> datetime | None:
+    return None if text is None else datetime.fromisoformat(text)
 
 
 def _text(moment: datetime) -> str:

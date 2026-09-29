@@ -25,7 +25,7 @@ from pathlib import Path
 
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
-from aft.queue import enqueue, last_sweep, record_sweep, session_state
+from aft.queue import enqueue, session_state, watching_since
 from aft.readers import CLAUDE, PI
 
 # Where each agent keeps its session files, and the layout of one: Claude Code writes
@@ -40,6 +40,15 @@ SESSION_DIRS = {
 
 # A session that has not written for this long is done talking, whatever its hook said.
 IDLE_AFTER = timedelta(minutes=30)
+
+# How far back the sweep looks. Each session in the window is measured against its own
+# progress, so the timer's cadence decides only how soon a missed session is found
+# (BUILD-PLAN M2.2).
+SESSION_WINDOW = timedelta(days=7)
+
+# How long a session whose newest job failed waits before the sweep offers it again, so a
+# transcript that cannot be digested costs one attempt an hour rather than one a tick.
+RETRY_AFTER = timedelta(hours=1)
 
 # A session that has added this much past its watermark holds enough new conversation to
 # be worth a digest now, rather than whenever it happens to end (DESIGN 8: running
@@ -63,23 +72,19 @@ SWEEP_DETAIL = "sweep"
 
 
 def sweep(config: Config, now: datetime) -> list[SessionEvent]:
-    """Enqueue the sessions of both agents that this sweep window turned up.
+    """Enqueue the sessions of both agents that hold capture work no hook reported.
 
-    A session is capture work when the queue has no work in flight for it and it has
-    either gone quiet or outgrown its watermark, and only for files touched since the
-    last sweep: an untouched session cannot have new conversation in it.
-
-    Before the first sweep there is no window, and every transcript on the host would
-    fill it, spending the model budget on sessions that predate afterthought. So the
-    first sweep records where the window starts and enqueues nothing (BUILD-PLAN M2.2).
+    Every session file modified in the last `SESSION_WINDOW` is measured against its own
+    progress, never against the time of the last sweep, so a session whose hook never fired
+    is found whatever the timer's cadence. A session is capture work when the queue has
+    no work in flight for it, it moved since its last digest read it (or, never digested,
+    since this host began watching), a failure is not still cooling off, and it has either
+    gone quiet or outgrown its watermark.
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
     """
-    since = last_sweep(config)
-    if since is None:
-        record_sweep(config, now)
-        return []
+    since = watching_since(config, now)
     found: list[SessionEvent] = []
     for agent, directory in SESSION_DIRS.items():
         for path in _session_files(directory):
@@ -93,7 +98,6 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
                 continue
             enqueue(config, event)
             found.append(event)
-    record_sweep(config, now)
     return found
 
 
@@ -105,11 +109,18 @@ def _candidate(
     The checks run cheapest first: a timestamp, the queue, and only then the file.
     """
     touched = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-    if touched <= since:
+    if touched < now - SESSION_WINDOW:
         return None
     session_id = _session_id(agent, path)
     state = session_state(config, agent, session_id)
     if state.has_open_job:
+        return None
+    # A digest reads the transcript after it claims its job, so a file that has not moved
+    # since that claim holds nothing the digest did not read, including a chunk the filter
+    # emptied and that therefore moved no watermark.
+    if touched <= (state.read_at or since):
+        return None
+    if state.failed_at is not None and now - state.failed_at < RETRY_AFTER:
         return None
     idle = now - touched >= IDLE_AFTER
     if not idle and not _grown_since_watermark(path, state.watermark, agent):
