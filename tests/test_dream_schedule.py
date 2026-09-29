@@ -270,6 +270,24 @@ aft:
 """
 
 
+def seeded_page(initialized) -> Path:
+    """The fixture page committed into the vault, with one digest waiting on it."""
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True)
+    overview.write_text(PAGE)
+    (root / "projects" / "widget" / "index.md").write_text("---\ntype: Index\n---\n")
+    vault.commit(root, ["projects"], "seed")
+    digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
+    return overview
+
+
+def tag_day(cfg, sha: str) -> str:
+    """The UTC date of the checkpoint commit, which is the date its tags carry."""
+    stamp = int(run_git(["show", "-s", "--format=%ct", sha], cfg.vault))
+    return datetime.fromtimestamp(stamp, UTC).date().isoformat()
+
+
 def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
     root = initialized.vault
     overview = root / "projects" / "widget" / "overview.md"
@@ -324,6 +342,70 @@ def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
         "stated",
         "decision",
     )
+
+
+def test_checkpoint_tags_a_bare_bullet_that_ends_in_a_date(widget, initialized):
+    """A date with nothing to attach it to is a bare line, not a fact line half-typed."""
+    overview = seeded_page(initialized)
+    edited = overview.read_text().replace(
+        "- The build uses uv. [stated] 2026-09-01 [^s1]\n",
+        "- The build uses uv. [stated] 2026-09-01 [^s1]\n"
+        "- The 3.13 wheel build broke on 2026-09-27\n"
+        "- Cut releases by hand. [observed] 2026-09-20\n",
+    )
+    assert edited != overview.read_text()
+    overview.write_text(edited)
+    age(overview, LONG_AGO)
+
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    day = tag_day(initialized, result.checkpoint)
+    assert result.tagged == ["projects/widget/overview.md"]
+    assert subjects(initialized)[0] == f"aft: tag hand edits from {result.checkpoint}"
+
+    text = overview.read_text()
+    assert f"- The 3.13 wheel build broke on 2026-09-27 [stated] {day} [^s2]\n" in text
+    assert "- Cut releases by hand. [observed] 2026-09-20\n" in text
+    assert (
+        f"  - id: s2\n    resource: aft://edit/{result.checkpoint}\n"
+        f"    title: Hand edit {day}\n    quote: The 3.13 wheel build broke on 2026-09-27\n"
+    ) in text
+    fact = next(f for f in page.parse(text, overview).facts if f.refs == ("s2",))
+    assert (fact.statement, fact.source, fact.kind) == (
+        "The 3.13 wheel build broke on 2026-09-27",
+        "stated",
+        "decision",
+    )
+
+
+def test_checkpoint_tags_a_bare_bullet_that_carries_its_own_note(widget, initialized):
+    """The note under a hand-typed bullet marks the fact it becomes, and stops nothing tagged."""
+    overview = seeded_page(initialized)
+    edited = overview.read_text().replace(
+        "## Candidates",
+        "- We ship on Tuesdays.\n\n> [!question] 2026-09-25\n> Is that still the cadence?\n\n"
+        "- Releases are cut from main only.\n\n## Candidates",
+    )
+    assert edited != overview.read_text()
+    overview.write_text(edited)
+    age(overview, LONG_AGO)
+
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    day = tag_day(initialized, result.checkpoint)
+    assert result.tagged == ["projects/widget/overview.md"]
+    assert subjects(initialized)[0] == f"aft: tag hand edits from {result.checkpoint}"
+
+    text = overview.read_text()
+    assert f"- We ship on Tuesdays. [stated] {day} [^s2]\n" in text
+    assert f"- Releases are cut from main only. [stated] {day} [^s3]\n" in text
+    facts = {f.statement: f for f in page.parse(text, overview).facts}
+    noted = facts["We ship on Tuesdays."]
+    assert (noted.source, noted.state) == ("stated", page.NEEDS_YOU)
+    assert noted.callouts[0].text == ["Is that still the cadence?"]
+    assert facts["Releases are cut from main only."].state == page.ACTIVE
+    assert [message for _, message in page.parse(text, overview).errors] == [
+        "fact line must read '- <statement> [<source>] YYYY-MM-DD [^id]'",
+        "a callout cannot mark a refused fact line",
+    ]
 
 
 def test_checkpoint_without_bare_bullets_makes_no_tag_commit(widget, initialized):

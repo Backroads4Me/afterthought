@@ -32,7 +32,7 @@ from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
 from aft.install import systemd as systemd_install
-from aft.library import manifest, survey
+from aft.library import importing, manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest.ManifestError,
         queue.QueueError,
         sqlite3.Error,
+        importing.ImportError,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -197,6 +198,11 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("manifest", help="path to manifest YAML file")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_validate)
+
+    q = lsub.add_parser("import", help="import a library collection into the vault")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_import)
     return parser
 
 
@@ -508,6 +514,10 @@ def cmd_library_survey(args) -> int:
 
 def cmd_library_validate(args) -> int:
     return manifest.run(args.manifest, path_override=args.path)
+
+
+def cmd_library_import(args) -> int:
+    return importing.run(args.manifest, path_override=args.path)
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget

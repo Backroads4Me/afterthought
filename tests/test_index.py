@@ -638,7 +638,9 @@ def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config)
     assert indexed == {entry.id: entry.text for entry in evidence.entries(initialized, "def")}
 
 
-def test_a_rewritten_archive_row_is_reindexed_at_its_own_size(initialized: Config) -> None:
+def test_a_rewritten_archive_row_is_reindexed_though_its_stored_size_did_not_move(
+    initialized: Config,
+) -> None:
     """``aft forget pattern`` redacts archived text under the row's own key (BUILD-PLAN M2.8),
     and DESIGN 12 requires the redaction to reach the index as well as the archive. The change
     is caught on the bytes, not on what they happen to measure: these two texts compress to the
@@ -666,7 +668,7 @@ def test_a_rewritten_archive_row_is_reindexed_at_its_own_size(initialized: Confi
     assert search(initialized, "evidence", "bronze") == []
 
 
-def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> None:
+def test_forgotten_evidence_leaves_the_index(initialized: Config) -> None:
     """``aft forget`` and the retention window remove content from everything afterthought
     controls (DESIGN 12, DESIGN 8), and the index is one of those things."""
     evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange", "old words"))
@@ -772,6 +774,24 @@ def test_reindex_equals_the_incremental_result(initialized: Config) -> None:
     write(initialized, "archive/steel.md", _ALL_DEAD)
     write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
     write(initialized, "reports/2026-09-28.md", REPORT)
+    write(initialized, "library/widget/notes.txt", "Library notes for widget\n")
+    write(
+        initialized,
+        "references/widget/collection.md",
+        """---
+type: Reference
+title: Widget Library
+description: Reference materials for widget
+aft:
+  collection: widget
+  projects:
+    - p_widget
+  files:
+    notes.txt: 44fe67898e8cca3b8252ddb6234814147b5dca7f1ea020a3baf7f032ec7dcff4
+---
+# Widget Library
+""",
+    )
     write(initialized, "projects/widget/broken.md", UNCLOSED_PAGE)
     evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
     evidence.store(initialized, "pi", "def", "p_widget", entries("another flange"))
@@ -1013,7 +1033,7 @@ def test_a_line_inside_a_code_fence_is_the_quoted_text_and_not_a_heading(
     assert search(initialized, "digests", "bronze") == [f"{rel}#Summary"]
 
 
-def test_a_fence_opened_inside_a_fence_ends_the_block_the_other_one_started(
+def test_a_fence_opened_inside_a_fence_does_not_end_the_block_around_it(
     initialized: Config,
 ) -> None:
     """A digest quoting a document quotes that document's own headings and its own fenced blocks:
@@ -1221,7 +1241,9 @@ def test_moving_a_slug_in_the_registry_refiles_the_rows_it_derived(initialized: 
     assert _column(digest_row, "body") == "The widget gained a flange."
 
 
-def test_a_project_page_that_names_no_project_takes_its_directory(initialized: Config) -> None:
+def test_a_project_page_takes_its_directory_unless_the_frontmatter_names_another(
+    initialized: Config,
+) -> None:
     """A page under ``projects/<slug>/`` belongs to that project whether or not its frontmatter
     says so: the block can be absent, hand-typed, or written so the parser cannot read it, and
     the directory is what DESIGN 6 files the page in. The frontmatter still wins where it
