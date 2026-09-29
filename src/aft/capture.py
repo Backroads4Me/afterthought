@@ -91,8 +91,8 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
     file has moved (BUILD-PLAN M2.2).
 
     The queue is read once for the whole walk, whatever files it walks: every session is
-    asked the same questions of the same rows, and a file goes to the reader only once it
-    has moved since a sweep last read that file to no work (BUILD-PLAN M2.2).
+    asked the same questions of the same rows, and a file goes to the reader only once its
+    bytes have moved since something last read them to their end (BUILD-PLAN M2.2).
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
@@ -142,18 +142,20 @@ def _candidate(
     if state.has_open_job:
         return None
     if state.waiting_on_retry(now):
-        # A chunk of this session did not land. It is offered again once the pause that
-        # failure set has passed, and once the tries are spent the session waits where a
-        # person can read why rather than as a row on every tick (BUILD-PLAN M2.1, M2.2).
+        # A chunk of this session did not land, so it waits out the pause that failure set.
+        # Past the last of its tries that pause is the long interval the ladder stops growing
+        # at, so the session comes back hours apart rather than as a row on every tick, and it
+        # is named where a person can read why (BUILD-PLAN M2.1, M2.2).
         return None
     if state.watermark is None and touched <= watching:
         # Nothing has ever digested this session and its file predates the watching, so it
         # is history from before afterthought rather than a hook it missed.
         return None
     if state.seen == (stat.st_mtime, stat.st_size):
-        # A sweep already read this file at this size and this watermark and called it
-        # finished. A transcript only grows, so the same bytes hold the same answer, and
-        # the parse of them is the sweep's one expensive check.
+        # Something already read these same bytes to their end and called them finished. The
+        # observation the queue holds is the file's modification time and size, and a
+        # transcript only ever grows, so the same pair holds the same answer - and parsing
+        # them is the sweep's one expensive check.
         return None
     idle = now - touched >= IDLE_AFTER
     if not idle and not _grown_since_watermark(path, stat.st_size, state.watermark, agent):
