@@ -47,7 +47,7 @@ These rules apply to every task and every pull request.
 | `aft.vault` | `init(config)`, `commit(vault, paths, message)`, `locked(config)` (the exclusive vault lock every writer takes), `require(config)`. |
 | `aft.page` | `split_frontmatter(text)`, `parse(text, path) -> Page` with `facts: list[Fact]`; fact states `CANDIDATE`, `ACTIVE`, `SUPERSEDED`, `WITHDRAWN`, `STALE`, `CONFLICT`, `NEEDS_YOU`; `KIND_SECTIONS`. |
 | `aft.lint` | `lint_vault(vault) -> list[Finding]`. |
-| `aft.cli` | `aft init`, `aft key`, `aft project list/add/rename/forget`, `aft lint`. New commands are added here as subcommands. |
+| `aft.cli` | `aft init`, `aft key`, `aft project list/add/rename/forget`, `aft lint`. New commands are added here as subcommands. A task whose entry names a command owns that command's wiring here, whether or not its file list names `src/aft/cli.py`; the wiring is argument parsing plus one call into the task's module. |
 
 New code follows the same shape: small modules, dataclasses for records, pure functions
 where possible, errors as exceptions caught once in `cli.main`.
