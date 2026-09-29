@@ -10,9 +10,10 @@ model only judges meaning, and the rules and the page writer decide what changes
 Where the lines come from:
 
 * **The pages the run may edit.** A project fact searches ``projects/<slug>/``; a global
-  fact searches those and ``global/`` as well (BUILD-PLAN M4.3). Reference pages, digests,
-  the archive and reports are never read: a run edits no reference page, and a run must
-  never cite its own reports (design 6).
+  fact searches those and ``global/`` as well (BUILD-PLAN M4.3). Digests, the archive and
+  reports are never read: a run must never cite its own reports (design 6). Reference
+  pages are outside M4.3's list: one carries ``aft.projects`` rather than one project, so
+  no run owns it under R6 as the rules read a page's project.
 * **The pages as they are now, not the search index.** A run applies earlier facts before
   it decides later ones (design 9), so a line added a moment ago has to be found, and the
   index is only brought up to date after the run commits. An index row is also a whole
@@ -226,9 +227,13 @@ def _pages(vault: Path, scope: str, slug: str | None) -> list[Path]:
 
 
 def _lines(vault: Path, path: Path) -> list[tuple[str, str | None, page.Fact, dict[str, dict]]]:
-    """The retrievable lines of one page. A page that cannot be read or whose frontmatter
-    does not parse gives none: its project and sources are unknown, and ``aft lint``, which
-    the run passes before it commits, names it."""
+    """The retrievable lines of one page, with the project the page belongs to.
+
+    Whether a page is global is read from its path, never from its frontmatter, because
+    the rules read a None project as a global page (R6). A project page takes its project
+    from ``aft.project``; one without it, a page that cannot be read, and one whose
+    frontmatter does not parse give no lines, since which project they belong to is
+    unknown. ``aft lint``, which the run passes before it commits, names each of them."""
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -236,18 +241,22 @@ def _lines(vault: Path, path: Path) -> list[tuple[str, str | None, page.Fact, di
     frontmatter, _, _, error = page.split_frontmatter(text)
     if error:
         return []
-    aft = (frontmatter or {}).get("aft")
-    project = aft.get("project") if isinstance(aft, dict) else None
+    rel = path.relative_to(vault).as_posix()
+    project: str | None = None
+    if not rel.startswith(f"{GLOBAL_PAGES}/"):
+        aft = (frontmatter or {}).get("aft")
+        project = aft.get("project") if isinstance(aft, dict) else None
+        if not isinstance(project, str) or not project:
+            return []
     sources = {
         str(entry["id"]): entry
         for entry in (frontmatter or {}).get("sources") or []
         if isinstance(entry, dict) and entry.get("id") is not None
     }
-    rel = path.relative_to(vault).as_posix()
     return [
         (
             rel,
-            project if isinstance(project, str) else None,
+            project,
             fact,
             {ref: sources[ref] for ref in fact.refs if ref in sources},
         )

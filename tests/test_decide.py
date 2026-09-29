@@ -408,3 +408,47 @@ def test_a_page_whose_frontmatter_does_not_parse_gives_no_lines(tmp_path):
 
 def fake_reply(action: str, line: str | None) -> Reply:
     return Reply(content={"action": action, "line": line, "reason": "because"})
+
+
+def test_the_label_named_is_the_line_carried(home, vault, fake):
+    cfg = _config(home, vault, fake)
+    new_fact = _fact("The GPU host runs SGLang for the digest model.")
+    lines = decide.related(cfg.vault, new_fact, "widget")
+    assert len(lines) >= 3
+    for line in lines[1:]:
+        fake.script = [fake_reply("confirm", line.label)]
+        proposal = decide.decide(cfg, new_fact, "switched to sglang", "widget")
+        assert proposal.target == line
+
+
+def test_a_global_fact_carries_a_global_line_as_its_target(home, vault, fake):
+    cfg = _config(home, vault, fake)
+    new_fact = _fact(RGB, kind="preference", scope="global")
+    lines = decide.related(cfg.vault, new_fact, "widget")
+    fake.script = [fake_reply("confirm", next(x.label for x in lines if x.fact.statement == RGB))]
+
+    proposal = decide.decide(cfg, new_fact, "still no rgb", "widget")
+
+    assert proposal.target is not None
+    assert proposal.target.path == "global/preferences.md"
+    context = proposal.context(TODAY, _evidence(), RUN_PROJECT)
+    assert context.page_project is None
+    assert proposal.check(context) == rules.apply("confirm")
+
+
+def test_a_project_page_without_its_project_gives_no_lines(vault):
+    text = PROJECT_PAGE.replace(f"aft:\n  project: {RUN_PROJECT}\n", "")
+    (vault / "projects" / "widget" / "overview.md").write_text(text)
+
+    for scope in ("project", "global"):
+        lines = decide.related(vault, _fact(CAPTURE, scope=scope), "widget")
+        assert not any(line.path.startswith("projects/") for line in lines)
+
+
+def test_a_page_is_global_by_its_path(vault):
+    path = vault / "global" / "preferences.md"
+    path.write_text(GLOBAL_PAGE.replace("---\n\n##", f"aft:\n  project: {RUN_PROJECT}\n---\n\n##"))
+
+    lines = decide.related(vault, _fact(RGB, kind="preference", scope="global"), "widget")
+
+    assert next(x for x in lines if x.fact.statement == RGB).project is None
