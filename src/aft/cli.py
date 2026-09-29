@@ -11,9 +11,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, inject, keys, lint, vault
+from aft import __version__, adapters, gitutil, inject, keys, lint, queue, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
-from aft.events import AdapterError, SessionEvent
+from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
@@ -369,11 +369,13 @@ def _hook_event(args, payload: object) -> SessionEvent:
 def _dispatch(event: SessionEvent) -> None:
     """Hand one normalized event to the part of afterthought that consumes it.
 
-    ``session_start`` prints the injection block (M1.2); ``compaction`` and
-    ``session_end`` enqueue capture (M2.2). Neither exists yet, so a parsed event is
-    recognized and dropped here: there is nothing to print and nothing to enqueue,
-    which is the no output and exit 0 the hook contract asks for in the meantime.
+    ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
+    returns: no model call, no transcript read, no project resolution (DESIGN 8, BUILD-PLAN
+    M2.2). ``session_start`` is injection's, which the agents run as `aft inject` (M1.2),
+    so it prints nothing here, and the hook contract asks for silence and exit 0.
     """
+    if event.kind in (COMPACTION, SESSION_END):
+        queue.enqueue(load(), event)
 
 
 @contextmanager

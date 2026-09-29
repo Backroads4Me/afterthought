@@ -346,7 +346,7 @@ def test_the_sweep_chunks_a_long_session_that_outgrew_its_watermark(
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    queue.watching_since(cfg, NOW - timedelta(minutes=10))
 
     queue.enqueue(cfg, event(session_id="long-running", agent=PI, transcript=path))
     job = queue.next_job(cfg)
@@ -369,7 +369,7 @@ def test_the_sweep_leaves_alone_what_is_quiet_enough_or_already_queued(
     waiting = session_file(sessions, CLAUDE, "waiting", touched=NOW - timedelta(minutes=31))
     digesting = session_file(sessions, CLAUDE, "digesting", touched=NOW - timedelta(minutes=31))
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=40))
+    queue.watching_since(cfg, NOW - timedelta(minutes=40))
 
     for session_id, path in (("digesting", digesting), ("waiting", waiting)):
         queue.enqueue(cfg, event(session_id=session_id, transcript=path))
@@ -381,6 +381,12 @@ def test_the_sweep_leaves_alone_what_is_quiet_enough_or_already_queued(
         cfg,
         "SELECT session_id, status FROM jobs ORDER BY session_id",
     ) == [("digesting", queue.RUNNING), ("waiting", queue.PENDING)]
+
+
+def progress(config: Config, session_id: str) -> tuple[str | None, bool, bool]:
+    """Where a Claude Code session's digest has read to, and whether work is in flight."""
+    state = queue.session_state(config, CLAUDE, session_id)
+    return state.watermark, state.off_record, state.has_open_job
 
 
 def hand_claim_to(config: Config, job: queue.Job, pid: int, age: timedelta) -> None:
@@ -428,9 +434,7 @@ def test_a_claim_whose_pid_was_recycled_to_a_live_process_ages_out(cfg: Config) 
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
     queue.complete(cfg, retry, "entry-3", off_record=False)
-    assert queue.session_state(cfg, CLAUDE, "recycled") == queue.SessionState(
-        watermark="entry-3", off_record=False, has_open_job=False
-    )
+    assert progress(cfg, "recycled") == ("entry-3", False, False)
 
 
 def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None:
@@ -455,9 +459,7 @@ def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
     queue.complete(cfg, retry, "entry-3", off_record=False)
-    assert queue.session_state(cfg, CLAUDE, "other-owner") == queue.SessionState(
-        watermark="entry-3", off_record=False, has_open_job=False
-    )
+    assert progress(cfg, "other-owner") == ("entry-3", False, False)
 
 
 def test_a_claim_younger_than_one_work_cadence_is_left_alone(cfg: Config) -> None:
@@ -497,9 +499,7 @@ def test_a_worker_that_lost_its_claim_cannot_move_the_watermark(cfg: Config) -> 
     with pytest.raises(queue.QueueError):
         queue.complete(cfg, stale, "entry-99", off_record=False)
 
-    assert queue.session_state(cfg, CLAUDE, "slow-worker") == queue.SessionState(
-        watermark=None, off_record=False, has_open_job=True
-    )
+    assert progress(cfg, "slow-worker") == (None, False, True)
     assert query(cfg, "SELECT status, claimed_pid FROM jobs") == [(queue.RUNNING, holder)]
 
 
@@ -517,9 +517,7 @@ def test_a_worker_that_lost_its_claim_cannot_mark_the_row_failed(cfg: Config) ->
     assert query(cfg, "SELECT status, claimed_pid, error FROM jobs") == [
         (queue.RUNNING, holder, None)
     ]
-    assert queue.session_state(cfg, CLAUDE, "slow-failure") == queue.SessionState(
-        watermark=None, off_record=False, has_open_job=True
-    )
+    assert progress(cfg, "slow-failure") == (None, False, True)
 
 
 def test_closing_a_row_the_queue_no_longer_holds_is_an_error(cfg: Config) -> None:
@@ -556,7 +554,7 @@ def test_a_watermark_quoted_only_as_a_parent_is_no_watermark_at_all(
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    queue.watching_since(cfg, NOW - timedelta(minutes=10))
     queue.enqueue(cfg, event(session_id="tree-jumped", agent=PI, transcript=path))
     job = queue.next_job(cfg)
     assert job is not None
@@ -600,9 +598,7 @@ def test_a_span_open_in_one_session_is_no_other_sessions_span(cfg: Config) -> No
     again = queue.next_job(cfg)
     assert again is not None and again.session_id == "off-record"
     assert (again.watermark, again.off_record) == ("o-3", True), "its own span is still open"
-    assert queue.session_state(cfg, CLAUDE, "ordinary") == queue.SessionState(
-        watermark="n-1", off_record=False, has_open_job=False
-    )
+    assert progress(cfg, "ordinary") == ("n-1", False, False)
 
 
 def test_two_agents_sessions_of_one_id_keep_their_own_span(cfg: Config) -> None:
@@ -793,5 +789,82 @@ def test_a_queue_file_without_span_state_is_refused(cfg: Config) -> None:
     )
     conn.close()
 
-    with pytest.raises(queue.QueueError, match="off-the-record"):
+    with pytest.raises(queue.QueueError, match="earlier build"):
         queue.enqueue(cfg, event(session_id="old"))
+
+
+def sweep_dirs(monkeypatch, sessions: Path, tmp_path: Path) -> None:
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+
+
+def test_the_sweep_finds_a_session_the_last_sweep_ran_past(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A session still talking at one sweep is found by a later one, whatever the cadence:
+    each session is measured against its own progress, not the time of the last sweep."""
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "slow-to-quiet", touched=NOW - timedelta(minutes=20))
+
+    assert capture.sweep(cfg, NOW - timedelta(minutes=10)) == [], "still talking"
+    found = capture.sweep(cfg, NOW + timedelta(minutes=15))
+
+    assert [e.session_id for e in found] == [path.stem]
+
+
+def test_a_session_untouched_since_its_digest_read_it_is_not_offered_again(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A digest that kept nothing moves no watermark, and still ends the work: the file has
+    not moved since the digest claimed it. When the session speaks again, it is work."""
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    monkeypatch.setattr(queue, "_now", lambda: NOW)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "dry", touched=NOW - timedelta(minutes=31))
+    queue.enqueue(cfg, event(session_id="dry", transcript=path))
+    job = queue.next_job(cfg)
+    assert job is not None
+    queue.complete(cfg, job, None, off_record=False)
+
+    assert capture.sweep(cfg, NOW + timedelta(hours=1)) == []
+
+    later = NOW + timedelta(minutes=5)
+    os.utime(path, (later.timestamp(), later.timestamp()))
+    found = capture.sweep(cfg, NOW + timedelta(hours=1))
+    assert [e.session_id for e in found] == ["dry"]
+
+
+def test_a_failed_session_waits_before_it_is_offered_again(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    monkeypatch.setattr(queue, "_now", lambda: NOW)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "broken", touched=NOW - timedelta(minutes=40))
+    queue.enqueue(cfg, event(session_id="broken", transcript=path))
+    job = queue.next_job(cfg)
+    assert job is not None
+    queue.fail(cfg, job, "unrecognized transcript")
+
+    assert capture.sweep(cfg, NOW + timedelta(minutes=10)) == []
+    found = capture.sweep(cfg, NOW + capture.RETRY_AFTER + timedelta(minutes=1))
+    assert [e.session_id for e in found] == ["broken"]
+
+
+def test_the_sweep_looks_back_only_over_its_window(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    queue.watching_since(cfg, NOW - timedelta(days=30))
+    session_file(sessions, CLAUDE, "ancient", touched=NOW - timedelta(days=8))
+
+    assert capture.sweep(cfg, NOW) == []
+
+
+def test_watching_begins_once(cfg: Config) -> None:
+    assert queue.watching_since(cfg, NOW) == NOW
+    assert queue.watching_since(cfg, NOW + timedelta(days=1)) == NOW
