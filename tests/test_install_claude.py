@@ -573,12 +573,15 @@ def test_the_add_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch, cap
     assert "ANTHROPIC_API_KEY" not in printed
     assert "echo status" not in printed
     assert "claude-opus" not in printed
-    head, *entries = printed.splitlines()
+    lines = printed.splitlines()
+    head = lines[0]
+    hook_entries = lines[1:4]
     assert head.startswith(f"3 entries to add to {settings}")
     assert "5 second timeout" in head
-    assert entries == [
+    assert hook_entries == [
         f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
     ]
+    assert any("would write skill" in line for line in lines)
     assert settings.read_text(encoding="utf-8") == text
     assert list(settings.parent.glob("settings.json.aft-*")) == []
 
@@ -613,6 +616,7 @@ def test_dry_run_of_an_installed_file_says_so(tmp_path, monkeypatch, capsys):
     settings = claude_install.settings_path()
     assert settings == settings_in(tmp_path)
     claude_install.install(settings)
+    claude_install.install_skill(claude_install.skills_dir(settings))
     text = settings.read_text(encoding="utf-8")
 
     assert main(["install", "claude", "--dry-run"]) == 0

@@ -493,62 +493,110 @@ def cmd_trace(args) -> int:
 
 
 def cmd_install_claude(args) -> int:
-    """Add or remove afterthought's hook entries in Claude Code's own settings file."""
+    """Add or remove afterthought's hook entries and skill in Claude Code's configuration."""
     settings = claude_install.settings_path()
+    skills = claude_install.skills_dir(settings)
     change = (
         claude_install.uninstall(settings, dry_run=args.dry_run)
         if args.uninstall
         else claude_install.install(settings, dry_run=args.dry_run)
     )
+    skill_change = (
+        claude_install.uninstall_skill(skills, dry_run=args.dry_run)
+        if args.uninstall
+        else claude_install.install_skill(skills, dry_run=args.dry_run)
+    )
     if args.dry_run:
-        print(change.preview or f"no changes to {settings}")
+        preview_lines = []
+        if change.preview:
+            preview_lines.append(change.preview)
+        if skill_change.changed:
+            verb = "would remove" if args.uninstall else "would write"
+            preview_lines.append(f"{verb} skill {skill_change.target}")
+            if skill_change.diff:
+                preview_lines.append(skill_change.diff)
+        if not preview_lines:
+            print(f"no changes to {settings}")
+        else:
+            print("\n".join(preview_lines))
         return 0
     if change.backup is not None:
         print(f"backed up {settings} to {change.backup}")
+    if skill_change.backup is not None:
+        print(f"backed up {skill_change.target.name} to {skill_change.backup}")
     if args.uninstall:
         print(
             f"removed afterthought's hooks from {settings}"
             if change.changed
             else f"no afterthought hooks to remove in {settings}"
         )
+        if skill_change.changed:
+            print(f"removed skill {skill_change.target}")
+        else:
+            print(f"no afterthought skill to remove in {skills}")
     else:
         print(
             f"installed afterthought's hooks in {settings}"
             if change.changed
             else f"afterthought's hooks are already in {settings}"
         )
+        if skill_change.changed:
+            print(f"installed skill {skill_change.target}")
+        else:
+            print(f"afterthought skill is already in {skills}")
     return 0
 
 
 def cmd_install_pi(args) -> int:
-    """Copy or remove afterthought's extension in the directory pi loads extensions from."""
+    """Copy or remove afterthought's extension and skill in pi's configuration."""
     extensions = pi_install.extensions_dir()
+    skills = pi_install.skills_dir(extensions)
     change = (
         pi_install.uninstall(extensions, dry_run=args.dry_run)
         if args.uninstall
         else pi_install.install(extensions, dry_run=args.dry_run)
     )
+    skill_change = (
+        pi_install.uninstall_skill(skills, dry_run=args.dry_run)
+        if args.uninstall
+        else pi_install.install_skill(skills, dry_run=args.dry_run)
+    )
     target = pi_install.target_path(extensions)
-    if not change.changed:
+    if not change.changed and not skill_change.changed:
         if args.uninstall:
             print(f"no afterthought extension in {extensions}")
+            print(f"no afterthought skill in {skills}")
         else:
             print(f"{target} is already up to date")
+            print(f"{skill_change.target} is already up to date")
         return 0
-    # Every line of a preview says what the run itself would say, so the preview cannot
-    # promise less than the command does: the text as a diff when there is one, the copy a
-    # change makes of the text it replaces, and the paths it writes or takes away.
-    if args.dry_run and change.diff:
-        print(change.diff)
+    if args.dry_run:
+        if change.diff:
+            print(change.diff)
+        if skill_change.diff:
+            print(skill_change.diff)
     if change.backup is not None:
         verb = "would back up" if args.dry_run else "backed up"
         print(f"{verb} the previous {target.name} to {change.backup}")
+    if skill_change.backup is not None:
+        verb = "would back up" if args.dry_run else "backed up"
+        print(f"{verb} the previous {skill_change.target.name} to {skill_change.backup}")
     if args.uninstall:
         verb = "would remove" if args.dry_run else "removed"
-        print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+        if change.changed:
+            print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+        if skill_change.changed:
+            print(f"{verb} {', '.join(str(path) for path in skill_change.removed)}")
     else:
         verb = "would write" if args.dry_run else "installed"
-        print(f"{verb} {target}")
+        if change.changed:
+            print(f"{verb} {target}")
+        else:
+            print(f"{target} is already up to date")
+        if skill_change.changed:
+            print(f"{verb} {skill_change.target}")
+        else:
+            print(f"{skill_change.target} is already up to date")
     return 0
 
 

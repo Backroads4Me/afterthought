@@ -44,6 +44,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from aft.install import skill as skill_install
+
 AGENT = "claude"
 
 # The three events BUILD-PLAN M1.3 installs, in the order it lists them, which is the
@@ -404,3 +406,25 @@ def _write(settings: Path, text: str, original: str | None) -> Path | None:
     except (OSError, UnicodeEncodeError) as exc:
         raise InstallError(f"cannot write {settings} ({exc}); it was not changed") from exc
     return backup
+
+
+def skills_dir(settings: Path | None = None) -> Path:
+    """The skills directory Claude Code reads for the current user."""
+    if settings is not None:
+        return settings.parent / "skills"
+    return Path.home() / ".claude" / "skills"
+
+
+def skill_target(skills: Path) -> Path:
+    """The one skill file afterthought installs in Claude Code's skills directory."""
+    return skill_install.target_path(skills)
+
+
+def install_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
+    """Install the library-import skill into Claude Code's skills directory."""
+    return skill_install.install(skills, dry_run=dry_run)
+
+
+def uninstall_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
+    """Remove the library-import skill from Claude Code's skills directory."""
+    return skill_install.uninstall(skills, dry_run=dry_run)
