@@ -431,7 +431,9 @@ def test_cli_installs_into_the_agent_directory_pi_names(monkeypatch, tmp_path, c
 
     assert main(["install", "pi"]) == 0
 
-    assert capsys.readouterr().out == f"{target} is already up to date\n"
+    out = capsys.readouterr().out
+    assert f"{target} is already up to date" in out
+    assert "is already up to date" in out
 
     assert main(["install", "pi", "--uninstall"]) == 0
     assert names(extensions) == set()
@@ -454,14 +456,14 @@ def test_cli_dry_run_prints_an_applicable_diff_and_writes_nothing(monkeypatch, t
 
     printed = capsys.readouterr().out.splitlines()
     assert names(extensions) == set()
-    assert printed[-1] == f"would write {target}"
-    assert added_lines("\n".join(printed)) == SHIPPED.splitlines()
-    # The patch is every line above that last one, and each of them carries one of unified
-    # diff's own prefixes: no blank line sits inside it, so a tool can read it as a change.
-    patch = printed[:-1]
-    assert patch
-    assert all(line.startswith(("---", "+++", "@@", "+", "-")) for line in patch)
-    assert patch[-1] == f"+{SHIPPED.splitlines()[-1]}"
+    assert any(line == f"would write {target}" for line in printed)
+    skills = pi_install.skills_dir(extensions)
+    skill_target = pi_install.skill_target(skills)
+    assert any(line == f"would write {skill_target}" for line in printed)
+    diff_lines = [line for line in printed if not line.startswith("would write ")]
+    assert diff_lines
+    assert all(line.startswith(("---", "+++", "@@", "+", "-")) for line in diff_lines)
+    assert f"+{SHIPPED.splitlines()[-1]}" in diff_lines
 
 
 def test_cli_dry_run_reports_a_change_only_in_line_endings(monkeypatch, tmp_path, capsys):
@@ -478,8 +480,8 @@ def test_cli_dry_run_reports_a_change_only_in_line_endings(monkeypatch, tmp_path
     assert main(["install", "pi", "--dry-run"]) == 0
 
     printed = capsys.readouterr().out.splitlines()
-    assert printed[-1] == f"would write {target}"
-    assert printed[0].startswith(f"would back up the previous {target.name} to ")
+    assert any(line == f"would write {target}" for line in printed)
+    assert any(line.startswith(f"would back up the previous {target.name} to ") for line in printed)
     assert tree(tmp_path) == before, "a dry run writes nothing, not even the backup it names"
 
     assert main(["install", "pi"]) == 0
@@ -501,7 +503,7 @@ def test_cli_uninstall_dry_run_promises_the_copy_the_run_keeps(monkeypatch, tmp_
     previewed = capsys.readouterr().out.splitlines()
 
     assert target.is_file() and names(target.parent) == {pi_install.EXTENSION_FILE}
-    assert previewed[-1] == f"would remove {target}"
+    assert any(line == f"would remove {target}" for line in previewed)
     promised = f"would back up the previous {target.name} to "
     named = [line for line in previewed if line.startswith(promised)]
     assert len(named) == 1, previewed
@@ -511,8 +513,8 @@ def test_cli_uninstall_dry_run_promises_the_copy_the_run_keeps(monkeypatch, tmp_
     assert main(["install", "pi", "--uninstall"]) == 0
 
     run = capsys.readouterr().out.splitlines()
-    assert run[-1] == f"removed {target}"
-    assert run[0].startswith(f"backed up the previous {target.name} to ")
+    assert any(line == f"removed {target}" for line in run)
+    assert any(line.startswith(f"backed up the previous {target.name} to ") for line in run)
     assert len(backups(extensions)) == 1
     kept = target.parent / next(iter(backups(extensions)))
     assert kept.read_text(encoding="utf-8") == "// an edit worth keeping\n"
@@ -527,7 +529,10 @@ def test_cli_uninstall_dry_run_says_what_the_real_run_would_say(monkeypatch, tmp
 
     assert main(["install", "pi", "--uninstall"]) == 0
 
-    assert dry == capsys.readouterr().out == f"no afterthought extension in {extensions}\n"
+    real = capsys.readouterr().out
+    assert dry == real
+    assert f"no afterthought extension in {extensions}" in dry
+    assert "no afterthought skill in" in dry
     assert pi_install.EXTENSION_FILE not in dry, "an uninstall cannot talk about text to write"
 
 

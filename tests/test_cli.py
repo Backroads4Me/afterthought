@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from aft import vault
 from aft.cli import main
@@ -76,12 +77,58 @@ def test_rename_moves_directories(initialized, tmp_path):
     page = initialized.vault / "projects" / "widget" / "overview.md"
     page.parent.mkdir(parents=True)
     page.write_text("placeholder")
-    vault.commit(initialized.vault, ["projects"], "add page")
+    digest = initialized.vault / "digests" / "widget" / "2026" / "09" / "digest.md"
+    digest.parent.mkdir(parents=True)
+    digest.write_text("digest placeholder")
+    archive_proj = initialized.vault / "archive" / "projects" / "widget" / "overview.md"
+    archive_proj.parent.mkdir(parents=True)
+    archive_proj.write_text("archive proj placeholder")
+    archive_legacy = initialized.vault / "archive" / "widget.md"
+    archive_legacy.parent.mkdir(parents=True, exist_ok=True)
+    archive_legacy.write_text("archive legacy placeholder")
+    vault.commit(initialized.vault, ["projects", "digests", "archive"], "add files")
     assert main(["project", "rename", "widget", "gadget"]) == 0
     assert (initialized.vault / "projects" / "gadget" / "overview.md").exists()
     assert not (initialized.vault / "projects" / "widget").exists()
+    assert (initialized.vault / "digests" / "gadget" / "2026" / "09" / "digest.md").exists()
+    assert not (initialized.vault / "digests" / "widget").exists()
+    assert (initialized.vault / "archive" / "projects" / "gadget" / "overview.md").exists()
+    assert not (initialized.vault / "archive" / "projects" / "widget").exists()
+    assert (initialized.vault / "archive" / "gadget.md").exists()
+    assert not (initialized.vault / "archive" / "widget.md").exists()
     assert Registry.load(initialized.registry_path).by_slug("gadget") is not None
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_rename_rolls_back_when_directory_move_fails(initialized, tmp_path, monkeypatch, capsys):
+    """When a filesystem rename fails, the registry and any already-moved directories roll back."""
+    repo = make_repo(tmp_path / "widget")
+    main(["project", "add", str(repo)])
+    page = initialized.vault / "projects" / "widget" / "overview.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("placeholder")
+    digest = initialized.vault / "digests" / "widget" / "2026" / "09" / "digest.md"
+    digest.parent.mkdir(parents=True)
+    digest.write_text("digest placeholder")
+    vault.commit(initialized.vault, ["projects", "digests"], "add files")
+
+    real_rename = Path.rename
+
+    def failing_rename(self, target):
+        if "digests" in str(self):
+            raise OSError("simulated disk error")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+    ret = main(["project", "rename", "widget", "gadget"])
+    assert ret == 2
+    err = capsys.readouterr().err
+    assert "cannot rename project directories" in err
+
+    assert Registry.load(initialized.registry_path).by_slug("widget") is not None
+    assert Registry.load(initialized.registry_path).by_slug("gadget") is None
+    assert (initialized.vault / "projects" / "widget" / "overview.md").exists()
+    assert not (initialized.vault / "projects" / "gadget").exists()
 
 
 def test_forget_removes_registry_entry(initialized, tmp_path, capsys):

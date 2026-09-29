@@ -18,7 +18,10 @@ import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from aft.library.map_evidence import MapVerificationSummary
 
 from aft import index, vault
 from aft.config import Config, load
@@ -43,6 +46,7 @@ class ImportResult:
     reference_pages: list[str]
     report_path: str
     committed: bool
+    map_summary: MapVerificationSummary | None = None
 
 
 def extract_pdf_pages(path: Path) -> list[tuple[str, str]]:
@@ -105,10 +109,35 @@ def extract_json_chunks(text: str) -> list[tuple[str, str]]:
 
 
 def extract_html_chunks(text: str) -> list[tuple[str, str]]:
-    """Extract text from HTML documents."""
-    clean = re.sub(r"<[^>]+>", " ", text)
-    clean = re.sub(r"\s+", " ", clean).strip()
-    return [("content", clean)] if clean else []
+    """Extract text from HTML documents, preserving headings as chunk titles."""
+    heading_pattern = re.compile(
+        r"<(?:h[1-6]|title)[^>]*>(.*?)</(?:h[1-6]|title)>", re.IGNORECASE | re.DOTALL
+    )
+    matches = list(heading_pattern.finditer(text))
+    if not matches:
+        clean = re.sub(r"<[^>]+>", " ", text)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return [("content", clean)] if clean else []
+
+    chunks: list[tuple[str, str]] = []
+    first_start = matches[0].start()
+    if first_start > 0:
+        clean_pre = re.sub(r"<[^>]+>", " ", text[:first_start])
+        clean_pre = re.sub(r"\s+", " ", clean_pre).strip()
+        if clean_pre:
+            chunks.append(("Overview", clean_pre))
+
+    for i, m in enumerate(matches):
+        raw_heading = m.group(1)
+        clean_h = re.sub(r"<[^>]+>", " ", raw_heading)
+        clean_h = re.sub(r"\s+", " ", clean_h).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        clean_body = re.sub(r"<[^>]+>", " ", text[start:end])
+        clean_body = re.sub(r"\s+", " ", clean_body).strip()
+        chunks.append((clean_h or "Section", clean_body))
+
+    return chunks
 
 
 def extract_document_chunks(path: Path) -> list[tuple[str, str]]:
@@ -166,6 +195,47 @@ def _doc_slug(rel_path: str) -> str:
     return stem
 
 
+def compute_reference_slugs(file_paths) -> dict[str, str]:
+    """Derive unique reference page slugs for files in a collection.
+
+    If two or more documents share the same stem (e.g. guide.pdf and guide.txt),
+    their extension is appended (e.g. guide-pdf and guide-txt) to guarantee uniqueness
+    and avoid reference page overwrites.
+    """
+    paths = sorted(file_paths)
+    stems: dict[str, str] = {}
+    stem_counts: dict[str, int] = {}
+    for fp in paths:
+        p = Path(fp)
+        prefix = f"{p.parent.as_posix().replace('/', '-')}-" if p.parent != Path(".") else ""
+        base = f"{prefix}{p.stem}"
+        stems[fp] = base
+        stem_counts[base] = stem_counts.get(base, 0) + 1
+
+    slug_map: dict[str, str] = {}
+    used_slugs: set[str] = set()
+
+    for fp in paths:
+        p = Path(fp)
+        base = stems[fp]
+        if stem_counts[base] > 1:
+            ext = p.suffix.lstrip(".").lower()
+            candidate = f"{base}-{ext}" if ext else base
+        else:
+            candidate = base
+
+        slug = candidate
+        counter = 2
+        while slug in used_slugs:
+            slug = f"{candidate}-{counter}"
+            counter += 1
+
+        used_slugs.add(slug)
+        slug_map[fp] = slug
+
+    return slug_map
+
+
 def generate_reference_pages(
     vault_path: Path,
     manifest: Manifest,
@@ -176,6 +246,7 @@ def generate_reference_pages(
     ref_dir = vault_path / "references" / manifest.name
     ref_dir.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
+    slug_map = compute_reference_slugs(manifest.files.keys())
 
     # 1. collection.md
     reg_file = vault_path / "registry.yaml"
@@ -206,11 +277,11 @@ def generate_reference_pages(
     for rel_path, entry in sorted(manifest.files.items()):
         if entry.role == "exclude":
             continue
-        slug = _doc_slug(rel_path)
+        slug = slug_map.get(rel_path, _doc_slug(rel_path))
         doc_bullets.append(f"- [[{slug}|{rel_path}]] (role: `{entry.role}`)")
         for rel_k, targets in entry.relations.items():
             for t in targets:
-                t_slug = _doc_slug(t)
+                t_slug = slug_map.get(t, _doc_slug(t))
                 doc_bullets.append(f"  - {rel_k}: [[{t_slug}|{t}]]")
 
         chunks = file_chunks.get(rel_path, [])
@@ -257,14 +328,14 @@ aft:
     for rel_path, entry in sorted(manifest.files.items()):
         if entry.role == "exclude":
             continue
-        slug = _doc_slug(rel_path)
+        slug = slug_map.get(rel_path, _doc_slug(rel_path))
         f_hash = file_hashes.get(rel_path, "")
         chunks = file_chunks.get(rel_path, [])
 
         relations_lines: list[str] = []
         for rel_k, targets in entry.relations.items():
             for t in targets:
-                t_slug = _doc_slug(t)
+                t_slug = slug_map.get(t, _doc_slug(t))
                 relations_lines.append(f"- {rel_k}: [[{t_slug}|{t}]]")
         relations_text = (
             "\n\n### Relations\n\n" + "\n".join(relations_lines) if relations_lines else ""
@@ -316,6 +387,7 @@ def write_import_report(
     imported_files: list[str],
     excluded_files: list[str],
     now: datetime,
+    map_summary: MapVerificationSummary | None = None,
 ) -> str:
     """Append report section to reports/<yyyy>/<mm>/<date>.md."""
     date_str = now.strftime("%Y-%m-%d")
@@ -353,6 +425,29 @@ def write_import_report(
 ### Excluded files
 
 {excluded_bullets}
+"""
+
+    if map_summary is not None:
+        rejected_lines = []
+        if map_summary.rejected:
+            for r in map_summary.rejected:
+                src_info = f" from `{r.claim.source_map}`" if r.claim.source_map else ""
+                loc_info = f":{r.claim.line}" if r.claim.line else ""
+                rejected_lines.append(f"- `{r.claim.target_path}`{src_info}{loc_info}: {r.reason}")
+            rejected_text = "\n".join(rejected_lines)
+        else:
+            rejected_text = "- none"
+
+        section_text += f"""
+### Map evidence
+
+- Claims checked: {map_summary.total}
+- Claims verified: {len(map_summary.verified)}
+- Claims rejected: {len(map_summary.rejected)}
+
+#### Rejected claims
+
+{rejected_text}
 """
 
     if not report_file.exists():
@@ -436,9 +531,31 @@ def import_collection(
         # Update search index
         index.update(cfg)
 
+        # 6.5 Verify claims in exclude-role map files (BUILD-PLAN M7.4, DESIGN 11)
+        from aft.library.map_evidence import is_map_file, verify_map_files
+
+        exclude_map_files = [
+            rel_path
+            for rel_path, entry in manifest.files.items()
+            if entry.role == "exclude" and is_map_file(rel_path)
+        ]
+        map_summary = None
+        if exclude_map_files:
+            map_summary = verify_map_files(
+                exclude_map_files,
+                manifest.path,
+                extracted_chunks=file_chunks,
+                home=cfg.home,
+            )
+
         # 7. Write import report
         report_rel = write_import_report(
-            cfg.vault, manifest, imported_files, excluded_files, now_dt
+            cfg.vault,
+            manifest,
+            imported_files,
+            excluded_files,
+            now_dt,
+            map_summary=map_summary,
         )
 
         # 8. Commit
@@ -460,6 +577,7 @@ def import_collection(
         reference_pages=ref_pages,
         report_path=report_rel,
         committed=committed,
+        map_summary=map_summary,
     )
 
 

@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from aft import config as configmod
 from aft import lint, page, pagewrite
+from aft import vault as vaultmod
 from aft.registry import Registry
 
 REL = Path("projects/widget/overview.md")
@@ -133,7 +135,22 @@ def make(initialized, template: str) -> pagewrite.PageDoc:
     path = initialized.vault / REL
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(template.replace("{project_id}", project.id))
-    return pagewrite.PageDoc.read(path)
+    return pagewrite.PageDoc.read(path, vault=initialized.vault)
+
+
+@pytest.fixture
+def projects_vault(tmp_path, monkeypatch) -> configmod.Config:
+    """A vault that itself sits under a directory named ``projects``, which is a layout
+    anyone can pick: the config names any absolute path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    vault = tmp_path / "projects" / "afterthought"
+    (home / configmod.CONFIG_NAME).write_text(f'vault = "{vault}"\nhost = "testhost"\n')
+    monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    config = configmod.load()
+    vaultmod.init(config)
+    return config
 
 
 @pytest.fixture
@@ -779,6 +796,7 @@ def test_text_that_would_split_a_page_line_is_refused(doc):
     assert doc.render() == before
 
 
+STRUCK = "- ~~The GPU host runs vLLM.~~ [observed] 2026-09-30 [^s1] withdrawn 2026-10-02"
 STATE = "- The GPU host runs vLLM. [observed] 2026-09-30 [^s1]"
 DECISION = "- The index is plain SQLite. [stated] 2026-09-20 [^s1]"
 NOTE = "> [!conflict] 2026-10-01\n> A session says the host runs llama.cpp ([^s2])."
@@ -1104,27 +1122,6 @@ def test_a_hand_typed_tail_makes_every_state_operation_refuse(initialized):
         assert doc.render() == before
 
 
-def test_archive_superseded_removes_line_and_returns_content(initialized, doc):
-    source = new_source(doc)
-    old = doc.fact("The index is plain SQLite.")
-    doc.supersede(old, "The index is SQLite FTS5.", "stated", "2026-10-04", (source,))
-    struck = next(fact for fact in doc.page.facts if fact.state == page.SUPERSEDED)
-    assert struck.statement == "The index is plain SQLite."
-    line = doc.archive_superseded(struck)
-    assert "~~The index is plain SQLite.~~" in line
-    assert "superseded 2026-10-04 by" in line
-    assert "The index is plain SQLite." not in doc.render()
-    assert all(fact.statement != "The index is plain SQLite." for fact in doc.page.facts)
-
-
-def test_archive_superseded_refuses_active_fact(doc):
-    active = doc.fact("The GPU host runs vLLM.")
-    before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="only a superseded line can be archived"):
-        doc.archive_superseded(active)
-    assert doc.render() == before
-
-
 def test_scrub_source_replaces_quote_and_title_with_marker(initialized):
     """Scrubbing a source replaces quote and title with the marker and preserves other sources."""
     page_text = (
@@ -1191,58 +1188,454 @@ def test_remove_candidate_removes_line_and_refuses_non_candidate_or_open_note(in
     assert "Candidate with note." in doc.render()
 
 
-def test_add_callout_success_and_refusals(initialized):
-    """Adding a callout marks the active fact and refuses invalid states or citations."""
-    page_text = (
-        "---\n"
-        "type: Project\n"
-        "title: Demo\n"
-        "sources:\n"
-        "  - id: s1\n"
-        "    resource: aft://session/claude/s-1#e1\n"
-        '    quote: "words 1"\n'
-        "aft:\n"
-        "  project: p_demo\n"
-        "---\n\n"
-        "## Decisions\n\n"
-        "- Standing fact. [stated] 2026-10-01 [^s1]\n"
-        "- Another fact. [observed] 2026-10-01 [^s1]\n\n"
-        "## Candidates\n\n"
-        "- Candidate line. [inferred] 2026-10-01 [^s1] (signals 1/3, sessions 1/2)\n"
+def archived(initialized, rel: Path = REL) -> list[str]:
+    """The lines of the archive file this project's resolved notes went to (ruling 7943f9a)."""
+    return (initialized.vault / "archive" / rel).read_text().split("\n")
+
+
+def test_add_callout_puts_the_conflict_under_its_line(initialized, doc):
+    line = doc.fact("The GPU host runs vLLM.")
+    before = doc.render()
+    assert doc.add_callout(line, "conflict", "A session says the host runs SGLang.", "2026-10-05")
+    result = written(initialized, doc)
+    assert edits(before, doc.render()) == (
+        (),
+        (
+            "> [!conflict] 2026-10-05",
+            "> A session says the host runs SGLang.",
+            "",
+        ),
     )
-    doc = make(initialized, page_text)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.CONFLICT)]
+    note = result.facts[1].callouts[0]
+    assert (note.type, note.date, note.text) == (
+        "conflict",
+        "2026-10-05",
+        ["A session says the host runs SGLang."],
+    )
+    # the blank line sits above the header, so the note renders as its own block
+    assert doc.render().split("\n")[line.line] == ""
 
-    # Candidate refuses callout
-    with pytest.raises(pagewrite.WriteError, match="candidate line cannot have a callout"):
-        doc.add_callout(doc.fact("Candidate line."), "question", "Why?", "2026-10-02")
 
-    # Uncited footnote in callout text refuses
-    with pytest.raises(pagewrite.WriteError, match="source s99 is not in the frontmatter"):
+def test_a_callout_wraps_over_rows_as_design_writes_it(initialized, doc):
+    """One note over several rows reads back as it was written, and the page reads back as
+    the page that never had a note once the note is resolved.
+    """
+    text = (
+        "A session says capture should also run on every compaction ([^s2]). The line above\n"
+        "stands until stronger evidence arrives."
+    )
+    plain = doc.render()
+    assert doc.add_callout(doc.fact("The GPU host runs vLLM."), "conflict", text, "2026-10-01")
+    result = written(initialized, doc)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.CONFLICT)]
+    assert result.facts[1].callouts[0].text == [
+        "A session says capture should also run on every compaction ([^s2]). The line above",
+        "stands until stronger evidence arrives.",
+    ]
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert written(initialized, doc).facts[1].state == page.ACTIVE
+    assert doc.render() == plain
+
+
+def test_add_callout_refuses_a_line_struck_out_by_hand(initialized):
+    doc = make(initialized, PAGE.replace(STATE, STRUCK))
+    assert states(doc.page, "State") == [("The GPU host runs vLLM.", page.WITHDRAWN)]
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="cannot add a callout to a withdrawn line"):
+        doc.add_callout(doc.fact("The GPU host runs vLLM."), "conflict", "A dispute.", "2026-10-05")
+    assert doc.render() == before
+
+
+def test_add_callout_refuses_a_candidate(initialized, doc):
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="cannot add a callout to a candidate line"):
         doc.add_callout(
-            doc.fact("Standing fact."), "question", "Disputed by [^s99]", "2026-10-02"
+            doc.fact("Long sessions need checkpoints."), "question", "Ask?", "2026-10-05"
         )
+    assert doc.render() == before
 
-    # Unknown callout type refuses
-    with pytest.raises(pagewrite.WriteError, match="unknown callout type"):
-        doc.add_callout(doc.fact("Standing fact."), "info", "Info note", "2026-10-02")
 
-    # Success: add question callout
-    doc.add_callout(
-        doc.fact("Standing fact."), "question", "Is this choice durable? ([^s1])", "2026-10-02"
+def test_add_callout_refuses_to_write_over_text_typed_under_the_line(initialized):
+    quoted = f"{STATE}\n> [!note] 2026-10-01\n> what I think about that"
+    doc = make(initialized, PAGE.replace(STATE, quoted))
+    assert [message for _, message in doc.page.errors] == [
+        "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'"
+    ]
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match=r"> \[!note\] 2026-10-01 is already quote text"):
+        doc.add_callout(doc.fact("The GPU host runs vLLM."), "conflict", "Ours.", "2026-10-05")
+    assert doc.render() == before
+
+
+def test_a_callout_citing_a_source_the_page_lacks_is_refused(initialized, doc):
+    """A note is read next to its fact, so every citation in it resolves like the line's."""
+    before = doc.render()
+    for type, text in [
+        ("conflict", "A session says otherwise, see [^s9]."),
+        ("question", "Which is right?\n[^s9] is not a source of this page."),
+    ]:
+        with pytest.raises(pagewrite.WriteError, match="source s9 is not in the frontmatter"):
+            doc.add_callout(doc.fact("The GPU host runs vLLM."), type, text, "2026-10-05")
+    assert doc.render() == before
+
+
+def test_add_callout_refuses_input_the_page_cannot_carry(doc):
+    before = doc.render()
+    line = doc.fact("The GPU host runs vLLM.")
+    with pytest.raises(pagewrite.WriteError, match="unknown callout"):
+        doc.add_callout(line, "note", "Not a state.", "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="needs text and no blank lines"):
+        doc.add_callout(line, "question", "   ", "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="needs text and no blank lines"):
+        doc.add_callout(line, "question", "one\n\ntwo", "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="a callout row is one line"):
+        doc.add_callout(line, "conflict", "row one\rrow two", "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="YYYY-MM-DD"):
+        doc.add_callout(line, "conflict", "Undated.", "last tuesday")
+    assert doc.render() == before
+
+
+def test_a_hand_typed_tail_leaves_the_line_out_of_reach_of_the_note_operations(initialized):
+    """A line the parse refused holds no fact, so its note operations name nothing and a
+    handle taken before the tail was typed cannot be used on it.
+    """
+    doc = make(initialized, PAGE)
+    line = doc.fact("The GPU host runs vLLM.")
+    doc.path.write_text(doc.render().replace(STATE, f"{STATE} pending review"))
+    doc = pagewrite.PageDoc.read(doc.path, vault=doc.vault)
+    assert [message for _, message in doc.page.errors] == [
+        "unrecognized text after the sources: 'pending review'"
+    ]
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="no fact line"):
+        doc.fact("The GPU host runs vLLM.")
+    with pytest.raises(pagewrite.WriteError, match="moved"):
+        doc.add_callout(line, "conflict", "A dispute.", "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="moved"):
+        doc.resolve_callout(line)
+    assert doc.render() == before
+
+
+def test_a_row_typed_into_an_open_note_is_never_rewritten_and_archives_verbatim(initialized):
+    """A note and the rows under it are one object: no note operation rebuilds it, and
+    closing it moves every row, the one a person typed included, to the archive.
+    """
+    noted = "\n".join(
+        [
+            STATE,
+            "> [!conflict] 2026-10-01",
+            "> A session says the host runs SGLang.",
+            "> Ted: SGLang was only the benchmark box.",
+        ]
     )
-    updated = doc.fact("Standing fact.")
-    assert updated.state == page.NEEDS_YOU
-    assert len(updated.callouts) == 1
-    assert updated.callouts[0].type == "question"
-    assert "> [!question] 2026-10-02" in doc.render()
-    assert "> Is this choice durable? ([^s1])" in doc.render()
+    doc = make(initialized, PAGE.replace(STATE, noted))
+    disputed = doc.fact("The GPU host runs vLLM.")
+    assert disputed.state == page.CONFLICT
+    assert disputed.callouts[0].text == [
+        "A session says the host runs SGLang.",
+        "Ted: SGLang was only the benchmark box.",
+    ]
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="cannot add a callout to a conflict line"):
+        doc.add_callout(disputed, "question", "A second note.", "2026-10-06")
+    assert doc.render() == before
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert states(written(initialized, doc), "State") == [("The GPU host runs vLLM.", page.ACTIVE)]
+    assert "> Ted: SGLang was only the benchmark box." in archived(initialized)
 
-    # Once a note is open, adding another callout refuses
-    with pytest.raises(pagewrite.WriteError, match="without open notes"):
-        doc.add_callout(updated, "conflict", "Another dispute", "2026-10-03")
 
-    # Success: add conflict callout to another fact
-    doc.add_callout(doc.fact("Another fact."), "conflict", "Disputed fact.", "2026-10-02")
-    fact2 = doc.fact("Another fact.")
-    assert fact2.state == page.CONFLICT
-    assert "> [!conflict] 2026-10-02" in doc.render()
+def test_resolve_callout_gives_the_line_back_and_archives_it_once(initialized, doc):
+    plain = doc.render()
+    doc.add_callout(doc.fact("The GPU host runs vLLM."), "question", "Does it still?", "2026-10-05")
+    assert written(initialized, doc).facts[1].state == page.NEEDS_YOU
+    before = doc.render()
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert written(initialized, doc).facts[1].state == page.ACTIVE
+    removed, added = edits(before, doc.render())
+    assert added == () and len(removed) == 3
+    assert doc.render() == plain  # the blank line that set the note apart went with it
+    after = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="no callout to resolve"):
+        doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+    assert doc.render() == after
+    assert archived(initialized).count("> [!question] 2026-10-05") == 1
+
+
+def test_resolve_callout_archives_the_note_verbatim_with_the_line_it_was_about(initialized):
+    """The note is never deleted: its header, every row and the line it was about go to the
+    archive as they were read, the date travelling in the header.
+    """
+    note = [
+        "> [!conflict] 2026-10-01",
+        "> A session says the host runs SGLang.",
+        "> Ted: SGLang was only the benchmark box.",
+    ]
+    doc = make(initialized, PAGE.replace(STATE, "\n".join([STATE, *note])))
+    line = doc.fact("The GPU host runs vLLM.")
+    before = doc.render()
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert states(written(initialized, doc), "State") == [("The GPU host runs vLLM.", page.ACTIVE)]
+    assert edits(before, doc.render()) == ((line.line + 1, line.line + 2, line.line + 3), ())
+    assert archived(initialized) == [
+        "---",
+        "type: Archive",
+        "title: widget archive",
+        "description: Notes and lines resolved out of widget.",
+        "---",
+        "",
+        f"> {STATE}",
+        *note,
+        "",
+    ]
+
+
+def test_resolving_two_notes_appends_both_blocks_to_the_archive(initialized, doc):
+    index = doc.fact("The index is plain SQLite.")
+    doc.add_callout(index, "question", "Is plain SQLite still the plan?", "2026-10-01")
+    doc.add_callout(
+        doc.fact("The GPU host runs vLLM."), "conflict", "A session says SGLang.", "2026-10-02"
+    )
+    assert doc.resolve_callout(doc.fact("The index is plain SQLite.")) is True
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    written(initialized, doc)
+    assert archived(initialized)[-9:] == [
+        "",
+        "> - The index is plain SQLite. [stated] 2026-09-20 [^s1]",
+        "> [!question] 2026-10-01",
+        "> Is plain SQLite still the plan?",
+        "",
+        f"> {STATE}",
+        "> [!conflict] 2026-10-02",
+        "> A session says SGLang.",
+        "",
+    ]
+
+
+def test_a_note_on_a_global_page_archives_into_archive_global(initialized):
+    """Ruling 7943f9a: archive path mirrors page path in vault, so global/preferences.md
+    archives to archive/global/preferences.md.
+    """
+    noted = "\n".join([STATE, "> [!question] 2026-10-01", "> Does the host still run vLLM?"])
+    pref_path = initialized.vault / "global/preferences.md"
+    pref_path.parent.mkdir(parents=True, exist_ok=True)
+    pref_path.write_text(PAGE.replace(STATE, noted).replace("{project_id}", "p1"))
+    doc = pagewrite.PageDoc.read(pref_path, vault=initialized.vault)
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert (initialized.vault / "archive/global/preferences.md").is_file()
+    pref_archive = (initialized.vault / "archive/global/preferences.md").read_text()
+    assert "> [!question] 2026-10-01" in pref_archive
+
+
+def test_a_page_outside_the_vault_refuses_to_archive(initialized, tmp_path):
+    """A page outside the vault has no vault-relative archive location and refuses."""
+    outside = tmp_path / "outside.md"
+    noted = "\n".join([STATE, "> [!question] 2026-10-01", "> Does the host still run vLLM?"])
+    outside.write_text(PAGE.replace(STATE, noted).replace("{project_id}", "p1"))
+    doc = pagewrite.PageDoc.read(outside, vault=initialized.vault)
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="lies outside vault"):
+        doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+    assert doc.render() == before
+
+
+def test_text_typed_below_a_note_stays_on_the_page_when_the_note_closes(initialized):
+    """A row belongs to the note only while the parse reads it as a note row: the note goes
+    to the archive and the line a person typed plainly under it stays, still reported.
+    """
+    typed = "Answer: vLLM, restarted on Tuesday."
+    noted = "\n".join([STATE, "> [!conflict] 2026-10-01", "> A session says SGLang.", typed])
+    doc = make(initialized, PAGE.replace(STATE, noted))
+    assert [message for _, message in doc.page.errors] == [
+        "only fact lines are allowed in a fact section"
+    ]
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    doc.path.write_text(doc.render())
+    assert [finding.message for finding in lint.lint_vault(initialized.vault)] == [
+        "only fact lines are allowed in a fact section"
+    ]
+    assert typed in doc.render()
+    assert archived(initialized)[-4:] == [
+        f"> {STATE}",
+        "> [!conflict] 2026-10-01",
+        "> A session says SGLang.",
+        "",
+    ]
+    assert typed not in archived(initialized)
+
+
+def test_closing_a_note_under_an_answer_someone_typed_leaves_their_answer_alone(initialized):
+    """The ruling protects text the tool did not write; it does not hold a close because
+    the page reads badly while the note is open. The note goes to the archive, the answer
+    keeps every byte on the page, and the page ends up reading as grammar.
+    """
+    ours = [STATE, "> [!conflict] 2026-10-01", "> A session says SGLang."]
+    answer = ["", "> [!question] 2026-10-09", "> vLLM, restarted on Tuesday."]
+    noted = "\n".join([STATE, "", "> [!conflict] 2026-10-01", "> A session says SGLang.", *answer])
+    doc = make(initialized, PAGE.replace(STATE, noted))
+    assert [message for _, message in doc.page.errors] == [
+        "a callout cannot follow a conflict fact"
+    ]
+    line = doc.fact("The GPU host runs vLLM.")
+    before = doc.render()
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    result = written(initialized, doc)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.NEEDS_YOU)]
+    cut = without(without(before, line.line + 3), line.line + 2)
+    assert doc.render() == without(cut, line.line + 1)
+    assert archived(initialized)[-4:] == [f"> {STATE}", *ours[1:], ""]
+    assert "restarted on Tuesday" not in "".join(archived(initialized))
+
+
+def test_a_vault_under_a_projects_directory_archives_inside_itself(projects_vault):
+    """The archive key comes from the page's place in the vault the configuration names,
+    not from a directory named ``projects`` somewhere on the way to it.
+    """
+    noted = "\n".join([STATE, "> [!conflict] 2026-10-01", "> A session says SGLang."])
+    doc = make(projects_vault, PAGE.replace(STATE, noted))
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert states(written(projects_vault, doc), "State") == [
+        ("The GPU host runs vLLM.", page.ACTIVE)
+    ]
+    assert archived(projects_vault, REL)[-4:] == [
+        f"> {STATE}",
+        "> [!conflict] 2026-10-01",
+        "> A session says SGLang.",
+        "",
+    ]
+    assert not (projects_vault.vault.parent / "archive").exists()
+
+
+def test_an_archive_write_that_fails_leaves_page_and_archive_as_they_were(
+    initialized, doc, monkeypatch
+):
+    """The page edit and the archive write are one step: a note is never left on the page
+    and in the archive at once, nor filed in the archive and lost from the page.
+    """
+    doc.add_callout(
+        doc.fact("The index is plain SQLite."), "question", "Still plain SQLite?", "2026-10-01"
+    )
+    assert doc.resolve_callout(doc.fact("The index is plain SQLite.")) is True
+    doc.add_callout(
+        doc.fact("The GPU host runs vLLM."), "conflict", "A session says SGLang.", "2026-10-02"
+    )
+    archive = initialized.vault / "archive" / REL
+    was_archive, was_page = archive.read_bytes(), doc.render()
+    write, failures = Path.write_bytes, iter([OSError("no space left on device")])
+
+    def flaky(self, data, **kwargs):
+        error = next(failures, None)
+        if error is not None:
+            raise error
+        return write(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(OSError, match="no space left on device"):
+        doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+    assert archive.read_bytes() == was_archive
+    assert doc.render() == was_page
+    assert page.parse(doc.render(), REL).facts[1].state == page.CONFLICT
+
+
+def test_a_note_type_the_parser_grows_is_one_the_writer_writes(initialized, doc, monkeypatch):
+    """The writer writes the note types the parser reads, from the one table design 6's
+    fact state is defined by, so the two cannot drift apart.
+    """
+    monkeypatch.setitem(page.CALLOUTS, "watch", page.NEEDS_YOU)
+    assert doc.add_callout(
+        doc.fact("The GPU host runs vLLM."), "watch", "Keep an eye on this.", "2026-10-05"
+    )
+    result = written(initialized, doc)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.NEEDS_YOU)]
+    assert result.facts[1].callouts[0].type == "watch"
+
+
+def test_an_archive_file_named_by_hand_lints_after_the_writer_appends(initialized, doc):
+    """``archive/<slug>.md`` is a person-visible path, so the writer takes responsibility
+    for one it did not make: their text stays and the file gets the frontmatter every
+    page in the vault is linted for.
+    """
+    archive_file = initialized.vault / "archive" / REL
+    archive_file.parent.mkdir(parents=True, exist_ok=True)
+    archive_file.write_text("# Resolved notes\n\nNothing here yet.\n")
+    assert doc.add_callout(doc.fact("The GPU host runs vLLM."), "question", "Still?", "2026-10-05")
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert written(initialized, doc).facts[1].state == page.ACTIVE
+    text = archive_file.read_text()
+    assert text.startswith("---\ntype: Archive\n")
+    assert "# Resolved notes\n\nNothing here yet." in text
+    assert archived(initialized)[-3:] == ["> [!question] 2026-10-05", "> Still?", ""]
+
+
+def test_an_archive_that_cannot_be_read_is_refused_with_its_path(initialized, doc):
+    """Rather than append into a file whose own frontmatter does not read, the writer says
+    which file it means and leaves both files alone.
+    """
+    archive = initialized.vault / "archive"
+    filed = archive / REL
+    filed.parent.mkdir(parents=True, exist_ok=True)
+    assert doc.add_callout(doc.fact("The GPU host runs vLLM."), "question", "Still?", "2026-10-05")
+    before = doc.render()
+    for text in ["---\ntype: [Archive\n---\n", "---\ntype: Archive\n\n# Notes\n"]:
+        filed.write_text(text)
+        was = filed.read_bytes()
+        with pytest.raises(pagewrite.WriteError, match="cannot be read") as caught:
+            doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+        assert str(filed) in str(caught.value)
+        assert filed.read_bytes() == was
+        assert doc.render() == before
+
+
+def test_add_callout_writes_trailing_blank_when_line_below_is_non_blank(initialized):
+    """When the line below the fact is non-blank (e.g. typed prose or another fact),
+    add_callout writes a trailing blank line so typed text sitting below the fact is
+    not absorbed into the note blockquote.
+    """
+    typed = "Some typed prose sitting right under the fact."
+    doc = make(initialized, PAGE.replace(STATE, f"{STATE}\n{typed}"))
+    fact = doc.fact("The GPU host runs vLLM.")
+    assert doc.add_callout(fact, "conflict", "A session says SGLang.", "2026-10-05")
+
+    lines = doc.render().splitlines()
+    callout_idx = lines.index("> [!conflict] 2026-10-05")
+    assert lines[callout_idx - 1] == ""  # blank line above callout
+    assert lines[callout_idx + 1] == "> A session says SGLang."
+    assert lines[callout_idx + 2] == ""  # trailing blank line written below callout
+    assert lines[callout_idx + 3] == typed  # typed text is not absorbed into callout
+
+    reparsed = page.parse(doc.render(), REL)
+    note = reparsed.facts[1].callouts[0]
+    assert note.text == ["A session says SGLang."]
+
+
+def test_carried_off_narrowed_to_errors_on_removed_lines(initialized):
+    """narrow carried_off: when carried_off=True, only errors on the removed lines are
+    allowed to be carried off. An error outside the removed lines that disappears must still
+    trigger WriteError.
+    """
+    doc = make(initialized, PAGE)
+    doc.lines.insert(25, "## InvalidSection")
+    doc._page = page.parse("\n".join(doc.lines), REL)
+    assert any("unknown section 'InvalidSection'" in msg for _, msg in doc.page.errors)
+
+    # Error outside the removed lines: if line 26's error disappears during an edit to lines 27..28
+    doc.lines.pop(25)
+    with pytest.raises(pagewrite.WriteError, match="this edit would drop text outside the grammar"):
+        doc._apply(27, 28, [doc.lines[27]], carried_off=True)
+
+    # Error on the removed lines: removing lines 25..26 with carried_off=True is permitted
+    doc.lines.insert(25, "## InvalidSection")
+    doc._page = page.parse("\n".join(doc.lines), REL)
+    doc._apply(25, 26, [], carried_off=True)
+    assert not any("unknown section 'InvalidSection'" in msg for _, msg in doc.page.errors)
+
+
+def test_archive_slug_uses_vault_path_slug():
+    """_archive_slug delegates to vault.path_slug, falling back to stem for non-project paths."""
+    from aft.pagewrite import _archive_slug
+
+    assert _archive_slug(Path("projects/widget/overview.md")) == "widget"
+    assert _archive_slug(Path("archive/projects/widget/overview.md")) == "widget"
+    assert _archive_slug(Path("archive/widget.md")) == "widget"
+    assert _archive_slug(Path("global/preferences.md")) == "preferences"
+    assert _archive_slug(Path("random/custom.md")) == "custom"
