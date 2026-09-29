@@ -508,7 +508,7 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
   fact page (`projects/<slug>/*.md` except `index.md`, and `global/*.md`) is rewritten as
   `- <text> [stated] <date> [^id]`, dated with the checkpoint commit's UTC date, with a
   source `resource: aft://edit/<commit>` whose quote is the text. A line Ted typed or edited
-  in full fact-line form keeps exactly what he wrote. The vault-wide check for recent edits
+  in full fact-line form keeps exactly what Ted wrote. The vault-wide check for recent edits
   skips every project for the run.
   Holds `vault.locked` for the whole run.
 - **Tests:** no digests, no commit; recent hand edit, project skipped; older hand edit,
