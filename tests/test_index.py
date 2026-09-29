@@ -21,6 +21,7 @@ from aft import evidence, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
+from aft.registry import Project, Registry
 
 REL = "projects/widget/overview.md"
 
@@ -120,6 +121,40 @@ sources: []
 - No RGB lighting. [stated] 2026-09-20 [^s1]
 """
 
+# A digest that carries the same heading twice, as a day's notes written over themselves
+# read. The two sections hold different words, and each has to reach search on its own.
+TWO_SUMMARIES = """---
+type: Session Digest
+title: widget session
+description: Two run notes in one file.
+---
+
+## Summary
+
+The widget gained a flange.
+
+## Handoff
+
+Nothing is open.
+
+## Summary
+
+The gasket arrived oversize.
+"""
+
+# A page whose frontmatter opens and never closes: the page as it looks halfway through a
+# save, or as it looks when a hand-typed block is missing its closing rule.
+UNCLOSED_PAGE = (
+    "---\ntype: Project\ntitle: widget\nsources: []\n\n## Facts\n\n"
+    "- Orphan. [stated] 2026-09-20 [^s1]\n"
+)
+
+# Two different texts the archive compresses to the same number of bytes, so an update that
+# decided whether an archived row had changed from the size of its stored text sees nothing
+# move. Their equality is asserted from the archive's own bytes where it is used.
+FIRST_TEXT = "The flange is bronze, cast at 401 degrees and checked twice."
+SECOND_TEXT = "The flange is nickel, cast at 400 degrees and checked twice."
+
 
 def write(cfg: Config, rel: str, text: str) -> str:
     """Put one page in the vault and return where it went."""
@@ -127,6 +162,23 @@ def write(cfg: Config, rel: str, text: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return rel
+
+
+def register(cfg: Config, slug: str) -> Project:
+    """Put one project in the registry, and return it so a test can name the id it gives out."""
+    registry = Registry.load(cfg.registry_path)
+    project = registry.add(slug)
+    registry.save()
+    return project
+
+
+def stored_size(cfg: Config, session_id: str, entry_id: str) -> int:
+    """The bytes the archive holds for one entry, compressed as it stores them."""
+    with sqlite3.connect(cfg.home / evidence.EVIDENCE_NAME) as conn:
+        return conn.execute(
+            "SELECT length(text) FROM evidence WHERE session_id = ? AND entry_id = ?",
+            (session_id, entry_id),
+        ).fetchone()[0]
 
 
 def edit(cfg: Config, rel: str) -> pagewrite.PageDoc:
@@ -445,6 +497,33 @@ def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config)
     assert indexed == {entry.id: entry.text for entry in evidence.entries(initialized, "def")}
 
 
+def test_a_rewritten_archive_row_is_reindexed_at_its_own_size(initialized: Config) -> None:
+    """``aft forget pattern`` redacts archived text under the row's own key (BUILD-PLAN M2.8),
+    and DESIGN 12 requires the redaction to reach the index as well as the archive. The change
+    is caught on the bytes, not on what they happen to measure: these two texts compress to
+    the same length and under the same key, and the row still reads back as the new text."""
+    evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
+    first_size = stored_size(initialized, "abc", "e1")
+    index.update(initialized)
+    before = row_for(initialized, "evidence", "abc#e1")
+    assert _column(before, "body") == FIRST_TEXT
+
+    # The second text archived under another session, so both rows sit in the archive at
+    # once and the equality can be read off the bytes it stores rather than recomputed.
+    evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
+    assert stored_size(initialized, "def", "e1") == first_size
+
+    evidence.store(initialized, "claude", "abc", "p_widget", entries(SECOND_TEXT))
+    assert index.update(initialized) == []
+
+    after = row_for(initialized, "evidence", "abc#e1")
+    assert _column(after, "body") == SECOND_TEXT
+    assert _column(after, "entry_hash") != _column(before, "entry_hash")
+    assert _column(after, "entry_rowid") == _column(before, "entry_rowid")
+    assert sorted(search(initialized, "evidence", "nickel")) == ["abc#e1", "def#e1"]
+    assert search(initialized, "evidence", "bronze") == []
+
+
 def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> None:
     """``aft forget`` and the retention window remove content from everything afterthought
     controls (DESIGN 12, DESIGN 8), and the index is one of those things."""
@@ -462,12 +541,14 @@ def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> 
 def test_reindex_equals_the_incremental_result(initialized: Config) -> None:
     """The plan's test: an index kept in step as the vault and the archive changed, and the same
     index dropped and rebuilt from those sources, hold the same rows under the same ids in
-    every collection - including after a page and an evidence session went away."""
+    every collection - including after a page and an evidence session went away, and including
+    the report of the one page neither build could read."""
     rel = write(initialized, REL, PAGE)
     write(initialized, "archive/widget.md", ARCHIVE)
     write(initialized, "archive/steel.md", _ALL_DEAD)
     write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
     write(initialized, "reports/2026-09-28.md", REPORT)
+    write(initialized, "projects/widget/broken.md", UNCLOSED_PAGE)
     evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
     evidence.store(initialized, "pi", "def", "p_widget", entries("another flange"))
     index.update(initialized)
@@ -481,14 +562,14 @@ def test_reindex_equals_the_incremental_result(initialized: Config) -> None:
     (initialized.vault / "archive" / "steel.md").unlink()
     evidence.forget(initialized, "abc")
     write(initialized, "digests/widget/2026/10/2026-10-01-pi-def-9.md", DIGEST)
-    index.update(initialized)
+    report = index.update(initialized)
 
     built = {name: rows(initialized, name) for name in index.COLLECTIONS}
     assert all(built[name] for name in index.COLLECTIONS), {
         name: len(built[name]) for name in index.COLLECTIONS
     }
 
-    index.reindex(initialized)
+    assert index.reindex(initialized) == report
 
     assert {name: rows(initialized, name) for name in index.COLLECTIONS} == built
 
@@ -580,16 +661,52 @@ def test_a_heading_match_outranks_the_same_word_in_body(initialized: Config) -> 
     ]
 
 
+def test_two_sections_under_one_heading_are_two_rows(initialized: Config) -> None:
+    """A heading that repeats in one file is two rows, not one section replacing the other.
+    A busy day puts every run's report in one daily file and every run carries the same
+    section names (DESIGN 9), so the second ``## Summary`` of a day has its own row, under its
+    own id, and a query for its own words finds it and only it."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", TWO_SUMMARIES)
+    index.update(initialized)
+
+    assert keys_of(initialized, "digests") == [
+        f"{rel}#Handoff",
+        f"{rel}#Summary",
+        f"{rel}#Summary 2",
+    ]
+    assert search(initialized, "digests", "flange") == [f"{rel}#Summary"]
+    assert search(initialized, "digests", "gasket") == [f"{rel}#Summary 2"]
+    assert _column(row_for(initialized, "digests", f"{rel}#Summary 2"), "heading") == "Summary"
+
+
 def _a_page(
     title: str = "A project",
     description: str = "Nothing about the word here.",
     statement: str = "The schedule holds for the quarter.",
+    project: str | None = None,
 ) -> str:
-    """A fact page with one line under ``Decisions``, and one source that line can cite."""
+    """A fact page with one line under ``Decisions``, and one source that line can cite.
+    ``project`` is the ``aft.project`` it names, when it names one."""
+    aft = f"aft:\n  project: {project}\n" if project else ""
     return (
         f"---\ntype: Project\ntitle: {title}\ndescription: {description}\n"
         "sources:\n  - id: s1\n    resource: aft://session/pi/def#entry-9\n"
-        '    quote: "quoted words"\n---\n\n'
+        '    quote: "quoted words"\n'
+        f"{aft}---\n\n"
+        f"## Decisions\n\n- {statement} [stated] 2026-09-20 [^s1]\n"
+    )
+
+
+def _a_scoped_page(
+    project_ids: list[str], statement: str = "Flanges are cast, not machined."
+) -> str:
+    """A collection page whose scope is the list of projects it covers (DESIGN 11)."""
+    scope = "".join(f"  - {project_id}\n" for project_id in project_ids)
+    return (
+        "---\ntype: Collection\ntitle: Flanges\ndescription: How flanges are made.\n"
+        "sources:\n  - id: s1\n    resource: aft://session/pi/def#entry-9\n"
+        '    quote: "quoted words"\n'
+        f"aft:\n  projects:\n{scope}---\n\n"
         f"## Decisions\n\n- {statement} [stated] 2026-09-20 [^s1]\n"
     )
 
@@ -648,16 +765,136 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
     assert _column(evidence_row, "entry_rowid") is not None
 
 
-def test_a_page_the_index_cannot_read_is_reported_not_skipped(initialized: Config) -> None:
-    """An unreadable page is skipped by ``aft inject`` and named by ``aft lint``; the index has
-    no such companion, so it refuses the update rather than taking that page's words out of
-    search with no record anywhere that they went."""
-    write(
-        initialized,
-        REL,
-        "---\ntype: Project\ntitle: widget\nsources: []\n\n## Facts\n\n"
-        "- Orphan. [stated] 2026-09-20 [^s1]\n",
+def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
+    initialized: Config,
+) -> None:
+    """``digests/<slug>/`` and ``archive/<slug>.md`` name their project by the path they are
+    filed under (DESIGN 6), so their rows carry the registry's id for that slug - which is
+    what lets `aft search --project` leave the other projects' memory out. A slug the
+    registry does not know is no error and gives no id, and a global page carries none:
+    that row is every project's memory, not one whose project went missing."""
+    widget = register(initialized, "widget")
+    digest = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
+    rested = write(initialized, "archive/widget.md", ARCHIVE)
+    unknown = write(initialized, "digests/gizmo/2026/09/2026-09-28-pi-def.md", DIGEST)
+    every_project = write(initialized, "global/preferences.md", PREFERENCES)
+    assert index.update(initialized) == []
+
+    digest_row = row_for(initialized, "digests", f"{digest}#Summary")
+    rested_row = row_for(initialized, "archive", f"{rested}#Decisions")
+    unknown_row = row_for(initialized, "digests", f"{unknown}#Summary")
+    global_row = row_for(initialized, "pages", f"{every_project}#Preferences")
+    assert _column(digest_row, "project_id") == widget.id
+    assert _column(rested_row, "project_id") == widget.id
+    assert _column(unknown_row, "project_id") is None
+    assert _column(global_row, "project_id") is None
+
+
+def test_a_registry_that_will_not_parse_stops_the_run_rather_than_guessing(
+    initialized: Config,
+) -> None:
+    """The registry is what turns a digest's or a rested page's path slug into a project id, so
+    reading a broken one as an empty one would file every project's own memory as global
+    memory. The run refuses instead and leaves no half-built index behind; `aft lint` is where
+    the file itself gets named."""
+    write(initialized, REL, PAGE)
+    write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
+    write(initialized, "registry.yaml", "version: 1\nprojects: not-a-list\n")
+
+    with pytest.raises(index.SearchIndexError, match="project registry.*projects must be a list"):
+        index.update(initialized)
+
+    assert rows(initialized, "digests") == []
+    assert rows(initialized, "pages") == []
+
+
+def test_a_project_page_that_names_no_project_takes_its_directory(initialized: Config) -> None:
+    """A page under ``projects/<slug>/`` belongs to that project whether or not its frontmatter
+    says so: the block can be absent, hand-typed, or written so the parser cannot read it, and
+    the directory is what DESIGN 6 files the page in. The frontmatter still wins where it
+    speaks, so the two cannot disagree silently - `aft lint` is what reports the difference."""
+    widget = register(initialized, "widget")
+    unnamed = write(initialized, "projects/widget/overview.md", _a_page())
+    named = write(initialized, "projects/widget/decisions.md", _a_page(project="p_other"))
+    index.update(initialized)
+
+    assert _column(row_for(initialized, "pages", f"{unnamed}#Decisions"), "project_id") == (
+        widget.id
+    )
+    assert _column(row_for(initialized, "pages", f"{named}#Decisions"), "project_id") == "p_other"
+
+
+def test_a_page_that_covers_several_projects_is_a_row_for_each(initialized: Config) -> None:
+    """A reference page is one collection of lines covering several projects at once
+    (DESIGN 11), so it indexes as one row per project it applies to: each row carries that
+    project's id and names it in its key, so a search filtered to one of them finds the page
+    and the rows are never collapsed into one another or into the global pages."""
+    ids = [register(initialized, "widget").id, register(initialized, "gizmo").id]
+    rel = write(initialized, "references/flanges/collection.md", _a_scoped_page(ids))
+    index.update(initialized)
+
+    found = rows(initialized, "pages")
+    assert sorted(_column(row, "project_id") for row in found) == sorted(ids)
+    assert sorted(_column(row, "row_key") for row in found) == sorted(
+        f"{rel}#{project_id}#Decisions" for project_id in ids
+    )
+    assert sorted(search(initialized, "pages", "cast")) == sorted(
+        f"{rel}#{project_id}#Decisions" for project_id in ids
     )
 
-    with pytest.raises(index.SearchIndexError, match="frontmatter"):
-        index.update(initialized)
+
+def test_a_page_that_will_not_parse_is_reported_and_the_rebuild_still_comes(
+    initialized: Config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A page caught halfway through a save - or hand-typed without the closing rule - has
+    frontmatter that will not parse. It is left out of the build and reported by its path and
+    its reason rather than refusing the run, because `aft reindex` is the remedy for a bad
+    index (DESIGN 14) and must stay available. It holds no rows and no hash, so the rebuild
+    prints the same report and indexes the page once it is repaired."""
+    good = write(initialized, REL, PAGE)
+    broken = write(initialized, "projects/widget/broken.md", UNCLOSED_PAGE)
+
+    assert index.update(initialized) == [
+        f"{broken}: cannot be indexed: frontmatter has no closing ---"
+    ]
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+    assert broken not in hashes(initialized)
+
+    assert main(["reindex"]) == 0
+
+    printed = capsys.readouterr().out
+    assert f"{broken}: cannot be indexed: frontmatter has no closing ---" in printed
+    assert f"rebuilt the search index at {initialized.home / index.INDEX_NAME}" in printed
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+
+    write(initialized, broken, _a_page(statement="The gasket is nitrile."))
+    assert index.update(initialized) == []
+    assert f"{broken}#Decisions" in keys_of(initialized, "pages")
+
+
+def test_one_unreadable_page_is_reported_and_the_others_still_index(initialized: Config) -> None:
+    """A dangling symlink and a page of bytes that are not UTF-8 are named in the report while
+    every other page indexes: the files are the memory, but one broken file is no reason for
+    search to lose them all. Neither records a hash, so both are read again on the next
+    update, and a page that has been repaired indexes then."""
+    good = write(initialized, REL, PAGE)
+    dangling = "projects/widget/dangling.md"
+    not_text = "projects/widget/not-text.md"
+    (initialized.vault / "projects" / "widget").mkdir(parents=True, exist_ok=True)
+    os.symlink(initialized.vault / "nowhere.md", initialized.vault / dangling)
+    (initialized.vault / not_text).write_bytes(b"---\ntitle: \xff\xfe\n---\n\n## Facts\n\n")
+
+    report = index.update(initialized)
+
+    assert sorted(line.split(":")[0] for line in report) == sorted([dangling, not_text])
+    assert any("cannot be read" in line for line in report)
+    assert any("not UTF-8" in line for line in report)
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+    assert dangling not in hashes(initialized) and not_text not in hashes(initialized)
+
+    (initialized.vault / dangling).unlink()
+    (initialized.vault / not_text).unlink()
+    write(initialized, dangling, _a_page(statement="The gasket is nitrile."))
+
+    assert index.update(initialized) == []
+    assert f"{dangling}#Decisions" in keys_of(initialized, "pages")

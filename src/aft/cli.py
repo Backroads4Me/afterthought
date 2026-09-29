@@ -250,10 +250,13 @@ def cmd_lint(args) -> int:
 
 
 def cmd_reindex(args) -> int:
-    """Rebuild the search index. Everything it does is `aft.index`'s; this names the file."""
+    """Rebuild the search index. Everything it does is `aft.index`'s; this names the file it
+    wrote and repeats the pages it could not read."""
     config = load()
     vault.require(config)
-    index.reindex(config)
+    report = index.reindex(config)
+    for line in report:
+        print(line)
     print(f"rebuilt the search index at {config.home / index.INDEX_NAME}")
     return 0
 

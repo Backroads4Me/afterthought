@@ -36,7 +36,10 @@ description and the section's own heading all outrank the line text: BUILD-PLAN 
 weights title and description above body" holds with the heading on the near side of that
 divide. Every row also carries path, project id, agent, session and time. Fields a collection
 has no answer for are left empty rather than invented - a curated page is not one agent's
-record, so its rows carry no agent or session, and an evidence entry sits under no heading.
+record, so its rows carry no agent or session, and an evidence entry sits under no heading. A
+row's project id comes from the page's own ``aft.project``, the projects a reference page
+lists, or the directory the file is filed under; a row with none is a page that is every
+project's memory (DESIGN 6), not a page whose project went missing.
 
 Two keys keep the index in step with what it is built from (BUILD-PLAN M3.1: "updated
 incrementally by file content hash and evidence row id"):
@@ -51,19 +54,21 @@ incrementally by file content hash and evidence row id"):
   entry_id)`` primary key, and records the archive rowid it was read from. Rows the index has
   never seen are read and indexed once; rows the archive no longer holds - purged past the
   retention window (DESIGN 8) or forgotten (DESIGN 12) - lose their index rows. The archive's
-  text is zlib-compressed (``aft.evidence._pack``), so only the rows being read now are
-  decompressed; the rest are compared on their primary key and their stored payload size.
+  text is zlib-compressed (``aft.evidence._pack``), so the bytes of every row are digested
+  and only the rows whose digest moved are decompressed.
 
-A row whose text is rewritten in place under the same primary key is caught by that payload
-size, which is why it is recorded. The one writer that rewrites archived text in place is
-``aft forget pattern`` (BUILD-PLAN M2.8); a redaction that happened to leave the compressed
-size identical would slip past the size check, and the exact answer for that case is
-`reindex`, which rebuilds the table from the archive without trusting any key.
+A row whose text is rewritten in place under the same primary key is caught by that digest,
+whatever the compressed text happens to measure. The one writer that rewrites archived text
+in place is ``aft forget pattern`` (BUILD-PLAN M2.8), whose redaction has to reach the index
+to leave no unredacted words behind (DESIGN 12).
 
-An update reports what it cannot read instead of indexing around it. ``aft inject`` skips an
-unreadable page because a session must not fail over a broken one, and ``aft lint`` is where
-broken pages get named; for the index, quietly leaving a page out would take its text out of
-search with no record at all, which is the failure `aft.evidence` refuses for its rows.
+One damaged file does not stop a run. A page that cannot be read, is not UTF-8, or has
+frontmatter that will not parse is left out of the build, named by its path and its reason in
+the report `update` and `reindex` return and `aft reindex` prints, and no hash is recorded for
+it, so the next update reads it again once it is repaired. ``aft inject`` skips a broken page
+for the same reason and ``aft lint`` is where every broken page gets named. Only the index
+file's own failure stops a run, because that is the one failure `aft reindex` exists to answer
+(DESIGN 14).
 """
 
 from __future__ import annotations
@@ -78,9 +83,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import lint, page
+from aft import inject, lint, page
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
+from aft.registry import Registry, RegistryError
 
 INDEX_NAME = "index.sqlite"
 
@@ -112,15 +118,21 @@ FILE_COLLECTIONS: dict[str, tuple[str, ...]] = {
     REPORTS: ("reports",),
 }
 
+# The directories DESIGN 6 files one project's own text under, where the slug is the second
+# path component: ``projects/<slug>/``, ``digests/<slug>/`` and ``archive/<slug>.md``. The
+# rest name no project: ``global/`` is every project's memory, ``references/`` lists the
+# projects a page covers, and a report day spans them all.
+PROJECT_DIRS = ("projects", DIGESTS, ARCHIVE)
+
 # Which fact states a collection admits, read off the state table in DESIGN 6 and the
-# collection table in DESIGN 10. ``pages`` holds "active curated lines": Conflict and
-# Needs you are an active line with a callout under it, so their lines are active lines, and
-# `aft.inject` carries the same three for the same reason. A candidate is its own state and
-# DESIGN 10 files candidate facts under Digests, where the digest that raised it is searchable.
-# Superseded, withdrawn and stale lines are marked "Injected? No" and are not active memory;
-# they rest in ``archive``, which DESIGN 10 searches only when ``--archive`` asks for it.
+# collection table in DESIGN 10. ``pages`` holds "active curated lines", which are the lines
+# `aft.inject` injects, so the index and the block a session starts with carry the same lines
+# by construction. A candidate is its own state and DESIGN 10 files candidate facts under
+# Digests, where the digest that raised it is searchable. Superseded, withdrawn and stale
+# lines are marked "Injected? No" and are not active memory; they rest in ``archive``, which
+# DESIGN 10 searches only when ``--archive`` asks for it.
 FACT_STATES: dict[str, tuple[str, ...]] = {
-    PAGES: (page.ACTIVE, page.CONFLICT, page.NEEDS_YOU),
+    PAGES: inject.INJECTED,
     ARCHIVE: (page.SUPERSEDED, page.WITHDRAWN, page.STALE),
 }
 
@@ -136,8 +148,9 @@ BODY_WEIGHT = 1.0
 #: The columns a query can match, in the order ``bm25`` takes its weights.
 INDEXED_COLUMNS = ("title", "description", "heading", "body")
 
-#: The columns that only identify a row: path, project id, agent, session, time and a heading
-#: or entry id (BUILD-PLAN M3.1), stored so a hit reads back without opening its file again.
+#: The identifiers a row carries: path, project id, agent, session, time and a heading or
+#: entry id (BUILD-PLAN M3.1), stored so a hit reads back without opening its file again,
+#: plus the evidence row's archive rowid and the digest of its stored payload.
 IDENTITY_COLUMNS = (
     "path",
     "project_id",
@@ -147,7 +160,7 @@ IDENTITY_COLUMNS = (
     "time",
     "row_key",
     "entry_rowid",
-    "text_bytes",
+    "entry_hash",
 )
 
 #: Every column of every collection, in table order.
@@ -209,9 +222,17 @@ SESSION_RESOURCE = "aft://session/"
 
 
 class SearchIndexError(Exception):
-    """An index operation that cannot be honoured: this SQLite has no FTS5, a file or the
-    archive cannot be read, a page cannot be parsed into rows, or the index file will not
-    open, will not enter WAL, or will not take its write lock."""
+    """An index operation that cannot be honoured: this SQLite has no FTS5, the project
+    registry or the evidence archive cannot be read, an archived entry's text does not
+    decompress as it was written, or the index file will not open, will not enter WAL, or
+    will not take its write lock."""
+
+
+class _Unreadable(Exception):
+    """One file the index cannot turn into rows: it will not read, is not UTF-8, or its
+    frontmatter will not parse. Its path and this reason go in the report the run returns,
+    the rest of the run goes on, and no hash is recorded for it, so a later update that
+    finds it repaired indexes it after all."""
 
 
 @dataclass(frozen=True)
@@ -230,7 +251,7 @@ class Row:
     time: str = ""
     row_key: str = ""
     entry_rowid: int | None = None
-    text_bytes: int | None = None
+    entry_hash: str | None = None
 
     def values(self) -> tuple:
         """The row in `COLUMNS` order, so the columns and the record cannot drift apart."""
@@ -248,31 +269,36 @@ class _File:
     time: str
 
 
-def update(config: Config) -> None:
+def update(config: Config) -> list[str]:
     """Bring the index in step with the vault and the archive, leaving untouched rows alone.
 
     This is the incremental path BUILD-PLAN M3.1 names: a file is rebuilt only when its
-    content hash moved, an evidence row is read only when the index has not seen it, and
-    whatever has disappeared from either loses its rows. Nothing here waits for a model or a
-    git commit; it reads the files as they are.
+    content hash moved, an evidence row is read only when the index has not seen its stored
+    bytes, and whatever has disappeared from either loses its rows. Nothing here waits for a
+    model or a git commit; it reads the files as they are.
+
+    What it returns is the report: one line per file it could not read or parse, naming the
+    file and the reason. None of those recorded a hash, so the next update reads them again.
     """
     with _writing(config) as conn:
-        _sync_files(conn, config)
+        report = _sync_files(conn, config)
         _sync_evidence(conn, config)
+        return report
 
 
-def reindex(config: Config) -> None:
+def reindex(config: Config) -> list[str]:
     """Drop the index and build it again from the files and the archive (DESIGN 14).
 
     Every table goes, shadow tables and all, before anything is rebuilt - so a row an
     earlier update got wrong cannot survive into the result. The rebuild then runs the same
     sync as an incremental update over an empty index, which is why a rebuild and an index
-    kept up to date come out with the same rows.
+    kept up to date come out with the same rows and the same report.
     """
     with _writing(config) as conn:
         _create(conn, fresh=True)
-        _sync_files(conn, config)
+        report = _sync_files(conn, config)
         _sync_evidence(conn, config)
+        return report
 
 
 def rank_expression(collection: str) -> str:
@@ -295,30 +321,46 @@ def _require_collection(collection: str) -> None:
 # Reading the vault
 
 
-def _sync_files(conn: sqlite3.Connection, config: Config) -> None:
+def _sync_files(conn: sqlite3.Connection, config: Config) -> list[str]:
     """Index every file whose content the index has not already read, and unindex the ones
-    that are gone."""
+    that are gone.
+
+    Returns the report: one line per file this could not index, naming the file and the
+    reason. A file that is unreadable, not UTF-8, or has frontmatter that will not parse
+    loses its rows and its hash record, exactly as `reindex` would leave it, so its words
+    are not searched out from an older version of itself and a later update reads it again.
+    """
     read = dict(conn.execute(_SELECT_HASHES))
-    found = _vault_files(config)
+    found, report = _vault_files(config)
+    registry = _project_registry(config)
     for rel in sorted(set(read) - set(found)):
         _drop_path(conn, rel)
     for rel, current in found.items():
         if read.get(rel) == current.digest:
             continue
+        try:
+            rows = _file_rows(rel, current, registry)
+        except _Unreadable as exc:
+            report.append(f"{rel}: {exc}")
+            _drop_path(conn, rel)
+            continue
         _drop_path(conn, rel)
-        for row in _file_rows(rel, current):
+        for row in rows:
             _insert(conn, current.collection, row)
         conn.execute(_RECORD_HASH, (rel, current.digest))
+    return report
 
 
-def _vault_files(config: Config) -> dict[str, _File]:
-    """Every vault file the collections are built from, by vault-relative path.
+def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
+    """Every vault file the collections are built from, by vault-relative path, and the
+    report lines for the ones that could not be read at all.
 
     Only the directories of `FILE_COLLECTIONS` are walked, and `aft.lint`'s skipped
     directories are skipped here too, so the index reads the same pages the linter checks and
     nothing from ``.git``, ``.obsidian`` or the library's files.
     """
     found: dict[str, _File] = {}
+    report: list[str] = []
     for collection, directories in FILE_COLLECTIONS.items():
         for name in directories:
             root = config.vault / name
@@ -328,23 +370,29 @@ def _vault_files(config: Config) -> dict[str, _File]:
                 rel = path.relative_to(config.vault)
                 if lint.SKIP_DIRS.intersection(rel.parts):
                     continue
-                found[rel.as_posix()] = _read_file(collection, path, rel)
-    return found
+                try:
+                    found[rel.as_posix()] = _read_file(collection, path)
+                except _Unreadable as exc:
+                    report.append(f"{rel.as_posix()}: {exc}")
+    return found, report
 
 
-def _read_file(collection: str, path: Path, rel: Path) -> _File:
-    """One file as the index reads it, reported on when it cannot be read."""
+def _read_file(collection: str, path: Path) -> _File:
+    """One file as the index reads it.
+
+    A file that will not read, cannot be stat'd, or is not UTF-8 raises `_Unreadable`, which
+    is reported while the rest of the run goes on - a dangling symlink or a page caught
+    halfway through a save is no reason for the index to refuse every other page.
+    """
     try:
         data = path.read_bytes()
+        moment = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
     except OSError as exc:
-        raise SearchIndexError(f"cannot read {path} to index it: {exc}") from exc
+        raise _Unreadable(f"cannot be read to index it: {exc}") from exc
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise SearchIndexError(
-            f"{path} is not UTF-8 text, so its words cannot be indexed: {exc}"
-        ) from exc
-    moment = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+        raise _Unreadable(f"is not UTF-8 text, so its words cannot be indexed: {exc}") from exc
     return _File(
         collection=collection,
         text=text,
@@ -370,7 +418,7 @@ def _collection_of(rel: str) -> str | None:
     return None
 
 
-def _file_rows(rel: str, current: _File) -> list[Row]:
+def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
     """The rows one file contributes to its collection.
 
     A fact collection (``pages``, ``archive``) takes the lines its own state admits, read
@@ -379,35 +427,59 @@ def _file_rows(rel: str, current: _File) -> list[Row]:
     broken line reaches the index no more than it reaches `aft.inject`. A prose collection
     (``digests``, ``reports``) is split under its headings, since what it holds is written
     prose rather than fact lines.
+
+    A page scoped to several projects contributes a row per project and a heading that
+    repeats in one file contributes a row per occurrence, so every section of the file
+    reaches search as a row of its own (`_row_key`).
     """
     frontmatter, body, _, error = page.split_frontmatter(current.text)
     if error:
-        raise SearchIndexError(f"cannot index {rel}: {error}")
+        raise _Unreadable(f"cannot be indexed: {error}")
     title = _one_line((frontmatter or {}).get("title")) or Path(rel).stem
     description = _one_line((frontmatter or {}).get("description"))
-    project_id = _project_id(frontmatter)
+    scopes = _project_scopes(rel, frontmatter, registry)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
     if admitted is None:
         chunks = _prose_chunks(body)
     else:
         chunks = _fact_chunks(page.parse(current.text, Path(rel)), admitted)
-    return [
-        Row(
-            title=title,
-            description=description,
-            body=text,
-            path=rel,
-            project_id=project_id,
-            agent=agent,
-            session_id=session_id,
-            time=current.time,
-            heading=heading,
-            row_key=f"{rel}#{heading}",
-        )
-        for heading, text in chunks
-        if text
-    ]
+    rows: list[Row] = []
+    occurrences: dict[str, int] = {}
+    for heading, text in chunks:
+        if not text:
+            continue
+        occurrences[heading] = seen = occurrences.get(heading, 0) + 1
+        for project_id, key_part in scopes:
+            rows.append(
+                Row(
+                    title=title,
+                    description=description,
+                    body=text,
+                    path=rel,
+                    project_id=project_id,
+                    agent=agent,
+                    session_id=session_id,
+                    time=current.time,
+                    heading=heading,
+                    row_key=_row_key(rel, heading, key_part, seen),
+                )
+            )
+    return rows
+
+
+def _row_key(rel: str, heading: str, key_part: str | None, occurrence: int) -> str:
+    """A row's id: the file it came from and the section it is about (BUILD-PLAN M3.1).
+
+    A page covering several projects gets one row per project, so the project id joins the
+    key to keep those rows apart. A heading that occurs more than once in a file numbers its
+    second and later occurrences, so two sections under the same heading are two rows rather
+    than one replacing the other - which is what a day of reports with one fixed set of
+    section names per run needs (DESIGN 9).
+    """
+    parts = [rel] if key_part is None else [rel, key_part]
+    parts.append(heading if occurrence == 1 else f"{heading} {occurrence}")
+    return "#".join(parts)
 
 
 def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -447,12 +519,67 @@ def _one_line(value: object) -> str:
     return " ".join(value.split()) if isinstance(value, str) else ""
 
 
-def _project_id(frontmatter: dict | None) -> str | None:
-    """The project a page names in ``aft.project`` (DESIGN 6), which is what a search is
-    filtered by. A global page names none, which is what makes it every project's memory."""
+def _project_registry(config: Config) -> Registry:
+    """The project registry, read once per sync as `aft.lint` reads it.
+
+    A registry that will not parse is an error rather than an empty one: it is what turns the
+    slug of a digest, an archived page or an unlabelled project page into a project id, and
+    reading it as empty would label all of those every project's memory.
+    """
+    try:
+        return Registry.load(config.registry_path)
+    except RegistryError as exc:
+        raise SearchIndexError(
+            f"cannot read the project registry at {config.registry_path}"
+            f" to file rows by project: {exc}"
+        ) from exc
+
+
+def _project_scopes(
+    rel: str, frontmatter: dict | None, registry: Registry
+) -> list[tuple[str | None, str | None]]:
+    """The project each row of this file belongs to, and what its row key carries to say so.
+
+    A page's own ``aft.project`` (DESIGN 6) wins. A reference page is one collection of lines
+    covering several projects at once (DESIGN 11), so ``aft.projects`` gives a row per project
+    and each row names itself in its key. Failing both, the directory a file is filed under
+    names the project it belongs to and the registry turns that slug into an id; a slug the
+    registry does not know is no error and gives no id.
+
+    A row with no id is every project's memory - the global pages of DESIGN 6, a report day,
+    or a reference page that covers nothing yet - and not a page whose project went missing.
+    """
     aft = (frontmatter or {}).get("aft")
-    project = aft.get("project") if isinstance(aft, dict) else None
-    return project if isinstance(project, str) and project else None
+    if isinstance(aft, dict):
+        project = aft.get("project")
+        if isinstance(project, str) and project:
+            return [(project, None)]
+        listed = aft.get("projects")
+        if isinstance(listed, list):
+            ids: list[str] = []
+            for value in listed:
+                if isinstance(value, str) and value and value not in ids:
+                    ids.append(value)
+            if ids:
+                return [(project_id, project_id) for project_id in ids]
+    slug = _path_slug(rel)
+    if slug is not None:
+        found = registry.by_slug(slug)
+        if found is not None:
+            return [(found.id, None)]
+    return [(None, None)]
+
+
+def _path_slug(rel: str) -> str | None:
+    """The slug of the project a file is filed under (DESIGN 6's vault tree), or None where
+    its directory names no project. ``archive/`` files one page per project, so its slug is
+    the page's name."""
+    parts = Path(rel).parts
+    if len(parts) < 2 or parts[0] not in PROJECT_DIRS:
+        return None
+    if parts[0] != ARCHIVE:
+        return parts[1]
+    return Path(parts[1]).stem if len(parts) == 2 else None
 
 
 def _session_of(rel: str) -> tuple[str | None, str | None]:
@@ -478,34 +605,36 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
     update on the evidence row, and is not trusted as the key itself: once the highest rowid
     goes, SQLite hands that number to the next row inserted.
 
-    A row is read again when its rowid moved or its stored text changed size, which is how a
-    rewrite of archived text in place - `aft forget pattern`'s redaction (BUILD-PLAN M2.8) -
-    reaches the index. Whatever is read is written once, under its own key.
+    A row is read again when its rowid moved or when the SHA-256 of its stored payload moved
+    with it, so a rewrite of archived text in place - `aft forget pattern`'s redaction
+    (BUILD-PLAN M2.8) - reaches the index whatever the compressed text measures. The stored
+    bytes are digested as they are read; only the rows that moved are decompressed.
     """
     seen = {
-        (session_id, entry_id): (rowid, size)
-        for session_id, entry_id, rowid, size in conn.execute(
-            "SELECT session_id, entry_id, entry_rowid, text_bytes FROM evidence"
+        (session_id, entry_id): (rowid, digest)
+        for session_id, entry_id, rowid, digest in conn.execute(
+            "SELECT session_id, entry_id, entry_rowid, entry_hash FROM evidence"
         )
     }
     archive = config.home / EVIDENCE_NAME
     if not archive.exists():
         _unindex(conn, EVIDENCE, sorted(seen))
         return
+    live: dict[tuple[str, str], tuple[int, str]] = {}
     with _reading_archive(archive) as source:
-        live = {
-            (session_id, entry_id): (rowid, size)
-            for rowid, session_id, entry_id, size in source.execute(
-                "SELECT rowid, session_id, entry_id, length(text) FROM evidence"
-            )
-        }
-        _unindex(conn, EVIDENCE, sorted(set(seen) - set(live)))
-        for key in sorted(key for key in live if live[key] != seen.get(key)):
-            row = _evidence_row(source, key, *live[key])
-            if row is None:
-                continue  # gone between the key scan and the read; a later update sees it
+        for record in source.execute(
+            "SELECT rowid, session_id, entry_id, agent, project_id, time, text FROM evidence"
+            " ORDER BY session_id, entry_id"
+        ):
+            key = (record["session_id"], record["entry_id"])
+            payload = bytes(record["text"])
+            digest = hashlib.sha256(payload).hexdigest()
+            live[key] = (record["rowid"], digest)
+            if seen.get(key) == (record["rowid"], digest):
+                continue  # the same bytes at the same rowid: nothing moved
             _unindex(conn, EVIDENCE, [key])
-            _insert(conn, EVIDENCE, row)
+            _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+    _unindex(conn, EVIDENCE, sorted(set(seen) - set(live)))
 
 
 def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
@@ -513,20 +642,16 @@ def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, st
     conn.executemany(_DELETE_BY_ENTRY[collection], keys)
 
 
-def _evidence_row(
-    source: sqlite3.Connection, key: tuple[str, str], rowid: int, size: int
-) -> Row | None:
-    """One archive row as an index row, or None when the archive no longer holds it."""
-    session_id, entry_id = key
-    found = source.execute(
-        "SELECT agent, project_id, time, text FROM evidence WHERE session_id = ? AND entry_id = ?",
-        (session_id, entry_id),
-    ).fetchone()
-    if found is None:
-        return None
-    agent, project_id, moment, packed = found
+def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
+    """One archive row as an index row: its text decompressed, its stored bytes digested.
+
+    The digest is of the payload as the archive holds it, not of the text, so a redaction
+    that rewrote the words moved it whatever the compressed form measures (`_sync_evidence`).
+    """
+    session_id = record["session_id"]
+    entry_id = record["entry_id"]
     try:
-        text = zlib.decompress(bytes(packed)).decode("utf-8")
+        text = zlib.decompress(payload).decode("utf-8")
     except (zlib.error, UnicodeDecodeError) as exc:
         raise SearchIndexError(
             f"the archived text of entry {entry_id} of session {session_id}"
@@ -534,15 +659,15 @@ def _evidence_row(
         ) from exc
     return Row(
         body=text,
-        path=f"{SESSION_RESOURCE}{agent}/{session_id}",
-        project_id=project_id,
-        agent=agent,
+        path=f"{SESSION_RESOURCE}{record['agent']}/{session_id}",
+        project_id=record["project_id"],
+        agent=record["agent"],
         session_id=session_id,
         entry_id=entry_id,
-        time=moment,
+        time=record["time"],
         row_key=f"{session_id}#{entry_id}",
-        entry_rowid=rowid,
-        text_bytes=size,
+        entry_rowid=record["rowid"],
+        entry_hash=digest,
     )
 
 
@@ -559,6 +684,7 @@ def _reading_archive(archive: Path) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(
             archive.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_SECONDS
         )
+        conn.row_factory = sqlite3.Row
     except sqlite3.Error as exc:
         raise SearchIndexError(
             f"cannot open the evidence archive at {archive} to index it: {exc}"
