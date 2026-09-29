@@ -12,7 +12,22 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault, work
+from aft import (
+    __version__,
+    adapters,
+    digest,
+    evidence,
+    forget,
+    gitutil,
+    index,
+    inject,
+    keys,
+    lint,
+    queue,
+    redact,
+    vault,
+    work,
+)
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
 from aft.dream import schedule
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
@@ -50,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         manifest.ManifestError,
         queue.QueueError,
         sqlite3.Error,
+        digest.DigestError,
+        evidence.EvidenceError,
+        redact.BadPattern,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -104,6 +122,19 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("dream", help="turn waiting digests into curated facts")
     p.set_defaults(handler=cmd_dream)
+
+    p = sub.add_parser("forget", help="remove session evidence or redact patterns")
+    fsub = p.add_subparsers(metavar="target")
+    q = fsub.add_parser("session", help="remove every trace of one session")
+    q.add_argument("session_id", help="the session id to forget")
+    q.set_defaults(handler=cmd_forget_session)
+    q = fsub.add_parser("pattern", help="redact a regular expression across the archive")
+    q.add_argument("pattern", help="the regular expression to redact")
+    q.set_defaults(handler=cmd_forget_pattern)
+
+    p = sub.add_parser("redigest", help="rebuild a session digest from archived evidence")
+    p.add_argument("session_id", help="the session id to redigest")
+    p.set_defaults(handler=cmd_redigest)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
@@ -353,6 +384,41 @@ def _dream(config: Config) -> None:
         print(f"aft dream: {slug}: skipped, a session was active within the quiet period")
     for slug in result.edited:
         print(f"aft dream: {slug}: skipped, the vault has hand edits within the quiet period")
+
+
+def cmd_forget_session(args) -> int:
+    config = load()
+    vault.require(config)
+    report = forget.forget_session(config, args.session_id)
+    print(
+        f"forgot session {args.session_id}: removed evidence, "
+        f"{len(report.digests_removed)} digest file(s), "
+        f"withdrew {len(report.lines_withdrawn)} curated line(s)"
+    )
+    print("the vault's git history still holds older commits; rewrite history to remove them")
+    return 0
+
+
+def cmd_forget_pattern(args) -> int:
+    config = load()
+    vault.require(config)
+    count = forget.forget_pattern(config, args.pattern)
+    print(f"redacted {count} {'entry' if count == 1 else 'entries'} in the evidence archive")
+    existing = list(config.settings.capture.redact_patterns)
+    if args.pattern not in existing:
+        existing.append(args.pattern)
+    print("Add this line to config.toml under [capture]:")
+    print(f"redact_patterns = {json.dumps(existing)}")
+    print("the vault's git history still holds older commits; rewrite history to remove them")
+    return 0
+
+
+def cmd_redigest(args) -> int:
+    config = load()
+    vault.require(config)
+    result = digest.redigest(config, args.session_id)
+    print(f"rebuilt digest at {result.path}")
+    return 0
 
 
 def cmd_install_claude(args) -> int:
