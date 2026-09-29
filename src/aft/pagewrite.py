@@ -316,6 +316,151 @@ class PageDoc:
         self._apply(index, index + 1, [line])
         return True
 
+    def confirm(self, fact: page.Fact, source: str, date: str) -> bool:
+        """Cite one more source on a standing line and carry its date (design 9, confirm).
+
+        A line's date is the date it was last evidenced (design 6), so it becomes the later
+        of the date it carries and ``date``; an older confirmation adds its footnote and
+        leaves the date. A source the line already cites adds nothing. On a candidate the
+        gate progress is rewritten from the footnotes it ends up with; whether that carries
+        it over the gate is the rules' call, made through ``promote``. A line that no
+        longer stands (superseded, withdrawn or stale) takes no evidence.
+        """
+        found = self._resolve(fact)
+        if found.state in (page.SUPERSEDED, page.WITHDRAWN, page.STALE):
+            raise WriteError(f"a {found.state} line is no longer memory to confirm")
+        (ref,) = self._check_refs((source,))
+        refs = found.refs if ref in found.refs else (*found.refs, ref)
+        latest = max(found.date, _check_date(date))
+        suffix = _counts_suffix(refs, self.sources) if found.section == page.CANDIDATES else ""
+        line = _fact_line(found.statement, found.source, latest, refs, suffix=suffix)
+        return self._rewrite(found, line)
+
+    def supersede(
+        self,
+        fact: page.Fact,
+        statement: str,
+        tag: str,
+        date: str,
+        refs: Sequence[str],
+        *,
+        by: str | None = None,
+    ) -> page.Fact:
+        """Replace an active line with a new one and strike the old one (design 6, 9).
+
+        The old line is struck through and ends ``superseded <date> by [^by]``; the new
+        line sits directly above it in the same section, as in design 6's example, carrying
+        ``statement`` with ``tag``, ``date`` and ``refs``. ``by`` is the footnote that links
+        the struck line to its replacement, so it has to be one the replacement cites; it
+        defaults to the replacement's first footnote. ``date`` is both the replacement's
+        date last evidenced and the date of the strike, since the evidence that replaced
+        the line is what dates the replacement. Whether the replacement has the authority
+        is R4's call, made before this is called.
+        """
+        found = self._resolve(fact)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate is promoted or left, never superseded")
+        if found.state != page.ACTIVE:
+            raise WriteError(f"only an active line can be superseded; this one is {found.state}")
+        statement = self._check_statement(statement)
+        refs = self._check_refs(refs)
+        if not refs:
+            raise WriteError("a replacement needs a source to cite")
+        by = refs[0] if by is None else str(by)
+        if by not in refs:
+            raise WriteError(f"the replacement has to cite [^{by}], the source that links to it")
+        date = _check_date(date)
+        new = _fact_line(statement, _check_source_tag(tag), date, refs)
+        struck = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            struck=True,
+            suffix=f" superseded {date} by [^{by}]",
+        )
+        with self._atomic():
+            at = found.line - 1
+            self._apply(at, at + 1, [new, struck])
+            self._line_reads(at + 2, found.statement, page.SUPERSEDED)
+            return self._fact_written(at + 1, statement)
+
+    def withdraw(self, fact: page.Fact, date: str) -> bool:
+        """Strike a line out of memory after ``aft forget`` (design 6, withdrawn).
+
+        A stale line can be withdrawn too, and its stale mark gives way to the strike, since
+        a withdrawn line is out of memory whatever its anchor says. A line already withdrawn
+        is left as it is, keeping the date it was first withdrawn on.
+        """
+        found = self._resolve(fact)
+        date = _check_date(date)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate line cannot be struck through")
+        if found.state == page.WITHDRAWN:
+            return False
+        if found.state == page.SUPERSEDED:
+            raise WriteError("a superseded line is already out of memory")
+        if found.callouts:
+            raise WriteError("a line with an open note cannot be struck; close the note first")
+        line = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            struck=True,
+            suffix=f" withdrawn {date}",
+        )
+        return self._rewrite(found, line, page.WITHDRAWN)
+
+    def mark_stale(self, fact: page.Fact, reason: str, date: str) -> bool:
+        """Mark an active line stale, ending it ``(stale <date>: <reason>)`` (design 6, R8).
+
+        A line already stale keeps the date and reason it went stale with, so a check that
+        finds the same broken anchor on every run changes nothing. A line with an open note
+        cannot carry the mark (the parse refuses a note under a stale line), which is R8's
+        "only reported until the note is closed".
+        """
+        found = self._resolve(fact)
+        date = _check_date(date)
+        reason = reason.strip() if isinstance(reason, str) else ""
+        if not reason:
+            raise WriteError("a stale mark needs a reason")
+        if "\n" in reason or "\r" in reason or ")" in reason:
+            raise WriteError("a stale reason is one line without ')'")
+        self._check_citations(reason)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate may end only with its signal counts")
+        if found.state == page.STALE:
+            return False
+        if found.state != page.ACTIVE:
+            raise WriteError(f"only an active line can go stale; this one is {found.state}")
+        line = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            suffix=f" (stale {date}: {reason})",
+        )
+        return self._rewrite(found, line, page.STALE)
+
+    def clear_stale(self, fact: page.Fact, date: str) -> bool:
+        """Take the stale mark off a line whose anchor matches again (R8, M4.5).
+
+        The line goes back to the plain active line it was, with the date it was last
+        evidenced unchanged: words reappearing in a file are not a quote, so they are not
+        new evidence. ``date`` is the day the anchor matched again, which M4.5 reports; it
+        is checked, and the grammar gives it no place on the line. A line that is not stale
+        is left as it is.
+        """
+        found = self._resolve(fact)
+        _check_date(date)
+        if found.state == page.ACTIVE:
+            return False
+        if found.state != page.STALE:
+            raise WriteError(f"only a stale line has a stale mark; this one is {found.state}")
+        line = _fact_line(found.statement, found.source, found.date, found.refs)
+        return self._rewrite(found, line, page.ACTIVE)
+
     def promote(self, candidate: page.Fact, kind: str) -> page.Fact:
         """Move a candidate out of Candidates to become an active fact (design 6).
 
@@ -359,6 +504,27 @@ class PageDoc:
                 f"the line does not read back as {statement!r}; it reads {found.statement!r}"
             )
         return found
+
+    def _rewrite(self, found: page.Fact, line: str, state: str | None = None) -> bool:
+        """Replace one fact line in place; whether its text changed.
+
+        The new line has to read back as the same statement, in ``state`` when one is
+        named and otherwise in the state the line had, or the edit is put back.
+        """
+        index = found.line - 1
+        if line == self.lines[index]:
+            return False
+        with self._atomic():
+            self._apply(index, index + 1, [line])
+            self._line_reads(found.line, found.statement, state or found.state)
+        return True
+
+    def _line_reads(self, line: int, statement: str, state: str) -> None:
+        """Refuse unless ``line`` parses as a fact with this statement in this state."""
+        found = next((fact for fact in self._page.facts if fact.line == line), None)
+        if found is None or found.statement != statement or found.state != state:
+            raw = self.lines[line - 1]
+            raise WriteError(f"line {line} does not read back as a {state} {statement!r}: {raw!r}")
 
     def _resolve(self, fact: page.Fact) -> page.Fact:
         """The fact in the current text this handle names: its line, and every field of
