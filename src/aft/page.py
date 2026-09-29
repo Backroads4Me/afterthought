@@ -107,6 +107,13 @@ class Page:
     facts: list[Fact] = field(default_factory=list)
     sections: list[str] = field(default_factory=list)
     errors: list[tuple[int, str]] = field(default_factory=list)
+    rejected: list[tuple[int, str, str]] = field(default_factory=list)
+    """The fact lines the parser refused, each as (file line, the line as written, the reason).
+
+    A refused line holds no fact, so it is in none of `facts` and nothing that reads facts shows
+    it. It stays visible here so a script can tell a line the grammar refuses from a page that
+    simply has none, and so a hand-typed line is never dropped without a trace (BUILD-PLAN F2).
+    """
 
 
 def split_frontmatter(text: str) -> tuple[dict | None, str, int, str | None]:
@@ -177,10 +184,15 @@ def parse(text: str, path: Path) -> Page:
             callout = _start_callout(page, stripped, number, last_fact, fact_refused)
             continue
         if stripped.startswith("- "):
+            reported = len(page.errors)
             fact = _parse_fact(page, stripped[2:], number, section)
             fact_refused = fact is None
+            if fact is None:
+                page.rejected.append((number, stripped, _refusal(page, reported)))
         else:
-            page.errors.append((number, "only fact lines are allowed in a fact section"))
+            message = "only fact lines are allowed in a fact section"
+            page.errors.append((number, message))
+            page.rejected.append((number, stripped, message))
             fact = None
             fact_refused = False
         # Only a line the parser accepted holds a fact, so a note after a hand-typed
@@ -190,6 +202,11 @@ def parse(text: str, path: Path) -> Page:
         if fact is not None:
             page.facts.append(fact)
     return page
+
+
+def _refusal(page: Page, reported: int) -> str:
+    """Join what the parser reported about one refused line into the one reason it holds."""
+    return "; ".join(message for _, message in page.errors[reported:])
 
 
 def _start_callout(
