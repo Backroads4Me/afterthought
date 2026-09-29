@@ -45,6 +45,12 @@ EXTENSION_FILE = "index.ts"
 # The extension's path in the repository that holds this package.
 SOURCE = Path("integrations") / "pi" / "afterthought.ts"
 
+# The name a rescue copy carries: the file whose text it holds, this tool's own mark, and the
+# UTC second it was made. An uninstall reads the mark back to tell its own copies from a thing
+# of somebody else's standing in the same directory, so both ends name it here.
+BACKUP_PREFIX = f"{EXTENSION_FILE}.aft-"
+BACKUP_SUFFIX = ".bak"
+
 
 class InstallError(Exception):
     """The extension is not one afterthought can install, or sits where it cannot write."""
@@ -132,9 +138,13 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
 
     The one file the installer creates goes, backed up first when it holds text other than the
     extension afterthought ships - the copy beside it is there for text that exists nowhere
-    else, and a file that matches the shipped one needs no copy to survive it. With nothing of
-    anyone else's left inside, the directory of our own goes too; a directory still holding
-    anything keeps every byte of it, the extensions directory is never removed, and a sibling
+    else, and a file that matches the shipped one needs no copy to survive it. The rescue
+    copies of earlier runs, stamped with this installer's own mark, hold text of writes it
+    replaced and are its own to take back, so they go with the file they were made beside -
+    and a run that has to keep text of somebody's own leaves the whole footprint where it was.
+    With nothing of anyone else's left inside, the directory of our own goes too; a directory
+    still holding anything keeps every byte of it, the extensions directory is never
+    removed, and a sibling
     extension is never looked at, so an uninstall leaves whatever it did not install standing
     where it stood. ``Change.removed`` names the paths it actually took - and so says nothing
     when there was nothing of afterthought's there to take.
@@ -148,14 +158,19 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
         # uninstall will leave such a copy behind decides whether our own directory can go
         # with the file or has to stay holding it.
         keep = original if original and original != _shipped() else None
+        # The copies an earlier run stamped here kept the text that run replaced, and this
+        # installer's own mark names them: the run that takes the file they were made beside
+        # takes them too. A run that has to keep text of somebody's own leaves its whole
+        # footprint standing, the older copies along with the one it makes now.
+        copies = _own_copies(container) if original is not None and keep is None else []
         # What the uninstall takes away, named before any of it happens so the dry run, the
-        # report and the filesystem end up describing the same act: afterthought's own file
-        # when one stands there, and the directory of our own once that file has left behind
-        # nothing of anybody else's.
+        # report and the filesystem end up describing the same act: afterthought's own paths,
+        # and the directory of our own once those have left behind nothing of anybody else's.
         removed: list[Path] = []
         if original is not None:
             removed.append(target)
-        if keep is None and _is_ours_to_remove(container, target):
+        removed += copies
+        if keep is None and _is_ours_to_remove(container, removed):
             removed.append(container)
         changed = bool(removed)
         diff = _diff(target, original, "")
@@ -164,6 +179,8 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
             return Change(changed=changed, backup=backup, diff=diff, removed=tuple(removed))
         if target in removed:
             target.unlink()
+        for copy in copies:
+            copy.unlink()
         if container in removed:
             container.rmdir()
         return Change(changed=changed, backup=backup, diff=diff, removed=tuple(removed))
@@ -171,15 +188,35 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
         raise InstallError(f"cannot uninstall from {extensions}: {exc}") from exc
 
 
-def _is_ours_to_remove(container: Path, target: Path) -> bool:
-    """True when ``container`` is a directory holding nothing but afterthought's own file.
+def _own_copies(container: Path) -> list[Path]:
+    """The rescue copies this installer stamped inside ``container``, oldest first; none where
+    there is no directory to hold them.
 
-    Empty, or holding only the entry point the uninstall is taking away with it, the
-    directory is afterthought's own - it created it and nobody else has put anything in it -
-    so it goes. A directory holding anything else keeps every byte of it, and where there is
-    no directory at all there is nothing to remove.
+    Their names carry this installer's mark, so they are its own to take away with the file
+    they were made beside. A thing of somebody else's under such a name - a directory, or a
+    link they made - is judged as itself and keeps its place, the way the installer's own two
+    paths are.
     """
-    return container.is_dir() and all(entry == target for entry in container.iterdir())
+    if not container.is_dir():
+        return []
+    return sorted(
+        entry
+        for entry in container.iterdir()
+        if entry.name.startswith(BACKUP_PREFIX)
+        and entry.name.endswith(BACKUP_SUFFIX)
+        and stat.S_ISREG(_own_mode(entry) or 0)
+    )
+
+
+def _is_ours_to_remove(container: Path, ours: list[Path]) -> bool:
+    """True when ``container`` is a directory holding nothing but the paths named in ``ours``.
+
+    Nothing of anybody else's inside means the directory is afterthought's own - it created it
+    and only its own file and rescue copies have stood in it - so it goes with them. A
+    directory holding anything else keeps every byte of it, and where there is no directory
+    at all there is nothing to remove.
+    """
+    return container.is_dir() and all(entry in ours for entry in container.iterdir())
 
 
 def _target(extensions: Path) -> Path:
@@ -280,7 +317,7 @@ def _backup(target: Path, original: str | None, *, dry_run: bool) -> Path | None
     if not original:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup = target.with_name(f"{target.name}.aft-{stamp}.bak")
+    backup = target.with_name(f"{BACKUP_PREFIX}{stamp}{BACKUP_SUFFIX}")
     if not dry_run:
         with open(backup, "w", encoding="utf-8") as copy:
             copy.write(original)

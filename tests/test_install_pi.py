@@ -132,8 +132,10 @@ def test_no_name_is_published_before_its_bytes_reach_the_device(tmp_path, monkey
     """A machine dying mid-install must leave either the old file or the new one whole, so a
     name may only stand where its bytes are already on the device.
 
-    The evidence is the bytes a descriptor holds as it is synced, the bytes the temp file holds
-    as it is renamed, and the order of those two events, not the final content alone.
+    One ordered log of the write path is the evidence, so an implementation that renames the
+    temporary file into place first and syncs whatever stands at the target name afterwards -
+    the shape that leaves a half-written extension behind a published name - puts a replace
+    ahead of the sync of the new text and fails here.
     """
     extensions = tmp_path / "extensions"
     target = pi_install.target_path(extensions)
@@ -141,16 +143,17 @@ def test_no_name_is_published_before_its_bytes_reach_the_device(tmp_path, monkey
     target.parent.mkdir(parents=True)
     target.write_text(hand_edited, encoding="utf-8")
 
-    sized: list[int] = []
-    published: list[bytes] = []
+    events: list[tuple[str, int]] = []
     real_fsync, real_replace = os.fsync, os.replace
 
     def watch_fsync(fd: int) -> None:
-        sized.append(os.fstat(fd).st_size)  # bytes the descriptor holds as it is synced
+        # the bytes this descriptor holds at the moment it hands them to the device
+        events.append(("fsync", os.fstat(fd).st_size))
         real_fsync(fd)
 
     def watch_replace(src: str, dst: os.PathLike[str] | str) -> None:
-        published.append(Path(src).read_bytes())  # complete, or the name publishes a partial
+        # the bytes the temporary name holds as it is moved into place
+        events.append(("replace", len(Path(src).read_bytes())))
         real_replace(src, dst)
 
     monkeypatch.setattr(os, "fsync", watch_fsync)
@@ -158,9 +161,12 @@ def test_no_name_is_published_before_its_bytes_reach_the_device(tmp_path, monkey
 
     change = pi_install.install(extensions)
 
-    # the text being replaced is durable first, then the new text, then the rename alone
-    assert sized == [len(hand_edited.encode()), len(SHIPPED.encode())]
-    assert published == [SHIPPED.encode()]
+    kept = ("fsync", len(hand_edited.encode()))
+    staged = ("fsync", len(SHIPPED.encode()))
+    published = ("replace", len(SHIPPED.encode()))
+    # the text being replaced is on the device, then the new text is, and only then does a
+    # rename publish it; a later sync, of the directory holding the name, only appends
+    assert events[:3] == [kept, staged, published]
     assert target.read_text(encoding="utf-8") == SHIPPED
     assert change.backup is not None
     assert change.backup.read_text(encoding="utf-8") == hand_edited
@@ -267,6 +273,43 @@ def test_uninstall_keeps_hand_edited_text_as_a_backup(extensions):
         "// an edit worth keeping\n"
     )
     assert backups(extensions) == {change.backup.name}
+
+
+def test_uninstall_takes_the_copies_of_earlier_installs_and_their_directory(extensions):
+    """An install that replaced the installed file left a rescue copy inside afterthought's own
+    directory. The copy is afterthought's own, so the uninstall that takes the extension takes
+    it and the directory they both stand in.
+    """
+    target = install(extensions)
+    target.write_text("// an extension of an earlier build\n", encoding="utf-8")
+    install(extensions)
+
+    (copy,) = backups(extensions)
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.removed == (target, target.parent / copy, target.parent)
+    assert not target.parent.exists()
+    assert names(extensions) == set(), "no trace of afterthought is left behind"
+
+
+def test_uninstall_takes_its_own_copies_and_leaves_a_directory_holding_theirs(extensions):
+    """The copies this installer stamped go, a file of somebody else's stays, and the directory
+    holding that file stands with it: an uninstall removes its own and nothing else."""
+    target = install(extensions)
+    target.write_text("// an extension of an earlier build\n", encoding="utf-8")
+    install(extensions)
+    note = target.parent / "notes.md"
+    note.write_text("# theirs\n", encoding="utf-8")
+
+    (copy,) = backups(extensions)
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.removed == (target, target.parent / copy)
+    assert not (target.parent / copy).exists()
+    assert note.read_text(encoding="utf-8") == "# theirs\n"
+    assert names(target.parent) == {"notes.md"}
 
 
 def test_uninstall_of_a_directory_we_left_empty(extensions):
