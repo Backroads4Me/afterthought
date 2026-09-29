@@ -157,10 +157,6 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
         # uninstall will leave such a copy behind decides whether our own directory can go
         # with the file or has to stay holding it.
         keep = original if original and original != _shipped() else None
-        # The copies an earlier run stamped here kept the text that run replaced, and this
-        # installer's own mark names them: the run that takes the file they were made beside
-        # takes them too. A run that has to keep text of somebody's own leaves its whole
-        # footprint standing, the older copies along with the one it makes now.
         copies = _own_copies(container) if original is not None and keep is None else []
         # What the uninstall takes away, named before any of it happens so the dry run, the
         # report and the filesystem end up describing the same act: afterthought's own paths,
@@ -191,10 +187,8 @@ def _own_copies(container: Path) -> list[Path]:
     """The rescue copies this installer stamped inside ``container``, oldest first; none where
     there is no directory to hold them.
 
-    Their names carry this installer's mark, so they are its own to take away with the file
-    they were made beside. A thing of somebody else's under such a name - a directory, or a
-    link they made - is judged as itself and keeps its place, the way the installer's own two
-    paths are.
+    A thing of somebody else's under such a name - a directory, or a link they made - is
+    judged as itself and keeps its place. ``uninstall`` says what it does with the copies.
     """
     if not container.is_dir():
         return []
@@ -210,10 +204,7 @@ def _own_copies(container: Path) -> list[Path]:
 def _is_ours_to_remove(container: Path, ours: list[Path]) -> bool:
     """True when ``container`` is a directory holding nothing but the paths named in ``ours``.
 
-    Nothing of anybody else's inside means the directory is afterthought's own - it created it
-    and only its own file and rescue copies have stood in it - so it goes with them. A
-    directory holding anything else keeps every byte of it, and where there is no directory
-    at all there is nothing to remove.
+    ``uninstall`` says why that makes the directory afterthought's own to remove.
     """
     return container.is_dir() and all(entry in ours for entry in container.iterdir())
 
