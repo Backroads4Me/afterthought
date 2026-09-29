@@ -53,7 +53,6 @@ SECTION_ORDER = (*page.KIND_SECTIONS, page.CANDIDATES)
 Candidates. A section the page lacks is created at this rank."""
 
 _ENTRY_LINE = re.compile(r"^(?P<indent>[ \t]*)-[ \t]")
-_PLAIN_YAML = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_ ./#:+~=@,;-]*$")
 _SOURCE_ID = re.compile(r"s(?P<n>\d+)")
 
 
@@ -101,14 +100,14 @@ def _fact_line(
 
 
 def _scalar(value: str) -> str:
-    """A frontmatter value as one YAML line: plain where that round-trips, else quoted."""
-    if _PLAIN_YAML.fullmatch(value):
+    """A frontmatter value as one YAML line: the first form that reads back as itself."""
+    for form in (value, json.dumps(value, ensure_ascii=False)):
         try:
-            if yaml.safe_load(value) == value:
-                return value
+            if yaml.safe_load(f"k: {form}") == {"k": value}:
+                return form
         except yaml.YAMLError:
-            pass
-    return json.dumps(value, ensure_ascii=False)
+            continue
+    return json.dumps(value)  # escapes every code point YAML could reinterpret
 
 
 def _next_id(sources: dict[str, dict]) -> str:
@@ -165,6 +164,11 @@ def _section_for(kind: str) -> str:
 def _guard_struck(fact: page.Fact, action: str) -> None:
     if fact.struck:
         raise WriteError(f"cannot {action} a struck line; it carries its own marker")
+
+
+def _line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
+    """What a fact line says, apart from the line number it currently sits on."""
+    return fact.statement, fact.source, fact.date, fact.refs, fact.struck
 
 
 class PageDoc:
@@ -228,10 +232,11 @@ class PageDoc:
             raise WriteError("a source needs a quote to cite")
         if title and (not isinstance(title, str) or not title.strip()):
             raise WriteError("a source title is text or nothing")
+        sources = self.sources
         bounds = self._fm_bounds()
         if bounds is None:
             raise WriteError("the page has no frontmatter to add a source to")
-        new_id = _next_id(self.sources)
+        new_id = _next_id(sources)
         entry = [f"- id: {new_id}", f"  resource: {_scalar(resource)}"]
         if title:
             entry.append(f"  title: {_scalar(title)}")
@@ -368,9 +373,11 @@ class PageDoc:
         return found
 
     def _resolve(self, fact: page.Fact) -> page.Fact:
-        """The same fact in the current text."""
+        """The fact in the current text this handle names: its line, and every field of
+        that line, so a twin carrying the same statement cannot answer for it."""
+        wanted = _line_identity(fact)
         for fact_now in self._page.facts:
-            if fact_now.line == fact.line and fact_now.statement == fact.statement:
+            if fact_now.line == fact.line and _line_identity(fact_now) == wanted:
                 return fact_now
         raise WriteError(f"the fact at line {fact.line} moved; take it from the page again")
 
@@ -448,9 +455,9 @@ class PageDoc:
         if header is None:
             return self._insert_section(section, line)
         at = self._section_end(header)
-        empty = at == header + 1
-        self._apply(at, at, ["", line] if empty else [line])
-        return at + (2 if empty else 1)
+        gap = at == header + 1 or self.lines[at - 1].rstrip().startswith(">")
+        self._apply(at, at, ["", line] if gap else [line])
+        return at + (2 if gap else 1)
 
     def _insert_section(self, section: str, line: str) -> int:
         """Create ``section`` where design 6 orders it and put ``line`` under it."""
@@ -482,7 +489,7 @@ class PageDoc:
         )
 
     def _section_end(self, header: int) -> int:
-        """The line just past a section's facts, before the blank lines that follow."""
+        """The line just past a section's content, before the blank lines that follow."""
         index = header + 1
         while index < len(self.lines) and not self.lines[index].rstrip().startswith("## "):
             index += 1

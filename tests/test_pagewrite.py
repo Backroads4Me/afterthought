@@ -49,6 +49,16 @@ aft:
 
 BROKEN_FM = PAGE.replace("title: widget", "title: [widget")
 
+UNTERMINATED_FM = """\
+---
+type: Project
+title: widget
+description: A page whose frontmatter never closes.
+sources: []
+
+## Facts
+"""
+
 CANDIDATE = "- Long sessions need checkpoints. [inferred] 2026-09-30 [^s2]"
 
 BARE = """\
@@ -388,6 +398,17 @@ def test_add_source_refuses_a_page_with_no_frontmatter(initialized):
     assert doc.render() == before
 
 
+def test_add_source_names_an_unterminated_frontmatter_as_unreadable(initialized):
+    doc = make(initialized, UNTERMINATED_FM)
+    before = doc.render()
+    with pytest.raises(
+        pagewrite.WriteError,
+        match="sources are unreadable: frontmatter has no closing",
+    ):
+        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+    assert doc.render() == before
+
+
 def test_a_source_value_ending_in_a_line_break_is_written_as_one_line(initialized, doc):
     """A quote or title off a transcript keeps its break: the value goes out quoted on
     a single line, so the frontmatter gains no stray blank line.
@@ -430,6 +451,31 @@ def test_a_source_value_with_an_interior_line_break_rounds_trip(initialized, doc
         ),
     )
     assert doc.sources["s3"]["quote"] == "first line\nsecond line"
+
+
+def test_a_source_value_a_quoted_scalar_would_fold_is_written_escaped(initialized, doc):
+    """YAML reads U+0085 inside a quoted scalar as a line break, so a value carrying it
+    goes out with the code point escaped and comes back as the text it was given.
+    """
+    folded = "first\u0085second"
+    before = doc.render()
+    doc.add_source(folded, title=folded, quote=folded)
+    written(initialized, doc)
+    assert edits(before, doc.render()) == (
+        (),
+        (
+            "  - id: s3",
+            '    resource: "first\\u0085second"',
+            '    title: "first\\u0085second"',
+            '    quote: "first\\u0085second"',
+        ),
+    )
+    assert doc.sources["s3"] == {
+        "id": "s3",
+        "resource": folded,
+        "title": folded,
+        "quote": folded,
+    }
 
 
 def test_a_hand_typed_tail_makes_every_operation_on_the_candidate_refuse(initialized):
@@ -572,6 +618,31 @@ def test_a_note_a_person_typed_under_a_candidate_stops_the_move(initialized):
     assert doc.render() == before
 
 
+def test_an_append_lands_below_a_note_rather_than_under_it(initialized):
+    """A note ends before the next fact: an append keeps the note attached to the fact
+    above it and starts its own paragraph underneath, whichever operation appends.
+    """
+    state = "- The GPU host runs vLLM. [observed] 2026-09-30 [^s1]"
+    note = "> [!question] 2026-10-01\n> why?"
+    template = PAGE.replace(f"{state}\n", f"{state}\n\n{note}\n")
+
+    added = "- The timer runs every 30 minutes. [observed] 2026-10-04 [^s1]"
+    doc = make(initialized, template)
+    before = doc.render()
+    doc.add_fact("state", "The timer runs every 30 minutes.", "observed", "2026-10-04", ("s1",))
+    result = written(initialized, doc)
+    assert edits(before, doc.render()) == ((), (added, ""))
+    assert f"{state}\n\n{note}\n\n{added}\n" in doc.render()
+    noted = [(f.statement, [c.type for c in f.callouts]) for f in result.facts if f.callouts]
+    assert noted == [("The GPU host runs vLLM.", ["question"])]
+
+    doc = make(initialized, template)
+    doc.promote(doc.fact("Long sessions need checkpoints."), "state")
+    moved = "- Long sessions need checkpoints. [inferred] 2026-09-30 [^s2]"
+    written(initialized, doc)
+    assert f"{note}\n\n{moved}\n" in doc.render()
+
+
 def test_a_page_that_arrives_broken_still_takes_its_edit(initialized):
     doc = make(initialized, BROKEN)
     before = doc.render()
@@ -602,6 +673,37 @@ def test_a_statement_on_two_lines_is_only_named_by_a_fact_handle(initialized, do
     written(initialized, doc)
     with pytest.raises(pagewrite.WriteError, match="2 lines read"):
         doc.fact("The GPU host runs vLLM.")
+
+
+def test_a_handle_names_one_of_two_lines_sharing_a_statement(initialized, doc):
+    """Two lines can carry one statement; a handle still rewrites the line it came from."""
+    doc.add_candidate("Dup statement.", "inferred", "2026-09-30", ("s1",))
+    second = doc.add_candidate("Dup statement.", "inferred", "2026-09-30", ("s1", "s2"))
+    doc.promote(second, "decision")
+    result = written(initialized, doc)
+    decisions = [fact for fact in result.facts if fact.section == "Decisions"]
+    assert states(result, "Decisions") == [
+        ("The index is plain SQLite.", page.ACTIVE),
+        ("Dup statement.", page.ACTIVE),
+    ]
+    assert decisions[-1].refs == ("s1", "s2")
+    assert states(result, "Candidates") == [
+        ("Long sessions need checkpoints.", page.CANDIDATE),
+        ("Dup statement.", page.CANDIDATE),
+    ]
+
+
+def test_a_handle_shifted_onto_its_twin_is_refused(initialized, doc):
+    """The line a handle names can come to hold its twin; that handle is refused the way
+    a handle onto a moved line is, not quietly applied to the neighbour.
+    """
+    doc.add_candidate("Dup statement.", "inferred", "2026-09-30", ("s1",))
+    second = doc.add_candidate("Dup statement.", "inferred", "2026-09-30", ("s1", "s2"))
+    doc.add_fact("state", "The timer runs every 30 minutes.", "observed", "2026-10-04", ("s1",))
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="moved"):
+        doc.promote(second, "decision")
+    assert doc.render() == before
 
 
 def test_a_struck_candidate_takes_no_edit_that_would_unstrike_it(initialized):
