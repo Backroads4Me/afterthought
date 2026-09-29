@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -95,6 +96,14 @@ def write_records(path: Path, *records: dict) -> Path:
     """A transcript file holding exactly these records, in the order given."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
+        for one in records:
+            handle.write(json.dumps(one) + "\n")
+    return path
+
+
+def append_records(path: Path, *records: dict) -> Path:
+    """A session that kept working: these records added to the end of the same file."""
+    with path.open("a", encoding="utf-8") as handle:
         for one in records:
             handle.write(json.dumps(one) + "\n")
     return path
@@ -583,7 +592,7 @@ def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest
     )
     asked_for: list[list[Entry]] = []
 
-    def keeps_everything(entries: object, _config: object) -> list[Entry]:
+    def keeps_everything(entries: Sequence[Entry], _config: Config) -> list[Entry]:
         kept = list(entries)
         asked_for.append(kept)
         return kept
@@ -726,32 +735,77 @@ def test_the_injection_reads_the_handoff_off_the_digest(session: Session):
     assert "- In flight: the sweep, still to write" in block
 
 
-def test_a_fact_for_every_project_says_it_had_nowhere_to_go(session: Session):
-    """The plan asks for a scope the page format has no field for: losing it is loud.
+def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Session):
+    """A fact for every project is kept, and says so: the scope survives the verifier.
 
-    The page format is the plan author's to settle, so a global fact is not relabelled as
-    one project's. Each one is its own line of the dropped record, naming what it said, the
-    scope it carried and the entry it came from, so "the model found nothing global" and
-    "there was nowhere to write it" read apart.
+    One line of a fact page has no field for scope (DESIGN 6), so what the verifier verified
+    travels in the record beside the page - the statement, its kind, its source, the entry
+    its quote came from, and the scope that says it applies past this project (DESIGN 7). A
+    fact the verifier refused is named there too, as dropped, and reaches no line at all.
     """
     wrote = digest_once(
         session,
         answer(
-            said(scope="global"),
-            said(statement="Ted prefers a plain hyphen.", quote="session end", scope="global"),
+            said(
+                statement="Ted prefers a plain hyphen.",
+                quote="session end",
+                kind="preference",
+                scope="global",
+            ),
+            said(statement="The archive keeps its own words.", quote="rust", entry="e1"),
         ),
     )
-    assert wrote.facts == ()
-    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
-    assert [fact["statement"] for fact in dropped] == [
-        "Capture runs at session end, not per turn.",
-        "Ted prefers a plain hyphen.",
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert kept == [
+        {
+            "statement": "Ted prefers a plain hyphen.",
+            "kind": "preference",
+            "source": "stated",
+            "entry": "e1",
+            "scope": "global",
+        }
     ]
-    assert [fact["entry"] for fact in dropped] == ["e1", "e1"]
-    assert [fact["reason"] for fact in dropped] == [
-        "scope global has no field on a digest page (DESIGN 6 line grammar)",
-    ] * 2
-    assert "Ted prefers a plain hyphen" not in body(session.cfg, wrote.path)
+    assert "Ted prefers a plain hyphen. [stated]" in body(session.cfg, wrote.path)
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert [fact["statement"] for fact in dropped] == ["The archive keeps its own words."]
+
+
+def test_a_global_fact_that_is_not_stated_carries_the_rule_it_will_be_skipped_for(
+    session: Session,
+):
+    """DESIGN 9 R6: a global page changes only from [stated].
+
+    The digest is not where that rule is applied, so an observed global fact is written like
+    any other and carries the rule as its skip reason beside it: dreaming can report the skip
+    without this page having to erase the fact first.
+    """
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The archive is worth its size in quotes.",
+                quote="the hook writes one row",
+                entry="e2",
+                kind="state",
+                source="observed",
+                scope="global",
+            ),
+            said(
+                statement="Ted prefers a plain hyphen.",
+                quote="session end",
+                kind="preference",
+                scope="global",
+            ),
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [fact["scope"] for fact in kept] == ["global", "global"]
+    assert kept[0]["skip"] == "a global page changes only from [stated]"
+    # The same sentence the digest module records, so a page and its code cannot drift apart.
+    assert digest.GLOBAL_NOT_STATED == kept[0]["skip"]
+    assert "skip" not in kept[1]
+    assert "The archive is worth its size in quotes. [observed]" in body(session.cfg, wrote.path)
+    assert [fact.scope for fact in wrote.facts] == ["global", "global"]
 
 
 # ------------------------------------------------------- the order a crash leaves things in
@@ -903,35 +957,65 @@ def test_a_rerun_on_the_same_session_adds_no_digest_page(session: Session):
     assert watermark(cfg) == wrote.watermark
 
 
-def test_a_second_chunk_the_same_day_names_the_page_that_stands(session: Session):
-    """Two chunks of one session, one day: the standing digest is refused, not replaced.
+def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session):
+    """One page per job, and a page's bytes never change once it is written (DESIGN 8).
 
-    The plan gives a session one digest path per day, so the second chunk has no page of
-    its own to write. Overwriting the first digest would lose the earlier half of the day
-    quietly; the job fails instead, and says why, with the chunk archived and the mark
-    left where the first digest put it. The page's path is known before a token is spent
-    on it, so a chunk that could never be filed is refused before the endpoint is called.
+    A session that keeps working is digested again as it grows, so one day can hold several
+    jobs for one session. Each takes the next part of the day's name - the plain name, then
+    -2, then -3 - each spends its own one model answer, and every page filed before it keeps
+    the bytes it was filed with, so the day's whole reading survives the last job.
     """
-    first = digest_once(session, answer(said()))
-    grown = write_transcript(
-        session.transcript.with_name("grown.jsonl"),
-        session.cwd,
-        record("e4", "user", "And keep the archive compressed."),
-    )
+    grown = "The queue holds one row per session."
+    ended = "The hook returns without a model call."
+    stem = page_path()[:-3]
     fake, cfg = serve(
-        session.cfg, answer(said(statement="The archive stays compressed.", quote="archive"))
+        session.cfg,
+        answer(said()),
+        answer(
+            said(
+                statement=grown,
+                quote="one row per session",
+                entry="e4",
+                kind="state",
+                source="observed",
+            )
+        ),
+        answer(
+            said(
+                statement=ended,
+                quote="without a model call",
+                entry="e5",
+                kind="state",
+                source="observed",
+            )
+        ),
     )
     try:
-        with pytest.raises(digest.DigestError) as raised:
-            digest.digest_job(cfg, claim(cfg, grown, session.cwd))
+        first = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+        filed_first = (cfg.vault / page_path()).read_bytes()
+        append_records(session.transcript, record("e4", "user", grown))
+        second = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+        filed_second = (cfg.vault / f"{stem}-2.md").read_bytes()
+        append_records(session.transcript, record("e5", "user", ended))
+        third = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+        asked = len(fake.requests)
+        filed = pages(cfg)
     finally:
         fake.stop()
-    assert page_path() in str(raised.value)
-    assert fake.requests == [], "a chunk with no page to write was digested anyway"
-    assert "one digest path per day" in str(raised.value)
-    assert watermark(cfg) == first.watermark
-    assert pages(cfg) == [below()]
-    assert evidence.find_quote(cfg, SESSION, "e4", "keep the archive compressed")
+    assert first is not None and second is not None and third is not None
+    assert [first.path, second.path, third.path] == [
+        page_path(),
+        f"{stem}-2.md",
+        f"{stem}-3.md",
+    ]
+    assert asked == 3, "a job spent an answer another job should have had"
+    assert filed == sorted([below(), f"{below()[:-3]}-2.md", f"{below()[:-3]}-3.md"])
+    assert (cfg.vault / page_path()).read_bytes() == filed_first
+    assert (cfg.vault / f"{stem}-2.md").read_bytes() == filed_second
+    assert "Capture runs at session end, not per turn. [stated]" in body(cfg, first.path)
+    assert f"{grown} [observed]" in body(cfg, second.path)
+    assert f"{ended} [observed]" in body(cfg, third.path)
+    assert watermark(cfg) == "e5"
 
 
 def test_a_directory_that_is_no_project_at_all_is_never_sent_to_the_model(

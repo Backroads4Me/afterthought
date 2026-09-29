@@ -64,15 +64,16 @@ CHARS_PER_TOKEN = 4
 MAX_OUTPUT_TOKENS = 4_000
 
 # A page's body is fact sections only (DESIGN 6), so a fact's kind is the heading it sits
-# under and its scope has no field to live in; see ``_homes``.
+# under. A fact's scope is no part of that line, so it travels in the page's own record.
 SCOPES = frozenset({"project", "global"})
-NO_HOME = "scope {scope} has no field on a digest page (DESIGN 6 line grammar)"
+# DESIGN 9 R6: why dreaming passes over a global fact Ted did not commit to himself. The
+# digest records it beside the fact, so the skip is reported and the fact stays written.
+GLOBAL_NOT_STATED = "a global page changes only from [stated]"
 
 
 class DigestError(Exception):
     """A job this digest cannot honour: no project to file under, no transcript to read,
-    a session id no path can be built from, or a page of this session's date that already
-    stands and would be overwritten."""
+    or a session id no page path can be built from."""
 
 
 class AnswerRefused(DigestError):
@@ -204,11 +205,10 @@ _JOIN = "\n\n"
 def parts(entries: Sequence[Entry]) -> list[list[Entry]]:
     """The parts one job's entries are sent in, with the prompt paid for first.
 
-    A session's end is one digest, and one page (DESIGN 13: one digest per session per
-    day, not per turn); what the cap bounds is one call, so a chunk over it is a session
-    digested in parts and filed as one page. The cap is on the call's input, which is the
-    prompt and the chunk together, so the prompt's own tokens come off the budget before
-    the entries are divided.
+    The parts of one job are one digest and one page; what the cap bounds is one call, so
+    a chunk over it is a session digested in parts and filed as one page. The cap is on the
+    call's input, which is the prompt and the chunk together, so the prompt's own tokens
+    come off the budget before the entries are divided.
     """
     return split_parts(entries, max(1, MAX_CHUNK_TOKENS - tokens(prompt_text())))
 
@@ -251,8 +251,8 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     kept = filtermod.filter_entries(read, config)
     if not kept:
         # Nothing the filter left to digest: the entries were read and decided, so the
-        # mark moves and the job closes. A page of nothing would stand for the day and
-        # then refuse the chunk that follows it with real work on it.
+        # mark moves and the job closes. A page of nothing would stand as the session's
+        # last word and speak for the work that came after it.
         queue.complete(config, job, read[-1].id)
         return None
 
@@ -264,13 +264,11 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         kept,
     )
 
-    # The page's path is known before a token is spent on it, so a day whose digest already
-    # stands is refused here - with the chunk archived and the watermark held - rather than
-    # after every part of it has been paid for. _write checks once more before the commit.
+    # The page's own name is taken here, before a token is spent on it, from what already
+    # stands in the day's directory: a job writes the page it is given and never a page
+    # another job wrote.
     when = read[-1].time.astimezone(UTC).date()
-    rel = _path(resolution.slug, job.agent, job.session_id, when)
-    if (config.vault / rel).is_file():
-        raise DigestError(_collision(rel))
+    rel = _path(config, resolution.slug, job.agent, job.session_id, when)
 
     facts: list[Fact] = []
     dropped: list[Dropped] = []
@@ -278,10 +276,10 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     handoffs: list[dict[str, object]] = []
     prompt = prompt_text()
     schema = digest_schema()
-    # One page per job, whatever the number of parts: the plan names one path per session
-    # and day, and a handoff is what stood at the end of the part that read it, so the
-    # last part's is the job's. Summaries are joined uncut - a page's description has no
-    # cap, so nothing is truncated at the join, and a reader sees every part's own words.
+    # One page per job, whatever the number of parts: the parts of one job are one digest,
+    # and a handoff is what stood at the end of the part that read it, so the last part's is
+    # the job's. Summaries are joined uncut - a page's description has no cap, so nothing is
+    # truncated at the join, and a reader sees every part's own words.
     for part in parts(kept):
         answer = _model_answer(config, prompt, render(part), schema)
         part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"])
@@ -290,9 +288,6 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         summaries.append(answer["summary"])
         handoffs.append(answer["handoff"])
 
-    # A fact whose scope the page cannot carry is refused here, not written wrong.
-    written, homeless = _homes(facts)
-    dropped.extend(homeless)
     page, on_page, refused = _page(
         config,
         job,
@@ -301,7 +296,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         resolution,
         summaries,
         handoffs[-1],
-        written,
+        facts,
         dropped,
         when,
         now or datetime.now(UTC),
@@ -387,31 +382,6 @@ def _refused(fact: dict, reason: str) -> Dropped:
     )
 
 
-def _homes(facts: Sequence[Fact]) -> tuple[list[Fact], list[Dropped]]:
-    """The facts this page can hold, and the ones it has no field for.
-
-    A line's kind is its section, so a project fact arrives whole. ``scope: global`` says
-    a fact applies in every project, and no field of the design's page format carries that
-    (DESIGN 6), so a global fact written here would reach the next session as a project's
-    own. Each is refused on its own line of the same record that carries the verifier's
-    refusals, naming its statement, its scope and the entry it came from, so "the model
-    found nothing global" and "there was nowhere to write it" cannot read alike. The page
-    format is the plan author's to settle.
-    """
-    homeless = [fact for fact in facts if fact.scope != "project"]
-    dropped = [
-        Dropped(
-            statement=fact.statement,
-            kind=fact.kind,
-            source=fact.source,
-            entry=fact.entry,
-            reason=NO_HOME.format(scope=fact.scope),
-        )
-        for fact in homeless
-    ]
-    return [fact for fact in facts if fact.scope == "project"], dropped
-
-
 def _require_session_id(session_id: str) -> None:
     """The session id as a name a page can be filed under, or this job's refusal.
 
@@ -428,9 +398,24 @@ def _require_session_id(session_id: str) -> None:
         )
 
 
-def _path(slug: str, agent: str, session_id: str, when: date) -> str:
-    """The page's path in the vault, as DESIGN 6 lays it out."""
-    return f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
+def _path(config: Config, slug: str, agent: str, session_id: str, when: date) -> str:
+    """The page's path in the vault, as DESIGN 6 lays it out, in the part this job owns.
+
+    A session's first job of a day writes the plain name and every job after it takes the
+    next free part - ``-2``, ``-3`` - because one job is one page and a digest's content
+    never changes once written (DESIGN 8). The part comes from what already stands in the
+    directory, so a job never pays for a model call on a page another job already holds.
+    """
+    stem = f"{when:%Y-%m-%d}-{agent}-{session_id}"
+
+    def name(part: int) -> str:
+        return f"{stem}.md" if part == 1 else f"{stem}-{part}.md"
+
+    directory = config.vault / "digests" / slug / f"{when:%Y}" / f"{when:%m}"
+    part = 1
+    while (directory / name(part)).is_file():
+        part += 1
+    return f"digests/{slug}/{when:%Y}/{when:%m}/{name(part)}"
 
 
 def _page(
@@ -455,15 +440,26 @@ def _page(
 
     The frontmatter is written whole because this page is new; the fact lines and the
     sources they cite go through the page writer, which refuses text its own parse would
-    not read back, so a page that leaves here lints (DESIGN 6).
+    not read back, so a page that leaves here lints (DESIGN 6). What that writer took is
+    what ``aft.facts`` names, so the record beside a page and the lines on it cannot part.
     """
-    frontmatter = _frontmatter(config, resolution, slug, summaries, handoff, dropped, when, stamp)
+    frontmatter = _frontmatter(
+        config, resolution, slug, summaries, handoff, facts, dropped, when, stamp
+    )
     text, written, refused = _written(frontmatter, rel, job, facts)
     if refused:
-        # The refusals join the record of dropped facts, which means writing the page
-        # once more over the lines that did land - and the same lines refuse again.
+        # A line the writer would not take never reached the page, so the record beside it
+        # names it as dropped and keeps the kept list to the lines a reader can find.
         frontmatter = _frontmatter(
-            config, resolution, slug, summaries, handoff, [*dropped, *refused], when, stamp
+            config,
+            resolution,
+            slug,
+            summaries,
+            handoff,
+            written,
+            [*dropped, *refused],
+            when,
+            stamp,
         )
         text, written, _ = _written(frontmatter, rel, job, facts)
     return text, tuple(written), tuple(refused)
@@ -475,11 +471,17 @@ def _frontmatter(
     slug: str,
     summaries: Sequence[str],
     handoff: dict,
+    kept: Sequence[Fact],
     dropped: Sequence[Dropped],
     when: date,
     stamp: datetime,
 ) -> dict:
-    """The page's OKF frontmatter, with afterthought's own fields under one ``aft`` key."""
+    """The page's OKF frontmatter, with afterthought's own fields under one ``aft`` key.
+
+    ``aft.facts`` is what this job verified and the page carries, the scope of each fact
+    included - the fact line has no field for it (DESIGN 6) - and ``aft.dropped`` is what
+    the verifier or the page writer refused, with the reason each one failed on.
+    """
     aft: dict[str, object] = {}
     if resolution.project is not None:
         aft["project"] = resolution.project.id
@@ -488,6 +490,8 @@ def _frontmatter(
         "failed": list(handoff["failed"]),
         "open": list(handoff["open"]),
     }
+    if kept:
+        aft["facts"] = [_verified(fact) for fact in kept]
     if dropped:
         aft["dropped"] = [_record(fact) for fact in dropped]
     return {
@@ -564,6 +568,25 @@ def _record(fact: Dropped) -> dict:
     }
 
 
+def _verified(fact: Fact) -> dict:
+    """One fact the page carries, as the verifier verified it, scope and all.
+
+    The fact line has no field for scope (DESIGN 6), so the page's own record names it, and
+    a global fact whose source is not one of Ted's own commitments carries the rule it will
+    be skipped for (DESIGN 9 R6). Where such a fact is filed later is not this page's to say.
+    """
+    record = {
+        "statement": fact.statement,
+        "kind": fact.kind,
+        "source": fact.source,
+        "entry": fact.entry,
+        "scope": fact.scope,
+    }
+    if fact.scope == "global" and fact.source != "stated":
+        record["skip"] = GLOBAL_NOT_STATED
+    return record
+
+
 def _words(fact: Fact) -> dict:
     """A verified fact in the shape a refusal is recorded from."""
     return {
@@ -598,11 +621,9 @@ def _reap_orphans(directory: Path) -> None:
 def _write(config: Config, rel: str, text: str) -> Path:
     """Put the page in the vault and commit it, or leave the vault exactly as it was.
 
-    An existing page at the path stops the job rather than being replaced: the plan gives
-    one path per session per day and the design has a chunk of a long session digested
-    more than once a day, so the second chunk of a day would otherwise overwrite the first
-    digest whole. Refusing keeps both, holds the watermark, and says so on its own line of
-    the failure, which is what a doomed retry has to leave behind for a person to end it.
+    The path arrives chosen by ``_path``, which looked at what already stands in that
+    directory, so a page written here is always a page that was not there a moment ago and
+    never a page some earlier job wrote.
 
     The commit is the last step. A page the commit did not take is taken back out on the
     way as well: the file goes, and so does the index entry that staging put beside it,
@@ -610,8 +631,6 @@ def _write(config: Config, rel: str, text: str) -> Path:
     memory. So a failure leaves no page standing that the watermark does not know about.
     """
     path = config.vault / rel
-    if path.is_file():
-        raise DigestError(_collision(rel))
     path.parent.mkdir(parents=True, exist_ok=True)
     _reap_orphans(path.parent)
     handle, tmp = tempfile.mkstemp(
@@ -636,16 +655,3 @@ def _write(config: Config, rel: str, text: str) -> Path:
             git(["reset", "-q", "--", rel], cwd=config.vault, check=False)
             raise
     return path
-
-
-def _collision(rel: str) -> str:
-    """What a collision reports: three lines, because one failure text is a queue's row."""
-    return "\n".join(
-        (
-            f"a digest page already stands at {rel}",
-            "the plan gives a session one digest path per day (BUILD-PLAN M2.6), so this "
-            "chunk has no page of its own to write",
-            "the chunk is archived and the watermark holds, so nothing is lost while "
-            "this page's identity is settled",
-        )
-    )
