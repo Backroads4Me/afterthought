@@ -110,7 +110,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import inject, lint, page
+from aft import inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError
@@ -762,14 +762,8 @@ def _project_scopes(
 
 def _path_slug(rel: str) -> str | None:
     """The slug of the project a file is filed under (DESIGN 6's vault tree), or None where
-    its directory names no project. ``archive/`` files one page per project, so its slug is
-    the page's name."""
-    parts = Path(rel).parts
-    if len(parts) < 2 or parts[0] not in PROJECT_DIRS:
-        return None
-    if parts[0] != ARCHIVE:
-        return parts[1]
-    return Path(parts[1]).stem if len(parts) == 2 else None
+    its directory names no project."""
+    return vault.path_slug(rel)
 
 
 def _session_of(rel: str) -> tuple[str | None, str | None]:
