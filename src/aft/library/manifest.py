@@ -4,7 +4,7 @@ The manifest specifies a collection's name, title, description, target projects,
 and a mapping of every surveyed file to exactly one role (original, derived,
 errata, notes, exclude) and its relations (derived-from, errata-for, supersedes).
 The validator enforces that every surveyed file has one role, relations point
-inside the collection, and instruction files and tooling are excluded.
+inside the collection, instruction files are excluded, and relations fit roles.
 """
 
 from __future__ import annotations
@@ -20,16 +20,30 @@ from aft.library import survey
 
 ROLES = frozenset({"original", "derived", "errata", "notes", "exclude"})
 RELATIONS = frozenset({"derived-from", "errata-for", "supersedes"})
-RELATION_ALIASES = {
-    "derived_from": "derived-from",
-    "errata_for": "errata-for",
-}
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 class ManifestError(Exception):
     """Raised when a manifest file is missing, malformed, or fails validation."""
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects duplicate mapping keys."""
+
+    def construct_mapping(self, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in mapping:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"found duplicate key {key!r}",
+                    key_node.start_mark,
+                )
+            mapping[key] = self.construct_object(value_node, deep=deep)
+        return mapping
 
 
 @dataclass(frozen=True)
@@ -50,9 +64,8 @@ class Manifest:
 
 
 def normalize_relation_name(name: str) -> str:
-    """Normalize relation key to hyphenated form."""
-    lowered = name.lower().strip()
-    return RELATION_ALIASES.get(lowered, lowered)
+    """Normalize relation key to lowercase stripped form."""
+    return name.lower().strip()
 
 
 def load_manifest(
@@ -68,7 +81,7 @@ def load_manifest(
 
     try:
         raw_text = resolved_path.read_text(encoding="utf-8")
-        data = yaml.safe_load(raw_text)
+        data = yaml.load(raw_text, Loader=UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise ManifestError(f"manifest is not valid YAML: {exc}") from exc
 
@@ -101,105 +114,100 @@ def load_manifest(
 
     # Collection directory location
     collection_path_val = (
-        path_override
-        if path_override is not None
-        else data.get("path") or data.get("source") or data.get("root")
+        path_override if path_override is not None else data.get("path", resolved_path.parent)
     )
-    if collection_path_val is None:
-        errors.append("manifest must specify 'path' to collection directory or provide an override")
-        collection_dir = resolved_path.parent
+    if isinstance(collection_path_val, (str, Path)):
+        col_path = Path(collection_path_val)
+        if not col_path.is_absolute():
+            col_path = (resolved_path.parent / col_path).resolve()
+        collection_path = col_path
     else:
-        raw_p = Path(collection_path_val)
-        if raw_p.is_absolute():
-            collection_dir = raw_p.resolve()
-        else:
-            collection_dir = (resolved_path.parent / raw_p).resolve()
+        errors.append("path must be a valid directory path string")
+        collection_path = resolved_path.parent
 
-    # Files mapping
+    # File mapping
     files_raw = data.get("files")
-    file_entries: dict[str, FileEntry] = {}
+    files: dict[str, FileEntry] = {}
     if not isinstance(files_raw, dict):
-        errors.append("files must be a mapping of file paths to role and relations")
+        errors.append("files must be a dictionary mapping relative file paths to entries")
     else:
-        for fpath, fspec in files_raw.items():
-            entry, entry_errs = _parse_file_entry(str(fpath), fspec)
-            errors.extend(entry_errs)
-            file_entries[entry.path] = entry
+        for fpath, raw_entry in files_raw.items():
+            if not isinstance(fpath, str):
+                errors.append(f"file path key must be string, got {fpath!r}")
+                continue
+
+            # Allow string shorthand for role with no relations
+            if isinstance(raw_entry, str):
+                role = raw_entry.strip().lower()
+                if role not in ROLES:
+                    errors.append(
+                        f"file '{fpath}': role must be one of {sorted(ROLES)}, got {role!r}"
+                    )
+                files[fpath] = FileEntry(path=fpath, role=role, relations={})
+                continue
+
+            if not isinstance(raw_entry, dict):
+                entry_type = type(raw_entry).__name__
+                errors.append(
+                    f"file '{fpath}': entry must be a dictionary or string role, got {entry_type}"
+                )
+                continue
+
+            role = raw_entry.get("role")
+            if not isinstance(role, str) or role.strip().lower() not in ROLES:
+                errors.append(f"file '{fpath}': role must be one of {sorted(ROLES)}, got {role!r}")
+                role = str(role or "")
+            else:
+                role = role.strip().lower()
+
+            relations_raw = raw_entry.get("relations", {})
+            relations: dict[str, tuple[str, ...]] = {}
+            if not isinstance(relations_raw, dict):
+                errors.append(f"file '{fpath}': relations must be a mapping")
+            else:
+                for rel_key, rel_val in relations_raw.items():
+                    if not isinstance(rel_key, str):
+                        errors.append(f"file '{fpath}': relation type must be string")
+                        continue
+                    norm_rel = normalize_relation_name(rel_key)
+                    if norm_rel not in RELATIONS:
+                        errors.append(
+                            f"file '{fpath}': unknown relation '{rel_key}', "
+                            f"must be one of {sorted(RELATIONS)}"
+                        )
+                        continue
+
+                    # Targets can be single string or list of strings
+                    if isinstance(rel_val, str):
+                        targets = (rel_val.strip(),)
+                    elif isinstance(rel_val, list) and all(isinstance(t, str) for t in rel_val):
+                        targets = tuple(t.strip() for t in rel_val)
+                    else:
+                        errors.append(
+                            f"file '{fpath}': relation '{rel_key}' targets must be "
+                            "a string path or list of string paths"
+                        )
+                        continue
+
+                    relations[norm_rel] = targets
+
+            files[fpath] = FileEntry(path=fpath, role=role, relations=relations)
 
     manifest = Manifest(
         name=name,
         title=title,
         description=description,
         projects=projects,
-        path=collection_dir,
-        files=file_entries,
+        path=collection_path,
+        files=files,
     )
     return manifest, errors
 
 
-def _parse_file_entry(fpath: str, spec: object) -> tuple[FileEntry, list[str]]:
-    """Parse one file entry from either a string role or a dictionary spec."""
-    errors: list[str] = []
-    norm_path = Path(fpath).as_posix()
-
-    if isinstance(spec, str):
-        role = spec.strip().lower()
-        if role not in ROLES:
-            errors.append(f"file '{norm_path}': unknown role '{role}'")
-        return FileEntry(path=norm_path, role=role), errors
-
-    if isinstance(spec, dict):
-        role_val = spec.get("role")
-        if not isinstance(role_val, str) or role_val.strip().lower() not in ROLES:
-            errors.append(
-                f"file '{norm_path}': role must be one of {sorted(ROLES)} (got {role_val!r})"
-            )
-            role = str(role_val or "")
-        else:
-            role = role_val.strip().lower()
-
-        relations_raw = spec.get("relations") or {}
-        relations: dict[str, tuple[str, ...]] = {}
-        if not isinstance(relations_raw, dict):
-            errors.append(f"file '{norm_path}': relations must be a mapping")
-        else:
-            for rel_k, rel_v in relations_raw.items():
-                norm_k = normalize_relation_name(str(rel_k))
-                if norm_k not in RELATIONS:
-                    expected = sorted(RELATIONS)
-                    errors.append(
-                        f"file '{norm_path}': unknown relation '{rel_k}', "
-                        f"expected one of {expected}"
-                    )
-                if isinstance(rel_v, str):
-                    relations[norm_k] = (Path(rel_v).as_posix(),)
-                elif isinstance(rel_v, list) and all(isinstance(x, str) for x in rel_v):
-                    relations[norm_k] = tuple(Path(x).as_posix() for x in rel_v)
-                else:
-                    errors.append(
-                        f"file '{norm_path}': relation '{rel_k}' target must be a path "
-                        "string or list of paths"
-                    )
-
-        return FileEntry(path=norm_path, role=role, relations=relations), errors
-
-    errors.append(f"file '{norm_path}': entry must be a role string or mapping")
-    return FileEntry(path=norm_path, role=""), errors
-
-
 def validate_manifest(manifest: Manifest) -> list[str]:
-    """Validate manifest semantic rules against surveyed collection and DESIGN 11."""
+    """Validate a loaded manifest against its surveyed collection directory."""
     errors: list[str] = []
 
-    # Check collection path exists and is a directory
-    if not manifest.path.exists():
-        errors.append(f"collection directory does not exist: {manifest.path}")
-        return errors
-    if not manifest.path.is_dir():
-        errors.append(f"collection path is not a directory: {manifest.path}")
-        return errors
-
-    # Survey the collection to check every surveyed file
     try:
         report = survey.survey(manifest.path)
     except survey.SurveyError as exc:
@@ -219,7 +227,7 @@ def validate_manifest(manifest: Manifest) -> list[str]:
     for p in missing_from_collection:
         errors.append(f"unknown file: '{p}' listed in manifest does not exist in collection")
 
-    # 2. Instruction files and tooling must be role: exclude
+    # 2. Instruction files must have role: exclude
     for finfo in report.files:
         if finfo.path not in manifest.files:
             continue
@@ -228,15 +236,28 @@ def validate_manifest(manifest: Manifest) -> list[str]:
             errors.append(
                 f"instruction file '{finfo.path}' must have role 'exclude', got '{entry.role}'"
             )
-        if finfo.is_tooling and entry.role != "exclude":
-            errors.append(
-                f"tooling file '{finfo.path}' must have role 'exclude', got '{entry.role}'"
-            )
 
-    # 3. Relations point inside the collection and follow authority rules
+    # 3. Relations fit roles, point inside the collection, and follow authority rules
     for fpath, entry in manifest.files.items():
         if fpath not in surveyed_paths:
             continue
+
+        has_derived_from = "derived-from" in entry.relations
+        has_errata_for = "errata-for" in entry.relations
+
+        if entry.role == "derived" and not has_derived_from:
+            errors.append(f"file '{fpath}' with role 'derived' requires 'derived-from' relation")
+        if has_derived_from and entry.role != "derived":
+            errors.append(
+                f"file '{fpath}' has relation 'derived-from' but role is '{entry.role}' "
+                "(only allowed on 'derived')"
+            )
+        if has_errata_for and entry.role != "errata":
+            errors.append(
+                f"file '{fpath}' has relation 'errata-for' but role is '{entry.role}' "
+                "(only allowed on 'errata')"
+            )
+
         for rel_type, targets in entry.relations.items():
             for target in targets:
                 if target == fpath:
@@ -273,12 +294,12 @@ def run(
     path_override: str | Path | None = None,
     stream: sys.stdout.__class__ | None = None,
 ) -> int:
-    """CLI runner for `aft library validate <manifest>`."""
-    out = sys.stdout if stream is None else stream
-    m_path = Path(manifest_str).expanduser()
-    p_override = Path(path_override).expanduser() if path_override else None
+    """CLI entry point for aft library manifest / validate."""
+    out = stream if stream is not None else sys.stdout
+    mpath = Path(manifest_str).expanduser()
+    override = Path(path_override).expanduser() if path_override else None
 
-    manifest = validate(m_path, p_override)
+    manifest = validate(mpath, override)
     file_count = len(manifest.files)
     excluded = sum(1 for f in manifest.files.values() if f.role == "exclude")
     relations_count = sum(len(f.relations) for f in manifest.files.values())

@@ -1,4 +1,4 @@
-"""Tests for `aft library validate <manifest>` (milestone M7.2)."""
+"""Tests for library manifest parser and validator (BUILD-PLAN M7.2 / M7.3)."""
 
 from __future__ import annotations
 
@@ -12,21 +12,21 @@ from aft import cli
 
 @pytest.fixture
 def collection_tree(tmp_path: Path) -> Path:
-    """Create a sample library collection on disk."""
+    """Create a sample library collection directory with mixed files."""
     root = tmp_path / "rvc_docs"
     root.mkdir()
 
-    # Original documents
+    # Source files (PDFs)
     source_dir = root / "source"
     source_dir.mkdir()
-    (source_dir / "rvc_spec_2023.pdf").write_bytes(b"%PDF-1.4 spec 2023")
-    (source_dir / "rvc_spec_2016.pdf").write_bytes(b"%PDF-1.4 spec 2016")
+    (source_dir / "rvc_spec_2023.pdf").write_bytes(b"%PDF-1.4 test 2023")
+    (source_dir / "rvc_spec_2016.pdf").write_bytes(b"%PDF-1.4 test 2016")
 
-    # Derived text
-    (root / "rvc_spec_clean.md").write_text("# Cleaned markdown")
+    # Derived file (clean markdown of spec)
+    (root / "rvc_spec_clean.md").write_text("# RV-C Spec Clean\nExtracted content")
 
-    # Errata
-    (root / "spec_errata.json").write_text('{"errata": []}')
+    # Errata file (JSON)
+    (root / "spec_errata.json").write_text('{"PGN 12345": "correction note"}')
 
     # Working notes
     notes_dir = root / "notes"
@@ -96,7 +96,7 @@ def write_manifest(path: Path, data: dict) -> Path:
 
 
 def test_valid_manifest(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """A valid manifest passes validation and outputs confirmation."""
+    """A complete and valid manifest passes validation with exit code 0."""
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
     exit_code = cli.main(["library", "validate", str(m_path)])
     assert exit_code == 0
@@ -107,20 +107,17 @@ def test_valid_manifest(tmp_path: Path, valid_manifest_data: dict, capsys):
 
 
 def test_string_role_shortcut(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """Files without relations can use a simple string role."""
+    """Entries can be written as simple string roles when they have no relations."""
     valid_manifest_data["files"]["notes/aquahot.md"] = "notes"
-    valid_manifest_data["files"]["AGENTS.md"] = "exclude"
     valid_manifest_data["files"][".gitignore"] = "exclude"
-    valid_manifest_data["files"]["tools/generate.py"] = "exclude"
-    valid_manifest_data["files"]["source/rvc_spec_2016.pdf"] = "original"
-
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
     exit_code = cli.main(["library", "validate", str(m_path)])
     assert exit_code == 0
 
 
 def test_unassigned_file_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """A surveyed file without a role in the manifest fails validation."""
+    """Files in the collection but omitted from the manifest fail validation."""
     del valid_manifest_data["files"]["notes/aquahot.md"]
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
@@ -132,7 +129,7 @@ def test_unassigned_file_rejected(tmp_path: Path, valid_manifest_data: dict, cap
 
 
 def test_unknown_file_in_manifest_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """Listing a file that does not exist in the collection fails validation."""
+    """Files in the manifest that don't exist in the collection fail validation."""
     valid_manifest_data["files"]["nonexistent.pdf"] = {"role": "original"}
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
@@ -144,7 +141,7 @@ def test_unknown_file_in_manifest_rejected(tmp_path: Path, valid_manifest_data: 
 
 
 def test_unknown_role_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """A file with an unrecognized role fails validation."""
+    """Invalid roles are rejected with available options listed."""
     valid_manifest_data["files"]["notes/aquahot.md"] = {"role": "doc"}
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
@@ -156,7 +153,7 @@ def test_unknown_role_rejected(tmp_path: Path, valid_manifest_data: dict, capsys
 
 
 def test_instruction_file_not_excluded_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """An instruction file (AGENTS.md) not marked exclude fails validation."""
+    """Instruction files (AGENTS.md) not marked exclude fail validation."""
     valid_manifest_data["files"]["AGENTS.md"] = {"role": "notes"}
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
@@ -167,18 +164,75 @@ def test_instruction_file_not_excluded_rejected(tmp_path: Path, valid_manifest_d
     assert "instruction file 'AGENTS.md' must have role 'exclude'" in captured.err
 
 
-def test_tooling_not_excluded_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """Tooling (.gitignore, tools/) not marked exclude fails validation."""
+def test_tooling_allowed_non_exclude_role(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """Tooling files (.gitignore, tools/) can be assigned non-exclude roles by author."""
     valid_manifest_data["files"][".gitignore"] = {"role": "notes"}
     valid_manifest_data["files"]["tools/generate.py"] = {"role": "original"}
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 0
+
+
+def test_derived_from_requires_derived_role(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """derived-from relation on non-derived role fails validation."""
+    valid_manifest_data["files"]["source/rvc_spec_2016.pdf"]["relations"] = {
+        "derived-from": "source/rvc_spec_2023.pdf"
+    }
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
     exit_code = cli.main(["library", "validate", str(m_path)])
     assert exit_code == 2
 
     captured = capsys.readouterr()
-    assert "tooling file '.gitignore' must have role 'exclude'" in captured.err
-    assert "tooling file 'tools/generate.py' must have role 'exclude'" in captured.err
+    assert "only allowed on 'derived'" in captured.err
+
+
+def test_derived_role_requires_derived_from(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """Role derived without derived-from relation fails validation."""
+    valid_manifest_data["files"]["rvc_spec_clean.md"]["relations"] = {}
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "requires 'derived-from' relation" in captured.err
+
+
+def test_errata_for_requires_errata_role(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """errata-for relation on non-errata role fails validation."""
+    valid_manifest_data["files"]["notes/aquahot.md"]["relations"] = {
+        "errata-for": "source/rvc_spec_2023.pdf"
+    }
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "only allowed on 'errata'" in captured.err
+
+
+def test_duplicate_yaml_keys_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """Duplicate YAML keys in manifest are refused."""
+    m_path = tmp_path / "manifest_dup.yaml"
+    text = (
+        "name: rvc\n"
+        "title: RV-C\n"
+        "description: Docs\n"
+        "title: Duplicate Title\n"
+        "projects: []\n"
+        "files: {}\n"
+    )
+    m_path.write_text(text, encoding="utf-8")
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "manifest is not valid YAML" in captured.err
+    assert "duplicate key" in captured.err
 
 
 def test_relation_to_nonexistent_target_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
