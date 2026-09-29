@@ -161,6 +161,32 @@ aft:
 - The session wrote the injection block. [observed] {date} [^s1]
 """
 
+# A digest page as M2.6 writes it, with the instant the digest step filed it under
+# ``generated.at``.
+STAMPED_DIGEST = """\
+---
+type: Session Digest
+title: Widget session {date}
+description: Digest of the widget session on {date}.
+sources: []
+generated:
+  by: aft 0.0.0 / test-model
+  at: {at}
+aft:
+  project: p_widget
+  handoff:
+    in_flight: {in_flight}
+    failed:
+      - the parserless draft
+    open:
+      - the pi extension
+---
+
+## Facts
+
+- The session wrote the injection block. [observed] {date} [^s1]
+"""
+
 PAGES = """\
 - Widget API: How to call a widget over HTTP. (aft read projects/widget/api.md)
 - Widget spec: Dimensions and tolerances for every widget. \
@@ -560,6 +586,33 @@ def test_the_highest_part_of_the_newest_day_supplies_the_handoff(widget, tmp_pat
     block = inject.build(widget, resolve(widget, tmp_path / "widget"))
     assert "- In flight: the third part" in block
     for earlier in ("the first part", "the second", "the block"):
+        assert earlier not in block
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["'2026-10-07T22:30:00Z'", "2026-10-07T22:30:00"],
+    ids=["a quoted utc stamp", "an unquoted stamp with no offset"],
+)
+def test_the_digest_written_last_supplies_the_handoff(widget, tmp_path, stamp):
+    """Two sessions digested on one day: the one whose name sorts first ran on last, and
+    the ``generated.at`` its page carries is what says so."""
+    day = widget.vault / "digests/widget/2026/10"
+    write(
+        day / "2026-10-07-pi-aardvark.md",
+        STAMPED_DIGEST.format(date="2026-10-07", at=stamp, in_flight="the closing edit"),
+    )
+    write(
+        day / "2026-10-07-pi-zebra.md",
+        STAMPED_DIGEST.format(
+            date="2026-10-07",
+            at="'2026-10-07T14:05:00Z'",
+            in_flight="the abandoned draft",
+        ),
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "- In flight: the closing edit" in block
+    for earlier in ("the abandoned draft", "the block"):
         assert earlier not in block
 
 
