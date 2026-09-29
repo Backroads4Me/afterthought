@@ -65,14 +65,13 @@ FAILED = "failed"
 CLAIM_LEASE_FLOOR = timedelta(minutes=30)
 
 # A chunk a session was offered and did not land is offered again on a pause that doubles
-# with every try until the ceiling. That ceiling is the interval a session whose tries are
-# spent keeps being offered on - six hours, hours rather than sweep ticks - so a broken
-# reader or an endpoint that is down costs a handful of rows over an evening rather than one
-# per sweep, and the session still comes back by itself. Past RETRY_ATTEMPTS tries it is
-# named on `attention_needed` with the last reason it recorded while those long offers go on
-# (DESIGN 14: left queued and reported, BUILD-PLAN M2.1, M2.2).
+# with every try and then stands at RETRY_INTERVAL, so a broken reader or an endpoint that is
+# down costs a handful of rows over an evening rather than one per sweep and the session keeps
+# coming back by itself. Past RETRY_ATTEMPTS tries the count stops too, so the notice on
+# `attention_needed` says one thing however many of those long offers have gone by (DESIGN 14:
+# left queued and reported, BUILD-PLAN M2.1, M2.2).
 RETRY_AFTER = timedelta(minutes=30)
-RETRY_CEILING = timedelta(hours=6)
+RETRY_INTERVAL = timedelta(hours=6)
 RETRY_ATTEMPTS = 3
 
 # The one key of the meta table this module uses: the instant this home began being
@@ -148,11 +147,11 @@ class SessionState:
     digested. ``has_open_job`` covers a row awaiting a claim and one being digested now:
     both are capture work in flight for that session, and a second row for either would
     be a chunk the digest has already read. ``attempts`` counts the chunks this session was
-    offered that did not land, and ``retry_after`` is the instant the next one may be
-    offered; a chunk that lands returns both to zero and None. ``seen`` is the
-    ``(mtime, size)`` of the bytes something last read to their end and called finished - a
-    sweep that found no work, or a digest that found nothing to record - or None once either
-    of them moves.
+    offered that did not land, stopping at the point its tries are spent, and ``retry_after``
+    is the instant the next one may be offered; a chunk that finishes returns both to zero and
+    None. ``seen`` is the ``(mtime, size)`` of the bytes something last read to their end - a
+    sweep that found no work, or a digest that reported how far it had read - or None once
+    either of them moves.
     """
 
     watermark: str | None = None
@@ -164,10 +163,10 @@ class SessionState:
     def waiting_on_retry(self, now: datetime) -> bool:
         """Whether the queue is holding this session off another chunk.
 
-        A chunk that did not land waits out a pause that doubles with every try until the
-        ceiling, and a session whose tries are spent goes on being offered on that ceiling -
-        hours apart - rather than stopping for good. Nothing shortens the pause early; a chunk
-        of the session landing ends it, which is what a session standing on
+        A chunk that did not land waits out a pause that doubles with every try and then
+        stands at RETRY_INTERVAL, and a session whose tries are spent keeps being offered on
+        that interval rather than stopping for good. Nothing shortens the pause early; a chunk
+        of the session finishing ends it, which is what a session standing on
         `attention_needed` is waiting for too (DESIGN 14).
         """
         return self.retry_after is not None and now < self.retry_after
@@ -175,8 +174,8 @@ class SessionState:
 
 @dataclass(frozen=True)
 class Attention:
-    """One session whose tries are spent: its chunks stopped landing, and a person is
-    what puts that right."""
+    """One session whose tries are spent: its chunks keep not landing, and a person is
+    what puts that right. The count and reason it carries do not change with the offers."""
 
     agent: str
     session_id: str
@@ -249,23 +248,30 @@ def next_job(config: Config) -> Job | None:
         return _job(conn, row)
 
 
-def complete(config: Config, job: Job, watermark: str | None) -> None:
-    """Close a job and record the watermark its digest reached.
+def complete(
+    config: Config,
+    job: Job,
+    watermark: str | None,
+    read_to: tuple[float, int] | None = None,
+) -> None:
+    """Close a job and record how far its digest got.
 
-    This is where a session's watermark moves, and nowhere else: the digest step calls it
-    with the entry it ended on when it wrote that digest (DESIGN 8, BUILD-PLAN M2.2).
-    A digest that lands also ends the retry state its session was carrying: the tries
-    start again from the first and the next chunk is offered on the sweep's own terms.
-    Only the process still holding the claim closes it, so a worker that outlived its
-    claim - its row already handed to another process - cannot close that row or move the
-    watermark backwards. Closing a row this process does not hold is an error, not a
-    success.
+    This is where a session's watermark moves, and nowhere else: the digest step calls it with
+    the entry it ended on when it wrote that digest (DESIGN 8, BUILD-PLAN M2.2). ``read_to`` is
+    the modification time and size of the file the digest read to - the range it was given and
+    actually consumed - and that is where the sweep's checkpoint moves, so the file comes back
+    once its bytes pass that mark and not before. A completion that names no ``read_to``
+    certifies no end, and the bytes come around again rather than being written off. Any
+    completion ends the retry state its session was carrying: the tries and the reason beside
+    them start again from the first. Only the process still holding the claim closes it, so a
+    worker that outlived its claim - its row already handed to another process - cannot close
+    that row or move the watermark backwards. Closing a row this process does not hold is an
+    error, not a success.
 
-    A watermark of None closes the row and charges nothing: the digest read the chunk and
-    found nothing there to record, which is a finished digest, not a failed try. Its
-    checkpoint moves to the end of the bytes it just processed, so the sweep offers those
-    bytes again only once they have moved, while the session's tries and the pause they set
-    stand exactly where they were (BUILD-PLAN M2.2).
+    A watermark of None moves nothing: the digest read the chunk and found nothing there to
+    record, which is a finished digest rather than a failed try. The closed row, beside the
+    checkpoint the digest left on it, is what the report speaks from - the chunk was read, and
+    nothing was recorded (BUILD-PLAN M2.2).
     """
     now = _now()
     with _writing(config) as conn:
@@ -282,9 +288,9 @@ def complete(config: Config, job: Job, watermark: str | None) -> None:
                 " ON CONFLICT (agent, session_id) DO UPDATE SET watermark = excluded.watermark",
                 (job.agent, job.session_id, watermark),
             )
-            _advanced(conn, job.agent, job.session_id)
-        else:
-            _processed_to_the_end(conn, job)
+        _advanced(conn, job.agent, job.session_id)
+        if read_to is not None:
+            _note_read(conn, job.agent, job.session_id, *read_to)
 
 
 def fail(config: Config, job: Job, error: str) -> None:
@@ -294,11 +300,12 @@ def fail(config: Config, job: Job, error: str) -> None:
     the work queued rather than retrying it in the same run. Nothing moved the session's
     watermark, so the turns this chunk could not read are still capture work, and
     the sweep offers them again once the pause this failure sets has passed - a pause that
-    doubles with every try rather than a row on every tick, up to an interval of hours. A
-    session whose tries are spent is named on `attention_needed` holding this row's error,
-    which is where a person finds it, and it goes on being offered on that long interval
-    until something lands. The agent's own hook reaches the queue as a row like any other,
-    and it is a chunk of that session landing, not the report, that starts the tries
+    doubles with every try and then stands at RETRY_INTERVAL rather than landing a row on every
+    tick. Past RETRY_ATTEMPTS tries the session is named on `attention_needed` holding this
+    row's error, which is where a person finds it, and the count and reason it is named with
+    stop changing there: a new reason or a chunk that finishes is what changes them. The agent's
+    own hook reaches the queue as a row like any other, and it is a chunk of that session
+    finishing, not the report, that starts the tries
     again from the first (BUILD-PLAN M2.1, M2.2). As when a job closes, only the process still
     holding the claim records its failure, so a worker whose row has gone on to another
     process cannot mark that row failed or clear that process's claim. Recording a failure on
@@ -354,11 +361,11 @@ def attention_needed(config: Config) -> list[Attention]:
     """The sessions whose tries are spent, each with the last reason it recorded.
 
     A chunk that did not land is offered again on a widening pause, and a session whose tries
-    have run out goes on being offered on that pause's ceiling hours later rather than being
-    dropped. It stands here with the last reason any of its rows recorded, so the reason is
-    readable while those long offers continue, and naming it is the report's (DESIGN 14: left
-    queued and reported). A chunk of that session landing takes it off the list; a lifecycle
-    event that only reports the session does not.
+    have run out goes on being offered every RETRY_INTERVAL rather than being dropped. It stands
+    here from the moment its tries ran out, with the last reason any of its rows recorded, and
+    the further offers do not change what it says: only a new reason or a finished chunk does.
+    Naming it is the report's (DESIGN 14: left queued and reported). A chunk of that session
+    finishing takes it off the list; a lifecycle event that only reports the session does not.
     """
     with _reading(config) as conn:
         rows = conn.execute(
@@ -428,10 +435,11 @@ def _note_read(
 
 
 def _advanced(conn: sqlite3.Connection, agent: str, session_id: str) -> None:
-    """A chunk of this session landed, so its tries start again from the first.
+    """A chunk of this session finished, so its tries and the reason beside them end.
 
-    The pause and the spent tries describe the chunk that did not land. Once the session
-    has a watermark further along, they say nothing about the next one.
+    The pause and the spent tries describe a chunk that did not land. Once a chunk of the
+    session has finished behind them - recorded or not - they say nothing about the next one,
+    and a healthy session still reading as an exception is how a report stops being believable.
     """
     conn.execute(
         "UPDATE sessions SET attempts = 0, retry_after = NULL WHERE agent = ? AND session_id = ?",
@@ -439,52 +447,33 @@ def _advanced(conn: sqlite3.Connection, agent: str, session_id: str) -> None:
     )
 
 
-def _processed_to_the_end(conn: sqlite3.Connection, job: Job) -> None:
-    """Move a session's checkpoint to the end of the bytes a digest read and recorded nothing from.
-
-    Nothing to record is still an end: the file's own modification time and size become what
-    the queue holds, so those bytes come around again only once they move. The tries stay
-    exactly as they were - a digest that succeeded at nothing owes no failed try. A row that
-    named no transcript, or one the agent has since cleaned up, leaves the checkpoint where
-    it was, and the sweep will meet that file when it is there (BUILD-PLAN M2.2).
-    """
-    if job.transcript_path is None:
-        return
-    try:
-        stat = job.transcript_path.stat()
-    except OSError:
-        return
-    _note_read(conn, job.agent, job.session_id, stat.st_mtime, stat.st_size)
-
-
 def _retry_pause(attempts: int) -> timedelta:
     """How long a session waits after the ``attempts``-th chunk that did not land.
 
-    The pause doubles with every try until the ceiling, so a week of failures costs no more
-    waiting than six hours of them, and a session is never offered on every sweep. The
-    ceiling is what keeps the widening interval a real instant: doubled without one, the
-    ladder runs off the end of `timedelta`.
+    The pause doubles with every try and stands at RETRY_INTERVAL once the tries are spent, so
+    an endpoint that is down costs a handful of offers over an evening and then one every
+    interval after that. Doubling stops with the tries, which is also what keeps the widening
+    inside the range `timedelta` can hold.
     """
-    pause = RETRY_AFTER
-    while attempts > 1 and pause < RETRY_CEILING:
-        pause = min(pause * 2, RETRY_CEILING)
-        attempts -= 1
-    return pause
+    if attempts >= RETRY_ATTEMPTS:
+        return RETRY_INTERVAL
+    return RETRY_AFTER * 2 ** (attempts - 1)
 
 
 def _held_back(conn: sqlite3.Connection, agent: str, session_id: str, now: datetime) -> None:
     """Count one chunk this session was offered that did not land, and say when the next
     one may be offered.
 
-    The pause widens with every try, so a transcript no reader can read or an endpoint
-    that is down costs a handful of rows across an evening rather than one per sweep, and
-    every one of them keeps the reason it gave (`attention_needed`).
+    The count stops at RETRY_ATTEMPTS, so the notice a report reads says the same thing however
+    many offers have failed since: a new reason or a finished chunk is what changes it, not
+    every retry. Each of those failures still keeps its own row and the reason it gave
+    (`attention_needed`).
     """
     held = conn.execute(
         "SELECT attempts FROM sessions WHERE agent = ? AND session_id = ?",
         (agent, session_id),
     ).fetchone()
-    attempts = (held[0] if held else 0) + 1
+    attempts = min((held[0] if held else 0) + 1, RETRY_ATTEMPTS)
     conn.execute(
         "INSERT INTO sessions (agent, session_id, attempts, retry_after) VALUES (?, ?, ?, ?)"
         " ON CONFLICT (agent, session_id) DO UPDATE SET"

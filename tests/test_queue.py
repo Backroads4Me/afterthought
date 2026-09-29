@@ -776,12 +776,12 @@ def test_a_failed_session_is_offered_again_once_its_pause_has_passed(
 def test_a_session_that_keeps_failing_costs_a_row_per_widening_pause(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
-    """Six hours of ten-minute sweeps over one session that will not digest leave four rows.
+    """Six hours of ten-minute sweeps over one session that will not digest leave three rows.
 
     A turn past its watermark, the sweep finds it on every one of those passes, so the
-    bound has to come from the failures themselves: thirty minutes before the first retry,
-    an hour before the next, two before the third, and four before the fourth. Every row
-    that was left behind says why (BUILD-PLAN M2.2).
+    bound has to come from the failures themselves: RETRY_AFTER before the first retry, double
+    that before the next, then RETRY_INTERVAL apart. Every row left behind says why
+    (BUILD-PLAN M2.2).
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -805,13 +805,13 @@ def test_a_session_that_keeps_failing_costs_a_row_per_widening_pause(
             tried.append(minutes)
             queue.fail(cfg, chunk, "the model endpoint was down")
 
-    assert tried == [0, 30, 90, 210], (
-        "one try, then thirty minutes, then an hour more, then two, then four"
+    assert tried == [0, 30, 90], (
+        "one try, then RETRY_AFTER, then double that, then the interval apart"
     )
     assert (
         query(cfg, "SELECT error FROM jobs WHERE status = ?", (queue.FAILED,))
-        == [("the model endpoint was down",)] * 4
-    ), "each of the four keeps its reason"
+        == [("the model endpoint was down",)] * 3
+    ), "each of the three keeps its reason"
 
 
 def test_a_session_whose_tries_are_spent_stands_named_with_its_reason(
@@ -819,12 +819,12 @@ def test_a_session_whose_tries_are_spent_stands_named_with_its_reason(
 ) -> None:
     """Spent tries name a session for a person rather than quietly retiring it.
 
-    Three failures at the widening cadence and the sweep offers the session on hours rather
-    than on every tick, which is where `attention_needed` takes it over: the session, how
-    many tries it spent, and the last reason any of its rows recorded. A fresh row of the
-    agent's own that is waiting for its digest says nothing and hides nothing, and does not
-    lift the hold; only a chunk landing starts the tries again - and then the third turn,
-    still uncaptured, is work again (DESIGN 14, BUILD-PLAN M2.2).
+    Three failures at the widening cadence and the sweep offers the session on RETRY_INTERVAL
+    rather than on every tick, which is where `attention_needed` takes it over: the session, how
+    many tries it spent, and the last reason any of its rows recorded. A fresh row of the agent's
+    own that is waiting for its digest says nothing and hides nothing, and does not lift the
+    hold; only a chunk finishing does - and then the third turn, still uncaptured, is work again
+    (DESIGN 14, BUILD-PLAN M2.2).
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -846,7 +846,7 @@ def test_a_session_whose_tries_are_spent_stands_named_with_its_reason(
         assert chunk is not None
         queue.fail(cfg, chunk, "the model endpoint was down")
 
-    assert capture.sweep(cfg, NOW + timedelta(hours=3)) == [], "held on the pause it set"
+    assert capture.sweep(cfg, NOW + timedelta(hours=3)) == [], "held until the interval passes"
     assert queue.attention_needed(cfg) == [
         queue.Attention(CLAUDE, "endpoint-spent", 3, "the model endpoint was down")
     ], "named with the reason it gave, and readable in the rows beside it"
@@ -860,7 +860,9 @@ def test_a_session_whose_tries_are_spent_stands_named_with_its_reason(
     assert fixed is not None, "a hook is the agent's own report, not the sweep's guess"
     queue.complete(cfg, fixed, "entry-2")
 
-    assert queue.attention_needed(cfg) == [], "a chunk that lands settles the tries"
+    assert queue.attention_needed(cfg) == [], "a finished chunk settles the tries"
+    cleared = state_of(cfg, "endpoint-spent")
+    assert (cleared.attempts, cleared.retry_after) == (0, None), "no hold and no stale reason"
     found = capture.sweep(cfg, NOW + timedelta(hours=13))
     assert [e.session_id for e in found] == ["endpoint-spent"]
 
@@ -870,10 +872,11 @@ def test_a_spent_session_comes_back_on_an_interval_of_hours(
 ) -> None:
     """Spent tries are a longer pause, not a door closed on the session (BUILD-PLAN M2.2).
 
-    The session ended, the endpoint is down, and the sweep spent its three tries on it. After
-    that the queue offers it again on the interval the widening pause stops growing at - hours
-    apart, one row per offer, each carrying its reason and its count - and the completion that
-    finally lands ends the tries and takes the session off the list it was on.
+    The session ended, the endpoint is down, and the sweep spent its tries on it. After that the
+    queue offers it again every RETRY_INTERVAL - one row per offer, never one per sweep - and the
+    notice beside it says the same thing at the fourth offer as it did at the third and changes
+    only when a new reason arrives. The completion that finally lands ends the tries, the pause,
+    and the list the session was on.
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -888,8 +891,8 @@ def test_a_spent_session_comes_back_on_an_interval_of_hours(
     queue.begin_watching(cfg, NOW - timedelta(hours=1))
     clock = move_the_queue_clock(monkeypatch)
 
-    # The instants each failure lets the next offer through: now, +30 min, +1 h, +2 h, +4 h.
-    for minutes in (0, 30, 90, 210, 450):
+    # RETRY_AFTER, then double that, then RETRY_INTERVAL apart: now, +30 min, +90 min, +450 min.
+    for minutes in (0, 30, 90, 450):
         clock.at = NOW + timedelta(minutes=minutes)
         assert [e.session_id for e in capture.sweep(cfg, clock.at)] == ["endpoint-returned"]
         chunk = queue.next_job(cfg)
@@ -897,22 +900,41 @@ def test_a_spent_session_comes_back_on_an_interval_of_hours(
         queue.fail(cfg, chunk, "the model endpoint was down")
 
     assert queue.attention_needed(cfg) == [
-        queue.Attention(CLAUDE, "endpoint-returned", 5, "the model endpoint was down")
-    ], "held, counted, and still carrying its reason"
-    assert capture.sweep(cfg, NOW + timedelta(minutes=800)) == [], "the six-hour pause holds"
+        queue.Attention(
+            CLAUDE, "endpoint-returned", queue.RETRY_ATTEMPTS, "the model endpoint was down"
+        )
+    ], "one notice, still carrying the count and reason it was spent with"
+    offered_again = NOW + timedelta(minutes=450) + queue.RETRY_INTERVAL
+    assert capture.sweep(cfg, offered_again - timedelta(minutes=1)) == [], "held to the interval"
 
-    clock.at = NOW + timedelta(minutes=810)
+    clock.at = offered_again
     assert [e.session_id for e in capture.sweep(cfg, clock.at)] == ["endpoint-returned"], (
-        "offered again once the interval the ladder stopped at has passed"
+        "one offer per interval, and the notice beside it unchanged"
     )
-    assert capture.sweep(cfg, NOW + timedelta(minutes=811)) == [], "once, not every sweep"
+    assert queue.attention_needed(cfg) == [
+        queue.Attention(
+            CLAUDE, "endpoint-returned", queue.RETRY_ATTEMPTS, "the model endpoint was down"
+        )
+    ]
+    assert capture.sweep(cfg, offered_again + timedelta(minutes=10)) == [], "not one per sweep"
 
+    third = queue.next_job(cfg)
+    assert third is not None
+    queue.fail(cfg, third, "the reader could not parse it")
+    assert queue.attention_needed(cfg) == [
+        queue.Attention(
+            CLAUDE, "endpoint-returned", queue.RETRY_ATTEMPTS, "the reader could not parse it"
+        )
+    ], "a new reason is the state change that rewrites the notice"
+
+    queue.enqueue(cfg, event(session_id="endpoint-returned", transcript=path))
     fixed = queue.next_job(cfg)
     assert fixed is not None
     queue.complete(cfg, fixed, "entry-3")
 
-    assert state_of(cfg, "endpoint-returned").attempts == 0, "a success ends the tries"
-    assert queue.attention_needed(cfg) == [], "and the list it stood on"
+    cleared = state_of(cfg, "endpoint-returned")
+    assert (cleared.attempts, cleared.retry_after) == (0, None), "a success ends the tries"
+    assert queue.attention_needed(cfg) == [], "and no reason is left standing on the list"
     assert capture.sweep(cfg, NOW + timedelta(minutes=900)) == [], "back to its watermark"
 
 
@@ -921,10 +943,10 @@ def test_a_digest_with_no_watermark_to_record_leaves_the_session_healthy(
 ) -> None:
     """A chunk with no entry id to hand back closed its row without failing (BUILD-PLAN M2.2).
 
-    The digest read the session and had nothing to record, so it handed back no watermark.
-    That is a digest that finished rather than one that failed: it owes no try against the
-    failure budget, and the checkpoint moves to the end of the bytes it processed, so the
-    next sweep has nothing to offer until the file grows again.
+    The session had its tries spent on it, and the chunk after them finished: the digest read it,
+    found nothing there to record, and handed back no watermark. A finished digest owes no try
+    and clears the exception beside it, and the checkpoint it leaves sits at the end of what it
+    read - not at the end of whatever the file had grown to while it was thinking.
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -938,20 +960,29 @@ def test_a_digest_with_no_watermark_to_record_leaves_the_session_healthy(
     digest_to(cfg, CLAUDE, "nothing-to-record", path, "entry-2")
     queue.begin_watching(cfg, NOW - timedelta(hours=1))
 
-    assert capture.sweep(cfg, NOW) != [], "one turn past its watermark"
+    clock = move_the_queue_clock(monkeypatch)
+
+    # Three failures at the widening cadence, and the session stands on the notice.
+    for minutes in (0, 30, 90):
+        clock.at = NOW + timedelta(minutes=minutes)
+        assert capture.sweep(cfg, clock.at) != [], "one turn past its watermark"
+        chunk = queue.next_job(cfg)
+        assert chunk is not None
+        queue.fail(cfg, chunk, "the model endpoint was down")
+
+    assert queue.attention_needed(cfg) == [
+        queue.Attention(
+            CLAUDE, "nothing-to-record", queue.RETRY_ATTEMPTS, "the model endpoint was down"
+        )
+    ]
+
+    # The endpoint is back. The next chunk is read, holds nothing to record, and the file grew
+    # while the digest was thinking.
+    clock.at = NOW + timedelta(minutes=450)
+    assert [e.session_id for e in capture.sweep(cfg, clock.at)] == ["nothing-to-record"]
     chunk = queue.next_job(cfg)
     assert chunk is not None
-    queue.complete(cfg, chunk, None)
-
-    after = state_of(cfg, "nothing-to-record")
-    assert (after.watermark, after.attempts) == ("entry-2", 0), (
-        "the watermark stands and no try was spent"
-    )
-    stat = path.stat()
-    assert after.seen == (stat.st_mtime, stat.st_size), "the checkpoint sits at the file's end"
-    assert queue.attention_needed(cfg) == [], "a quiet success is nobody's problem"
-    assert capture.sweep(cfg, NOW + timedelta(minutes=10)) == [], "those bytes are finished with"
-
+    read_to = (path.stat().st_mtime, path.stat().st_size)
     session_file(
         sessions,
         CLAUDE,
@@ -959,19 +990,33 @@ def test_a_digest_with_no_watermark_to_record_leaves_the_session_healthy(
         records=conversation(CLAUDE, ["entry-1", "entry-2", "entry-3", "entry-4"]),
         touched=NOW - timedelta(minutes=45),
     )
-    later = capture.sweep(cfg, NOW + timedelta(minutes=20))
-    assert [e.session_id for e in later] == ["nothing-to-record"], "new bytes are work again"
+    queue.complete(cfg, chunk, None, read_to=read_to)
+
+    after = state_of(cfg, "nothing-to-record")
+    assert (after.watermark, after.attempts, after.retry_after) == ("entry-2", 0, None), (
+        "the watermark stands, and nothing about the finished chunk needs a person"
+    )
+    assert queue.attention_needed(cfg) == [], "a quiet success is nobody's exception"
+    assert after.seen == read_to, "the checkpoint sits where the digest read to"
+    assert after.seen != (path.stat().st_mtime, path.stat().st_size), "not where the file stands"
+
+    later = capture.sweep(cfg, clock.at + timedelta(minutes=10))
+    assert [e.session_id for e in later] == ["nothing-to-record"], "bytes nobody read came back"
+    chunk = queue.next_job(cfg)
+    assert chunk is not None
+    queue.complete(cfg, chunk, None, read_to=(path.stat().st_mtime, path.stat().st_size))
+    assert capture.sweep(cfg, clock.at + timedelta(minutes=30)) == [], "certified bytes are done"
 
 
 def test_a_long_outage_stops_widening_the_pause_and_keeps_every_failure(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
-    """Forty tries is where a doubling pause stops being a number, so it stops growing first.
+    """A pause that kept doubling would stop being a number; this one stops growing first.
 
     A session whose reader nobody has fixed keeps reaching the queue through its agent's own
-    events, and every digest of it fails the same way. The pause doubles up to a day and
-    stays there, so after forty of them the queue holds forty failures that each kept their
-    reason, and the session is still named where a person will read it (DESIGN 14).
+    events, and every digest of it fails the same way. The pause widens to RETRY_INTERVAL and
+    stands there, the notice stops changing with the offers, and every one of the forty
+    failures keeps its own row and the reason it gave (DESIGN 14).
     """
     sessions = tmp_path / "agent-sessions"
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
@@ -993,12 +1038,12 @@ def test_a_long_outage_stops_widening_the_pause_and_keeps_every_failure(
         queue.fail(cfg, chunk, "the model endpoint was down")
 
     held = state_of(cfg, "long-outage")
-    assert held.attempts == 40, "every try was recorded, none rolled back with the pause"
-    assert held.retry_after == NOW + queue.RETRY_CEILING, "the pause stopped growing there"
+    assert held.attempts == queue.RETRY_ATTEMPTS, "the count stopped along with the doubling"
+    assert held.retry_after == NOW + queue.RETRY_INTERVAL, "the pause stands at the interval"
     assert query(cfg, "SELECT count(*) FROM jobs WHERE status = ?", (queue.FAILED,)) == [(40,)]
     assert queue.attention_needed(cfg) == [
-        queue.Attention(CLAUDE, "long-outage", 40, "the model endpoint was down")
-    ], "held, and still saying why"
+        queue.Attention(CLAUDE, "long-outage", queue.RETRY_ATTEMPTS, "the model endpoint was down")
+    ], "one notice for forty failures, and it still says why"
 
 
 def test_a_sweep_reads_the_queue_once_whatever_files_it_walks(

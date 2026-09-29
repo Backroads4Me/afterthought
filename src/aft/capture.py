@@ -142,10 +142,10 @@ def _candidate(
     if state.has_open_job:
         return None
     if state.waiting_on_retry(now):
-        # A chunk of this session did not land, so it waits out the pause that failure set.
-        # Past the last of its tries that pause is the long interval the ladder stops growing
-        # at, so the session comes back hours apart rather than as a row on every tick, and it
-        # is named where a person can read why (BUILD-PLAN M2.1, M2.2).
+        # A chunk of this session did not land, so it waits out the pause that failure set:
+        # doubling with every try, then RETRY_INTERVAL apart for as long as its chunks keep
+        # failing. It is named on `attention_needed` where a person can read why (BUILD-PLAN
+        # M2.1, M2.2).
         return None
     if state.watermark is None and touched <= watching:
         # Nothing has ever digested this session and its file predates the watching, so it
