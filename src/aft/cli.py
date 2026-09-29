@@ -17,6 +17,7 @@ from aft.events import AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.library import survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         vault.VaultError,
         GitError,
         UsageError,
+        survey.SurveyError,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -110,6 +112,13 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own extension and nothing else",
     )
     q.set_defaults(handler=cmd_install_pi)
+
+    p = sub.add_parser("library", help="import and manage library collections")
+    lsub = p.add_subparsers(metavar="action")
+    q = lsub.add_parser("survey", help="survey a collection directory before import")
+    q.add_argument("path", help="path to the collection directory")
+    q.add_argument("--json", action="store_true", help="output report as JSON")
+    q.set_defaults(handler=cmd_library_survey)
     return parser
 
 
@@ -314,6 +323,10 @@ def cmd_install_pi(args) -> int:
         verb = "would write" if args.dry_run else "installed"
         print(f"{verb} {target}")
     return 0
+
+
+def cmd_library_survey(args) -> int:
+    return survey.run(args.path, as_json=args.json)
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget
