@@ -81,6 +81,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
+
     p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
     isub = p.add_subparsers(metavar="agent")
     q = isub.add_parser("pi", help="install the afterthought extension in pi's extensions dir")
