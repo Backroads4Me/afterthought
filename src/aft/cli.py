@@ -17,7 +17,7 @@ from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
-from aft.library import survey
+from aft.library import manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
         GitError,
         UsageError,
         survey.SurveyError,
+        manifest.ManifestError,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -119,6 +120,11 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("path", help="path to the collection directory")
     q.add_argument("--json", action="store_true", help="output report as JSON")
     q.set_defaults(handler=cmd_library_survey)
+
+    q = lsub.add_parser("validate", help="validate a collection manifest against DESIGN 11")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_validate)
     return parser
 
 
@@ -327,6 +333,10 @@ def cmd_install_pi(args) -> int:
 
 def cmd_library_survey(args) -> int:
     return survey.run(args.path, as_json=args.json)
+
+
+def cmd_library_validate(args) -> int:
+    return manifest.run(args.manifest, path_override=args.path)
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget
