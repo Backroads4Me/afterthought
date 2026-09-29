@@ -74,9 +74,9 @@ def complete_json(
 ) -> dict:
     """Ask the model for one JSON object that satisfies ``schema``.
 
-    Raises ``ModelError`` when the endpoint cannot be reached, answers with a
-    non-2xx, an unusable body or no usable token count, or returns output that fails
-    ``schema`` twice.
+    Raises ``ModelError`` when ``model.name`` is empty or ``schema`` misuses a keyword,
+    when the endpoint cannot be reached, answers with a non-2xx, an unusable body or no
+    usable token count, or returns output that fails ``schema`` twice.
     """
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
