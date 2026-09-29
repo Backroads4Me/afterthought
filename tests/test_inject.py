@@ -542,6 +542,27 @@ def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_pa
     assert "the September draft" not in block
 
 
+@pytest.mark.parametrize("session", ["one", "550e8400-e29b-41d4-a716-446655440000"])
+def test_the_highest_part_of_the_newest_day_supplies_the_handoff(widget, tmp_path, session):
+    """A session digested more than once in a day files ``-2``, ``-3`` beside its first
+    page, and the last session's handoff is the highest part's, whatever order the
+    directory lists them in and even when the session id itself ends in digits."""
+    day = widget.vault / "digests/widget/2026/10"
+    for suffix, in_flight in [
+        ("-3", "the third part"),
+        ("", "the first part"),
+        ("-2", "the second"),
+    ]:
+        write(
+            day / f"2026-10-06-pi-{session}{suffix}.md",
+            DIGEST.format(date="2026-10-06", in_flight=in_flight),
+        )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "- In flight: the third part" in block
+    for earlier in ("the first part", "the second", "the block"):
+        assert earlier not in block
+
+
 def test_a_frontmatter_block_scalar_stays_on_one_line(widget, tmp_path):
     """A page description or handoff note written as a YAML block reaches the session
     as one line per page and one line per handoff item."""

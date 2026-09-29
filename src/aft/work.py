@@ -8,11 +8,12 @@ Nothing here decides what a digest says - only how far one run goes.
 A run stops between jobs, never inside one. The jobs it did not reach are still queued with
 their sessions' watermarks unmoved, so the next run picks them up where this one left off
 (DESIGN 13: "when a budget runs out, work waits in the queue"). A job that belongs to one
-session and cannot be digested is left behind as the record of why, and the run moves on to
-the next session. A failure that would repeat for every job left - an endpoint that is down,
-a vault that is not there, a queue another run has locked - ends the run instead, because
-working through the queue would stamp each of the day's jobs with the same sentence and
-leave no work behind to retry once a person has fixed the endpoint (DESIGN 14).
+session and cannot be digested is marked failed with its reason as the record of why, its
+watermark unmoved, and the run moves on to the next session. A failure that would repeat for
+every job left - an endpoint that is down, a vault that is not there, a queue another run has
+locked - ends the run instead and leaves the jobs queued (DESIGN 14), because working through
+the queue would stamp each of the day's jobs with the same sentence and leave no work behind
+to retry once a person has fixed the endpoint.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ QUEUE_LOST = (queue.QueueError, sqlite3.Error)
 # left stays queued, claimed only by a lease that the next run reclaims.
 STOPS_RUN = (ModelError, VaultError, GitError, RegistryError, *QUEUE_LOST)
 
-# The failures that belong to one session: the job is left behind with its reason and the
+# The failures that belong to one session: the job is marked failed with its reason and the
 # next session gets its turn.
 FAILS_JOB = (digest.DigestError, ReaderError, EvidenceError, OSError)
 

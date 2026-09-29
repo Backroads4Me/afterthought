@@ -29,7 +29,7 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from importlib.resources import files
@@ -79,8 +79,9 @@ class DigestError(Exception):
 class AnswerRefused(DigestError):
     """The endpoint answered this chunk and its answer failed the digest schema.
 
-    The model's own words are what the job is left behind with and the endpoint is up,
-    so this is one session's failure and the run moves on (DESIGN 14)."""
+    The endpoint is up and the fault is this chunk's, so the job is marked failed with the
+    model's own words as its reason, its watermark stays where it was, and the run moves on
+    to the next session."""
 
 
 # What aft.model reports when the endpoint answered and the answer was the fault: the one
@@ -245,15 +246,19 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
 
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
     if not read:
-        queue.complete(config, job, None)
+        queue.complete(config, job, None, off_record=job.off_record)
         return None
 
-    kept = filtermod.filter_entries(read, config)
+    # The span state starts where the session's last digest left it and runs through the
+    # job's entries in order, so a span opened in an earlier chunk still holds here and one
+    # left open at the end of this chunk holds over the next (DESIGN 12, M2.3). The parts
+    # below are cut from what this one pass kept, so they share its state in order.
+    kept, off_record = filtermod.filter_entries(read, config, job.off_record)
     if not kept:
         # Nothing the filter left to digest: the entries were read and decided, so the
         # mark moves and the job closes. A page of nothing would stand as the session's
         # last word and speak for the work that came after it.
-        queue.complete(config, job, read[-1].id)
+        queue.complete(config, job, read[-1].id, off_record=off_record)
         return None
 
     evidence.store(
@@ -302,21 +307,24 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         now or datetime.now(UTC),
     )
     dropped.extend(refused)
-    _write(config, rel, page)
+    rel = _write(
+        config, rel, page, lambda: _path(config, resolution.slug, job.agent, job.session_id, when)
+    )
     # The watermark is the last entry read, not the last one kept: what the filter threw
     # away has been decided, and reading it again would decide it again (DESIGN 8).
-    queue.complete(config, job, read[-1].id)
+    queue.complete(config, job, read[-1].id, off_record=off_record)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
 
 
 def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:
     """One digest call and its answer, with a refused answer told as this job's failure.
 
-    An answer that failed its schema twice is this chunk's own problem: the job is left
-    behind with the model's reason, its watermark stays where it was, and the next session
-    gets its turn. Anything else aft.model raises is the endpoint or its setup, which
-    every job left would meet alike, so it stays a ModelError and the run stops with the
-    queue kept for a later attempt (DESIGN 14).
+    An answer that failed its schema on both of the model's attempts is this chunk's own
+    problem: the job is marked failed with the model's reason, its watermark stays where it
+    was, and the next session gets its turn. Anything else aft.model raises is the endpoint
+    or its setup, which every job left would meet alike, so it stays a ModelError and the
+    run stops with the queue kept for a later attempt (DESIGN 14: an endpoint that is down
+    leaves the jobs queued).
     """
     try:
         return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS)
@@ -618,12 +626,17 @@ def _reap_orphans(directory: Path) -> None:
             continue
 
 
-def _write(config: Config, rel: str, text: str) -> Path:
-    """Put the page in the vault and commit it, or leave the vault exactly as it was.
+def _write(config: Config, rel: str, text: str, choose: Callable[[], str]) -> str:
+    """Put the page in the vault and commit it, or leave the vault exactly as it was, and
+    return the path it was filed at.
 
-    The path arrives chosen by ``_path``, which looked at what already stands in that
-    directory, so a page written here is always a page that was not there a moment ago and
-    never a page some earlier job wrote.
+    The path arrives chosen by ``_path`` before any model call, and is checked again under
+    the vault lock right before the rename: if another process working the same session (a
+    job that outlived its claim lease while another run reclaimed it) filed that part in the
+    meantime, ``choose`` names the next free part and the page takes that one instead. The
+    lock holds until the commit, so the part found free stays free. A page written here is
+    always a page that was not there a moment ago and never replaces one some other job
+    wrote.
 
     The commit is the last step. A page the commit did not take is taken back out on the
     way as well: the file goes, and so does the index entry that staging put beside it,
@@ -640,11 +653,18 @@ def _write(config: Config, rel: str, text: str) -> Path:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
         os.chmod(tmp, PAGE_MODE)
-        os.replace(tmp, path)
     except OSError:
         Path(tmp).unlink(missing_ok=True)
         raise
     with vault.locked(config):
+        if (config.vault / rel).exists():
+            rel = choose()
+        path = config.vault / rel
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            raise
         try:
             vault.commit(config.vault, [rel], f"aft: digest {rel}")
         except (GitError, vault.VaultError):
@@ -654,4 +674,4 @@ def _write(config: Config, rel: str, text: str) -> Path:
             path.unlink(missing_ok=True)
             git(["reset", "-q", "--", rel], cwd=config.vault, check=False)
             raise
-    return path
+    return rel

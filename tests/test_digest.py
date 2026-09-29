@@ -424,7 +424,7 @@ def test_a_value_off_the_plans_list_never_reaches_memory(session: Session, broke
     assert watermark(cfg) is None
 
     # The failed call left its chunk archived, which is what a quote is checked against.
-    entries = filtermod.filter_entries(list(read(CLAUDE, session.transcript, None)), cfg)
+    entries, _ = filtermod.filter_entries(list(read(CLAUDE, session.transcript, None)), cfg)
     kept, dropped = digest.verify(cfg, SESSION, entries, [said(**broken)])
     assert kept == []
     assert [fact.reason for fact in dropped] == [reason]
@@ -535,21 +535,12 @@ def test_an_emptied_chunk_leaves_the_day_open_for_the_work_that_follows(
     assert "Capture runs at session end, not per turn. [stated]" in written
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DESIGN 12 runs an unclosed span to the end of the session, which needs the span's "
-        "state beside the session it belongs to. That state lives inside one filter call "
-        "today, so the chunk after a span opened is read as though it closed. Remove this "
-        "marker when fm/afterthought-f3-span-across-chunks delivers the state per session."
-    ),
-)
 def test_an_unclosed_span_runs_to_the_end_of_the_session(session: Session):
-    """What DESIGN 12 requires, asserted as the rule rather than as today's behavior.
+    """DESIGN 12: a span no prompt closes runs to the end of the session.
 
     A prompt opens the span and no prompt closes it, so the rest of the session is off the
-    record: those entries reach no archive, no model, and no page. The closing prompt is
-    what the digest fails to see today once the chunk boundary falls inside the span.
+    record: those entries reach no archive, no model, and no page, even when they arrive in
+    a later chunk than the prompt that opened the span.
     """
     unclosed = write_records(
         session.transcript.with_name("unclosed.jsonl"),
@@ -581,8 +572,9 @@ def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest
 
     With the filter stood in for as one that keeps everything, the digest still hands the
     model every entry of the chunk, marker and all. What it drops, it drops because the
-    filter said so - which is why the span can have exactly one owner, and why DESIGN 12
-    across a chunk boundary is the filter's and the checkpoint's to deliver."""
+    filter said so - which is why the span can have exactly one owner. The span state the
+    job starts with is the one the queue holds for the session, and the state the filter
+    hands back is the one the job closes with."""
     unclosed = write_records(
         session.transcript.with_name("single-owner.jsonl"),
         {"cwd": str(session.cwd)},
@@ -591,11 +583,15 @@ def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest
         record("e3", "user", POST_SPAN),
     )
     asked_for: list[list[Entry]] = []
+    started: list[bool] = []
 
-    def keeps_everything(entries: Sequence[Entry], _config: Config) -> list[Entry]:
+    def keeps_everything(
+        entries: Sequence[Entry], _config: Config, off_record: bool = False
+    ) -> tuple[list[Entry], bool]:
         kept = list(entries)
         asked_for.append(kept)
-        return kept
+        started.append(off_record)
+        return kept, True
 
     monkeypatch.setattr(digest.filtermod, "filter_entries", keeps_everything)
     fake, cfg = serve(session.cfg, answer(said(entry="e1")))
@@ -605,6 +601,8 @@ def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest
     finally:
         fake.stop()
     assert [entry.id for entry in asked_for[0]] == ["e1", "e2", "e3"]
+    assert started == [False], "a first chunk began inside a span"
+    assert queue.session_state(cfg, CLAUDE, SESSION).off_record, "the span state was not kept"
     for words in ("the quarter's numbers", POST_SPAN):
         assert words in asked, f"{words} went unasked though the filter kept it"
 
@@ -1018,6 +1016,41 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
     assert watermark(cfg) == "e5"
 
 
+def test_a_part_filed_while_the_model_answered_is_left_standing(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """The part is chosen before the model call, and checked again under the vault lock.
+
+    Another process working the same session (a job that outlived its claim lease while
+    another run reclaimed it) files the part this job chose while this job waits on the
+    model. The page this job writes takes the next free part, and the page that stood is
+    left with the bytes it was filed with."""
+    stem = page_path()[:-3]
+    theirs = "---\ntype: Session Digest\ntitle: another job's page\n---\n"
+    answered = digest._model_answer
+
+    def answer_while_another_files(*args, **kwargs):
+        standing = cfg.vault / page_path()
+        standing.parent.mkdir(parents=True, exist_ok=True)
+        standing.write_text(theirs, encoding="utf-8")
+        with vault.locked(cfg):
+            vault.commit(cfg.vault, [page_path()], "another job's digest")
+        return answered(*args, **kwargs)
+
+    monkeypatch.setattr(digest, "_model_answer", answer_while_another_files)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.path == f"{stem}-2.md"
+    assert (cfg.vault / page_path()).read_text(encoding="utf-8") == theirs
+    assert "Capture runs at session end, not per turn. [stated]" in body(cfg, wrote.path)
+    assert wrote.path in committed_files(cfg)
+    assert watermark(cfg) == wrote.watermark
+
+
 def test_a_directory_that_is_no_project_at_all_is_never_sent_to_the_model(
     session: Session, tmp_path
 ):
@@ -1266,7 +1299,7 @@ def test_work_sweeps_a_session_no_hook_reported_and_digests_it(session: Session,
         capture, "SESSION_DIRS", {CLAUDE: root.parent, PI: session.cfg.home / "no-pi-sessions"}
     )
     try:
-        queue.record_sweep(cfg, quiet - timedelta(hours=6))
+        queue.watching_since(cfg, quiet - timedelta(hours=6))
         report = work.run(cfg)
     finally:
         fake.stop()
@@ -1279,9 +1312,9 @@ def test_a_refused_answer_fails_its_own_job_and_the_run_carries_on(session: Sess
     """One session's unusable answer is that session's loss, not the queue's wedged.
 
     The plan's schema carries seven kinds and the model answers with an eighth, twice, so
-    the answer is refused. DESIGN 14 assigns malformed output a per-job outcome: the row is
-    left behind FAILED with the model's own reason and its watermark unmoved, the next
-    session is digested in the same run, and a run after that still digests.
+    the answer is refused. That is this job's outcome alone: the row is marked failed with
+    the model's own reason and its watermark unmoved, the next session is digested in the
+    same run, and a run after that still digests.
     """
     refused = answer(said(kind="habit"))
     second = session.transcript.with_name("second-of-many.jsonl")
