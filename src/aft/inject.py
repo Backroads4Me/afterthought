@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from aft import page as pagemod
@@ -90,30 +91,93 @@ def _handoff_part(config: Config, slug: str) -> Part:
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The latest digest under ``directory``, which the digest step files under ``digests/``
-    as design 6 lays out: on the newest day, the highest part."""
-    return max(directory.rglob("*.md"), key=_digest_date, default=None)
+    """The digest of the session that ended most recently under ``directory``, which the
+    digest step files under ``digests/`` as design 6 lays it out.
+
+    A page stands under the day its digested chunk ended, so that day leads; on the newest
+    day the page written last is the newest word, whatever order its name sorts in. Only
+    the newest day's pages are opened, which is where the writing times have to be read.
+    """
+    digests = list(directory.rglob("*.md"))
+    if not digests:
+        return None
+    day = _digest_day(max(digests, key=_digest_day))
+    same_day = (digest for digest in digests if _digest_day(digest) == day)
+    return max(same_day, key=_digest_recency)
 
 
 # A digest name's part suffix: a session's second and later digests of one day are filed
 # as ``<date>-<agent>-<session>-2``, ``-3``, and a name without a suffix is part 1.
 _PART = re.compile(r"-(\d+)\Z")
 
+# A digest name's leading field: the day its digested chunk ended, which the digest step
+# files the page under.
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-def _digest_date(digest: Path) -> tuple[int, int, str, int]:
-    """Where a digest sorts: its year and month directories as numbers, then the
-    ``<date>-<agent>-<session>`` name that follows them, then its part as a number.
+
+def _digest_day(digest: Path) -> tuple[int, int, date]:
+    """Where a digest sorts by the day it covers: its ``<yyyy>`` and ``<mm>`` directories
+    read as numbers, then the day its name opens with.
 
     The directories read as numbers so an unpadded month cannot sort an older digest above
-    a newer one, and the part reads as a number so a session's ``-2`` sorts above its
-    unsuffixed first page and ``-10`` above ``-9``. A session id whose last group is digits
-    reads here as a name and a large part; its own later parts carry the whole id in their
-    name, which sorts above that shorter name, so the highest part still wins.
+    a newer one. The day is the one the chunk ended on, not the one the page was written
+    on, so a digest worked over days later does not push itself above a session that ran
+    down more recently.
     """
     parts = digest.parts
+    return (_as_int(parts[-3]), _as_int(parts[-2]), _day_of(digest.stem))
+
+
+def _digest_recency(digest: Path) -> tuple[datetime, str, int]:
+    """Where the digests of one day sort: the instant the page was written, then the
+    ``<date>-<agent>-<session>`` name it carries, then its part as a number.
+
+    A page's ``generated.at`` is when the digest step filed it, so on one day the page
+    written last is the session that ran down most recently, and a session whose name
+    sorts first cannot take the handoff from one that ran on after it. A page recording
+    no readable time stands at the start of its day, below every page of that day that
+    does record one. The name and the part keep the order whole when two pages were
+    stamped alike: a session's ``-2`` sorts above its unsuffixed first page and ``-10``
+    above ``-9``. A session id whose last group is digits reads here as a name and a
+    large part; its own later parts carry the whole id in their name, which sorts above
+    that shorter name, so the highest part still wins.
+    """
     found = _PART.search(digest.stem)
     name, part = (digest.stem[: found.start()], int(found.group(1))) if found else (digest.stem, 1)
-    return (_as_int(parts[-3]), _as_int(parts[-2]), name, part)
+    return (_written_at(digest, _day_of(digest.stem)), name, part)
+
+
+def _day_of(stem: str) -> date:
+    """The day a digest name opens with. A name opening with none covers no day of its own
+    and stands below every dated page.
+
+    The date leads the name because that is how the digest step files a page: design 6's
+    ``<date>-<agent>-<session>``.
+    """
+    found = _DAY.match(stem)
+    return date.fromisoformat(found.group()) if found else date.min
+
+
+def _written_at(digest: Path, day: date) -> datetime:
+    """The instant the digest step wrote this page, or the start of ``day`` when the page
+    records no readable one."""
+    generated = _frontmatter(digest).get("generated")
+    stamp = generated.get("at") if isinstance(generated, dict) else None
+    if isinstance(stamp, datetime):  # YAML reads an unquoted time as a datetime itself
+        return _as_utc(stamp)
+    if isinstance(stamp, str):
+        try:
+            stamp = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            return _as_utc(stamp)
+    return datetime.combine(day, time.min, tzinfo=UTC)
+
+
+def _as_utc(moment: datetime) -> datetime:
+    """A stamp with no offset reads as UTC, so an aware and a naive one can be compared."""
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 def _as_int(part: str) -> int:

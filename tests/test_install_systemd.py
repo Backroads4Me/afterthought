@@ -24,10 +24,10 @@ from aft.install.systemd import (
 
 
 def test_format_interval() -> None:
-    assert format_interval(15) == "*:0/15"
-    assert format_interval(30) == "*:0/30"
-    assert format_interval(60) == "hourly"
-    assert format_interval(120) == "0/2:00"
+    assert format_interval(15) == "15min"
+    assert format_interval(30) == "30min"
+    assert format_interval(60) == "60min"
+    assert format_interval(120) == "120min"
 
     with pytest.raises(ValueError):
         format_interval(0)
@@ -51,14 +51,16 @@ def test_unit_file_contents(tmp_path: Path, cfg: Config) -> None:
     assert "[Service]" in service_text
     assert "Type=oneshot" in service_text
     assert "EnvironmentFile=-%h/.afterthought/env" in service_text
-    assert "ExecStart=aft work" in service_text
+    real_aft = shutil.which("aft")
+    assert real_aft is not None
+    assert f"ExecStart={Path(real_aft).resolve()} work" in service_text
 
     timer_text = timer_file.read_text(encoding="utf-8")
     assert "[Unit]" in timer_text
     assert "Description=Afterthought background work timer" in timer_text
     assert "[Timer]" in timer_text
-    assert "OnCalendar=*:0/30" in timer_text
-    assert "Persistent=true" in timer_text
+    assert "OnBootSec=5min" in timer_text
+    assert "OnUnitActiveSec=30min" in timer_text
     assert "[Install]" in timer_text
     assert "WantedBy=timers.target" in timer_text
 
@@ -71,7 +73,7 @@ def test_custom_interval_minutes(tmp_path: Path, home: Path) -> None:
     install(tmp_path, config=cfg)
 
     timer_text = (tmp_path / TIMER_NAME).read_text(encoding="utf-8")
-    assert "OnCalendar=*:0/15" in timer_text
+    assert "OnUnitActiveSec=15min" in timer_text
 
 
 def test_idempotent_install(tmp_path: Path, cfg: Config) -> None:
@@ -119,7 +121,7 @@ def test_dry_run_uninstall(tmp_path: Path, cfg: Config) -> None:
     assert (tmp_path / TIMER_NAME).exists()
 
 
-def test_cli_install_timer(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_cli_install_timer(tmp_path: Path, home: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(systemd_install, "unit_dir", lambda path=None: tmp_path)
 
     # 1. Dry run
@@ -156,6 +158,23 @@ def test_cli_install_timer(tmp_path: Path, monkeypatch, capsys) -> None:
     assert f"no afterthought timer units to remove in {tmp_path}" in out
 
 
+def test_install_refuses_when_aft_not_in_path(tmp_path: Path, cfg: Config, monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    with pytest.raises(systemd_install.InstallError, match="aft executable not found in PATH"):
+        install(tmp_path, config=cfg)
+
+
+def test_cli_install_refuses_when_aft_not_in_path(
+    tmp_path: Path, home: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(systemd_install, "unit_dir", lambda path=None: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+    code = main(["install", "timer"])
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "aft: aft executable not found in PATH" in err
+
+
 def test_trigger_early_rate_limiting(cfg: Config) -> None:
     calls: list[list[str]] = []
 
@@ -187,7 +206,9 @@ def test_trigger_early_error_handling(cfg: Config) -> None:
     assert trigger_early(cfg, now=t0, runner=failing_runner) is False
 
 
-def test_install_error_on_unwritable_directory(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_install_error_on_unwritable_directory(
+    tmp_path: Path, home: Path, monkeypatch, capsys
+) -> None:
     unwritable = tmp_path / "blocked"
     unwritable.write_text("file blocking directory creation", encoding="utf-8")
     monkeypatch.setattr(systemd_install, "unit_dir", lambda path=None: unwritable)
@@ -204,10 +225,11 @@ def test_systemd_analyze_verify_timer(tmp_path: Path, cfg: Config) -> None:
     install(tmp_path, config=cfg)
     timer_path = tmp_path / TIMER_NAME
     service_path = tmp_path / SERVICE_NAME
-    # Provide a dummy ExecStart path for verification if needed
-    service_path.write_text(
-        service_path.read_text().replace("ExecStart=aft work", "ExecStart=/bin/true")
-    )
+    service_text = service_path.read_text(encoding="utf-8")
+    real_aft = shutil.which("aft")
+    assert real_aft is not None
+    assert f"ExecStart={Path(real_aft).resolve()} work" in service_text
+
     result = subprocess.run(
         ["systemd-analyze", "verify", str(timer_path)],
         capture_output=True,

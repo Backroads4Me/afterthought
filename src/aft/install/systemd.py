@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import difflib
 import os
+import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,7 +34,9 @@ RATE_LIMIT_FILE = "last-work-trigger"
 
 
 class InstallError(Exception):
-    """The systemd unit directory cannot be written, and nothing was changed."""
+    """The systemd unit directory cannot be written, or aft was not found,
+    and nothing was changed.
+    """
 
 
 @dataclass(frozen=True)
@@ -53,22 +56,30 @@ def unit_dir(path: Path | None = None) -> Path:
     return Path.home() / DEFAULT_UNIT_DIR
 
 
+def resolve_aft_path(explicit: Path | str | None = None) -> Path:
+    """Find the absolute path to the aft executable, refusing if not found."""
+    if explicit is not None:
+        p = Path(explicit).expanduser().resolve()
+        if not p.is_file() or not os.access(p, os.X_OK):
+            raise InstallError(f"aft executable not found or not executable: {explicit}")
+        return p
+    found = shutil.which("aft")
+    if not found:
+        raise InstallError("aft executable not found in PATH")
+    return Path(found).resolve()
+
+
 def format_interval(interval_minutes: int) -> str:
-    """Format an interval in minutes for systemd OnCalendar timer specification."""
+    """Format an interval in minutes for systemd OnUnitActiveSec timer specification."""
     if interval_minutes <= 0:
         raise ValueError(f"interval_minutes must be positive, got {interval_minutes}")
-    if interval_minutes < 60:
-        return f"*:0/{interval_minutes}"
-    if interval_minutes == 60:
-        return "hourly"
-    if interval_minutes % 60 == 0:
-        return f"0/{interval_minutes // 60}:00"
-    return f"*:0/{interval_minutes}"
+    return f"{interval_minutes}min"
 
 
-def service_content() -> str:
+def service_content(aft_path: Path | str | None = None) -> str:
     """The content of aft-work.service."""
-    return """\
+    executable = resolve_aft_path(aft_path)
+    return f"""\
 [Unit]
 Description=Afterthought background work
 Documentation=https://github.com/Backroads4Me/afterthought
@@ -76,21 +87,21 @@ Documentation=https://github.com/Backroads4Me/afterthought
 [Service]
 Type=oneshot
 EnvironmentFile=-%h/.afterthought/env
-ExecStart=aft work
+ExecStart={executable} work
 """
 
 
 def timer_content(interval_minutes: int = 30) -> str:
     """The content of aft-work.timer for the given interval in minutes."""
-    calendar_spec = format_interval(interval_minutes)
+    interval_spec = format_interval(interval_minutes)
     return f"""\
 [Unit]
 Description=Afterthought background work timer
 Documentation=https://github.com/Backroads4Me/afterthought
 
 [Timer]
-OnCalendar={calendar_spec}
-Persistent=true
+OnBootSec=5min
+OnUnitActiveSec={interval_spec}
 
 [Install]
 WantedBy=timers.target
@@ -102,13 +113,14 @@ def install(
     config: Config | None = None,
     *,
     dry_run: bool = False,
+    aft_path: Path | str | None = None,
 ) -> Change:
     """Write aft-work.service and aft-work.timer into target_dir."""
     directory = unit_dir(target_dir)
     cfg = config if config is not None else load()
     interval = cfg.settings.dream.interval_minutes
 
-    desired_service = service_content()
+    desired_service = service_content(aft_path)
     desired_timer = timer_content(interval)
 
     service_path = directory / SERVICE_NAME
@@ -202,6 +214,13 @@ def uninstall(
     )
 
 
+def _default_runner(cmd: list[str]) -> None:
+    try:
+        subprocess.run(cmd, capture_output=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def trigger_early(
     config: Config,
     *,
@@ -209,9 +228,6 @@ def trigger_early(
     runner: Callable[[list[str]], Any] | None = None,
 ) -> bool:
     """Start aft-work.service early if at least 5 minutes have elapsed since the last trigger."""
-    if os.environ.get("AFT_NO_SYSTEMD") and runner is None:
-        return False
-
     current_time = now if now is not None else datetime.now(UTC)
     trigger_file = config.home / RATE_LIMIT_FILE
 
@@ -228,10 +244,8 @@ def trigger_early(
     try:
         config.home.mkdir(parents=True, exist_ok=True)
         trigger_file.write_text(current_time.isoformat() + "\n", encoding="utf-8")
-        if runner is not None:
-            runner(cmd)
-        else:
-            subprocess.run(cmd, capture_output=True, check=False)
+        run_func = runner if runner is not None else _default_runner
+        run_func(cmd)
         return True
     except (OSError, subprocess.SubprocessError):
         return False
