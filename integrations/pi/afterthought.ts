@@ -14,7 +14,6 @@
 // code: what it prints is the whole conversation between the two.
 
 import { spawn } from "node:child_process"
-import type { ChildProcess } from "node:child_process"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
 const AFT = "aft"
@@ -88,13 +87,7 @@ export default function (pi: ExtensionAPI) {
    */
   async function hook(event: string, body: HookPayload): Promise<string> {
     const printed = await new Promise<string>((resolve) => {
-      let child: ChildProcess
-      try {
-        child = spawn(AFT, ["hook", "pi", event], { stdio: ["pipe", "pipe", "ignore"] })
-      } catch {
-        resolve("")
-        return
-      }
+      const child = spawn(AFT, ["hook", "pi", event], { stdio: ["pipe", "pipe", "ignore"] })
       let stdout = ""
       let settled = false
       let expiry: ReturnType<typeof setTimeout>
@@ -106,9 +99,9 @@ export default function (pi: ExtensionAPI) {
         clearTimeout(expiry)
         resolve(text)
       }
-      // A command killed on the bound leaves only the bytes that had reached the
-      // pipe, and a truncated memory block injected for the rest of a session is
-      // worse than no block at all, so nothing received so far is kept.
+      // The block is only finished when `aft` exits, so a command still running at the
+      // bound is dropped whole, even text it had already printed: a block that never
+      // completed would sit in front of the model for the rest of the session.
       expiry = setTimeout(() => {
         child.kill()
         finish("")

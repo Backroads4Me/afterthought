@@ -27,3 +27,4 @@ directory; the test suite does this so it never touches real memory.
 | `aft key [path]` | Show which project a directory belongs to; exits 1 when it is not registered |
 | `aft project list\|add\|rename\|forget` | Manage the project registry |
 | `aft lint` | Check every page against OKF v0.2 and the fact-line grammar |
+| `aft install pi [--dry-run\|--uninstall]` | Copy the afterthought extension into pi's extensions directory, preview it, or remove it again |

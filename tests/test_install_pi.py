@@ -166,6 +166,22 @@ def test_dry_run_reports_the_new_file_and_writes_nothing(extensions):
     assert names(extensions) == set()
 
 
+def test_dry_run_reports_a_change_no_line_diff_can_show(extensions):
+    """Text that differs only by its final newline changes no line, so the diff is empty:
+    the fields still say a change is coming and what it will keep beforehand."""
+    target = pi_install.target_path(extensions)
+    target.parent.mkdir(parents=True)
+    target.write_text(SHIPPED.rstrip("\n"), encoding="utf-8")
+
+    change = pi_install.install(extensions, dry_run=True)
+
+    assert change.changed is True
+    assert change.diff == ""
+    assert change.backup is not None and not change.backup.exists()
+    assert target.read_text(encoding="utf-8") == SHIPPED.rstrip("\n")
+    assert names(target.parent) == {pi_install.EXTENSION_FILE}
+
+
 def test_uninstall_removes_the_file_and_the_directory_this_installer_created(extensions):
     install(extensions)
 
@@ -324,11 +340,17 @@ def cli_env(monkeypatch, tmp_path, *, use_agent_dir: bool) -> Path:
 
 def test_cli_installs_into_the_agent_directory_pi_names(monkeypatch, tmp_path, capsys):
     extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    target = pi_install.target_path(extensions)
 
     assert main(["install", "pi"]) == 0
+
     assert extensions.is_relative_to(tmp_path)
-    assert pi_install.target_path(extensions).read_text(encoding="utf-8") == SHIPPED
-    assert "installed" in capsys.readouterr().out
+    assert target.read_text(encoding="utf-8") == SHIPPED
+    assert f"installed {target}" in capsys.readouterr().out
+
+    assert main(["install", "pi"]) == 0
+
+    assert capsys.readouterr().out == f"{target} is already up to date\n"
 
     assert main(["install", "pi", "--uninstall"]) == 0
     assert names(extensions) == set()
@@ -343,13 +365,77 @@ def test_cli_default_agent_directory_is_under_home(monkeypatch, tmp_path):
     assert pi_install.target_path(extensions).is_file()
 
 
-def test_cli_dry_run_prints_the_diff_and_writes_nothing(monkeypatch, tmp_path, capsys):
+def test_cli_dry_run_prints_an_applicable_diff_and_writes_nothing(monkeypatch, tmp_path, capsys):
     extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    target = pi_install.target_path(extensions)
 
     assert main(["install", "pi", "--dry-run"]) == 0
 
+    printed = capsys.readouterr().out.splitlines()
     assert names(extensions) == set()
-    assert added_lines(capsys.readouterr().out) == SHIPPED.splitlines()
+    assert printed[-1] == f"would write {target}"
+    assert added_lines("\n".join(printed)) == SHIPPED.splitlines()
+    # The patch is every line above that last one, and each of them carries one of unified
+    # diff's own prefixes: no blank line sits inside it, so a tool can read it as a change.
+    patch = printed[:-1]
+    assert patch
+    assert all(line.startswith(("---", "+++", "@@", "+", "-")) for line in patch)
+    assert patch[-1] == f"+{SHIPPED.splitlines()[-1]}"
+
+
+def test_cli_dry_run_reports_a_change_only_in_line_endings(monkeypatch, tmp_path, capsys):
+    """A target that differs from the shipped text by its final newline changes no line, so
+    no diff can show it - and the preview still has to say what the run will do, because a
+    silent preview promises nothing and then rewrites the file."""
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    extensions.mkdir(parents=True)
+    target = pi_install.target_path(extensions)
+    target.parent.mkdir()
+    target.write_text(SHIPPED.rstrip("\n"), encoding="utf-8")
+    before = tree(tmp_path)
+
+    assert main(["install", "pi", "--dry-run"]) == 0
+
+    printed = capsys.readouterr().out.splitlines()
+    assert printed[-1] == f"would write {target}"
+    assert printed[0].startswith(f"would back up the previous {target.name} to ")
+    assert tree(tmp_path) == before, "a dry run writes nothing, not even the backup it names"
+
+    assert main(["install", "pi"]) == 0
+
+    assert target.read_text(encoding="utf-8") == SHIPPED
+    assert len(backups(extensions)) == 1, "the text it replaced was kept before the rewrite"
+
+
+def test_cli_uninstall_dry_run_promises_the_copy_the_run_keeps(monkeypatch, tmp_path, capsys):
+    """Hand-edited text is copied before it goes, and that copy is why the directory stays:
+    the preview that omits it promises a cleaner removal than the command performs."""
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    extensions.mkdir(parents=True)
+    target = pi_install.target_path(extensions)
+    target.parent.mkdir()
+    target.write_text("// an edit worth keeping\n", encoding="utf-8")
+
+    assert main(["install", "pi", "--dry-run", "--uninstall"]) == 0
+    previewed = capsys.readouterr().out.splitlines()
+
+    assert target.is_file() and names(target.parent) == {pi_install.EXTENSION_FILE}
+    assert previewed[-1] == f"would remove {target}"
+    promised = f"would back up the previous {target.name} to "
+    named = [line for line in previewed if line.startswith(promised)]
+    assert len(named) == 1, previewed
+    copy = Path(named[0].removeprefix(promised))
+    assert copy.parent == target.parent and not copy.exists(), "a preview names, it does not write"
+
+    assert main(["install", "pi", "--uninstall"]) == 0
+
+    run = capsys.readouterr().out.splitlines()
+    assert run[-1] == f"removed {target}"
+    assert run[0].startswith(f"backed up the previous {target.name} to ")
+    assert len(backups(extensions)) == 1
+    kept = target.parent / next(iter(backups(extensions)))
+    assert kept.read_text(encoding="utf-8") == "// an edit worth keeping\n"
+    assert target.parent.is_dir(), "the copy left behind is why the directory stands"
 
 
 def test_cli_uninstall_dry_run_says_what_the_real_run_would_say(monkeypatch, tmp_path, capsys):

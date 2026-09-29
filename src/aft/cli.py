@@ -236,29 +236,26 @@ def cmd_install_pi(args) -> int:
     )
     target = pi_install.target_path(extensions)
     if not change.changed:
-        print(_install_pi_status(args, target=target, extensions=extensions))
+        if args.uninstall:
+            print(f"no afterthought extension in {extensions}")
+        else:
+            print(f"{target} is already up to date")
         return 0
+    # Every line of a preview says what the run itself would say, so the preview cannot
+    # promise less than the command does: the text as a diff when there is one, the copy a
+    # change makes of the text it replaces, and the paths it writes or takes away.
     if args.dry_run and change.diff:
         print(change.diff)
     if change.backup is not None:
-        print(f"backed up the previous {target.name} to {change.backup}")
+        verb = "would back up" if args.dry_run else "backed up"
+        print(f"{verb} the previous {target.name} to {change.backup}")
     if args.uninstall:
-        removed = ", ".join(str(path) for path in change.removed)
-        print(f"would remove {removed}" if args.dry_run else f"removed {removed}")
-    elif not args.dry_run:
-        print(f"installed {target}")
+        verb = "would remove" if args.dry_run else "removed"
+        print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+    else:
+        verb = "would write" if args.dry_run else "installed"
+        print(f"{verb} {target}")
     return 0
-
-
-def _install_pi_status(args, *, target: Path, extensions: Path) -> str:
-    """The line for a command that found nothing to do.
-
-    One place, so the real run and ``--dry-run`` say the same standing still in the same
-    words - install's words or uninstall's, whichever the command asked for.
-    """
-    if args.uninstall:
-        return f"no afterthought extension in {extensions}"
-    return f"{target} is already up to date"
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget

@@ -55,11 +55,14 @@ class Change:
     """What one install or uninstall did, or would have done under ``--dry-run``.
 
     ``changed`` is False when the paths already held exactly what was asked for, in which
-    case nothing was written or removed and no backup was taken. ``diff`` is the unified diff
-    of the extension file's text before and after; it is empty whenever that text did not
-    change, which is why an uninstall reports the paths it took away in ``removed`` rather
-    than leaving them to be inferred from a diff. An install replaces text and takes nothing
-    away, so its ``removed`` is empty.
+    case nothing was written or removed, no copy was named and no diff was drawn. ``backup``
+    is where the text this change replaces or removes is kept, or would be kept under
+    ``--dry-run``; None when there is no text worth a copy. ``diff`` is the unified diff of
+    the extension file's lines before and after, empty when its text changes no line - a
+    difference only in line endings is such a case, and a command that changes something says
+    so in its own line whatever the diff holds. An uninstall names the paths it takes away in
+    ``removed`` rather than leaving them to be inferred from a diff, and an install replaces
+    text and takes nothing away, so its ``removed`` is empty.
     """
 
     changed: bool
@@ -115,9 +118,9 @@ def install(extensions: Path, *, dry_run: bool = False) -> Change:
         if original == text:
             return Change(changed=False, backup=None, diff="")
         diff = _diff(target, original, text)
+        backup = _backup(target, original, dry_run=dry_run)
         if dry_run:
-            return Change(changed=True, backup=None, diff=diff)
-        backup = _backup(target, original)
+            return Change(changed=True, backup=backup, diff=diff)
         _write(target, text)
         return Change(changed=True, backup=backup, diff=diff)
     except OSError as exc:
@@ -156,9 +159,9 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
             removed.append(container)
         changed = bool(removed)
         diff = _diff(target, original, "")
+        backup = _backup(target, keep, dry_run=dry_run)
         if dry_run:
-            return Change(changed=changed, backup=None, diff=diff, removed=tuple(removed))
-        backup = _backup(target, keep)
+            return Change(changed=changed, backup=backup, diff=diff, removed=tuple(removed))
         if target in removed:
             target.unlink()
         if container in removed:
@@ -241,10 +244,16 @@ def _shipped() -> str | None:
 
 
 def _diff(target: Path, before: str | None, after: str) -> str:
-    """What the change does to the extension file's text, for ``--dry-run`` to print.
+    """What the change does to the extension file's lines, for ``--dry-run`` to print.
 
     A file that does not exist yet has no text to diff against, so it goes in as one block of
-    additions, which is what installing it means.
+    additions, which is what installing it means. Each line of the result is terminated once,
+    so what the dry run prints is a patch a tool could apply rather than a patch with blank
+    lines sprinkled through it.
+
+    Lines, not bytes, are the unit: text that differs only by a final newline or a CRLF
+    ending changes no line, so its diff is empty, and the command's own line about the write
+    or the removal is what says a change is coming.
     """
     return "\n".join(
         difflib.unified_diff(
@@ -252,24 +261,27 @@ def _diff(target: Path, before: str | None, after: str) -> str:
             after.splitlines(),
             fromfile=f"{target} (before)",
             tofile=f"{target} (after)",
+            lineterm="",
         )
     )
 
 
-def _backup(target: Path, original: str | None) -> Path | None:
-    """Copy the text a change is about to replace or remove into a file beside it. This is
-    the backup rule, where a reader of a write meets it: afterthought's extension file
-    changes only once its previous text is safe next to it.
+def _backup(target: Path, original: str | None, *, dry_run: bool) -> Path | None:
+    """Name the file that keeps the text this change replaces or removes, and copy the text
+    into it unless the change is only being previewed. This is the backup rule, where a
+    reader of a write meets it: afterthought's extension file changes only once its previous
+    text is safe next to it, and a preview says that copy is coming without making it.
 
     The copy is named for the tool that made it and stamped with the UTC second, so one
     install never overwrites another's backup. A file with no text of its own has nothing to
-    keep, so no backup is written to claim a file was lost that was never there.
+    keep, so no backup is named to claim a file was lost that was never there.
     """
     if not original:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = target.with_name(f"{target.name}.aft-{stamp}.bak")
-    backup.write_text(original, encoding="utf-8")
+    if not dry_run:
+        backup.write_text(original, encoding="utf-8")
     return backup
 
 
