@@ -1,0 +1,80 @@
+{
+  "type": "object",
+  "description": "One part of a session, as the digest prompt asks for it (BUILD-PLAN M2.6).",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Two to four sentences on what happened.",
+      "maxLength": 800
+    },
+    "handoff": {
+      "type": "object",
+      "description": "What a session that resumes this one needs to know to start.",
+      "properties": {
+        "in_flight": {
+          "type": "string",
+          "description": "What was being worked on when this part ended.",
+          "maxLength": 400
+        },
+        "failed": {
+          "type": "array",
+          "description": "Approaches tried that did not work.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5
+        },
+        "open": {
+          "type": "array",
+          "description": "Questions and next steps left open.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 5
+        }
+      },
+      "required": ["in_flight", "failed", "open"]
+    },
+    "facts": {
+      "type": "array",
+      "description": "What a future session could not learn from the code or the git history.",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string",
+            "description": "One sentence, in plain present tense, that stands on its own.",
+            "maxLength": 300
+          },
+          "kind": {
+            "type": "string",
+            "description": "The kind of fact, as design 6 names them.",
+            "enum": ["preference", "decision", "state", "fact", "lesson", "procedure", "reference"]
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the fact came from; a tentative remark is suggested, never stated.",
+            "enum": ["stated", "observed", "inferred", "suggested"]
+          },
+          "quote": {
+            "type": "string",
+            "description": "Words copied from one entry, which the script finds in that entry or drops the fact.",
+            "maxLength": 300
+          },
+          "entry": {
+            "type": "string",
+            "description": "The id of the entry the quote comes from."
+          },
+          "scope": {
+            "type": "string",
+            "description": "Global for Ted's preferences and environment; project for everything else.",
+            "enum": ["project", "global"]
+          }
+        },
+        "required": ["statement", "kind", "source", "quote", "entry", "scope"]
+      }
+    }
+  },
+  "required": ["summary", "handoff", "facts"]
+}

@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault
+from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault, work
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
@@ -88,6 +88,12 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("lint", help="check the vault's pages")
     p.set_defaults(handler=cmd_lint)
+
+    p = sub.add_parser(
+        "work",
+        help="sweep for missed sessions and digest queued work within the day's budget",
+    )
+    p.set_defaults(handler=cmd_work)
 
     p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
     p.set_defaults(handler=cmd_reindex)
@@ -290,6 +296,20 @@ def cmd_lint(args) -> int:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_work(args) -> int:
+    """Digest the queue within the day's budget, and say how far the run got.
+
+    A job that could not be digested is an exit status a timer can see, not a line only
+    the run's own log holds; the work it could not do stays queued either way (DESIGN 14).
+    """
+    config = load()
+    report = work.run(config)
+    print(f"aft work: {report.line()}")
+    for failure in report.failures:
+        print(f"aft work: {failure}", file=sys.stderr)
+    return 1 if report.failures else 0
 
 
 def cmd_reindex(args) -> int:
