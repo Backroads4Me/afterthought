@@ -55,7 +55,45 @@ def write_digest(
     role: str = "primary",
     at: str = "2026-10-05T08:00:00Z",
     consumed: str | None = None,
+    store_evidence: bool = True,
 ) -> Path:
+    if store_evidence:
+        from aft.readers import USER, Entry
+
+        db_path = cfg.home / "evidence.sqlite"
+        existing_keys: set[tuple[str, str]] = set()
+        if db_path.exists():
+            with evidence._reading(cfg) as conn:
+                rows = conn.execute("SELECT session_id, entry_id FROM evidence").fetchall()
+                existing_keys = {(str(r[0]), str(r[1])) for r in rows}
+
+        by_session: dict[str, list[tuple[str, Entry]]] = {}
+        for s in sources:
+            res = s.get("resource", "")
+            q = s.get("quote", "")
+            if res.startswith("aft://session/") and "#" in res:
+                uri = res.removeprefix("aft://session/")
+                parts = uri.split("#", 1)
+                agent_sess = parts[0].split("/")
+                agent = agent_sess[0] if len(agent_sess) > 1 else "claude"
+                sess_id = agent_sess[-1]
+                entry_id = parts[1]
+                if (sess_id, entry_id) in existing_keys:
+                    continue
+                by_session.setdefault(sess_id, []).append(
+                    (agent, Entry(id=entry_id, time=NOW, role=USER, text=q, is_error=False))
+                )
+        for sess_id, entries_with_agent in by_session.items():
+            agent = entries_with_agent[0][0]
+            entries = [e for _, e in entries_with_agent]
+            evidence.store(
+                cfg,
+                agent=agent,
+                session_id=sess_id,
+                project_id=f"p_{slug}",
+                entries=entries,
+            )
+
     rel = f"digests/{slug}/2026/10/{filename}.md"
     path = cfg.vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -987,6 +1025,7 @@ def test_lint_failure_aborts_run_without_commit(initialized, home, fake):
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
     registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
 
     seed_overview(
         cfg,
@@ -1007,8 +1046,9 @@ def test_lint_failure_aborts_run_without_commit(initialized, home, fake):
 
     # Aborted without commit!
     assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
-    # Vault is clean
-    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+    # The pre-existing corrupt file is untouched; run does not destroy uncommitted files
+    assert corrupt_page.exists()
+    assert run_git(["status", "--porcelain"], cfg.vault) == "?? projects/widget/broken.md"
 
 
 def test_marks_consumed_digests(initialized, home, fake):
@@ -1191,3 +1231,282 @@ def test_refusal_r6_global_fact_not_stated(initialized, home, fake):
     assert len(report.skips) == 1
     assert "global page changes only from [stated]" in report.skips[0].reason
     assert "global python" not in (cfg.vault / "global" / "environment.md").read_text()
+
+
+def test_quote_not_in_archive_is_rejected(initialized, home, fake):
+    """A fact whose quote is not in the archive is rejected under R1."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State line. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state line"}],
+    )
+
+    # Digest citing an entry that is not in the archive
+    write_digest(
+        cfg,
+        "widget",
+        "d-missing-quote",
+        facts=[
+            {
+                "statement": "An unevidenced fact.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess_missing#e99",
+                "quote": "words never captured",
+            }
+        ],
+        store_evidence=False,
+    )
+
+    fake.script = [reply("add", None, "add fact")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.rejected) == 1
+    assert report.rejected[0].rule == "R1"
+    assert report.rejected[0].reason == "quote not verified"
+    assert (
+        "An unevidenced fact."
+        not in (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    )
+
+
+def test_stated_fact_whose_evidence_entry_has_role_assistant_is_not_yours(initialized, home, fake):
+    """A [stated] fact whose evidence entry has role assistant is not yours."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State line. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state line"}],
+    )
+
+    from aft.readers import ASSISTANT, Entry
+
+    # Store entry with assistant role
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sess_assist_test",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1", time=NOW, role=ASSISTANT, text="The system runs on Redis.", is_error=False
+            )
+        ],
+    )
+
+    # Stated fact citing assistant words
+    write_digest(
+        cfg,
+        "widget",
+        "d-assist",
+        facts=[
+            {
+                "statement": "The system runs on Redis.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess_assist_test#e1",
+                "quote": "The system runs on Redis.",
+            }
+        ],
+        store_evidence=False,
+    )
+
+    fake.script = [reply("add", None, "add stated fact")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(r.rule == "R2" for r in report.rejected)
+    assert (
+        "The system runs on Redis."
+        not in (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    )
+
+
+def test_fact_with_two_refs_where_only_second_verifies_is_written_with_second_source(
+    initialized, home, fake
+):
+    """A fact with two refs where only the second verifies is written with the second source."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State line. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state line"}],
+    )
+
+    from aft.readers import USER, Entry
+
+    # Store only the second entry in evidence archive
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sess_second",
+        project_id="p_widget",
+        entries=[
+            Entry(id="e2", time=NOW, role=USER, text="Second verified quote.", is_error=False)
+        ],
+    )
+
+    # Digest has a fact with two refs: s1 (unverified) and s2 (verified)
+    rel = "digests/widget/2026/10/d-two-refs.md"
+    dpath = cfg.vault / rel
+    dpath.parent.mkdir(parents=True, exist_ok=True)
+    fm = {
+        "type": "Session Digest",
+        "title": "Digest two refs",
+        "description": "Two refs test.",
+        "generated": {"by": "aft", "at": "2026-10-05T08:00:00Z"},
+        "sources": [
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_first#e1",
+                "quote": "First unverified quote.",
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess_second#e2",
+                "quote": "Second verified quote.",
+            },
+        ],
+        "aft": {
+            "project": "p_widget",
+            "role": "primary",
+            "facts": [
+                {
+                    "statement": "Dual ref fact.",
+                    "kind": "fact",
+                    "source": "observed",
+                    "date": TODAY,
+                    "refs": ["s1", "s2"],
+                }
+            ],
+        },
+    }
+    body = "## Facts\n\n- Dual ref fact. [observed] 2026-10-05 [^s1] [^s2]\n"
+    dpath.write_text(f"---\n{yaml.safe_dump(fm, sort_keys=False)}---\n\n{body}", encoding="utf-8")
+    vault.commit(cfg.vault, [rel], "seed digest two refs")
+
+    fake.script = [reply("add", None, "dual ref")]
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    added = report.added[0]
+    assert added.statement == "Dual ref fact."
+
+    overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    overview_doc = pagewrite.PageDoc.read(cfg.vault / "projects" / "widget" / "overview.md")
+
+    # The unverified first source must not be added to sources
+    all_quotes = [s.get("quote") for s in overview_doc.sources.values()]
+    all_resources = [s.get("resource") for s in overview_doc.sources.values()]
+    assert "First unverified quote." not in all_quotes
+    assert "aft://session/claude/sess_first#e1" not in all_resources
+
+    # The second verified source must be present
+    assert "Second verified quote." in all_quotes
+    assert "aft://session/claude/sess_second#e2" in all_resources
+
+    # Find the sid for the second source in overview_doc
+    second_sid = next(
+        k
+        for k, v in overview_doc.sources.items()
+        if v.get("resource") == "aft://session/claude/sess_second#e2"
+    )
+    assert added.refs == (second_sid,)
+    assert f"- Dual ref fact. [observed] 2026-10-05 [^{second_sid}]" in overview_text
+
+
+def test_lint_failure_leaves_unrelated_uncommitted_file_untouched(
+    initialized, home, fake, monkeypatch
+):
+    """A lint failure restores modified files while leaving unrelated uncommitted files
+    untouched.
+    """
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State line. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state line"}],
+    )
+
+    # Create unrelated uncommitted files in the vault
+    unrelated_file = cfg.vault / "unrelated.txt"
+    unrelated_file.write_text("Unrelated work that must remain untouched.\n")
+
+    unrelated_dir = cfg.vault / "projects" / "other_project"
+    unrelated_dir.mkdir(parents=True, exist_ok=True)
+    unrelated_page = unrelated_dir / "notes.md"
+    unrelated_page.write_text("Other project notes.\n")
+
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-lint-fail",
+        facts=[
+            {
+                "statement": "New fact that triggers lint error.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess_lint#e1",
+                "quote": "New fact quote.",
+            }
+        ],
+    )
+
+    # Force lint_vault to fail
+    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+
+    fake.script = [reply("add", None, "add fact")]
+    with pytest.raises(apply.ApplyError, match="lint failed"):
+        apply.run_project(cfg, "widget", [dpath], now=NOW)
+
+    # Unrelated files must still exist with exact content
+    assert unrelated_file.exists()
+    assert unrelated_file.read_text() == "Unrelated work that must remain untouched.\n"
+    assert unrelated_page.exists()
+    assert unrelated_page.read_text() == "Other project notes.\n"
+
+    # Overview.md must be restored to its clean state without the new fact
+    overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "New fact that triggers lint error." not in overview_text

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -57,6 +57,7 @@ def check_anchors(
     project: Project | None,
     today: str,
     config_host: str,
+    record_write: Callable[[Path], None] | None = None,
 ) -> tuple[list[BrokenAnchor], list[ClearedAnchor]]:
     """Check fact anchors with ripgrep against the project default branch.
 
@@ -196,12 +197,19 @@ def check_anchors(
                         )
 
         if modified:
+            if record_write is not None:
+                record_write(page_path)
             page_path.write_text(doc.render(), encoding="utf-8")
 
     return broken_list, cleared_list
 
 
-def archive_superseded(vault: Path, slug: str, today: str) -> list[ArchivedLine]:
+def archive_superseded(
+    vault: Path,
+    slug: str,
+    today: str,
+    record_write: Callable[[Path], None] | None = None,
+) -> list[ArchivedLine]:
     """Move superseded lines older than 90 days to archive/<page path>."""
     project_dir = vault / "projects" / slug
     if not project_dir.is_dir():
@@ -289,6 +297,9 @@ def archive_superseded(vault: Path, slug: str, today: str) -> list[ArchivedLine]
                     )
                 )
 
+        if record_write is not None:
+            record_write(archive_path)
+            record_write(page_path)
         archive_path.write_text(doc_archive.render(), encoding="utf-8")
         remaining_lines = [line for idx, line in enumerate(raw_lines) if idx not in lines_to_remove]
         page_path.write_text("\n".join(remaining_lines), encoding="utf-8")
@@ -310,7 +321,12 @@ def check_oversize(vault: Path, pages: Sequence[Path]) -> list[str]:
     return oversize
 
 
-def regenerate_index(vault: Path, slug: str, title: str) -> None:
+def regenerate_index(
+    vault: Path,
+    slug: str,
+    title: str,
+    record_write: Callable[[Path], None] | None = None,
+) -> None:
     """Regenerate projects/<slug>/index.md without frontmatter."""
     project_dir = vault / "projects" / slug
     if not project_dir.is_dir():
@@ -328,19 +344,34 @@ def regenerate_index(vault: Path, slug: str, title: str) -> None:
     for name in ordered:
         lines.append(f"- {name}")
     lines.append("")
-    (project_dir / "index.md").write_text("\n".join(lines), encoding="utf-8")
+    index_path = project_dir / "index.md"
+    if record_write is not None:
+        record_write(index_path)
+    index_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def ensure_root_index(vault: Path) -> None:
+def ensure_root_index(
+    vault: Path,
+    record_write: Callable[[Path], None] | None = None,
+) -> None:
     """Ensure the root index.md exists and carries okf_version: 0.2."""
     root_index = vault / "index.md"
     if not root_index.exists():
+        if record_write is not None:
+            record_write(root_index)
         root_index.write_text(vaultmod.ROOT_INDEX, encoding="utf-8")
 
 
-def append_log(vault: Path, slug: str, entry: str) -> None:
+def append_log(
+    vault: Path,
+    slug: str,
+    entry: str,
+    record_write: Callable[[Path], None] | None = None,
+) -> None:
     """Append one entry to log.md."""
     log_path = vault / "log.md"
+    if record_write is not None:
+        record_write(log_path)
     if not log_path.exists():
         log_path.write_text(vaultmod.LOG, encoding="utf-8")
     current = log_path.read_text(encoding="utf-8")

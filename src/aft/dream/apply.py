@@ -165,6 +165,15 @@ def run_project(
 
     report = ProjectRunReport(project=slug)
 
+    written_paths: set[Path] = set()
+    created_paths: set[Path] = set()
+
+    def record_write(p: Path) -> None:
+        resolved = p.resolve()
+        if not p.exists():
+            created_paths.add(resolved)
+        written_paths.add(resolved)
+
     for digest_path in digests:
         try:
             d_text = digest_path.read_text(encoding="utf-8")
@@ -217,7 +226,7 @@ def run_project(
                 res = str(s_entry.get("resource", ""))
                 q = str(s_entry.get("quote", ""))
                 v = _is_quote_verified(config, res, q)
-                y = _is_quote_yours(config, res, default=(fact.source == "stated"))
+                y = _is_quote_yours(config, res, default=False)
                 evidence_list.append(
                     rules.Evidence(
                         source=ref,
@@ -229,7 +238,8 @@ def run_project(
                     )
                 )
 
-            if not any(e.verified for e in evidence_list):
+            verified_evidence = [e for e in evidence_list if e.verified]
+            if not verified_evidence:
                 report.rejected.append(
                     RejectedFact(
                         statement=new_fact.statement,
@@ -250,7 +260,11 @@ def run_project(
                 )
                 continue
 
-            quote_to_send = sources_map.get(fact.refs[0], {}).get("quote", "") if fact.refs else ""
+            quote_to_send = (
+                sources_map.get(verified_evidence[0].source, {}).get("quote", "")
+                if verified_evidence
+                else ""
+            )
             proposal = decide.decide(
                 config,
                 new_fact,
@@ -345,11 +359,13 @@ def run_project(
                 # Surviving write action: add, candidate, confirm, promote, supersede
                 if project is None and new_fact.scope != "global":
                     project = registry.add(slug, title=slug.capitalize())
+                    record_write(config.registry_path)
                     registry.save()
                     run_project_id = project.id
                     overview_path = vault_path / "projects" / slug / "overview.md"
                     if not overview_path.exists():
                         overview_path.parent.mkdir(parents=True, exist_ok=True)
+                        record_write(overview_path)
                         overview_path.write_text(
                             f"---\n"
                             f"type: Project\n"
@@ -379,21 +395,24 @@ def run_project(
                         target_file = vault_path / "projects" / slug / "overview.md"
 
                 doc = pagewrite.PageDoc.read(target_file)
-                first_ref = fact.refs[0] if fact.refs else ""
-                src_entry = sources_map.get(first_ref, {})
-                res = str(src_entry.get("resource", ""))
-                q = str(src_entry.get("quote", ""))
-                title = str(src_entry.get("title", ""))
+                verified_refs = [e.source for e in verified_evidence]
+                refs_to_use: list[str] = []
+                for ref in verified_refs:
+                    src_entry = sources_map.get(ref, {})
+                    res = str(src_entry.get("resource", ""))
+                    q = str(src_entry.get("quote", ""))
+                    title = str(src_entry.get("title", ""))
 
-                sid: str | None = None
-                for existing_id, existing_s in doc.sources.items():
-                    if existing_s.get("resource") == res and existing_s.get("quote") == q:
-                        sid = existing_id
-                        break
-                if sid is None and res and q:
-                    sid = doc.add_source(resource=res, title=title, quote=q)
+                    sid: str | None = None
+                    for existing_id, existing_s in doc.sources.items():
+                        if existing_s.get("resource") == res and existing_s.get("quote") == q:
+                            sid = existing_id
+                            break
+                    if sid is None and res and q:
+                        sid = doc.add_source(resource=res, title=title, quote=q)
+                    if sid:
+                        refs_to_use.append(sid)
 
-                refs_to_use = [sid] if sid else []
                 rel_target = target_file.relative_to(vault_path).as_posix()
 
                 if isinstance(outcome, rules.Apply) and outcome.action == "add":
@@ -440,8 +459,8 @@ def run_project(
                     )
                 elif isinstance(outcome, rules.Apply) and outcome.action == "confirm":
                     assert proposal.target is not None
-                    if sid:
-                        target_fact = doc.fact(proposal.target.fact.statement)
+                    target_fact = doc.fact(proposal.target.fact.statement)
+                    for sid in refs_to_use:
                         doc.confirm(target_fact, source=sid, date=new_fact.date)
                         report.confirmed.append(
                             ConfirmedFact(
@@ -456,15 +475,17 @@ def run_project(
                     assert proposal.target is not None
                     target_fact = doc.fact(proposal.target.fact.statement)
                     promoted = doc.promote(target_fact, kind=new_fact.kind)
-                    if sid:
+                    confirmed_refs = list(promoted.refs)
+                    for sid in refs_to_use:
                         doc.confirm(promoted, source=sid, date=new_fact.date)
+                        confirmed_refs.append(sid)
                     report.promoted.append(
                         PromotedFact(
                             statement=target_fact.statement,
                             kind=new_fact.kind,
                             source=new_fact.source,
                             date=new_fact.date,
-                            refs=(*promoted.refs, sid) if sid else promoted.refs,
+                            refs=tuple(confirmed_refs),
                             path=rel_target,
                         )
                     )
@@ -485,11 +506,12 @@ def run_project(
                             source=new_fact.source,
                             date=new_fact.date,
                             refs=tuple(refs_to_use),
-                            by=sid or "",
+                            by=refs_to_use[0] if refs_to_use else "",
                             path=rel_target,
                         )
                     )
 
+                record_write(target_file)
                 target_file.write_text(doc.render(), encoding="utf-8")
 
         # Mark digest consumed with commit sha
@@ -498,15 +520,18 @@ def run_project(
             daft = dfm.setdefault("aft", {})
             daft["consumed"] = head_before
             new_fm_yaml = yaml.safe_dump(dfm, sort_keys=False, allow_unicode=True).strip()
+            record_write(digest_path)
             digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
         report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
 
     # Maintenance
-    broken, cleared = maintain.check_anchors(vault_path, project, today, config.host)
+    broken, cleared = maintain.check_anchors(
+        vault_path, project, today, config.host, record_write=record_write
+    )
     report.broken_anchors.extend(broken)
     report.cleared_anchors.extend(cleared)
 
-    archived = maintain.archive_superseded(vault_path, slug, today)
+    archived = maintain.archive_superseded(vault_path, slug, today, record_write=record_write)
     report.archived_lines.extend(archived)
 
     project_dir = vault_path / "projects" / slug
@@ -514,15 +539,39 @@ def run_project(
     oversize = maintain.check_oversize(vault_path, project_pages)
     report.oversize_pages.extend(oversize)
 
-    maintain.regenerate_index(vault_path, slug, project.title if project else slug.capitalize())
-    maintain.ensure_root_index(vault_path)
-    maintain.append_log(vault_path, slug, f"{today}: dream {slug}")
+    maintain.regenerate_index(
+        vault_path,
+        slug,
+        project.title if project else slug.capitalize(),
+        record_write=record_write,
+    )
+    maintain.ensure_root_index(vault_path, record_write=record_write)
+    maintain.append_log(vault_path, slug, f"{today}: dream {slug}", record_write=record_write)
 
     # Lint check
     findings = lint.lint_vault(vault_path)
     if findings:
-        git(["checkout", "--", "."], cwd=vault_path)
-        git(["clean", "-fd"], cwd=vault_path)
+        for p in created_paths:
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+            parent = p.parent
+            while parent != vault_path and parent.is_relative_to(vault_path):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+
+        existing_to_restore = [
+            p.relative_to(vault_path).as_posix()
+            for p in written_paths
+            if p not in created_paths and p.is_relative_to(vault_path)
+        ]
+        if existing_to_restore:
+            git(["checkout", "--", *existing_to_restore], cwd=vault_path)
         raise ApplyError(f"lint failed on {len(findings)} finding(s): {findings[0]}")
 
     # One commit per project run
@@ -550,17 +599,32 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
             entry_id = parts[1]
             db_path = config.home / "evidence.sqlite"
             if db_path.exists():
-                with evidence._reading(config) as conn:
-                    row = conn.execute(
-                        "SELECT 1 FROM evidence WHERE session_id = ? AND entry_id = ?",
-                        (sess_id, entry_id),
-                    ).fetchone()
-                if row is not None:
-                    return evidence.find_quote(config, sess_id, entry_id, quote)
-    return True
+                try:
+                    with evidence._reading(config) as conn:
+                        row = conn.execute(
+                            "SELECT 1 FROM evidence WHERE session_id = ? AND entry_id = ?",
+                            (sess_id, entry_id),
+                        ).fetchone()
+                    if row is not None:
+                        return evidence.find_quote(config, sess_id, entry_id, quote)
+                except Exception:
+                    return False
+        return False
+    if resource.startswith("aft://edit/"):
+        sha = resource.removeprefix("aft://edit/").strip()
+        if not sha:
+            return False
+        try:
+            res = git(["show", "--format=", sha], cwd=config.vault, check=False)
+            if res.returncode == 0:
+                return evidence._spaced(quote) in evidence._spaced(res.stdout)
+        except Exception:
+            return False
+        return False
+    return False
 
 
-def _is_quote_yours(config: Config, resource: str, default: bool = True) -> bool:
+def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
     if resource.startswith("aft://edit/"):
         return True
     if resource.startswith("aft://session/"):
@@ -572,11 +636,14 @@ def _is_quote_yours(config: Config, resource: str, default: bool = True) -> bool
             entry_id = parts[1]
             db_path = config.home / "evidence.sqlite"
             if db_path.exists():
-                with evidence._reading(config) as conn:
-                    row = conn.execute(
-                        "SELECT role FROM evidence WHERE session_id = ? AND entry_id = ?",
-                        (sess_id, entry_id),
-                    ).fetchone()
-                if row is not None:
-                    return str(row[0]) == "user"
+                try:
+                    with evidence._reading(config) as conn:
+                        row = conn.execute(
+                            "SELECT role FROM evidence WHERE session_id = ? AND entry_id = ?",
+                            (sess_id, entry_id),
+                        ).fetchone()
+                    if row is not None:
+                        return str(row[0]) == "user"
+                except Exception:
+                    return False
     return default
