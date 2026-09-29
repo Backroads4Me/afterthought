@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aft import (
     capture,
@@ -36,6 +37,7 @@ from aft import (
     page,
     queue,
     registry,
+    vault,
     work,
 )
 from aft import config as configmod
@@ -84,10 +86,19 @@ def session(initialized: Config, tmp_path) -> Session:
     return Session(initialized, cwd, write_transcript(tmp_path / "s-1.jsonl", cwd))
 
 
+def write_records(path: Path, *records: dict) -> Path:
+    """A transcript file holding exactly these records, in the order given."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        for one in records:
+            handle.write(json.dumps(one) + "\n")
+    return path
+
+
 def write_transcript(path: Path, cwd: Path, *extra: dict) -> Path:
     """A Claude Code session file: a prompt, an answer, and a tool result in the prompt."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    records = [
+    return write_records(
+        path,
         {"cwd": str(cwd)},
         record("e1", "user", USER_PROMPT),
         record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
@@ -100,11 +111,17 @@ def write_transcript(path: Path, cwd: Path, *extra: dict) -> Path:
             },
         },
         *extra,
-    ]
-    with path.open("w", encoding="utf-8") as handle:
-        for one in records:
-            handle.write(json.dumps(one) + "\n")
-    return path
+    )
+
+
+def quiet_transcript(path: Path, cwd: Path) -> Path:
+    """A session the filter keeps nothing of: a span that opens and is never closed."""
+    return write_records(
+        path,
+        {"cwd": str(cwd)},
+        record("e1", "user", "off the record: what the quarter's numbers really were"),
+        record("e2", "assistant", "Understood. Nothing of it goes any further."),
+    )
 
 
 def record(entry_id: str, role: str, text: str, model: str | None = None) -> dict:
@@ -269,6 +286,17 @@ def head(cfg: Config) -> str:
     ).stdout
 
 
+def committed_files(cfg: Config) -> list[str]:
+    """Every path the vault's history has taken, over every commit it holds."""
+    return subprocess.run(
+        ["git", "log", "--all", "--name-only", "--format="],
+        cwd=cfg.vault,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+
 def page_path(session_id: str = SESSION) -> str:
     """Where a digest of ``NOW`` is filed, per DESIGN 6."""
     return f"digests/{below(session_id)}"
@@ -382,6 +410,69 @@ def test_a_value_off_the_plans_list_never_reaches_memory(session: Session, broke
     assert [fact.reason for fact in dropped] == [reason]
 
 
+def test_a_chunk_the_filter_empties_closes_the_job_with_no_page(session: Session):
+    """An all-off-the-record chunk files nothing, because a page of nothing would end up
+    standing for the whole day (DESIGN 8, DESIGN 12).
+
+    The filter drops a span before anything is archived or asked, so a chunk that is
+    nothing but one leaves the digest with no summary, no handoff and no fact. What it
+    does leave is a decision: the mark moves past the entries read, so the next sweep and
+    the next run hand the same chunk back as nothing, and the run counts the job among the
+    sessions with nothing to digest.
+    """
+    quiet = quiet_transcript(session.transcript.with_name("quiet.jsonl"), session.cwd)
+    fake, cfg = serve(session.cfg, answer(said()))
+    queue.enqueue(cfg, event(quiet, session.cwd))
+    try:
+        first = work.run(cfg)
+        asked = len(fake.requests)
+        standing = pages(cfg)
+        second = work.run(cfg)
+    finally:
+        fake.stop()
+    assert first.stopped == ""
+    assert first.digested == 0
+    assert first.empty == 1, "an emptied chunk was not counted among the nothing-to-digest"
+    assert asked == 0, "a chunk with nothing kept was asked of the model anyway"
+    assert standing == []
+    page_file = cfg.vault / page_path()
+    assert not page_file.exists()
+    assert list(page_file.parent.glob(".digest-*")) == []
+    assert rows(cfg, queue.DONE) == [SESSION]
+    assert watermark(cfg) == "e2"
+    assert (second.swept, second.digested, second.empty) == (0, 0, 0)
+
+
+def test_a_day_opened_off_the_record_still_gets_its_work(session: Session):
+    """The emptied chunk does not spend the day: the work that follows gets its page.
+
+    A session that opens with an off-the-record preamble and then does real work is the
+    ordinary shape of a working day. Filing nothing for the first chunk leaves the day's
+    one path free, so the chunk with content in it is digested instead of refused.
+    """
+    quiet = quiet_transcript(session.transcript.with_name("quiet.jsonl"), session.cwd)
+    fake, cfg = serve(session.cfg, answer(said(entry="e3"), summary="Wrote the capture hook."))
+    queue.enqueue(cfg, event(quiet, session.cwd))
+    try:
+        opened = work.run(cfg)
+        first = pages(cfg)
+        with quiet.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record("e3", "user", USER_PROMPT)) + "\n")
+            handle.write(json.dumps(record("e4", "assistant", ASSISTANT_ANSWER)) + "\n")
+        queue.enqueue(cfg, event(quiet, session.cwd))
+        ran = work.run(cfg)
+        standing = pages(cfg)
+        written = body(cfg, page_path())
+    finally:
+        fake.stop()
+    assert (opened.digested, opened.empty) == (0, 1)
+    assert first == []
+    assert ran.digested == 1
+    assert standing == [below()]
+    assert frontmatter(cfg, page_path())["description"] == "Wrote the capture hook."
+    assert "Capture runs at session end, not per turn. [stated]" in written
+
+
 def test_an_entry_the_chunk_never_held_is_dropped(session: Session):
     """An id the model invents has no role to check and no text to quote."""
     wrote = digest_once(session, answer(said(entry="e99")))
@@ -422,7 +513,16 @@ def test_a_statement_the_page_writer_refuses_is_dropped_not_written(session: Ses
 
 
 def test_the_digest_page_lints(session: Session):
-    """Not merely parses: `aft lint` reads the page and has nothing to report."""
+    """What `aft lint` reads of a page under ``digests``, proved on the page it wrote.
+
+    The fact-line grammar and the footnote-to-source cross-check are gated on
+    ``lint.FACT_DIRS`` - ``projects``, ``global``, ``references`` - so the rules that reach a
+    digest page are the OKF frontmatter rules: its ``type``, its string fields, its
+    ``generated`` pair, and the resource every source it carries. The page's own parse is
+    what holds the written fact line, so both are read here - and a verdict of nothing is
+    worth what the broken page below it proves, which is that the call does report this
+    tree rather than walking past it.
+    """
     wrote = digest_once(
         session,
         answer(
@@ -439,6 +539,20 @@ def test_the_digest_page_lints(session: Session):
     assert lint.lint_vault(session.cfg.vault) == []
     text = (session.cfg.vault / wrote.path).read_text(encoding="utf-8")
     assert page.parse(text, Path(wrote.path)).errors == []
+
+    fm, rest, _, error = page.split_frontmatter(text)
+    assert error is None and fm is not None
+    del fm["sources"][0]["resource"]
+    (session.cfg.vault / wrote.path).write_text(
+        "---\n"
+        + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True, width=100_000)
+        + "---\n"
+        + rest,
+        encoding="utf-8",
+    )
+    assert [str(finding) for finding in lint.lint_vault(session.cfg.vault)] == [
+        f"{wrote.path}:1: each source needs a resource"
+    ]
 
 
 def test_the_page_carries_the_projects_identity_and_the_handoff(session: Session):
@@ -522,17 +636,40 @@ def test_a_write_that_fails_leaves_no_page_and_no_watermark(session: Session):
 
 
 def test_a_commit_that_fails_leaves_no_page_standing(session: Session):
-    """A page git never took is a page the watermark does not know: it goes back out."""
+    """A page git never took is a page the watermark does not know: it goes back out.
+
+    The repository stands and the vault's own pre-commit hook refuses the commit, so the
+    page really is written and really is refused by git. A missing ``.git`` would be turned
+    away by `vault.require` before a page was ever attempted, which is no test of a rollback
+    at all - and a page left in git's index would be taken by the next commit of anything,
+    so the history is read as well as the worktree.
+    """
+    hook = session.cfg.vault / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho 'this vault takes no digests' >&2\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
     fake, cfg = serve(session.cfg, answer(said()))
-    shutil.rmtree(cfg.vault / ".git")
     try:
-        with pytest.raises(Exception) as raised:
+        with pytest.raises(vault.VaultError) as raised:
             digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
-        assert raised.type.__name__ in {"GitError", "VaultError"}
     finally:
         fake.stop()
-    assert not (cfg.vault / page_path()).exists()
-    assert pages(cfg) == []
+    assert "this vault takes no digests" in str(raised.value)
+    page_file = cfg.vault / page_path()
+    assert not page_file.exists()
+    assert list(page_file.parent.glob(".digest-*")) == []
+    assert watermark(cfg) is None
+    assert rows(cfg, queue.DONE) == []
+
+    hook.unlink()
+    later = session.transcript.with_name("later.jsonl")
+    shutil.copy(session.transcript, later)
+    fake, cfg = serve(cfg, answer(said()))
+    try:
+        assert digest.digest_job(cfg, claim(cfg, later, session.cwd, session_id="s-2"))
+    finally:
+        fake.stop()
+    assert pages(cfg) == [below("s-2")]
+    assert page_path() not in committed_files(cfg)
     assert watermark(cfg) is None
 
 
@@ -915,6 +1052,47 @@ def test_a_claim_another_worker_took_over_reaches_the_report_not_a_traceback(
     assert "not held by this process" in report.failures[0]
     assert below("taken-1") in pages(cfg), "the committed digest was lost with the close"
     assert watermark(cfg, "taken-1") is None
+
+
+def test_a_claim_lost_while_failing_a_job_reaches_the_command_too(
+    session: Session, monkeypatch, capsys
+):
+    """The queue call that writes a failure down can lose its claim in the same way.
+
+    It sits in the handler that reports the job's own failure, so the run would die in the
+    middle of reporting if the queue's refusal were not reported too: the job's reason and
+    the queue's both arrive on the command's lines, the run stops for the queue, the row is
+    left for whoever holds it now, and a timer sees a status (DESIGN 14).
+    """
+    gone = session.transcript.with_name("gone.jsonl")
+    shutil.copy(session.transcript, gone)
+    real = digest.digest_job
+
+    def digest_after_it_is_taken(config, job, moment=None):
+        conn = sqlite3.connect(config.home / queue.QUEUE_NAME)
+        conn.execute(
+            "UPDATE jobs SET status = ?, claimed_pid = NULL WHERE id = ?",
+            (queue.PENDING, job.id),
+        )
+        conn.commit()
+        conn.close()
+        return real(config, job, moment)
+
+    fake, cfg = serve(session.cfg, answer(said()))
+    queue.enqueue(cfg, event(gone, session.cwd, session_id="lost-1"))
+    gone.unlink()
+    monkeypatch.setattr(digest, "digest_job", digest_after_it_is_taken)
+    try:
+        code = cli.main(["work"])
+        printed = capsys.readouterr()
+    finally:
+        fake.stop()
+    assert code == 1
+    assert "stopped: the queue could not be used" in printed.out
+    assert any("gone.jsonl" in line for line in printed.err.splitlines())
+    assert any("not held by this process" in line for line in printed.err.splitlines())
+    assert rows(cfg, queue.FAILED) == []
+    assert rows(cfg, queue.PENDING) == ["lost-1"]
 
 
 def test_a_queue_that_cannot_be_opened_stops_the_run_with_its_own_words(session: Session):

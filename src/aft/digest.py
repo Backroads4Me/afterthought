@@ -15,9 +15,11 @@ reads as a session's "last session" layer (DESIGN 10) - and its facts are ordina
 lines whose footnotes name the session and entry each quote came from, so the quote a
 future dream re-checks is the one on the page.
 
-The watermark moves last and only with the page: a page that was not written leaves the
-session's read position where it was, because a watermark that runs ahead of its page
-loses the session quietly and looks exactly like success (DESIGN 14).
+The watermark moves last and only once the chunk has been dealt with: a page that was not
+written leaves the session's read position where it was, and a chunk the filter emptied
+moves it with no page at all, because those entries are decided and have nothing left to
+file. A watermark that runs ahead of a decision loses the session quietly and looks
+exactly like success (DESIGN 14).
 """
 
 from __future__ import annotations
@@ -39,7 +41,7 @@ from aft import __version__, evidence, keys, model, pagewrite, queue, readers, v
 from aft import filter as filtermod
 from aft import registry as registrymod
 from aft.config import Config
-from aft.gitutil import GitError
+from aft.gitutil import GitError, git
 from aft.model import ModelError
 from aft.page import KIND_SECTIONS
 from aft.readers import USER, Entry
@@ -208,11 +210,13 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
 
     Reads, filter, archive, model, verify, page, watermark, commit, in that order: the
     archive takes the chunk before the model sees it, because the page's quotes are found
-    in the archive, and the watermark moves only once the page stands in git.
+    in the archive, and the watermark moves only once the page stands in git or the chunk
+    is known to hold nothing the filter would keep.
 
-    Returns ``None`` when the session has no entry past its watermark, which closes the
-    job and leaves the watermark where it was: there was nothing to digest, so there is
-    nothing to file and nothing new to read.
+    Returns ``None`` when the job held nothing to digest, which closes it and files no
+    page. A session with no entry past its watermark keeps the mark it had; a chunk the
+    filter emptied moves the mark past the entries read, because those are decided and
+    would be decided again by every later run.
     """
     _require_session_id(job.session_id)
     vault.require(config)
@@ -230,6 +234,13 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         return None
 
     kept = filtermod.filter_entries(read, config)
+    if not kept:
+        # Nothing the filter left to digest: the entries were read and decided, so the
+        # mark moves and the job closes. A page of nothing would stand for the day and
+        # then refuse the chunk that follows it with real work on it.
+        queue.complete(config, job, read[-1].id)
+        return None
+
     evidence.store(
         config,
         job.agent,
@@ -249,7 +260,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     facts: list[Fact] = []
     dropped: list[Dropped] = []
     summaries: list[str] = []
-    handoff: dict[str, object] = {"in_flight": "", "failed": [], "open": []}
+    handoffs: list[dict[str, object]] = []
     prompt = prompt_text()
     schema = digest_schema()
     # One page per job, whatever the number of parts: the plan names one path per session
@@ -262,7 +273,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
-        handoff = answer["handoff"]
+        handoffs.append(answer["handoff"])
 
     # A fact whose scope the page cannot carry is refused here, not written wrong.
     written, homeless = _homes(facts)
@@ -274,7 +285,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         resolution.slug,
         resolution,
         summaries,
-        handoff,
+        handoffs[-1],
         written,
         dropped,
         when,
@@ -561,8 +572,10 @@ def _write(config: Config, rel: str, text: str) -> Path:
     digest whole. Refusing keeps both, holds the watermark, and says so on its own line of
     the failure, which is what a doomed retry has to leave behind for a person to end it.
 
-    The commit is the last step. A page the commit did not take is removed on the way out,
-    so a failure never leaves a page standing that the watermark does not know about.
+    The commit is the last step. A page the commit did not take is taken back out on the
+    way as well: the file goes, and so does the index entry that staging put beside it,
+    because a staged page is a page the next commit of anything at all would carry into
+    memory. So a failure leaves no page standing that the watermark does not know about.
     """
     path = config.vault / rel
     if path.is_file():
@@ -576,12 +589,16 @@ def _write(config: Config, rel: str, text: str) -> Path:
     except OSError:
         Path(tmp).unlink(missing_ok=True)
         raise
-    try:
-        with vault.locked(config):
+    with vault.locked(config):
+        try:
             vault.commit(config.vault, [rel], f"aft: digest {rel}")
-    except (GitError, vault.VaultError):
-        path.unlink(missing_ok=True)
-        raise
+        except (GitError, vault.VaultError):
+            # The page went into git's index before the commit refused it, and a staged
+            # page is taken by whichever commit comes next, so the index loses it with the
+            # file - and both go under the lock the commit was attempted under.
+            path.unlink(missing_ok=True)
+            git(["reset", "-q", "--", rel], cwd=config.vault, check=False)
+            raise
     return path
 
 
