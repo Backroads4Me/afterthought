@@ -41,7 +41,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import page
+from aft import page, vault
 
 SIGNALS_GATE = 3
 SESSIONS_GATE = 2
@@ -161,9 +161,8 @@ _line_identity = line_identity
 
 
 def _archive_slug(rel: Path) -> str:
-    if rel.parts and rel.parts[0] == "projects" and len(rel.parts) > 1:
-        return rel.parts[1]
-    return rel.stem
+    slug = vault.path_slug(rel)
+    return slug if slug is not None else rel.stem
 
 
 def _archive_header(rel: Path) -> list[str]:
@@ -631,6 +630,8 @@ class PageDoc:
             raise WriteError("a callout row is one line")
         self._check_citations(text)
         note = ["", f"> [!{type}] {_check_date(date)}", *[f"> {row}" for row in rows]]
+        if below.strip():
+            note.append("")
         self._apply(found.line, found.line, note)
         return True
 
@@ -658,7 +659,7 @@ class PageDoc:
         start = callout.line - 1
         stop = callout.line + len(callout.text)
         cut = start - 1 if not self.lines[start - 1].strip() else start
-        block = [self.lines[found.line - 1], *self.lines[start:stop]]
+        block = [f"> {self.lines[found.line - 1]}", *self.lines[start:stop]]
         archive = self._archive_edit(block)
         with self._atomic():
             self._apply(cut, stop, [], carried_off=True)
@@ -868,19 +869,34 @@ class PageDoc:
         if added:
             raise WriteError("; ".join(sorted(added)))
         gone = known - errors
-        if gone and not carried_off:
-            still = dict(gone)
-            flagged = []
-            lost = sorted(
-                [(line, message) for line, message in self._page.errors if message in still],
-                key=lambda hit: not (start + 1 <= hit[0] <= stop),
-            )
-            for line, message in lost:
-                if still[message]:
-                    still[message] -= 1
-                    flagged.append(f"line {line}: {message}")
-            detail = "; ".join(flagged)
-            raise WriteError(f"this edit would drop text outside the grammar: {detail}")
+        if gone:
+            if carried_off:
+                removed_errors = Counter(
+                    message
+                    for line, message in self._page.errors
+                    if (start + 1 <= line <= stop)
+                    or message.startswith("a callout cannot follow a ")
+                )
+                disallowed = gone - removed_errors
+            else:
+                disallowed = gone
+            if disallowed:
+                still = dict(disallowed)
+                flagged = []
+                lost = sorted(
+                    [
+                        (line, message)
+                        for line, message in self._page.errors
+                        if message in still and (not carried_off or not (start + 1 <= line <= stop))
+                    ],
+                    key=lambda hit: not (start + 1 <= hit[0] <= stop),
+                )
+                for line, message in lost:
+                    if still.get(message, 0) > 0:
+                        still[message] -= 1
+                        flagged.append(f"line {line}: {message}")
+                detail = "; ".join(flagged)
+                raise WriteError(f"this edit would drop text outside the grammar: {detail}")
         self.lines[:] = lines
         self._page = now
 
