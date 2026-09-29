@@ -17,6 +17,7 @@ from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.install import systemd as systemd_install
 from aft.library import manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         claude_install.InstallError,
         pi_install.InstallError,
+        systemd_install.InstallError,
         RegistryError,
         vault.VaultError,
         GitError,
@@ -113,6 +115,21 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own extension and nothing else",
     )
     q.set_defaults(handler=cmd_install_pi)
+    q = isub.add_parser(
+        "timer",
+        help="install systemd user timer and service units for background work",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the unit files aft would write or remove, write nothing",
+    )
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's systemd user units and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_timer)
 
     p = sub.add_parser("library", help="import and manage library collections")
     lsub = p.add_subparsers(metavar="action")
@@ -331,6 +348,31 @@ def cmd_install_pi(args) -> int:
     return 0
 
 
+def cmd_install_timer(args) -> int:
+    """Install or remove afterthought's systemd user service and timer units."""
+    unit_dir = systemd_install.unit_dir()
+    cfg = load()
+    change = (
+        systemd_install.uninstall(unit_dir, dry_run=args.dry_run)
+        if args.uninstall
+        else systemd_install.install(unit_dir, config=cfg, dry_run=args.dry_run)
+    )
+    if not change.changed:
+        if args.uninstall:
+            print(f"no afterthought timer units to remove in {unit_dir}")
+        else:
+            print(f"afterthought timer units in {unit_dir} are already up to date")
+        return 0
+    if args.dry_run:
+        print(change.preview or f"no changes to {unit_dir}")
+        return 0
+    if args.uninstall:
+        print(f"removed {', '.join(str(p) for p in change.units)}")
+    else:
+        print(f"installed {', '.join(str(p) for p in change.units)}")
+    return 0
+
+
 def cmd_library_survey(args) -> int:
     return survey.run(args.path, as_json=args.json)
 
@@ -385,7 +427,9 @@ def _dispatch(event: SessionEvent) -> None:
     so it prints nothing here, and the hook contract asks for silence and exit 0.
     """
     if event.kind in (COMPACTION, SESSION_END):
-        queue.enqueue(load(), event)
+        cfg = load()
+        queue.enqueue(cfg, event)
+        systemd_install.trigger_early(cfg)
 
 
 @contextmanager
