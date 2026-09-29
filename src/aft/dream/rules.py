@@ -14,9 +14,9 @@ lost its nerve is undebuggable, and design 9's report holds a Rejected row per r
 
 Pure by construction: no page, archive, index, clock or database is read or written here.
 Each rule that would otherwise need the outside world takes the value from ``context``,
-which carries the run's date, every quote the line would end up citing with the source and
-session it came in, its role and its date, and the project ids of the run and of the page
-the decision would edit.
+which carries the run's date, the new fact's quotes and the target line's own quotes (kept
+apart, because only the new fact's quotes can carry a decision), and the project ids of the
+run and of the page the decision would edit.
 
 Which of design 9's rules are here, and where the rest are:
 
@@ -157,12 +157,13 @@ class NewFact:
     carries no replacement on its own: R4 judges a replacement by the quotes."""
 
     scope: str = "project"
-    """``project`` or ``global`` (design 8). Retrieval uses it to decide which pages to
-    search; R6 reads the page a decision would edit."""
+    """``project`` or ``global`` (design 8). R6 holds it to the page the decision would
+    edit: a global fact goes only to a global page, and only when it is ``[stated]``."""
 
     explicit_correction: bool = False
-    """You corrected the record yourself, which skips R3's gate and no other rule: an
-    explicit correction still needs the authority and the newer quote R4 asks for."""
+    """You corrected the record yourself. It counts only when a verified quote of yours
+    backs it; then it skips R3's gate and replaces any standing line its quote is newer
+    than (design 9)."""
 
 
 @dataclass(frozen=True)
@@ -189,10 +190,8 @@ class Context:
     """YYYY-MM-DD of the run. Nothing here reads a clock."""
 
     evidence: tuple[Evidence, ...]
-    """Every quote the line would end up citing, the new fact's own and the target line's
-    own included: R3 counts the footnotes the finished line would carry, so leaving the
-    standing line's quotes out under-reads the sessions behind them and holds the gate
-    rather than clearing it. An unverified quote travels here too, so R1's refusal is
+    """The new fact's own quotes, and nothing else: they are what R1, R2, R4's newer quote
+    and the worker rule judge. An unverified quote travels here too, so R1's refusal is
     visible rather than absent."""
 
     run_project: str
@@ -201,6 +200,11 @@ class Context:
     page_project: str | None = None
     """The ``aft.project`` id of the page the decision would edit, or None for a page
     under ``global/``, which belongs to no project (R6)."""
+
+    line_evidence: tuple[Evidence, ...] = ()
+    """The target line's own quotes, one per footnote it carries. Only R3's gate reads
+    them, and only a verified quote from a primary session counts: a footnote without one
+    here adds nothing to the count."""
 
 
 @dataclass(frozen=True)
@@ -270,20 +274,22 @@ def check(
     if decision.action == "skip":
         return apply("skip")
 
-    # R1: one known source tag, and at least one quote a script found in its source.
+    # R1: one known source tag, and at least one quote of the new fact's own that a script
+    # found in its source. The target line's quotes vouch for the line, not for this fact.
     if new_fact.source not in page.SOURCES:
         return reject("R1")
     if not any(quote.verified for quote in context.evidence):
         return reject("R1")
 
     # R2: [stated] means you committed to it, so the quote has to be your own words.
-    if new_fact.source == "stated" and not any(
-        quote.verified and quote.yours for quote in context.evidence
-    ):
+    if new_fact.source == "stated" and not _yours(context.evidence):
         return reject("R2")
 
-    # R6: one project per run, and a global page changes only from what you stated.
+    # R6: one project per run, a global fact goes only to a global page and a project fact
+    # only to a project page, and a global page changes only from what you stated.
     if context.page_project is not None and context.page_project != context.run_project:
+        return reject("R6")
+    if (new_fact.scope == "global") != (context.page_project is None):
         return reject("R6")
     if context.page_project is None and new_fact.source != "stated":
         return reject("R6")
@@ -334,7 +340,7 @@ def _new_line(new_fact: NewFact, context: Context) -> Outcome:
     """Where an added line goes: R3's gate decides between a kind section and Candidates.
     The line has no footnotes yet, so the gate counts the quotes handed in and nothing
     else."""
-    if new_fact.source in NEEDS_THE_GATE and not new_fact.explicit_correction:
+    if new_fact.source in NEEDS_THE_GATE and not _corrected(new_fact, context):
         if not _passes_gate(context):
             return downgrade("candidate", "R3")
     return apply("add")
@@ -348,11 +354,10 @@ def _confirm(new_fact: NewFact, target_line: page.Fact, context: Context) -> Out
     footnotes the line would end up citing, so the candidate's own come from the line."""
     if target_line.kind is not None:
         return apply("confirm")
-    if new_fact.explicit_correction:
+    if _corrected(new_fact, context):
         return apply("promote")  # R3: an explicit correction from you skips the gate
     if target_line.source in NEEDS_THE_GATE:
-        promoted = _passes_gate(context, target_line.refs)
-        return apply("promote") if promoted else apply("confirm")
+        return apply("promote") if _passes_gate(context) else apply("confirm")
     # A stated or observed line is in Candidates because the worker rule held it; a
     # primary session corroborating it is what the worker rule asks for.
     if any(quote.verified and quote.origin == PRIMARY for quote in context.evidence):
@@ -376,20 +381,37 @@ def _supersede(new_fact: NewFact, target_line: page.Fact, context: Context) -> O
     claims about its own date carries no replacement. Without either the old line stands
     and the result is a conflict, or needs you when it is one of your commitments that is
     contradicted."""
+    if _corrected(new_fact, context) and _newer_than_the_line(
+        _yours(context.evidence), target_line
+    ):
+        return apply("supersede")  # an explicit correction from you replaces anything
     authority = AUTHORITY.get(target_line.kind or "", ())
-    if new_fact.source in authority and _newer_than_the_line(context, target_line):
+    # The quote that carries the authority is the one that has to be newer: your own words
+    # for a [stated] fact, any verified quote for an [observed] one.
+    carrying = _yours(context.evidence) if new_fact.source == "stated" else context.evidence
+    if new_fact.source in authority and _newer_than_the_line(carrying, target_line):
         return apply("supersede")
     return downgrade(_refusal(new_fact, target_line), "R4")
 
 
-def _newer_than_the_line(context: Context, target_line: page.Fact) -> bool:
-    """R4's date half: some verified quote outdates the date on the line (design 9: "a
-    verified quote newer than the line's latest evidence"). An unverified quote is no
+def _newer_than_the_line(quotes, target_line: page.Fact) -> bool:
+    """R4's date half: one of these verified quotes outdates the date on the line (design 9:
+    "a verified quote newer than the line's latest evidence"). An unverified quote is no
     evidence of a newer world, and a quote whose date does not parse is none either. The
     line's own date always parses: a line with an unreadable date holds no fact."""
     line_date = _date(target_line.date)
-    dated = [d for q in context.evidence if q.verified if (d := _date(q.date)) is not None]
+    dated = [d for q in quotes if q.verified if (d := _date(q.date)) is not None]
     return line_date is not None and bool(dated) and max(dated) > line_date
+
+
+def _yours(evidence: tuple[Evidence, ...]) -> list[Evidence]:
+    """The verified quotes in your own words (R2)."""
+    return [q for q in evidence if q.verified and q.yours]
+
+
+def _corrected(new_fact: NewFact, context: Context) -> bool:
+    """An explicit correction counts only when a verified quote of yours backs it."""
+    return new_fact.explicit_correction and bool(_yours(context.evidence))
 
 
 def _refusal(new_fact: NewFact, target_line: page.Fact) -> str:
@@ -413,16 +435,16 @@ def _open_note(outcome: Outcome, target_line: page.Fact) -> bool:
     return isinstance(outcome, Downgrade) and outcome.to_action in NOTE_OR_STRIKE
 
 
-def _passes_gate(context: Context, line_refs: tuple[str, ...] = ()) -> bool:
+def _passes_gate(context: Context) -> bool:
     """R3: three signals across two primary sessions, signals older than 30 days counting
     half. The two numbers are the writer's own ``counts_for`` over the footnotes the line
-    would end up citing - the verified quotes from primary sessions beside the ones the
-    line already carries - so the gate and the counts suffix a person reads cannot
-    disagree, and the weighting is arithmetic on the count it returns. Nothing is read
-    from a page or an archive."""
-    quotes = _primary(context.evidence)
+    would end up citing that rest on a verified quote from a primary session - the new
+    fact's and the line's own - so a worker footnote or an unverified one adds nothing,
+    and the weighting is arithmetic on the count it returns. Nothing is read from a page
+    or an archive."""
+    quotes = _primary(context.evidence) + _primary(context.line_evidence)
     entries = {quote.source: {"resource": quote.resource} for quote in quotes}
-    refs = [quote.source for quote in quotes] + list(line_refs)
+    refs = [quote.source for quote in quotes]
     signals, sessions = pagewrite.counts_for(refs, entries)
     aged = sum(1 for ref in dict.fromkeys(refs) if _aged(ref, quotes, context.today))
     return signals - aged / 2 >= SIGNALS_GATE and sessions >= SESSIONS_GATE

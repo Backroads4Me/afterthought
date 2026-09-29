@@ -616,9 +616,11 @@ def test_a_candidate_citing_two_sources_leaves_on_one_more_corroborating_source(
         new_fact(source="inferred"),
         line(SWEEP),
         ctx(
-            sig("s1", "2026-10-04", source="s1", resource=S1_RESOURCE),
-            sig("s2", "2026-10-03", source="s2", resource=S2_RESOURCE),
             sig("s9", "2026-10-02", source="s9", resource=S9_RESOURCE),
+            line_evidence=(
+                sig("s1", "2026-10-04", source="s1", resource=S1_RESOURCE),
+                sig("s2", "2026-10-03", source="s2", resource=S2_RESOURCE),
+            ),
         ),
     )
     assert outcome == apply("promote")
@@ -627,7 +629,7 @@ def test_a_candidate_citing_two_sources_leaves_on_one_more_corroborating_source(
 def test_a_caller_that_hands_in_only_the_new_quote_leaves_the_line_a_candidate():
     """The line's own quotes are what carry the sessions behind its footnotes: without
     them the count under-reads and the gate holds rather than guesses, which is what
-    ``Context.evidence`` asks the caller for."""
+    ``Context.line_evidence`` asks the caller for."""
     outcome = check(
         decide("confirm"),
         new_fact(source="inferred"),
@@ -1160,7 +1162,7 @@ def test_your_stated_word_is_what_may_change_a_global_page(action: str, expected
     target = None if action == "add" else line(VLLM)
     outcome = check(
         decide(action, line=None if action == "add" else "L1"),
-        new_fact(source="stated"),
+        new_fact(source="stated", scope="global"),
         target,
         ctx(*gate(), page_project=None),
     )
@@ -1248,3 +1250,110 @@ def test_check_reaches_nothing_outside_the_values_it_is_handed(
     monkeypatch.setattr(builtins, "open", forbid)
     monkeypatch.setattr(socket, "socket", forbid)
     assert check(decision, fact, target, context) == expected
+
+
+# The new fact's quotes and the line's own are kept apart: only the new fact's carry a
+# decision, and only verified primary quotes count toward the gate.
+
+
+def test_the_lines_own_verified_quote_does_not_vouch_for_an_unverified_new_one():
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="observed"),
+        line(VLLM),
+        ctx(sig("x", NEWER, verified=False), line_evidence=(sig("s2", OLDER),)),
+    )
+    assert outcome == reject("R1")
+
+
+def test_a_stated_supersede_needs_your_own_newer_words():
+    """The newer quote has to be the one carrying the authority: someone else's newer words
+    beside an old quote of yours replace nothing of yours."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="stated", kind="preference"),
+        line(NO_RGB),
+        ctx(sig("old", "2026-09-01"), sig("x", NEWER, yours=False)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_a_worker_quote_beside_the_lines_primary_quote_still_cannot_confirm():
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="observed"),
+        line(VLLM),
+        ctx(sig("w1", NEWER, origin=rules.WORKER), line_evidence=(sig("s2", OLDER),)),
+    )
+    assert outcome == reject("design 8 worker sessions")
+
+
+def test_a_worker_quote_beside_the_lines_primary_quote_cannot_supersede():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed"),
+        line(VLLM),
+        ctx(sig("w1", NEWER, origin=rules.WORKER), line_evidence=(sig("s2", OLDER),)),
+    )
+    assert outcome == downgrade("candidate", "design 8 worker sessions")
+
+
+def test_worker_and_unverified_footnotes_on_a_candidate_add_nothing_to_the_gate():
+    """Two primary signals across two sessions do not clear the gate, however many worker
+    or unverified footnotes the candidate carries beside them."""
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="inferred"),
+        line(SWEEP),
+        ctx(
+            sig("n", "2026-10-04", source="n", resource="aft://claude/n#e1"),
+            line_evidence=(
+                sig("s3", "2026-10-03", source="s3", resource="aft://claude/s3#e1"),
+                sig("w1", "2026-10-03", source="w1", origin=rules.WORKER),
+                sig("w2", "2026-10-02", source="w2", origin=rules.WORKER),
+                sig("u1", "2026-10-02", source="u1", verified=False),
+            ),
+        ),
+    )
+    assert outcome == apply("confirm")
+
+
+def test_an_explicit_correction_without_a_quote_of_yours_skips_no_gate():
+    outcome = check(
+        decide("add", line=None),
+        new_fact(source="inferred", explicit_correction=True),
+        None,
+        ctx(sig("a", NEWER, yours=False)),
+    )
+    assert outcome == downgrade("candidate", "R3")
+
+
+def test_your_explicit_correction_replaces_a_line_the_table_would_keep():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="inferred", explicit_correction=True),
+        line(NO_RGB),
+        ctx(sig("a", NEWER)),
+    )
+    assert outcome == apply("supersede")
+
+
+def test_a_global_fact_that_is_not_stated_is_refused():
+    outcome = check(
+        decide("add", line=None),
+        new_fact(source="observed", scope="global"),
+        None,
+        ctx(sig("a", NEWER), page_project=None),
+    )
+    assert outcome == reject("R6")
+
+
+@pytest.mark.parametrize(("scope", "page_project"), [("global", "p_widget"), ("project", None)])
+def test_a_fact_goes_only_to_a_page_of_its_own_scope(scope: str, page_project: str | None) -> None:
+    outcome = check(
+        decide("add", line=None),
+        new_fact(source="stated", scope=scope),
+        None,
+        ctx(*gate(), page_project=page_project),
+    )
+    assert outcome == reject("R6")
