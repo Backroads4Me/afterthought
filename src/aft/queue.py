@@ -12,6 +12,10 @@ machine shares what is in here.
 
 A row carries session identity, never a project: resolution to a project happens at
 digest time (BUILD-PLAN M2.2).
+
+Besides the rows, the queue keeps one line per session of its own: its watermark, the file
+a sweep last read to no work, and the pause a chunk that did not land waits out before the
+next one is offered.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import os
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -60,6 +64,14 @@ FAILED = "failed"
 # (DESIGN 8, BUILD-PLAN M2.2): a bound on correctness cannot rest on that number alone.
 CLAIM_LEASE_FLOOR = timedelta(minutes=30)
 
+# A chunk a session was offered and did not land is offered again on a pause twice as
+# long as the one before it, so a broken reader or endpoint costs a handful of rows over
+# an evening rather than one per sweep. When the tries run out the session is not dropped:
+# it waits on `attention_needed` with the reason its last chunk gave (DESIGN 14: left
+# queued and reported, BUILD-PLAN M2.1, M2.2).
+RETRY_AFTER = timedelta(minutes=30)
+RETRY_ATTEMPTS = 3
+
 # The one key of the meta table this module uses: the instant this home began being
 # watched, written by the opening sweep and never rewritten.
 WATCHING_SINCE = "watching_since"
@@ -86,6 +98,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     seen_mtime      REAL,
     seen_size       INTEGER,
     seen_watermark  TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    retry_after     TEXT,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -94,8 +108,15 @@ CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 """
 
 # The `sessions` columns a queue file written before this revision does not have. SQLite
+# The `sessions` columns a queue file written before this revision does not have. SQLite
 # leaves an existing table exactly as it found it, so each one is added when it is missing.
-SESSION_COLUMNS = {"seen_mtime": "REAL", "seen_size": "INTEGER", "seen_watermark": "TEXT"}
+SESSION_COLUMNS = {
+    "seen_mtime": "REAL",
+    "seen_size": "INTEGER",
+    "seen_watermark": "TEXT",
+    "attempts": "INTEGER NOT NULL DEFAULT 0",
+    "retry_after": "TEXT",
+}
 
 
 @dataclass(frozen=True)
@@ -120,20 +141,47 @@ class Job:
 class SessionState:
     """What the queue knows about one session, for the sweep's tests.
 
+    A session the queue has never heard of is all of these defaults, which is what lets a
+    sweep read the table once and ask each file it walks the same questions.
+
     ``watermark`` is the id of its last digested entry, or None for a session never
     digested. ``has_open_job`` covers a row awaiting a claim and one being digested now:
     both are capture work in flight for that session, and a second row for either would
-    be a chunk the digest has already read. ``has_unresolved_failure`` is true while the
-    session's newest row is a failed one, so the reason that chunk could not be digested
-    is still its last word and the queue is not waiting on anything. ``seen`` is the
+    be a chunk the digest has already read. ``attempts`` counts the chunks this session was
+    offered that did not land, and ``retry_after`` is the instant the next one may be
+    offered; a chunk that lands returns both to zero and None. ``seen`` is the
     ``(mtime, size)`` of the file a sweep last read through at this same watermark and
     called finished, or None once anything has moved.
     """
 
-    watermark: str | None
-    has_open_job: bool
-    has_unresolved_failure: bool
-    seen: tuple[float, int] | None
+    watermark: str | None = None
+    has_open_job: bool = False
+    attempts: int = 0
+    retry_after: datetime | None = None
+    seen: tuple[float, int] | None = None
+
+    def waiting_on_retry(self, now: datetime) -> bool:
+        """Whether the queue is holding this session off another chunk.
+
+        A chunk that did not land waits out a pause that doubles with every try. A session
+        that has spent its tries is held until something other than the sweep moves it -
+        the agent's own hook, or a digest that lands - and stands on `attention_needed`
+        with the reason it gave while it waits (DESIGN 14).
+        """
+        if self.attempts >= RETRY_ATTEMPTS:
+            return True
+        return self.retry_after is not None and now < self.retry_after
+
+
+@dataclass(frozen=True)
+class Attention:
+    """One session whose tries are spent: its chunks stopped landing, and a person is
+    what puts that right."""
+
+    agent: str
+    session_id: str
+    attempts: int
+    error: str | None
 
 
 def enqueue(config: Config, event: SessionEvent) -> None:
@@ -206,11 +254,16 @@ def complete(config: Config, job: Job, watermark: str | None) -> None:
 
     This is where a session's watermark moves, and nowhere else: the digest step calls it
     with the entry it ended on when it wrote that digest (DESIGN 8, BUILD-PLAN M2.2).
-    A watermark of None closes the job and leaves the session's where it was. Only the
-    process still holding the claim closes it, so a worker that outlived its claim - its
-    row already handed to another process - cannot close that row or move the
+    A digest that lands also ends the retry state its session was carrying: the tries
+    start again from the first and the next chunk is offered on the sweep's own terms.
+    Only the process still holding the claim closes it, so a worker that outlived its
+    claim - its row already handed to another process - cannot close that row or move the
     watermark backwards. Closing a row this process does not hold is an error, not a
     success.
+
+    A watermark of None closes the row and leaves the session's exactly where it was, so
+    nothing was digested: that counts as a try that did not land, and the session is
+    offered the chunk again on the same widening pause a failure is (BUILD-PLAN M2.2).
     """
     now = _now()
     with _writing(config) as conn:
@@ -227,6 +280,9 @@ def complete(config: Config, job: Job, watermark: str | None) -> None:
                 " ON CONFLICT (agent, session_id) DO UPDATE SET watermark = excluded.watermark",
                 (job.agent, job.session_id, watermark),
             )
+            _advanced(conn, job.agent, job.session_id)
+        else:
+            _held_back(conn, job.agent, job.session_id, now)
 
 
 def fail(config: Config, job: Job, error: str) -> None:
@@ -234,61 +290,93 @@ def fail(config: Config, job: Job, error: str) -> None:
 
     A failed row is not handed out again: it is the report's line, and DESIGN 14 leaves
     the work queued rather than retrying it in the same run. Nothing moved the
-    session's watermark, so the turns this chunk could not read are still capture work, but
-    the failed row is also the session's last word: the sweep leaves a session whose newest
-    row is this failure alone, rather than queueing the same chunk on every tick for a week
-    and burying the reason under the rows. What resumes it is a row that is not a failure -
-    the hook the agent fires itself, or any later digest that lands - after which the sweep
-    measures the session against its own watermark again (BUILD-PLAN M2.1, M2.2). As when
-    a job closes, only the process still holding the claim records its failure, so a
-    worker whose row has gone on to another process cannot mark that row
-    failed or clear that process's claim. Recording a failure on a row this process does
+    session's watermark, so the turns this chunk could not read are still capture work, and
+    the sweep offers them again once the pause this failure sets has passed - a pause that
+    doubles with every try rather than a row on every tick. A session whose tries are spent
+    stops being offered and stands on `attention_needed` holding this row's error, which is
+    where a person finds it; the agent's own hook still reports its session, and a chunk
+    that lands starts the tries again from the first (BUILD-PLAN M2.1, M2.2). As when a job
+    closes, only the process still holding the claim records its failure, so a
+    worker whose row has gone on to another process cannot mark that row failed or
+    clear that process's claim. Recording a failure on a row this process does
     not hold - one already handed on, or one no longer in the queue - is an error, not a
     silence: why the digest could not run has to reach the report.
     """
+    now = _now()
     with _writing(config) as conn:
         recorded = conn.execute(
             "UPDATE jobs SET status = ?, claimed_pid = NULL, error = ?, updated_time = ?"
             " WHERE id = ? AND status = ? AND claimed_pid = ?",
-            (FAILED, error, _text(_now()), job.id, RUNNING, os.getpid()),
+            (FAILED, error, _text(now), job.id, RUNNING, os.getpid()),
         ).rowcount
         if not recorded:
             raise QueueError(f"job {job.id} is not held by this process")
+        _held_back(conn, job.agent, job.session_id, now)
+
+
+def session_states(config: Config) -> dict[tuple[str, str], SessionState]:
+    """What the queue knows about every session it has heard of, in one read.
+
+    A sweep walks a week of session files and asks each one the same questions, so it asks
+    them of the table once rather than of every file it walks (BUILD-PLAN M2.2).
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT agent, session_id, watermark, seen_mtime, seen_size, seen_watermark,"
+            " attempts, retry_after FROM sessions"
+        ).fetchall()
+        open_keys = conn.execute(
+            "SELECT DISTINCT agent, session_id FROM jobs WHERE status IN (?, ?)",
+            (PENDING, RUNNING),
+        ).fetchall()
+    states: dict[tuple[str, str], SessionState] = {}
+    for row in rows:
+        agent, session_id, watermark = row[:3]
+        seen_mtime, seen_size, seen_watermark, attempts, retry = row[3:]
+        # An observation holds only while the watermark it was made against stands: a
+        # digest that moved it ended that claim, and the file is worth reading again.
+        seen = (seen_mtime, seen_size) if seen_watermark == watermark else None
+        states[(agent, session_id)] = SessionState(
+            watermark=watermark,
+            attempts=attempts,
+            retry_after=None if retry is None else datetime.fromisoformat(retry),
+            seen=seen,
+        )
+    for agent, session_id in open_keys:
+        states[(agent, session_id)] = replace(
+            states.get((agent, session_id), SessionState()), has_open_job=True
+        )
+    return states
 
 
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
-    """What the queue knows about one session, for the sweep's tests.
+    """What the queue knows about one session, or every default for one it never heard of."""
+    return session_states(config).get((agent, session_id), SessionState())
 
-    The session's last word is its newest row, so a row written after a failure - a hook's
-    own event or a digest that landed - is what settles that failure; nothing is cleared.
+
+def attention_needed(config: Config) -> list[Attention]:
+    """The sessions whose tries are spent, each with the reason its last chunk gave.
+
+    A chunk that did not land is offered again on a widening pause until the tries run
+    out. A session that runs out of tries is not dropped: it stands here with the error of
+    its newest row, so the reason stays readable while nothing more is queued for it, and
+    naming it is the report's (DESIGN 14: left queued and reported). A chunk that lands, or
+    the agent's own hook reporting the session, takes it off the list.
     """
     with _reading(config) as conn:
-        row = conn.execute(
-            "SELECT watermark, seen_mtime, seen_size, seen_watermark FROM sessions"
-            " WHERE agent = ? AND session_id = ?",
-            (agent, session_id),
-        ).fetchone()
-        open_row = conn.execute(
-            "SELECT 1 FROM jobs WHERE agent = ? AND session_id = ? AND status IN (?, ?) LIMIT 1",
-            (agent, session_id, PENDING, RUNNING),
-        ).fetchone()
-        newest = conn.execute(
-            "SELECT status FROM jobs WHERE agent = ? AND session_id = ?"
-            " ORDER BY created_time DESC, id DESC LIMIT 1",
-            (agent, session_id),
-        ).fetchone()
-    watermark = row[0] if row else None
-    # A sweep's observation belongs to the watermark it was made against: a digest that
-    # moved the watermark ended its claim, and the file is worth reading again.
-    seen = None
-    if row is not None and row[1] is not None and row[2] is not None and row[3] == watermark:
-        seen = (row[1], row[2])
-    return SessionState(
-        watermark=watermark,
-        has_open_job=open_row is not None,
-        has_unresolved_failure=newest is not None and newest[0] == FAILED,
-        seen=seen,
-    )
+        rows = conn.execute(
+            "SELECT agent, session_id, attempts,"
+            "       (SELECT error FROM jobs j"
+            "         WHERE j.agent = sessions.agent AND j.session_id = sessions.session_id"
+            "          ORDER BY j.created_time DESC, j.id DESC LIMIT 1)"
+            "  FROM sessions WHERE attempts >= ?"
+            " ORDER BY agent, session_id",
+            (RETRY_ATTEMPTS,),
+        ).fetchall()
+    return [
+        Attention(agent, session_id, attempts, reason)
+        for agent, session_id, attempts, reason in rows
+    ]
 
 
 def watching_since(config: Config) -> datetime | None:
@@ -338,6 +426,39 @@ def note_observed(
             " seen_watermark = excluded.seen_watermark",
             (agent, session_id, watermark, mtime, size, watermark),
         )
+
+
+def _advanced(conn: sqlite3.Connection, agent: str, session_id: str) -> None:
+    """A chunk of this session landed, so its tries start again from the first.
+
+    The pause and the spent tries describe the chunk that did not land. Once the session
+    has a watermark further along, they say nothing about the next one.
+    """
+    conn.execute(
+        "UPDATE sessions SET attempts = 0, retry_after = NULL WHERE agent = ? AND session_id = ?",
+        (agent, session_id),
+    )
+
+
+def _held_back(conn: sqlite3.Connection, agent: str, session_id: str, now: datetime) -> None:
+    """Count one chunk this session was offered that did not land, and say when the next
+    one may be offered.
+
+    The pause doubles with every try, so a transcript no reader can read or an endpoint
+    that is down costs a handful of rows across an evening rather than one per sweep,
+    and each of them keeps the reason it gave (`attention_needed`).
+    """
+    held = conn.execute(
+        "SELECT attempts FROM sessions WHERE agent = ? AND session_id = ?",
+        (agent, session_id),
+    ).fetchone()
+    attempts = (held[0] if held else 0) + 1
+    conn.execute(
+        "INSERT INTO sessions (agent, session_id, attempts, retry_after) VALUES (?, ?, ?, ?)"
+        " ON CONFLICT (agent, session_id) DO UPDATE SET"
+        " attempts = excluded.attempts, retry_after = excluded.retry_after",
+        (agent, session_id, attempts, _text(now + RETRY_AFTER * 2 ** (attempts - 1))),
+    )
 
 
 def _reclaim_stale_claims(conn: sqlite3.Connection, now: datetime, lease: timedelta) -> None:

@@ -26,7 +26,14 @@ from pathlib import Path
 from aft import readers
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
-from aft.queue import begin_watching, enqueue, note_observed, session_state, watching_since
+from aft.queue import (
+    SessionState,
+    begin_watching,
+    enqueue,
+    note_observed,
+    session_states,
+    watching_since,
+)
 from aft.readers import CLAUDE, PI
 
 # Where each agent keeps its session files, and the layout of one: Claude Code writes
@@ -72,16 +79,20 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
 
     Each session is compared with its own watermark, not with when the last sweep ran, so
     a session whose hook never fired is found whatever the timer's cadence (BUILD-PLAN
-    M2.2). It is capture work when the queue holds no work in flight for it and no failure
-    it has not explained, its file has moved within the last seven days, and it holds
-    entries past its watermark that it has either gone quiet on for 30 minutes or outgrown
-    by 200 KB.
+    M2.2). It is capture work when the queue holds no work in flight for it and is not
+    holding it off another try on a widening pause, its file has moved within the last
+    seven days, and it holds entries past its watermark that it has either gone quiet on
+    for 30 minutes or outgrown by 200 KB.
 
     Before this home has ever been watched there is nothing to measure its sessions
     against, and up to seven days of sessions that predate afterthought would fill the
     queue. So the opening sweep records that the watching has begun and captures nothing,
     and from then on a session the queue has never digested is capture work only once its
     file has moved (BUILD-PLAN M2.2).
+
+    The queue is read once for the whole walk, whatever files it walks: every session is
+    asked the same questions of the same rows, and only a file that has moved since a
+    sweep last read it is opened again (BUILD-PLAN M2.2).
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
@@ -90,11 +101,12 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
     if watching is None:
         begin_watching(config, now)
         return []
+    states = session_states(config)
     found: list[SessionEvent] = []
     for agent, directory in SESSION_DIRS.items():
         for path in _session_files(directory):
             try:
-                event = _candidate(config, agent, path, now, watching)
+                event = _candidate(config, agent, path, now, watching, states)
             except OSError:
                 # An agent's own cleanup can remove a transcript between the scan and the
                 # read of it. The session it held is gone, and the sweep moves on.
@@ -107,12 +119,18 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
 
 
 def _candidate(
-    config: Config, agent: str, path: Path, now: datetime, watching: datetime
+    config: Config,
+    agent: str,
+    path: Path,
+    now: datetime,
+    watching: datetime,
+    states: dict[tuple[str, str], SessionState],
 ) -> SessionEvent | None:
     """The event one session file earns from this sweep, or None for no work.
 
-    The checks run cheapest first: four timestamps and the queue, then a read of the
-    file's tail, then the entries inside it, and last the head scan that finds its directory.
+    The checks run cheapest first: the file's own timestamps, the queue's facts that the
+    sweep read once for the whole walk, a read of the file's tail, the entries inside it,
+    and last the head scan that finds its directory.
     """
     stat = path.stat()
     touched = datetime.fromtimestamp(stat.st_mtime, UTC)
@@ -120,12 +138,13 @@ def _candidate(
         # Past the seven days the sweep looks over, whatever its watermark holds.
         return None
     session_id = _session_id(agent, path)
-    state = session_state(config, agent, session_id)
+    state = states.get((agent, session_id), SessionState())
     if state.has_open_job:
         return None
-    if state.has_unresolved_failure:
-        # The reason that chunk could not be digested is the session's last word. Queuing
-        # it again on this tick would add a row and bury the reason (BUILD-PLAN M2.1).
+    if state.waiting_on_retry(now):
+        # A chunk of this session did not land. It is offered again once the pause that
+        # failure set has passed, and once the tries are spent the session waits where a
+        # person can read why rather than as a row on every tick (BUILD-PLAN M2.1, M2.2).
         return None
     if state.watermark is None and touched <= watching:
         # Nothing has ever digested this session and its file predates the watching, so it
