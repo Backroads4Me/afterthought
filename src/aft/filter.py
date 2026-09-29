@@ -207,9 +207,9 @@ def _flagged_output(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | N
 def _tool_lines(text: str) -> str | None:
     """The lines of a tool output that survive the filter, or None when none of them do.
 
-    An output the agent did not flag, with nothing to say about a failure and no place to
-    point at, adds nothing a future session could not re-run, so the entry goes rather than
-    becoming an empty one.
+    A line earns its place by reporting a failure or naming a place in the code. Text with
+    neither adds nothing a future session could not re-run, so an output that holds none of
+    them answers None and the entry goes rather than becoming an empty one.
     """
     kept = [line for line in text.splitlines() if _reports_a_break(line) or PATH_LINE.search(line)]
     return "\n".join(kept) if kept else None

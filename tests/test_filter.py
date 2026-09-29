@@ -511,8 +511,8 @@ def test_an_unflagged_tool_output_with_nothing_to_report_is_dropped(cfg):
 
 def test_a_flagged_output_keeps_its_head_when_no_line_matches(cfg):
     # The plan's own case: an output the agent flagged, with no line any pattern names.
-    # The whole words within its first 500 characters are kept, and only those, with the
-    # marker that says the head was cut short of the rest.
+    # Its first 500 characters are kept, by that number and only those, with the marker
+    # that says the head was cut short of the rest.
     quiet = "collected 12 items\nall quiet on the worker\nno changes detected\n" * 40
     assert len(quiet) > FLAG_HEAD_CHARS
     [text] = kept([output(quiet, "t1", is_error=True)], cfg)
