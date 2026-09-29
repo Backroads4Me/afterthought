@@ -9,10 +9,12 @@ and through ``sqlite3`` directly where the claim is about the file itself.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import zlib
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -564,6 +566,30 @@ def test_a_log_another_reader_holds_open_is_not_reported_as_forgotten(cfg):
         assert written not in archived.read_bytes(), archived.name
 
 
+def test_a_retry_of_a_refused_forgetting_does_not_claim_the_forgetting(cfg):
+    """A refusal is how a forgetting may end, and the words it named are still in the log
+    the reader was holding. So the call that follows - which finds no rows left to delete -
+    has to drain that log or refuse again. Answering quietly while the text sits in the
+    file would be the one claim DESIGN 12 forbids, and it would rest on some other
+    process happening to close its file last."""
+    written = zlib.compress(FORGOTTEN_TEXT.encode("utf-8"))
+    evidence.store(cfg, "claude", "gone", None, [entry("e1", text=FORGOTTEN_TEXT)])
+
+    with held_read_snapshot(cfg):
+        for attempt in ("first", "retry"):
+            with pytest.raises(evidence.EvidenceError) as excinfo:
+                evidence.forget(cfg, "gone")
+            assert str(db(cfg)) in str(excinfo.value), attempt
+            assert any(written in f.read_bytes() for f in archive_files(cfg)), (
+                f"the {attempt} refuses because of this residue, so the residue is there"
+            )
+
+    assert evidence.entries(cfg, "gone") == []
+    evidence.forget(cfg, "gone")
+    for archived in archive_files(cfg):
+        assert written not in archived.read_bytes(), archived.name
+
+
 def test_forget_of_a_session_that_is_not_there_changes_nothing(cfg):
     """A typo is no reason to rewrite the archive: with nothing to delete, `forget` leaves
     the rows and every byte of the file where they were, the way it only rewrites the
@@ -607,6 +633,23 @@ def test_an_unarchivable_entry_writes_nothing_and_loses_nothing(cfg, bad):
     with pytest.raises(evidence.EvidenceError):
         evidence.store(cfg, "claude", "s1", None, [*good, bad])
 
+    assert (row_count(cfg), stored(cfg, "s1")) == before
+
+
+def test_text_holding_a_lone_surrogate_is_refused_as_unstorable(cfg):
+    """A transcript line can escape a lone surrogate, and the readers' `json.loads` hands it
+    back as text that the filter and the redactor pass on unchanged - so the archive meets
+    text it cannot become UTF-8 out of, from the data source it exists to archive. That is
+    the entry that cannot be filed, not a `UnicodeEncodeError` no caller was told about,"""
+    lone = json.loads('{"t": "a \\ud800 b"}')["t"]
+    good = [entry("e1")]
+    evidence.store(cfg, "claude", "s1", None, good)
+    before = (row_count(cfg), stored(cfg, "s1"))
+
+    with pytest.raises(evidence.EvidenceError, match="UTF-8") as excinfo:
+        evidence.store(cfg, "claude", "s1", None, [*good, entry("bad", text=lone)])
+
+    assert not isinstance(excinfo.value, UnicodeEncodeError)
     assert (row_count(cfg), stored(cfg, "s1")) == before
 
 
@@ -681,6 +724,22 @@ def test_an_archive_that_will_not_give_its_text_back_is_reported_naming_it(cfg):
             assert str(db(cfg)) in str(excinfo.value)
     finally:
         db(cfg).chmod(0o644)
+
+
+def test_a_home_that_cannot_hold_the_archive_is_reported_naming_it(cfg):
+    """``AFT_HOME`` is a directory the person picking it may have made something else: a
+    plain file where the home should be, or a home under a directory nothing can write
+    into. Making room for the archive is part of opening it, so that failure names the
+    archive as the module's own error instead of arriving as a bare ``OSError``."""
+    occupied = cfg.home.parent / "a-home-that-is-a-file"
+    occupied.write_text("a file where the home should be")
+    blocked = replace(cfg, home=occupied)
+
+    with pytest.raises(evidence.EvidenceError) as excinfo:
+        evidence.store(blocked, "claude", "s1", None, [entry("e1")])
+
+    assert not isinstance(excinfo.value, OSError)
+    assert str(occupied / "evidence.sqlite") in str(excinfo.value)
 
 
 def test_an_archive_that_refuses_the_write_ahead_log_leaves_no_handle(cfg, monkeypatch):

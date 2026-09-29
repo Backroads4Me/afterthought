@@ -218,23 +218,28 @@ def forget(config: Config, session_id: str) -> None:
     The rows go, the write-ahead log is drained, and the archive is rewritten, so the
     forgotten words are not left in a freed page or in the log for whoever opens the file
     next. A log another process is reading cannot be drained, and that is reported rather
-    than returned as a forgetting the bytes contradict. Rewriting the archive is why this
-    is a command a person runs and not a sweep, and it happens only when rows went.
+    than returned as a forgetting the bytes contradict - and the log is drained whether or
+    not this call deleted anything, because that report is how a forgetting ends and the
+    text it named is still in the log until some later call drains it. Rewriting the
+    archive is why this is a command a person runs and not a sweep, so only a delete that
+    actually released pages pays for it.
 
     The archive only. The index rows, the digest files and the curated lines resting on
     the session are the command's to remove and withdraw (BUILD-PLAN M2.8), and the
     vault's git history is beyond any of them: forgetting explains how to rewrite that,
     and never does it.
 
-    A session with no rows, and an archive that was never written, both do nothing.
+    A session with no rows leaves every row and byte of the archive where it was, and an
+    archive that was never written has nothing to drain.
     """
     session_id = _require_name(session_id, "session id")
     if not _db_path(config).exists():
         return
     with _writing(config) as conn:
         removed = conn.execute("DELETE FROM evidence WHERE session_id = ?", (session_id,)).rowcount
-    if removed:
-        _release(config, rewrite=True)
+    # Drained always, rewritten only when this delete released pages: a refusal is how a
+    # forgetting may end, and the retry has to clear that residue or refuse again.
+    _release(config, rewrite=bool(removed))
 
 
 def _row(entry: Entry, session_id: str, agent: str, project_id: str | None) -> tuple:
@@ -270,10 +275,23 @@ def _spaced(text: str) -> str:
 
 def _pack(entry: Entry) -> bytes:
     """The entry's text, compressed: filtered conversation is the bulk of the archive, and
-    the retention window keeps a long run of it (DESIGN 8)."""
+    the retention window keeps a long run of it (DESIGN 8).
+
+    Text that cannot become UTF-8 is refused here rather than halfway through a chunk. A
+    transcript can carry a lone surrogate - JSON escapes one, and the readers' `json.loads`
+    hands it back as text the filter and the redactor pass on unchanged - and the encode
+    answers that with a `UnicodeEncodeError`, which is no caller's `EvidenceError` and lands
+    as a `ValueError` no caller can name.
+    """
     if not isinstance(entry.text, str):
         raise EvidenceError(f"entry {entry.id} holds text that is not text")
-    return zlib.compress(entry.text.encode("utf-8"))
+    try:
+        encoded = entry.text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise EvidenceError(
+            f"entry {entry.id} holds text that cannot be stored as UTF-8: {exc}"
+        ) from exc
+    return zlib.compress(encoded)
 
 
 def _unpack(blob: bytes, entry_id: str) -> str:
@@ -370,13 +388,14 @@ def _writing(config: Config) -> Iterator[sqlite3.Connection]:
 
 
 def _release(config: Config, *, rewrite: bool) -> None:
-    """Empty the write-ahead log after a write that removed rows, and rewrite the archive
+    """Empty the write-ahead log, and rewrite the archive when told to.
 
-    when told to. ``rewrite`` vacuums as well as draining the log, which is what clears the
-    pages a delete freed inside the file itself; `forget` pays for that and `purge`, which
-    runs on a timer, does not (DESIGN 12). Neither statement runs inside a transaction, so
-    this follows the write that removed the rows rather than joining it.
-    """
+    ``rewrite`` vacuums as well as draining the log, which is what clears the pages a delete
+    freed inside the file itself; `forget` pays for that when it deleted something, and
+    `purge`, which runs on a timer, never does (DESIGN 12). Neither statement runs inside a
+    transaction, so this follows the write that removed the rows rather than joining it, and
+    `forget` calls it even after a delete that removed nothing: a previous refusal is how a
+    forgetting can end, and the text it named is still in that log."""
     path = _db_path(config)
     with _reading(config) as conn:
         _drain_log(conn, path)
@@ -415,9 +434,9 @@ def _connect(config: Config) -> sqlite3.Connection:
     that only reads frees no pages, so it pays nothing for it.
     """
     path = _db_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
     conn = None
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
         conn.execute("PRAGMA secure_delete = ON")
         if _journal_mode(conn) != WAL_MODE:
@@ -425,11 +444,12 @@ def _connect(config: Config) -> sqlite3.Connection:
         conn.executescript(_SCHEMA)
     except BaseException as exc:
         # `_reading` and `_writing` never receive a connection that failed to open, and
-        # the mode pragma's own refusal is not a database error, so this is the only place
-        # the handle can be given back.
+        # neither the mode pragma's own refusal (not a database error) nor a home that
+        # cannot hold the file (no error naming the archive at all) is one, so this is the
+        # only place the handle can be given back and the path named.
         if conn is not None:
             conn.close()
-        if isinstance(exc, sqlite3.Error):
+        if isinstance(exc, (sqlite3.Error, OSError)):
             raise EvidenceError(f"cannot open the evidence archive at {path}: {exc}") from exc
         raise
     return conn
