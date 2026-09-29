@@ -502,8 +502,14 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
   digest is waiting. For each project with waiting digests and no session activity for
   `dream.quiet_minutes` (from the queue's last event time): if the vault has uncommitted
   changes modified within the quiet period, skip the project this run; older uncommitted
-  changes are committed first as `checkpoint: human edits`, and lines Ted added are tagged
-  `[stated]` with a source `resource: aft://edit/<commit>` whose quote is the line itself.
+  changes are committed first as `checkpoint: human edits`, holding Ted's bytes verbatim.
+  Then, in a second commit `aft: tag hand edits from <commit>`, each line Ted added in that
+  checkpoint as a bare bullet (`- <text>`, no tag, date or footnote) in a kind section of a
+  fact page (`projects/<slug>/*.md` except `index.md`, and `global/*.md`) is rewritten as
+  `- <text> [stated] <date> [^id]`, dated with the checkpoint commit's UTC date, with a
+  source `resource: aft://edit/<commit>` whose quote is the text. A line Ted typed or edited
+  in full fact-line form keeps exactly what he wrote. The vault-wide check for recent edits
+  skips every project for the run.
   Holds `vault.locked` for the whole run.
 - **Tests:** no digests, no commit; recent hand edit, project skipped; older hand edit,
   checkpoint commit separate from the dream commit.
