@@ -35,6 +35,14 @@ These rules apply to every task and every pull request.
 9. **Never write to the real vault or `~/.afterthought`** during a task. Installing into
    the real environment (`aft install`, systemd units, hooks) is done by Ted, at milestone
    ends, from the checklists in section 6.
+10. **One review round, then merge.** A PR gets one fix round from its gate review. Only
+    blocking findings hold the merge: privacy (text reaching the archive, index or model
+    that must not), data loss, the trust rules (R1 to R9, the authority table, quote
+    verification), or a broken interface that other tasks build against. They are fixed in
+    that round, and a second round only verifies those fixes. Every other finding is listed
+    in the PR description and collected into one follow-up task per module, dispatched
+    after the milestone's plan tasks. A PR merges when CI is green and no blocking finding
+    is open. The section 3 checkpoints still run, and their findings are sorted the same way.
 
 ## 2. What M0 provides
 
@@ -737,3 +745,10 @@ M5 after M3.2 and M4.6; M6 after M5; M7 after M3.2 and M4.6
 ```
 
 The first wave can run in parallel: M1.1, M1.2, M1.5, M2.1, M2.5 and M4.2.
+
+**M4.1, M4.3, M4.5 and M4.6 are built by Claude**, in order, not dispatched by firstmate.
+Each is a PR to this repository, green on CI and reviewed at the section 3 checkpoints. Claude
+starts M4.1 against the M2.6 interface and M4.3 once M3.1 merges; M4.5 needs M4.4, F4 and
+the page writer's remaining operations (`confirm`, `supersede`, `withdraw`, `mark_stale`),
+which stay with firstmate. Everything else in section 5, the follow-ups, and M5 to M7 stay
+with firstmate.
