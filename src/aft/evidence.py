@@ -65,9 +65,10 @@ CREATE INDEX IF NOT EXISTS evidence_by_time ON evidence (time);
 
 
 class EvidenceError(Exception):
-    """An archive operation that cannot be honoured: an entry with nothing to file it by,
-    a retention window that is not a window, or an archive that will not open or will not
-    give its text back."""
+    """An archive operation that cannot be honoured: a row that cannot be filed, a
+    retention window that is not a window, an archive that will not open, will not give
+    its text back, or will not enter WAL, or a write-ahead log another reader keeps from
+    draining."""
 
 
 def store(
