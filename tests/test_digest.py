@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -44,6 +45,7 @@ from aft import config as configmod
 from aft.config import Config
 from aft.events import SESSION_END, SessionEvent
 from aft.readers import CLAUDE, PI, Entry
+from aft.readers.claude import SYNTHETIC_MODEL
 from conftest import make_repo
 from fakes.model_server import FakeEndpoint
 
@@ -59,6 +61,9 @@ SESSION = "s-1"
 # them, which is what makes one fact honest and the next one invented.
 USER_PROMPT = "Store the digest at session end, not per turn. Capture runs at session end."
 ASSISTANT_ANSWER = "Done: the hook writes one row and returns without calling a model."
+# A prompt said after an off-the-record span has opened and never closed: work the rest of
+# the session is not supposed to remember (DESIGN 12).
+POST_SPAN = "The archive is worth its size in quotes."
 
 PLAN = Path(__file__).resolve().parents[1] / "planning" / "BUILD-PLAN.md"
 
@@ -449,6 +454,152 @@ def test_a_chunk_the_filter_empties_closes_the_job_with_no_page(session: Session
     assert (second.swept, second.digested, second.empty) == (0, 0, 0)
 
 
+def test_an_emptied_chunk_leaves_the_day_open_for_the_work_that_follows(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The checkpoint an emptied chunk moves must not swallow the session.
+
+    Nothing here is off the record: the CLI's own bookkeeping is not conversation, a
+    synthetic notice is infrastructure rather than an answer, and a tool result with
+    nothing breaking in it is the filter's own documented drop. That chunk files no page,
+    closes its row, and moves the mark past the entry it read. The work appended to the
+    same transcript afterwards is then found by a later sweep and has the day's one path
+    to itself, which is where the moved mark is either right or has eaten the session.
+    """
+    session_home = tmp_path / "claude-sessions"
+    # The agents keep one directory per project, and the sweep walks that layout.
+    (session_home / "widget").mkdir(parents=True)
+    routine = write_records(
+        session_home / "widget" / "s-1.jsonl",
+        {"cwd": str(session.cwd)},
+        {
+            "type": "system",
+            "uuid": "e0",
+            "timestamp": NOW.isoformat(),
+            "message": {"content": "workspace dirs initialized"},
+        },
+        {
+            "type": "user",
+            "uuid": "e1",
+            "timestamp": NOW.isoformat(),
+            "message": {
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "h1",
+            "timestamp": NOW.isoformat(),
+            "message": {
+                "model": SYNTHETIC_MODEL,
+                "content": [{"type": "text", "text": "nothing to add"}],
+            },
+        },
+    )
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: session_home, PI: session_home})
+    fake, cfg = serve(session.cfg, answer(said(entry="e2"), summary="Settled the hook's timing."))
+    try:
+        queue.enqueue(cfg, event(routine, session.cwd))
+        first = work.run(cfg)
+        asked = len(fake.requests)
+        standing = pages(cfg)
+        page_free = not (cfg.vault / page_path()).exists()
+        mark = watermark(cfg, SESSION)
+        rows_closed = rows(cfg, queue.DONE)
+        with routine.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record("e2", "user", USER_PROMPT)) + "\n")
+            handle.write(json.dumps(record("e3", "assistant", ASSISTANT_ANSWER)) + "\n")
+        # The next scheduled run, after the session has gone quiet for its idle period.
+        second = work.run(cfg, datetime.now(UTC) + capture.IDLE_AFTER)
+        written = body(cfg, page_path())
+    finally:
+        fake.stop()
+    assert first.empty == 1
+    assert asked == 0, "a chunk with nothing kept was asked of the model anyway"
+    assert standing == []
+    assert page_free, "a page stood for the chunk that kept nothing"
+    assert rows_closed == [SESSION], "the emptied chunk left its row in flight"
+    assert mark == "e1#t1", "the mark did not move past the entry the chunk decided on"
+    assert second.digested == 1, "the session was swallowed by the mark its emptied chunk moved"
+    assert pages(cfg) == [below()], "the work that followed never reached a page"
+    assert frontmatter(cfg, page_path())["description"] == "Settled the hook's timing."
+    assert "Capture runs at session end, not per turn. [stated]" in written
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "DESIGN 12 runs an unclosed span to the end of the session, which needs the span's "
+        "state beside the session it belongs to. That state lives inside one filter call "
+        "today, so the chunk after a span opened is read as though it closed. Remove this "
+        "marker when fm/afterthought-f3-span-across-chunks delivers the state per session."
+    ),
+)
+def test_an_unclosed_span_runs_to_the_end_of_the_session(session: Session):
+    """What DESIGN 12 requires, asserted as the rule rather than as today's behavior.
+
+    A prompt opens the span and no prompt closes it, so the rest of the session is off the
+    record: those entries reach no archive, no model, and no page. The closing prompt is
+    what the digest fails to see today once the chunk boundary falls inside the span.
+    """
+    unclosed = write_records(
+        session.transcript.with_name("unclosed.jsonl"),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "user", "off the record: the quarter's numbers"),
+    )
+    fake, cfg = serve(session.cfg, answer(said(entry="e1")), answer(said(entry="e3")))
+    try:
+        queue.enqueue(cfg, event(unclosed, session.cwd))
+        work.run(cfg)
+        with unclosed.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record("e3", "user", POST_SPAN)) + "\n")
+            handle.write(json.dumps(record("e4", "assistant", ASSISTANT_ANSWER)) + "\n")
+        queue.enqueue(cfg, event(unclosed, session.cwd))
+        work.run(cfg)
+        asked = json.dumps(fake.requests)
+        written = body(cfg, page_path())
+    finally:
+        fake.stop()
+    for words in ("the quarter's numbers", POST_SPAN):
+        assert words not in asked, f"{words} reached the model after the span opened"
+        assert words not in written, f"{words} reached the page after the span opened"
+    assert not evidence.find_quote(cfg, SESSION, "e3", POST_SPAN)
+
+
+def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest.MonkeyPatch):
+    """This module keeps no second copy of the spans state: it asks the filter and obeys.
+
+    With the filter stood in for as one that keeps everything, the digest still hands the
+    model every entry of the chunk, marker and all. What it drops, it drops because the
+    filter said so - which is why the span can have exactly one owner, and why DESIGN 12
+    across a chunk boundary is the filter's and the checkpoint's to deliver."""
+    unclosed = write_records(
+        session.transcript.with_name("single-owner.jsonl"),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "user", "off the record: the quarter's numbers"),
+        record("e3", "user", POST_SPAN),
+    )
+    asked_for: list[list[Entry]] = []
+
+    def keeps_everything(entries: object, _config: object) -> list[Entry]:
+        kept = list(entries)
+        asked_for.append(kept)
+        return kept
+
+    monkeypatch.setattr(digest.filtermod, "filter_entries", keeps_everything)
+    fake, cfg = serve(session.cfg, answer(said(entry="e1")))
+    try:
+        digest.digest_job(cfg, claim(cfg, unclosed, session.cwd))
+        asked = json.dumps(fake.requests)
+    finally:
+        fake.stop()
+    assert [entry.id for entry in asked_for[0]] == ["e1", "e2", "e3"]
+    for words in ("the quarter's numbers", POST_SPAN):
+        assert words in asked, f"{words} went unasked though the filter kept it"
+
+
 def test_an_entry_the_chunk_never_held_is_dropped(session: Session):
     """An id the model invents has no role to check and no text to quote."""
     wrote = digest_once(session, answer(said(entry="e99")))
@@ -551,6 +702,17 @@ def test_the_summary_is_the_pages_description(session: Session):
     """DESIGN 6: a page's one-line summary is its ``description``, and it holds no prose."""
     wrote = digest_once(session, answer(said(), summary="Two facts and a handoff."))
     assert frontmatter(session.cfg, wrote.path)["description"] == "Two facts and a handoff."
+
+
+def test_a_digest_page_is_its_owners_alone(session: Session):
+    """A digest page is one sessions conversation, filed in a vault a person may share.
+
+    Every other vault page comes from ``write_text`` at the umask's mode, so the digest's
+    own file is the one that has to say its mode out loud. The mode is read back off the
+    page a run wrote, not one the test set by hand.
+    """
+    wrote = digest_once(session, answer(said()))
+    assert stat.S_IMODE((session.cfg.vault / wrote.path).stat().st_mode) == 0o600
 
 
 def test_the_injection_reads_the_handoff_off_the_digest(session: Session):
@@ -688,6 +850,30 @@ def test_a_temporary_a_killed_run_leaves_is_no_page(session: Session, monkeypatc
     assert lint.lint_vault(cfg.vault) == []
     resolution = keys.resolve(session.cwd, registry.Registry.load(cfg.registry_path), cfg.host)
     assert "- In flight: the sweep, still to write" in inject.build(cfg, resolution)
+
+
+def test_a_temporary_no_writer_can_still_claim_is_taken_away(session: Session):
+    """A temporary is a page half-written, and age is all the vault can ask about it.
+
+    The page is staged beside the page it will become, so a run killed on the way to the
+    rename leaves that file in the month's directory for good unless the next writer clears
+    it. The claim lease is how long a row may go untouched before another worker takes it
+    back, so a temporary older than that has outlived every claim its maker could have
+    held; a younger one is another process's page halfway to standing. Both are planted
+    where this digest is about to file, and its own page lands besides neither of them.
+    """
+    directory = session.cfg.vault / "digests" / SLUG / f"{NOW:%Y}" / f"{NOW:%m}"
+    directory.mkdir(parents=True)
+    abandoned = directory / f"{digest.PAGE_TEMP_PREFIX}abandoned{digest.PAGE_TEMP_SUFFIX}"
+    working = directory / f"{digest.PAGE_TEMP_PREFIX}working{digest.PAGE_TEMP_SUFFIX}"
+    for stray in (abandoned, working):
+        stray.write_text("half a page, from a run that did not finish", encoding="utf-8")
+    outlived = (datetime.now(UTC) - queue.CLAIM_LEASE_FLOOR - timedelta(minutes=1)).timestamp()
+    os.utime(abandoned, (outlived, outlived))
+    digest_once(session, answer(said()))
+    assert not abandoned.exists(), "a temporary no claim can cover still stood in the vault"
+    assert working.is_file(), "another worker's page in progress was taken away"
+    assert pages(session.cfg) == [below()], "the page beside the strays never arrived"
 
 
 def test_the_watermark_moves_only_with_the_page_and_its_commit(session: Session):

@@ -94,6 +94,14 @@ ANSWER_REFUSED = "the answer failed its schema"
 # longer than the bound the endpoint's own schema-name rule uses.
 SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
 
+# A page is staged through a temporary in the directory that will hold it. The suffix is not
+# a page extension because a run killed before the rename leaves the file in the vault,
+# where `aft lint` and `aft inject` would find a page-shaped file with no page behind it.
+PAGE_TEMP_PREFIX = ".digest-"
+PAGE_TEMP_SUFFIX = ".tmp"
+# A digest page holds one session's conversation, so the file belongs to its owner alone.
+PAGE_MODE = 0o600
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -570,6 +578,23 @@ def _title(resolution: keys.Resolution, slug: str) -> str:
     return resolution.project.title if resolution.project is not None else slug
 
 
+def _reap_orphans(directory: Path) -> None:
+    """Take away the page temporaries of ``directory`` that no live writer can be holding.
+
+    A temporary is open only for the moment between its creation and its rename, so one
+    older than the floor of the queue's claim lease was left by a run that died there, and
+    nothing else would ever collect it. A younger sibling is another worker's page in
+    progress and stands.
+    """
+    oldest_allowed = datetime.now(UTC) - queue.CLAIM_LEASE_FLOOR
+    for stray in directory.glob(f"{PAGE_TEMP_PREFIX}*"):
+        try:
+            if datetime.fromtimestamp(stray.stat().st_mtime, UTC) < oldest_allowed:
+                stray.unlink()
+        except OSError:
+            continue
+
+
 def _write(config: Config, rel: str, text: str) -> Path:
     """Put the page in the vault and commit it, or leave the vault exactly as it was.
 
@@ -588,13 +613,14 @@ def _write(config: Config, rel: str, text: str) -> Path:
     if path.is_file():
         raise DigestError(_collision(rel))
     path.parent.mkdir(parents=True, exist_ok=True)
-    # A page is staged through a temporary in the directory that will hold it. The suffix is
-    # not ``.md`` because a run killed before the rename leaves the file behind, and a
-    # page-shaped file there is one `aft lint` reports and `aft inject` may take for a digest.
-    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix=".digest-", suffix=".tmp")
+    _reap_orphans(path.parent)
+    handle, tmp = tempfile.mkstemp(
+        dir=path.parent, prefix=PAGE_TEMP_PREFIX, suffix=PAGE_TEMP_SUFFIX
+    )
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
+        os.chmod(tmp, PAGE_MODE)
         os.replace(tmp, path)
     except OSError:
         Path(tmp).unlink(missing_ok=True)
