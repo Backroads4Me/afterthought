@@ -884,9 +884,11 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
             doc_desc = col_desc
             project_ids = list(projects) if projects else [None]
 
+            occurrences: dict[str, int] = {}
             for heading, text in chunks:
                 if not text:
                     continue
+                occurrences[heading] = seen = occurrences.get(heading, 0) + 1
                 for pid in project_ids:
                     row = Row(
                         title=doc_title,
@@ -903,7 +905,7 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
                             if src_file.exists()
                             else ""
                         ),
-                        row_key=_row_key(indexed_path, heading, pid, 1),
+                        row_key=_row_key(indexed_path, heading, pid, seen),
                         entry_hash=f_hash,
                     )
                     _insert(conn, LIBRARY, row)

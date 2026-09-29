@@ -36,7 +36,7 @@ from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
 from aft.install import systemd as systemd_install
-from aft.library import importing, manifest, survey
+from aft.library import importing, manifest, map_evidence, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -223,6 +223,12 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("manifest", help="path to manifest YAML file")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_import)
+
+    q = lsub.add_parser("check-map", help="verify claims in an imported index or map file")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("map_files", nargs="+", help="path to index or map file(s) to check")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_check_map)
     return parser
 
 
@@ -581,6 +587,10 @@ def cmd_library_validate(args) -> int:
 
 def cmd_library_import(args) -> int:
     return importing.run(args.manifest, path_override=args.path)
+
+
+def cmd_library_check_map(args) -> int:
+    return map_evidence.run(args.manifest, map_files=args.map_files, path_override=args.path)
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget
