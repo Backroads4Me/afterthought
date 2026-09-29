@@ -24,6 +24,7 @@ Two rules hold everything that is not afterthought's:
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import os
 import stat
@@ -102,17 +103,20 @@ def install(extensions: Path, *, dry_run: bool = False) -> Change:
     else - an older afterthought extension, or text someone wrote there by hand - is backed up
     and replaced, because this is the one path afterthought owns in pi's configuration.
     """
-    target = _target(extensions)
-    text = extension_source().read_text(encoding="utf-8")
-    original = _text(target)
-    if original == text:
-        return Change(changed=False, backup=None, diff="")
-    diff = _diff(target, original, text)
-    if dry_run:
-        return Change(changed=True, backup=None, diff=diff)
-    backup = _backup(target, original)
-    _write(target, text)
-    return Change(changed=True, backup=backup, diff=diff)
+    try:
+        target = _target(extensions)
+        text = extension_source().read_text(encoding="utf-8")
+        original = _text(target)
+        if original == text:
+            return Change(changed=False, backup=None, diff="")
+        diff = _diff(target, original, text)
+        if dry_run:
+            return Change(changed=True, backup=None, diff=diff)
+        backup = _backup(target, original)
+        _write(target, text)
+        return Change(changed=True, backup=backup, diff=diff)
+    except OSError as exc:
+        raise InstallError(f"cannot install into {extensions}: {exc}") from exc
 
 
 def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
@@ -127,20 +131,38 @@ def uninstall(extensions: Path, *, dry_run: bool = False) -> Change:
     where it stood.
     """
 
-    target = _target(extensions)
-    container = target.parent
-    original = _text(target)
-    if original is None and not container.exists():
-        return Change(changed=False, backup=None, diff="")
-    diff = _diff(target, original, "")
-    if dry_run:
-        return Change(changed=True, backup=None, diff=diff)
-    backup = _backup(target, None if original == _shipped() else original)
-    if target.exists():
-        target.unlink()
-    if container.is_dir() and not any(container.iterdir()):
-        container.rmdir()
-    return Change(changed=True, backup=backup, diff=diff)
+    try:
+        target = _target(extensions)
+        container = target.parent
+        original = _text(target)
+        if original is None and not _is_our_empty_dir(container):
+            return Change(changed=False, backup=None, diff="")
+        diff = _diff(target, original, "")
+        if dry_run:
+            return Change(changed=True, backup=None, diff=diff)
+        backup = _backup(target, None if original == _shipped() else original)
+        if target.exists():
+            target.unlink()
+        if _is_our_empty_dir(container):
+            # The extension file is what uninstalling means. A container that will
+            # not go away - one symlinked to a directory of somebody's own, say - is
+            # theirs to keep, and leaving it does not undo the removal above.
+            with contextlib.suppress(OSError):
+                container.rmdir()
+        return Change(changed=True, backup=backup, diff=diff)
+    except OSError as exc:
+        raise InstallError(f"cannot uninstall from {extensions}: {exc}") from exc
+
+
+def _is_our_empty_dir(container: Path) -> bool:
+    """True when ``container`` exists as a directory holding nothing.
+
+    An empty one is afterthought's own - the installer created it and nobody else has
+    put anything in it - so removing it is ours to do, and there is nothing left of
+    afterthought's in it to remove. Anything else standing in the way, including a
+    directory still holding somebody else's files, is not ours to touch.
+    """
+    return container.is_dir() and not any(container.iterdir())
 
 
 def _target(extensions: Path) -> Path:

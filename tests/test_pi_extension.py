@@ -45,13 +45,26 @@ with open(os.environ["AFT_RECORD"], "a", encoding="utf-8") as handle:
     handle.write(json.dumps({"argv": argv, "stdin": raw}) + "\\n")
 
 event = argv[-1] if argv else ""
+names = [name.strip() for name in os.environ.get("AFT_PRINT", "").split(",") if name.strip()]
+if event in names:
+    # Flushed, so a hook that then goes on hanging has still handed its text over.
+    print(f"MEMORY BLOCK for {event}", flush=True)
+
+chunked = [name.strip() for name in os.environ.get("AFT_CHUNKED", "").split(",") if name.strip()]
+if event in chunked:
+    # The final character arrives as two writes a beat apart, so the reader holds a
+    # partial UTF-8 sequence in one chunk and its remainder in the next.
+    line = f"MEMORY BLOCK for {event} █"
+    data = line.encode("utf-8")
+    split = len(data) - len(line[-1].encode("utf-8")) + 1
+    for piece in (data[:split], data[split:]):
+        sys.stdout.buffer.write(piece)
+        sys.stdout.buffer.flush()
+        time.sleep(0.2)
+
 sleeps = os.environ.get("AFT_SLEEP_EVENT", "")
 if event in [name.strip() for name in sleeps.split(",") if name.strip()]:
     time.sleep(float(os.environ.get("AFT_SLEEP", "0")))
-
-printed = os.environ.get("AFT_PRINT", "")
-if event in [name.strip() for name in printed.split(",") if name.strip()]:
-    print(f"MEMORY BLOCK for {event}")
 """
 
 HARNESS = """
@@ -121,9 +134,10 @@ def node() -> list[str]:
 def harness(tmp_path) -> Callable[..., tuple[dict, list[dict]]]:
     """Run the extension against a fake pi and a fake ``aft``, reporting what each observed.
 
-    ``print_for`` names the events whose hook prints a block, and ``sleep_for`` the events
-    whose hook sleeps past the extension's own bound, so each test chooses which half of the
-    contract it is looking at.
+    ``print_for`` names the events whose hook prints a block, ``chunked`` the events whose hook
+    prints one whose last character arrives split across two writes, and ``sleep_for`` the
+    events whose hook sleeps past the extension's own bound, so each test chooses which half of
+    the contract it is looking at.
     """
     root = tmp_path / "pi-extension"
     root.mkdir()
@@ -137,6 +151,7 @@ def harness(tmp_path) -> Callable[..., tuple[dict, list[dict]]]:
     def run(
         *,
         print_for: str = ",".join(EVENTS),
+        chunked: str = "",
         sleep_for: str = "",
         sleep_seconds: float = 0.0,
         session_file: str = SESSION_FILE,
@@ -146,6 +161,7 @@ def harness(tmp_path) -> Callable[..., tuple[dict, list[dict]]]:
             "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
             "AFT_RECORD": str(record),
             "AFT_PRINT": print_for,
+            "AFT_CHUNKED": chunked,
             "AFT_SLEEP_EVENT": sleep_for,
             "AFT_SLEEP": str(sleep_seconds),
         }
@@ -259,3 +275,26 @@ def test_shutdown_waits_two_seconds_on_a_hook_that_ignores_them(harness, tmp_pat
     }
     assert report["shutdownReturnedNothing"] is True
     assert report["shutdownMs"] < 3000, "the bound is 2000 ms, with room for a loaded runner"
+
+
+def test_a_block_split_across_reads_arrives_whole(harness, tmp_path):
+    """One character of the block arrives as two writes, so the reader is handed a
+    partial UTF-8 sequence and then its remainder. Decoding each read on its own would
+    turn that character into replacement marks, and the marks would be the prompt."""
+    report, _ = harness(print_for="", chunked="session_start")
+
+    assert report["afterStart"] == {
+        "cwd": str(tmp_path),
+        SECTION: "MEMORY BLOCK for session_start █",
+    }
+
+
+def test_a_hook_killed_on_the_bound_contributes_no_block(harness, tmp_path):
+    """A hook that printed and then hung has not finished printing. What reached the
+    pipe is a truncated block, and the extension drops it rather than keeping a partial
+    memory section in front of the model for the rest of the session."""
+    report, calls = harness(print_for="session_start", sleep_for="session_start", sleep_seconds=3)
+
+    assert payload_for(calls, "session_start")["hook_event_name"] == "session_start"
+    assert report["afterStart"] == {"cwd": str(tmp_path)}
+    assert report["afterCompact"] == {"cwd": str(tmp_path)}

@@ -47,6 +47,15 @@ def backups(extensions: Path) -> set[str]:
     return {name for name in names(pi_install.target_path(extensions).parent) if ".bak" in name}
 
 
+def added_lines(diff: str) -> list[str]:
+    """The lines a unified diff says the file will hold: its additions, headers aside."""
+    return [
+        line[1:]
+        for line in diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    ]
+
+
 def test_install_copies_the_shipped_extension(extensions):
     target = install(extensions)
 
@@ -112,7 +121,7 @@ def test_dry_run_reports_the_new_file_and_writes_nothing(extensions):
     change = pi_install.install(extensions, dry_run=True)
 
     assert change.changed is True
-    assert "+export default function" in change.diff
+    assert added_lines(change.diff) == SHIPPED.splitlines()
     assert names(extensions) == set()
 
 
@@ -194,6 +203,37 @@ def test_uninstall_refuses_a_file_where_our_directory_belongs(extensions):
     assert container.read_text(encoding="utf-8") == "// not a directory\n"
 
 
+def test_uninstall_leaves_a_directory_of_nothing_of_ours(extensions):
+    """No extension file and a directory holding only somebody else's text: there is
+    nothing of afterthought's left to take away, so nothing goes and nothing is said."""
+    note = extensions / pi_install.EXTENSION_DIR / "notes.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# theirs\n", encoding="utf-8")
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.changed is False
+    assert note.read_text(encoding="utf-8") == "# theirs\n"
+    assert names(extensions) == {pi_install.EXTENSION_DIR}
+
+
+def test_uninstall_through_a_symlink_of_somebody_elses(extensions, tmp_path):
+    """A user who keeps pi extensions in dotfiles can point afterthought's directory at
+    one of their own. The extension goes, their symlink stays, and the run says so."""
+    theirs = tmp_path / "dotfiles" / "afterthought"
+    theirs.mkdir(parents=True)
+    container = extensions / pi_install.EXTENSION_DIR
+    container.symlink_to(theirs)
+    pi_install.target_path(extensions).write_text(SHIPPED, encoding="utf-8")
+
+    change = pi_install.uninstall(extensions)
+
+    assert change.changed is True
+    assert names(extensions) == {pi_install.EXTENSION_DIR}, "their symlink is theirs to keep"
+    assert names(theirs) == set()
+    assert change.backup is None, "the shipped text needs no copy to survive it"
+
+
 def cli_env(monkeypatch, tmp_path, *, use_agent_dir: bool) -> Path:
     """Point both spellings of pi's agent directory at ``tmp_path`` and return extensions.
 
@@ -235,7 +275,35 @@ def test_cli_dry_run_prints_the_diff_and_writes_nothing(monkeypatch, tmp_path, c
     assert main(["install", "pi", "--dry-run"]) == 0
 
     assert names(extensions) == set()
-    assert f"{pi_install.target_path(extensions)} (before)" in capsys.readouterr().out
+    assert added_lines(capsys.readouterr().out) == SHIPPED.splitlines()
+
+
+def test_cli_uninstall_dry_run_says_what_the_real_run_would_say(monkeypatch, tmp_path, capsys):
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+
+    assert main(["install", "pi", "--dry-run", "--uninstall"]) == 0
+    dry = capsys.readouterr().out
+
+    assert main(["install", "pi", "--uninstall"]) == 0
+
+    assert dry == capsys.readouterr().out == f"no afterthought extension in {extensions}\n"
+    assert pi_install.EXTENSION_FILE not in dry, "an uninstall cannot talk about text to write"
+
+
+def test_cli_uninstall_names_the_empty_directory_it_takes_away(monkeypatch, tmp_path, capsys):
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    container = extensions / pi_install.EXTENSION_DIR
+    container.mkdir(parents=True)
+
+    assert main(["install", "pi", "--dry-run", "--uninstall"]) == 0
+
+    assert capsys.readouterr().out == f"would remove {container}\n"
+    assert container.is_dir(), "a dry run removes nothing"
+
+    assert main(["install", "pi", "--uninstall"]) == 0
+
+    assert capsys.readouterr().out == f"removed {container}\n"
+    assert not container.exists()
 
 
 def test_cli_reports_what_it_refused_and_fails(monkeypatch, tmp_path, capsys):
@@ -246,6 +314,18 @@ def test_cli_reports_what_it_refused_and_fails(monkeypatch, tmp_path, capsys):
     assert main(["install", "pi"]) == 2
 
     assert f"{extensions} is not a directory" in capsys.readouterr().err
+
+
+def test_cli_reports_a_write_the_os_refuses(monkeypatch, tmp_path, capsys):
+    """A dangling symlink where afterthought's directory belongs is a dotfiles user's
+    doing. The answer is one line and exit 2, not a traceback out of the installer."""
+    extensions = cli_env(monkeypatch, tmp_path, use_agent_dir=True)
+    extensions.mkdir(parents=True)
+    (extensions / pi_install.EXTENSION_DIR).symlink_to(tmp_path / "dotfiles" / "afterthought")
+
+    assert main(["install", "pi"]) == 2
+
+    assert f"cannot install into {extensions}" in capsys.readouterr().err
 
 
 def test_cli_help_lists_the_agent_it_installs(capsys):

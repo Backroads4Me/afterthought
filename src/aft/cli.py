@@ -235,18 +235,34 @@ def cmd_install_pi(args) -> int:
         else pi_install.install(extensions, dry_run=args.dry_run)
     )
     target = pi_install.target_path(extensions)
+    if not change.changed:
+        print(_install_pi_status(args, target=target, extensions=extensions))
+        return 0
     if args.dry_run:
-        print(change.diff or f"{target} is already what afterthought ships")
+        # The change itself is what --dry-run reports: replaced or removed text as a
+        # diff, and afterthought's own directory by name for the one change a diff
+        # cannot show, the empty directory the extension file already left behind.
+        print(change.diff or f"would remove {target.parent}")
         return 0
     if change.backup is not None:
         print(f"backed up the previous {target.name} to {change.backup}")
     if args.uninstall:
-        print(
-            f"removed {target}" if change.changed else f"no afterthought extension in {extensions}"
-        )
+        # With no text to diff, what an uninstall took away was the directory.
+        print(f"removed {target if change.diff else target.parent}")
     else:
-        print(f"installed {target}" if change.changed else f"{target} is already up to date")
+        print(f"installed {target}")
     return 0
+
+
+def _install_pi_status(args, *, target: Path, extensions: Path) -> str:
+    """The line for a command that found nothing to do.
+
+    One place, so the real run and ``--dry-run`` say the same standing still in the same
+    words - install's words or uninstall's, whichever the command asked for.
+    """
+    if args.uninstall:
+        return f"no afterthought extension in {extensions}"
+    return f"{target} is already up to date"
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget

@@ -98,29 +98,36 @@ export default function (pi: ExtensionAPI) {
       let stdout = ""
       let settled = false
       let expiry: ReturnType<typeof setTimeout>
-      const finish = (timedOut: boolean) => {
+      const finish = (text: string) => {
         if (settled) {
           return
         }
         settled = true
         clearTimeout(expiry)
-        if (timedOut) {
-          child.kill()
-        }
-        resolve(stdout)
+        resolve(text)
       }
-      expiry = setTimeout(() => finish(true), HOOK_TIMEOUT_MS)
-      child.stdout?.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString()
+      // A command killed on the bound leaves only the bytes that had reached the
+      // pipe, and a truncated memory block injected for the rest of a session is
+      // worse than no block at all, so nothing received so far is kept.
+      expiry = setTimeout(() => {
+        child.kill()
+        finish("")
+      }, HOOK_TIMEOUT_MS)
+      // Decoded as a stream rather than per chunk: a chunk boundary falls at an
+      // arbitrary byte, and a character straddling one survives only when the
+      // decoder holds the partial sequence until its remainder arrives.
+      child.stdout?.setEncoding("utf8")
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk
       })
       child.on("error", () => {
         if (!missingAftReported) {
           missingAftReported = true
           console.warn(`[afterthought] cannot run \`${AFT}\` - is it installed and in PATH?`)
         }
-        finish(false)
+        finish("")
       })
-      child.on("close", () => finish(false))
+      child.on("close", () => finish(stdout))
       // A command that exits before reading its whole stdin leaves a broken pipe behind, and
       // the exit is the fact that matters, not the pipe.
       child.stdin?.on("error", () => {})
