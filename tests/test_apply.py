@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from aft import config as configmod
-from aft import evidence, inject, page, pagewrite, vault
+from aft import evidence, inject, model, page, pagewrite, vault
 from aft.dream import apply, rules, schedule
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
@@ -1602,3 +1602,489 @@ def test_lint_failure_leaves_unrelated_uncommitted_file_untouched(
     # Overview.md must be restored to its clean state without the new fact
     overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "New fact that triggers lint error." not in overview_text
+
+
+def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake):
+    """A failure partway through a run restores every path it wrote, leaves the digests
+    unconsumed and re-raises; the next run finds a clean vault and makes no
+    checkpoint: human edits commit."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    overview = seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Existing line. [observed] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
+    )
+
+    first = write_digest(
+        cfg,
+        "widget",
+        "d-a",
+        facts=[
+            {
+                "statement": "First fact.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[{"id": "s2", "resource": "aft://session/c/2#e1", "quote": "first fact quote"}],
+    )
+    second = write_digest(
+        cfg,
+        "widget",
+        "d-b",
+        facts=[
+            {
+                "statement": "Second fact.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s3",
+            }
+        ],
+        sources=[{"id": "s3", "resource": "aft://session/c/2#e2", "quote": "second fact quote"}],
+    )
+
+    before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+    fake.script = [reply("add", None, "first"), Reply(status=500)]
+
+    with pytest.raises(model.ModelError):
+        schedule.run(cfg, now=NOW)
+
+    # Nothing of the run is left in the vault: clean worktree, no commit
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
+    assert "First fact." not in overview.read_text()
+    for digest in (first, second):
+        fm, _, _, _ = page.split_frontmatter(digest.read_text())
+        assert not fm["aft"].get("consumed")
+
+    # Both digests still wait, and their bytes carry no trace of the failed run, so the
+    # next run has no human edit to checkpoint and dreams each fact exactly once.
+    fake.script = [reply("add", None, "first again"), reply("add", None, "second again")]
+    res = schedule.run(cfg, now=NOW + timedelta(minutes=45))
+    assert res.checkpoint is None
+    assert res.tagged == []
+    assert res.ran == ["widget"]
+    text = overview.read_text()
+    assert text.count("- First fact.") == 1
+    assert text.count("- Second fact.") == 1
+
+
+def test_gate_counts_line_footnotes_by_evidence_date_not_line_date(initialized, home, fake):
+    """R3 weighs a target line's own footnotes by the date of their evidence entry, not
+    the date on the line: the aged signal of session A counts half, so the candidate's
+    raw counts reach the gate's numbers while its weighted score does not, and it
+    stays a candidate."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    from aft.readers import USER, Entry
+
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sessA",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1",
+                time=datetime(2026, 8, 1, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="checkpoint quote one",
+                is_error=False,
+            )
+        ],
+    )
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sessB",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e2",
+                time=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="checkpoint quote two",
+                is_error=False,
+            )
+        ],
+    )
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## Candidates\n\n- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] (signals 2/3, sessions 2/2)\n",
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sessA#e1",
+                "quote": "checkpoint quote one",
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sessB#e2",
+                "quote": "checkpoint quote two",
+            },
+        ],
+    )
+
+    # The new quote is from session A and dated today: the raw counts reach 3 signals
+    # across 2 sessions while the aged s1 pulls the weighted score to 2.5.
+    write_digest(
+        cfg,
+        "widget",
+        "d-gate",
+        facts=[
+            {
+                "statement": "Sessions need checkpoint capture.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s10",
+            }
+        ],
+        sources=[
+            {
+                "id": "s10",
+                "resource": "aft://session/claude/sessA#e9",
+                "quote": "checkpoint capture again",
+            }
+        ],
+    )
+
+    fake.script = [reply("confirm", "L1", "stated again")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert report.promoted == []
+    assert len(report.confirmed) == 1
+
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    text = overview.read_text()
+    # The footnotes now reach the gate's raw numbers, and the line still sits in
+    # Candidates: the weighted score of its evidence does not.
+    assert "(signals 3/3, sessions 2/2)" in text
+    parsed = page.parse(text, overview.relative_to(cfg.vault))
+    line = next(
+        f for f in parsed.facts if f.statement == "Sessions need checkpoint capture."
+    )
+    assert line.state == page.CANDIDATE
+
+
+def test_line_footnote_of_a_worker_session_does_not_count_toward_the_gate(
+    initialized, home, fake
+):
+    """A target line's footnote reads its origin from the evidence entry and the digest of
+    its session: a worker session's quote adds nothing to the gate, so the candidate
+    stays below it."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    from aft.readers import USER, Entry
+
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sessW",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1",
+                time=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="checkpoint quote w",
+                is_error=False,
+            )
+        ],
+    )
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sessB",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e2",
+                time=datetime(2026, 10, 1, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="checkpoint quote b",
+                is_error=False,
+            )
+        ],
+    )
+
+    # The digest of session sessW marks it a worker session; it is consumed, so it only
+    # stands as the record of how that session was classified.
+    write_digest(
+        cfg,
+        "widget",
+        "2026-09-30-claude-sessW",
+        facts=[],
+        sources=[],
+        role="worker",
+        consumed="dream-widget-20260930T120000Z",
+    )
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## Candidates\n\n- Sessions need checkpoint capture. [inferred] 2026-10-01 [^s1] [^s2] (signals 2/3, sessions 2/2)\n",
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sessW#e1",
+                "quote": "checkpoint quote w",
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sessB#e2",
+                "quote": "checkpoint quote b",
+            },
+        ],
+    )
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-worker-gate",
+        facts=[
+            {
+                "statement": "Sessions need checkpoint capture.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s10",
+            }
+        ],
+        sources=[
+            {
+                "id": "s10",
+                "resource": "aft://session/claude/sessD#e5",
+                "quote": "checkpoint capture stated",
+            }
+        ],
+    )
+
+    fake.script = [reply("confirm", "L1", "stated again")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert report.promoted == []
+
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    parsed = page.parse(overview.read_text(), overview.relative_to(cfg.vault))
+    line = next(
+        f for f in parsed.facts if f.statement == "Sessions need checkpoint capture."
+    )
+    assert line.state == page.CANDIDATE
+
+
+NOTES_PAGE = (
+    "---\n"
+    "type: Concept\n"
+    "title: Notes\n"
+    "description: Project notes.\n"
+    "sources:\n"
+    "  - id: s1\n"
+    "    resource: aft://session/c/1#e1\n"
+    "    quote: \"existing quote\"\n"
+    "aft:\n"
+    "  project: p_widget\n"
+    "---\n\n"
+    "## Facts\n\n"
+    "- A noted fact. [observed] 2026-09-30 [^s1]\n"
+)
+
+
+def test_dream_commit_carries_only_the_paths_the_run_wrote(initialized, home, fake, monkeypatch):
+    """A page edited while the run waits on the model stays out of the dream commit and
+    keeps the person's bytes."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Existing line. [observed] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
+    )
+
+    notes = cfg.vault / "projects" / "widget" / "notes.md"
+    notes.write_text(NOTES_PAGE, encoding="utf-8")
+    vault.commit(cfg.vault, ["projects/widget/notes.md"], "add notes")
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-scope",
+        facts=[
+            {
+                "statement": "The index uses FTS5.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {"id": "s2", "resource": "aft://session/c/9#e1", "quote": "fts5 it is"},
+        ],
+    )
+
+    real_decide = apply.decide.decide
+
+    def deciding(config, new_fact, quote, slug):
+        """The page changes after the model call, before any write of the run."""
+        proposal = real_decide(config, new_fact, quote, slug)
+        notes.write_text(notes.read_text() + "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n")
+        return proposal
+
+    monkeypatch.setattr(apply.decide, "decide", deciding)
+
+    fake.script = [reply("add", None, "new decision")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert report.commit is not None
+
+    files = run_git(
+        ["show", "--name-only", "--format=", report.commit], cfg.vault
+    ).splitlines()
+    assert "projects/widget/overview.md" in files
+    assert "projects/widget/notes.md" not in files
+
+    # The edit is untouched and still uncommitted: the run neither staged it nor wrote
+    # over it.
+    assert "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]" in notes.read_text()
+    assert run_git(["diff", "--name-only"], cfg.vault) == "projects/widget/notes.md"
+    assert run_git(["diff", "--cached", "--name-only"], cfg.vault) == ""
+
+
+def test_lint_rollback_restores_run_writes_not_unrelated_edits(
+    initialized, home, fake, monkeypatch
+):
+    """The lint rollback restores the paths this run wrote from the content this run
+    captured, so a tracked page the person edited stays byte-identical and
+    uncommitted."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Existing line. [observed] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
+    )
+
+    notes = cfg.vault / "projects" / "widget" / "notes.md"
+    notes.write_text(NOTES_PAGE, encoding="utf-8")
+    vault.commit(cfg.vault, ["projects/widget/notes.md"], "add notes")
+    notes.write_text(notes.read_text() + "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n")
+
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-lint",
+        facts=[
+            {
+                "statement": "The index uses FTS5.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {"id": "s2", "resource": "aft://session/c/9#e1", "quote": "fts5 it is"},
+        ],
+    )
+
+    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+    fake.script = [reply("add", None, "new decision")]
+    before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    with pytest.raises(apply.ApplyError, match="lint failed"):
+        apply.run_project(cfg, "widget", [dpath], now=NOW)
+
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
+    assert "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]" in notes.read_text()
+    assert run_git(["diff", "--name-only"], cfg.vault) == "projects/widget/notes.md"
+    assert run_git(["diff", "--cached", "--name-only"], cfg.vault) == ""
+    fm, _, _, _ = page.split_frontmatter(dpath.read_text())
+    assert not fm["aft"].get("consumed")
+
+
+def test_global_confirm_writes_to_the_targets_page(initialized, home, fake):
+    """A global fact that confirms a line is applied to the page that line stands on, not
+    to a global page picked from the new fact's kind."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    prefs = cfg.vault / "global" / "preferences.md"
+    prefs.write_text(
+        "---\n"
+        "type: Preferences\n"
+        "title: Preferences\n"
+        "description: Your preferences that apply in every project.\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/sessP#e1\n"
+        "    quote: \"no rgb please\"\n"
+        "---\n\n"
+        "## Preferences\n\n"
+        "- No RGB lighting. [stated] 2026-09-01 [^s1]\n",
+        encoding="utf-8",
+    )
+    vault.commit(cfg.vault, ["global/preferences.md"], "seed preferences")
+    environment = cfg.vault / "global" / "environment.md"
+    environment_before = environment.read_text()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-global",
+        facts=[
+            {
+                "statement": "No RGB lighting.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s10",
+                "scope": "global",
+            }
+        ],
+        sources=[
+            {
+                "id": "s10",
+                "resource": "aft://session/claude/sessQ#e1",
+                "quote": "still no rgb lighting",
+            }
+        ],
+    )
+
+    fake.script = [reply("confirm", "L1", "stated again")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.confirmed) == 1
+    assert report.confirmed[0].path == "global/preferences.md"
+
+    assert "- No RGB lighting. [stated] 2026-10-05 [^s1] [^s2]" in prefs.read_text()
+    assert environment.read_text() == environment_before

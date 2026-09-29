@@ -8,7 +8,8 @@ moves superseded lines older than 90 days to archive/<page path>;
 flags pages over 12,000 characters in the report data;
 regenerates each index.md and appends to log.md;
 runs lint and aborts the run without committing if lint fails;
-marks consumed digests with aft.consumed: <commit>;
+marks consumed digests with aft.consumed: <run id>, which the run's commit message
+also names, so the commit that consumed a digest is found with git log --grep;
 makes one commit per project run (separate from M4.1's checkpoint and tagging commits).
 """
 
@@ -159,6 +160,10 @@ def run_project(
 
     now = now or datetime.now(UTC)
     today = now.date().isoformat()
+    # A digest is marked consumed by the same commit that consumes it, so the marker
+    # cannot hold that commit's sha: it holds this run id instead, and the commit
+    # message names the same id, so `git log --grep <run id>` answers with the sha.
+    run_id = f"dream-{slug}-{now:%Y%m%dT%H%M%SZ}"
     vault_path = config.vault
 
     report = ProjectRunReport(project=slug)
@@ -318,8 +323,6 @@ def run_project(
                 )
                 outcome = proposal.check(context)
 
-                action = outcome.action if isinstance(outcome, rules.Apply) else outcome.to_action
-
                 if isinstance(outcome, rules.Reject):
                     report.rejected.append(
                         RejectedFact(
@@ -329,7 +332,10 @@ def run_project(
                             reason=proposal.decision.reason,
                         )
                     )
-                elif action == "skip":
+                    continue
+
+                action = outcome.action if isinstance(outcome, rules.Apply) else outcome.to_action
+                if action == "skip":
                     report.skips.append(
                         SkipFact(
                             statement=new_fact.statement,
@@ -528,9 +534,7 @@ def run_project(
                         doc.add_callout(target_fact, callout_type, note_text, today)
                         if action == "conflict":
                             rule_name = (
-                                outcome.rule
-                                if isinstance(outcome, rules.Downgrade)
-                                else "conflict"
+                                outcome.rule if isinstance(outcome, rules.Downgrade) else "conflict"
                             )
                             report.conflicts.append(
                                 ConflictFact(
@@ -561,7 +565,6 @@ def run_project(
             dfm, dbody, _, _ = page.split_frontmatter(d_text)
             if dfm is not None:
                 daft = dfm.setdefault("aft", {})
-                run_id = f"dream-{slug}-{now.strftime('%Y%m%dT%H%M%SZ')}"
                 daft["consumed"] = run_id
                 new_fm_yaml = yaml.safe_dump(dfm, sort_keys=False, allow_unicode=True).strip()
                 record_write(digest_path)
@@ -610,7 +613,17 @@ def run_project(
                 git(["add", "--", *rel_written], cwd=vault_path)
                 staged = git(["diff", "--cached", "--name-only"], cwd=vault_path).stdout.strip()
                 if staged:
-                    git(["commit", "-q", "-m", f"aft: dream {slug}"], cwd=vault_path)
+                    git(
+                        [
+                            "commit",
+                            "-q",
+                            "-m",
+                            f"aft: dream {slug}",
+                            "-m",
+                            f"Run: {run_id}",
+                        ],
+                        cwd=vault_path,
+                    )
                     report.commit = git(["rev-parse", "HEAD"], cwd=vault_path).stdout.strip()
                 else:
                     report.commit = None
@@ -728,4 +741,3 @@ def _is_quote_yours(config: Config, resource: str, default: bool = False) -> boo
                 except Exception:
                     return False
     return default
-
