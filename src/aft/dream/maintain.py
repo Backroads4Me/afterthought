@@ -6,6 +6,7 @@ flagging oversize pages, regenerating index.md files, and appending to log.md.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -127,16 +128,23 @@ def check_anchors(
             else:
                 content = show_res.stdout
                 is_broken = False
+                rg_bin = shutil.which("rg")
                 for word in all_of:
-                    rg_res = subprocess.run(
-                        ["rg", "-F", "-q", str(word)],
-                        input=content,
-                        capture_output=True,
-                        text=True,
-                    )
-                    if rg_res.returncode != 0:
-                        is_broken = True
-                        break
+                    target_str = str(word)
+                    if rg_bin is not None:
+                        rg_res = subprocess.run(
+                            [rg_bin, "-F", "-q", target_str],
+                            input=content,
+                            capture_output=True,
+                            text=True,
+                        )
+                        if rg_res.returncode != 0:
+                            is_broken = True
+                            break
+                    else:
+                        if target_str not in content:
+                            is_broken = True
+                            break
 
             for fact in list(doc.page.facts):
                 if sid not in fact.refs:
