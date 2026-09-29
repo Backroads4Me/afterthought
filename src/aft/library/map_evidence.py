@@ -3,15 +3,16 @@
 An existing index, table of contents, or instruction file in an imported collection
 is evidence to check, never a map or a rule to follow. Each claim taken from it is
 checked:
-1. Target path exists in the collection.
+1. Target path exists in the collection (and does not escape the collection root).
 2. Heading or key exists in the target document.
-3. Quoted description appears in the target document.
+3. Quoted description appears in the target document (checked against extracted text).
 
 Claims that fail are listed in the import report and never used.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -19,6 +20,29 @@ from pathlib import Path
 from typing import Any
 
 from aft.library.importing import extract_document_chunks
+
+MAP_EXTENSIONS = {".json", ".jsonl", ".md", ".markdown", ".txt"}
+MAP_NAME_KEYWORDS = {"index", "toc", "map", "table_of_contents", "catalog", "manifest"}
+
+
+def is_map_file(rel_path: str | Path) -> bool:
+    """Identify if an excluded file is a candidate map or index file.
+
+    Matches:
+    - Files starting with 'readme' (e.g. README.md, README.txt, README)
+    - Files whose stem is a map keyword (index, toc, map, table_of_contents, etc.)
+      with a supported extension
+    """
+    p = Path(rel_path)
+    lower_name = p.name.lower()
+    suffix = p.suffix.lower()
+    stem = p.stem.lower()
+
+    if lower_name.startswith("readme") and (suffix in MAP_EXTENSIONS or suffix == ""):
+        return True
+    if stem in MAP_NAME_KEYWORDS and suffix in MAP_EXTENSIONS:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -56,13 +80,71 @@ def _normalize_ws(text: str) -> str:
     return " ".join(text.split())
 
 
+def _get_document_chunks(
+    target_file: Path,
+    rel_path: str,
+    extracted_chunks: dict[str, list[tuple[str, str]]] | None = None,
+    home: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Retrieve extracted text chunks for a document, using cache or extractor (BUILD-PLAN M7.3)."""
+    # 1. In-memory extracted chunks if passed (e.g. during import_collection)
+    if extracted_chunks is not None and rel_path in extracted_chunks:
+        return extracted_chunks[rel_path]
+
+    # 2. Cached extraction in home / library / <hash>.json (M7.3 stored extraction)
+    if home is not None:
+        try:
+            file_bytes = target_file.read_bytes()
+            f_hash = hashlib.sha256(file_bytes).hexdigest()
+            cache_file = home / "library" / f"{f_hash}.json"
+            if cache_file.is_file():
+                data = json.loads(cache_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and "chunks" in data:
+                    return [(c.get("heading", ""), c.get("text", "")) for c in data["chunks"]]
+        except OSError:
+            pass
+
+    # 3. Fresh extraction via extract_document_chunks
+    return extract_document_chunks(target_file)
+
+
 def check_claim(
     claim: Claim,
     collection_root: Path,
     extracted_chunks: dict[str, list[tuple[str, str]]] | None = None,
+    home: Path | None = None,
 ) -> ClaimResult:
     """Verify one claim against target documents in collection_root."""
-    target_file = collection_root / claim.target_path
+    # Check for unparseable table row / missing target
+    if claim.target_path in ("<no link>", "<missing path>"):
+        reason = (
+            "table row has no markdown link"
+            if claim.target_path == "<no link>"
+            else "map entry has no target path"
+        )
+        return ClaimResult(claim=claim, passed=False, reason=reason)
+
+    # Path containment check (B2)
+    resolved_root = collection_root.resolve()
+    target_p = Path(claim.target_path)
+    if target_p.is_absolute():
+        return ClaimResult(
+            claim=claim,
+            passed=False,
+            reason=(
+                f"target path '{claim.target_path}' is absolute; "
+                "must be relative to collection root"
+            ),
+        )
+
+    target_file = (collection_root / target_p).resolve()
+    if not target_file.is_relative_to(resolved_root):
+        return ClaimResult(
+            claim=claim,
+            passed=False,
+            reason=f"target path '{claim.target_path}' escapes collection root",
+        )
+
     if not target_file.exists():
         return ClaimResult(
             claim=claim,
@@ -76,14 +158,10 @@ def check_claim(
             reason=f"target path '{claim.target_path}' is not a file",
         )
 
-    # 1. Heading check
+    # 1. Heading check against extracted text (B3)
     if claim.heading is not None:
         target_heading = claim.heading.strip()
-        chunks: list[tuple[str, str]]
-        if extracted_chunks is not None and claim.target_path in extracted_chunks:
-            chunks = extracted_chunks[claim.target_path]
-        else:
-            chunks = extract_document_chunks(target_file)
+        chunks = _get_document_chunks(target_file, claim.target_path, extracted_chunks, home=home)
 
         known_headings = [h.strip() for h, _ in chunks if h]
         clean_known = [re.sub(r"^#+\s*", "", h).strip() for h in known_headings]
@@ -137,19 +215,14 @@ def check_claim(
                 reason=f"cannot read JSON from '{claim.target_path}' to verify key '{claim.key}'",
             )
 
-    # 3. Quoted description check
+    # 3. Quoted description check against extracted text (B3)
     if claim.quote is not None:
         quote = claim.quote.strip()
         if quote:
-            doc_text = ""
-            if extracted_chunks is not None and claim.target_path in extracted_chunks:
-                doc_text = "\n".join(t for _, t in extracted_chunks[claim.target_path])
-            else:
-                try:
-                    doc_text = target_file.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    chunks = extract_document_chunks(target_file)
-                    doc_text = "\n".join(t for _, t in chunks)
+            chunks = _get_document_chunks(
+                target_file, claim.target_path, extracted_chunks, home=home
+            )
+            doc_text = "\n".join(t for _, t in chunks)
 
             if quote not in doc_text and _normalize_ws(quote) not in _normalize_ws(doc_text):
                 return ClaimResult(
@@ -175,6 +248,13 @@ def parse_claims_from_json(map_path: Path, rel_source: str | None = None) -> lis
                 continue
             path = doc.get("path") or doc.get("file")
             if not path or not isinstance(path, str):
+                claims.append(
+                    Claim(
+                        target_path="<missing path>",
+                        quote=doc.get("description") or doc.get("quote"),
+                        source_map=src,
+                    )
+                )
                 continue
             doc_quote = doc.get("description") or doc.get("quote")
             headings = doc.get("headings", [])
@@ -207,6 +287,15 @@ def parse_claims_from_json(map_path: Path, rel_source: str | None = None) -> lis
                 continue
             path = item.get("path") or item.get("file") or item.get("target")
             if not path or not isinstance(path, str):
+                claims.append(
+                    Claim(
+                        target_path="<missing path>",
+                        heading=item.get("heading") or item.get("title"),
+                        key=item.get("key"),
+                        quote=item.get("quote") or item.get("description"),
+                        source_map=src,
+                    )
+                )
                 continue
             claims.append(
                 Claim(
@@ -266,8 +355,44 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
     claims: list[Claim] = []
 
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
-    for line_num, line in enumerate(text.splitlines(), start=1):
+    wikilink_re = re.compile(r"\[\[([^|\]]+)(?:\|([^\]]+))?\]\]")
+
+    lines = text.splitlines()
+
+    # Identify divider lines in tables: | --- | --- |
+    divider_indices = set()
+    for idx, line in enumerate(lines):
+        if "|" in line:
+            cells = [c.strip() for c in line.split("|") if c.strip()]
+            if cells and all(re.match(r"^:?-+:?$", c) for c in cells):
+                divider_indices.add(idx)
+
+    # Header lines are table rows immediately preceding a divider line
+    header_indices = {idx - 1 for idx in divider_indices if idx > 0 and "|" in lines[idx - 1]}
+
+    for line_num, line in enumerate(lines, start=1):
+        idx = line_num - 1
         matches = link_re.findall(line)
+        wiki_matches = wikilink_re.findall(line)
+
+        # Check for table rows without links (non-blocking finding: reported, not silent)
+        if "|" in line:
+            cells = [c.strip() for c in line.split("|") if c.strip()]
+            if not cells or idx in divider_indices or idx in header_indices:
+                continue
+            if not matches and not wiki_matches:
+                row_desc = cells[0] if cells else ""
+                claims.append(
+                    Claim(
+                        target_path="<no link>",
+                        quote=row_desc,
+                        source_map=src,
+                        line=line_num,
+                    )
+                )
+                continue
+
+        # Markdown links
         for link_text, link_target in matches:
             if link_target.startswith(("http://", "https://", "mailto:")):
                 continue
@@ -290,6 +415,29 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
                     line=line_num,
                 )
             )
+
+        # Wikilinks [[target#heading|label]] or [[target]]
+        for target, label in wiki_matches:
+            path = target.split("#")[0].strip()
+            heading = target.split("#")[1].strip() if "#" in target else None
+            if not path:
+                continue
+            quote = label if label else None
+            if "|" in line:
+                cells = [c.strip() for c in line.split("|") if c.strip()]
+                desc_cells = [c for c in cells if target not in c and (not label or label not in c)]
+                if desc_cells:
+                    quote = desc_cells[0]
+            claims.append(
+                Claim(
+                    target_path=path,
+                    heading=heading,
+                    quote=quote,
+                    source_map=src,
+                    line=line_num,
+                )
+            )
+
     return claims
 
 
@@ -299,7 +447,7 @@ def load_claims_from_file(map_file: Path, rel_source: str | None = None) -> list
     suffix = map_file.suffix.lower()
     if suffix in (".json", ".jsonl"):
         return parse_claims_from_json(map_file, src)
-    if suffix in (".md", ".markdown", ".txt"):
+    if suffix in (".md", ".markdown", ".txt") or suffix == "":
         return parse_claims_from_markdown(map_file, src)
     return []
 
@@ -309,38 +457,84 @@ def check_map_file(
     collection_root: Path,
     rel_source: str | None = None,
     extracted_chunks: dict[str, list[tuple[str, str]]] | None = None,
+    home: Path | None = None,
 ) -> list[ClaimResult]:
     """Load and verify all claims in map_file against collection_root."""
-    claims = load_claims_from_file(map_file, rel_source)
-    return [check_claim(c, collection_root, extracted_chunks) for c in claims]
+    src = rel_source or map_file.name
+    if not map_file.exists() or not map_file.is_file():
+        return [
+            ClaimResult(
+                claim=Claim(target_path=src, source_map=src),
+                passed=False,
+                reason=f"map file '{src}' does not exist or is not a file",
+            )
+        ]
+    try:
+        claims = load_claims_from_file(map_file, src)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        return [
+            ClaimResult(
+                claim=Claim(target_path=src, source_map=src),
+                passed=False,
+                reason=f"cannot read map file '{src}': {exc}",
+            )
+        ]
+    return [check_claim(c, collection_root, extracted_chunks, home=home) for c in claims]
 
 
 def verify_map_files(
     map_files: list[Path | str],
     collection_root: Path,
     extracted_chunks: dict[str, list[tuple[str, str]]] | None = None,
+    home: Path | None = None,
 ) -> MapVerificationSummary:
     """Verify all claims across multiple map/index files against collection_root."""
     all_claims: list[Claim] = []
+    rejected: list[ClaimResult] = []
+    total = 0
+
     for mf in map_files:
         p = Path(mf)
         resolved = p if p.is_absolute() else collection_root / p
-        if resolved.is_file():
-            rel_src = p.as_posix() if not p.is_absolute() else resolved.name
-            all_claims.extend(load_claims_from_file(resolved, rel_src))
+        rel_src = p.as_posix() if not p.is_absolute() else resolved.name
+
+        if not resolved.exists() or not resolved.is_file():
+            rejected.append(
+                ClaimResult(
+                    claim=Claim(target_path=rel_src, source_map=rel_src),
+                    passed=False,
+                    reason=f"map file '{rel_src}' does not exist or is not a file",
+                )
+            )
+            total += 1
+            continue
+
+        try:
+            claims = load_claims_from_file(resolved, rel_src)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            rejected.append(
+                ClaimResult(
+                    claim=Claim(target_path=rel_src, source_map=rel_src),
+                    passed=False,
+                    reason=f"cannot read map file '{rel_src}': {exc}",
+                )
+            )
+            total += 1
+            continue
+
+        all_claims.extend(claims)
 
     verified: list[Claim] = []
-    rejected: list[ClaimResult] = []
-
     for c in all_claims:
-        res = check_claim(c, collection_root, extracted_chunks)
+        total += 1
+        res = check_claim(c, collection_root, extracted_chunks, home=home)
         if res.passed:
             verified.append(c)
         else:
             rejected.append(res)
 
     return MapVerificationSummary(
-        total=len(all_claims),
+        total=total,
         verified=verified,
         rejected=rejected,
     )
@@ -363,9 +557,19 @@ def run(
 
     manifest = manifest_mod.validate(m_path, p_override)
 
-    files_to_check = list(map_files) if map_files else list(manifest.maps)
+    if map_files:
+        files_to_check = list(map_files)
+    else:
+        files_to_check = [
+            rel_path
+            for rel_path, entry in manifest.files.items()
+            if entry.role == "exclude" and is_map_file(rel_path)
+        ]
+
     if not files_to_check:
-        out.write(f"aft: no map files specified to check for collection '{manifest.name}'\n")
+        out.write(
+            f"aft: no map files specified or found to check for collection '{manifest.name}'\n"
+        )
         return 0
 
     summary = verify_map_files(files_to_check, manifest.path)

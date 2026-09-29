@@ -265,3 +265,93 @@ def test_import_fails_on_invalid_manifest(initialized: Config, tmp_path: Path) -
 
     # Vault library directory remains untouched
     assert not (initialized.vault / "library").exists()
+
+
+def test_import_verifies_exclude_map_files_with_planted_false_claim(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """import calls verify_map_files for exclude-role map files and writes failures (B1)."""
+    col_dir = tmp_path / "planted_col"
+    col_dir.mkdir()
+
+    # 1. Authentic document
+    (col_dir / "guide.md").write_text(
+        "# User Guide\n\n## Getting Started\nThis is the authentic guide content.\n",
+        encoding="utf-8",
+    )
+
+    # 2. Excluded index.json with 1 valid claim and 2 false claims
+    (col_dir / "index.json").write_text(
+        json.dumps(
+            [
+                {
+                    "path": "guide.md",
+                    "heading": "Getting Started",
+                    "quote": "authentic guide content",
+                },
+                {
+                    "path": "guide.md",
+                    "heading": "Getting Started",
+                    "quote": "This false statement was never in guide",
+                },
+                {
+                    "path": "missing_doc.pdf",
+                    "heading": "Chapter 1",
+                },
+            ],
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    # 3. Excluded README.md with 1 valid claim and 1 path traversal false claim
+    (col_dir / "README.md").write_text(
+        "# Table of Contents\n\n"
+        "| File | Link |\n"
+        "|---|---|\n"
+        "| Guide | [Guide](guide.md#Getting Started) |\n"
+        "| Escaping file | [Secret](../outside_secret.txt) |\n",
+        encoding="utf-8",
+    )
+
+    manifest_data = {
+        "name": "planted",
+        "title": "Planted False Claims Test",
+        "description": "Verification of map evidence during import",
+        "projects": [],
+        "path": str(col_dir),
+        "files": {
+            "guide.md": "original",
+            "index.json": "exclude",
+            "README.md": "exclude",
+        },
+    }
+
+    m_file = tmp_path / "manifest.yaml"
+    m_file.write_text(yaml.dump(manifest_data), encoding="utf-8")
+
+    result = importing.import_collection(m_file, config=initialized)
+
+    # Verify ImportResult carries map_summary
+    assert result.map_summary is not None
+    assert result.map_summary.total == 5
+    assert len(result.map_summary.verified) == 2
+    assert len(result.map_summary.rejected) == 3
+
+    # Verify report contains Map evidence section and rejected claims
+    report_file = initialized.vault / result.report_path
+    assert report_file.is_file()
+    report_text = report_file.read_text(encoding="utf-8")
+
+    assert "### Map evidence" in report_text
+    assert "Claims checked: 5" in report_text
+    assert "Claims verified: 2" in report_text
+    assert "Claims rejected: 3" in report_text
+    assert "#### Rejected claims" in report_text
+
+    # Verify specific reasons for planted false claims
+    assert "quoted description does not appear in 'guide.md'" in report_text
+    assert "missing_doc.pdf" in report_text
+    assert "does not exist in collection" in report_text
+    assert "outside_secret.txt" in report_text
+    assert "escapes collection root" in report_text

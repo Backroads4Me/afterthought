@@ -226,7 +226,7 @@ def _parser() -> argparse.ArgumentParser:
 
     q = lsub.add_parser("check-map", help="verify claims in an imported index or map file")
     q.add_argument("manifest", help="path to manifest YAML file")
-    q.add_argument("map_files", nargs="+", help="path to index or map file(s) to check")
+    q.add_argument("map_files", nargs="*", help="path to index or map file(s) to check")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_check_map)
     return parser
