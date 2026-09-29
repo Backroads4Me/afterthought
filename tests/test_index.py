@@ -442,9 +442,9 @@ aft reindex --collection bronze
 Nothing was left open.
 """
 
-# A digest quoting the markup of a code block: the marks it quotes carry a language name, so
-# they open nothing and close nothing on their own - only the bare marks below them do.
-QUOTED_MARKUP_DIGEST = """---
+# A digest quoting markup that is itself a fenced block: the inner marks close the block the
+# outer marks opened, and the outer marks closing it leave the page outside a block again.
+NESTED_FENCE_DIGEST = """---
 type: Session Digest
 title: widget session
 description: What the session on 2026-09-28 did.
@@ -452,14 +452,34 @@ description: What the session on 2026-09-28 did.
 
 ## Summary
 
-How a digest quotes a command is itself worth quoting:
+A digest quoting markup has to quote the marks too:
 
-~~~text
-~~~bash
+````markdown
+```bash
+aft reindex --collection bronze
+```
+````
+
+## Handoff
+
+Nothing was left open.
+"""
+
+# A digest whose fenced block never closes: the block runs to the end of the page, and the
+# heading-shaped line that was going to open the next section is quoted text like the rest.
+UNCLOSED_FENCE_DIGEST = """---
+type: Session Digest
+title: widget session
+description: What the session on 2026-09-28 did.
+---
+
+## Summary
+
+The build ran like this:
+
+```bash
 # ship it
-~~~
-
-That is the whole recipe.
+aft reindex --collection bronze
 
 ## Handoff
 
@@ -531,10 +551,9 @@ def test_a_deleted_page_loses_its_rows(initialized: Config) -> None:
 
 
 def test_removing_one_page_leaves_every_row_it_never_named(initialized: Config) -> None:
-    """A run's removals go out in one statement per collection naming the paths it means, so the
-    shape of it has to be proved and not assumed: the page it named loses its rows and its hash
-    record, and the page it never mentioned keeps its row field for field. A removal that swept
-    the collection alongside it would look identical until a search came up empty."""
+    """Each removal names the one path it means, so the page a run dropped loses its rows and its
+    hash record while the page it never mentioned keeps its row field for field. A removal that
+    swept the collection alongside it would look identical until a search came up empty."""
     gone = write(initialized, "projects/widget/scrapped.md", _a_page(title="scrapped"))
     kept = write(initialized, "projects/widget/decisions.md", _a_page(title="decisions"))
     index.update(initialized)
@@ -625,10 +644,9 @@ def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> 
 
 
 def test_forgetting_one_session_leaves_every_row_it_never_named(initialized: Config) -> None:
-    """The rows a forget or a retention purge leaves behind go out in one statement naming the
-    keys it means, so the session it never mentioned is still there afterwards - field for
-    field, and still searchable. Bulk removal that took the collection with it would only show
-    up as a search that comes back empty."""
+    """Each removal names the one archive key it means, so the session a forget never mentioned is
+    still there afterwards - field for field, and still searchable. Removal that took the
+    collection with it would only show up as a search that comes back empty."""
     evidence.store(initialized, "claude", "abc", "p_widget", entries("the flange is bronze"))
     evidence.store(initialized, "pi", "def", "p_gizmo", entries("the gasket is nitrile"))
     index.update(initialized)
@@ -641,22 +659,10 @@ def test_forgetting_one_session_leaves_every_row_it_never_named(initialized: Con
     assert search(initialized, "evidence", "nitrile") == ["def#e1"]
 
 
-def test_forgetting_more_rows_than_a_statement_may_carry_still_loses_every_one_of_them(
-    initialized: Config, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A bulk forget drops its rows one statement per row, however many there were.
-
-    An ordinary SQLite takes 999 parameters in one statement (its default until 3.32), so a
-    removal that hands one statement a run's whole list of keys fails partway through it. The
-    limit is pinned down here rather than trusted from the SQLite this happens to be typed on."""
-    real_connect = sqlite3.connect
-
-    def connect(*args: object, **kwargs: object) -> sqlite3.Connection:
-        conn = real_connect(*args, **kwargs)  # type: ignore[arg-type]
-        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 999)
-        return conn
-
-    monkeypatch.setattr(sqlite3, "connect", connect)
+def test_a_bulk_forget_loses_every_row_it_named_and_only_those(initialized: Config) -> None:
+    """A retention purge or ``aft forget`` can drop hundreds of archive rows in one run, and each
+    goes out named by its own key: every row of the forgotten session is gone from the index and
+    the session that was never named keeps its row field for field, still searchable."""
     moment = datetime(2026, 9, 28, 12, tzinfo=UTC)
     bulk = [
         Entry(
@@ -759,17 +765,15 @@ def test_an_index_written_by_another_build_names_the_repair_rather_than_answerin
     initialized: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """What a row *is* is decided by the code that wrote it, not by the file holding it, so an
-    index carried across an upgrade answers rows nothing vouches for as though they were current.
-
-    The file states which build wrote it, and a build that is not that one refuses with the
-    repair in the sentence rather than adding rows of its own to rows it cannot vouch for -
-    including an index that stated no build at all, which is what every index written before
-    this claim existed looks like."""
+    carried across an upgrade answers rows nothing vouches for as though they were current. The
+    file states which build wrote it, and a build that is not that one refuses with the repair in
+    the sentence, naming the build it did find, rather than adding rows of its own to rows it
+    cannot vouch for."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
 
     monkeypatch.setattr(index, "BUILD_STAMP", "the-next-build")
-    with pytest.raises(index.SearchIndexError, match="aft reindex"):
+    with pytest.raises(index.SearchIndexError, match="written by build rows-1.*aft reindex"):
         index.update(initialized)
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
 
@@ -778,10 +782,52 @@ def test_an_index_written_by_another_build_names_the_repair_rather_than_answerin
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
     assert index.update(initialized) == []
 
+
+def test_an_index_holding_rows_that_never_said_who_wrote_them_names_the_repair(
+    initialized: Config,
+) -> None:
+    """An index written before the file said anything about its build holds rows and answers
+    nothing about them, which is the case the stamp exists to catch: the refusal says what is
+    unknown about the file, in other words than the one naming another build, and the rebuild is
+    what answers it."""
+    rel = write(initialized, REL, PAGE)
+    assert index.update(initialized) == []
     with _open(initialized) as conn:
-        conn.execute(f"DELETE FROM {index.BUILD_TABLE}")
-    with pytest.raises(index.SearchIndexError, match="aft reindex"):
+        conn.execute(f"DROP TABLE {index.BUILD_TABLE}")
+
+    with pytest.raises(index.SearchIndexError, match="before an index said which build wrote"):
         index.update(initialized)
+    assert index.reindex(initialized) == []
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+
+
+def test_an_index_file_holding_nothing_is_written_rather_than_refused(initialized: Config) -> None:
+    """A file with no rows in it has no row whose build a stamp could vouch for, so it is an
+    invitation: a run finding one writes it and says nothing about rebuilding."""
+    rel = write(initialized, REL, PAGE)
+    (initialized.home / index.INDEX_NAME).write_bytes(b"")
+
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+
+
+def test_an_index_schema_left_by_a_failed_run_is_finished_rather_than_refused(
+    initialized: Config,
+) -> None:
+    """A first run that failed after creating the schema leaves a file holding no rows and no
+    stamp: the tables came from autocommit and the rows did not, so the run that follows it
+    builds the index once the cause is gone rather than demanding a rebuild of an index that
+    never held anything."""
+    rel = write(initialized, REL, PAGE)
+    write(initialized, "registry.yaml", "version: 1\nprojects: not-a-list\n")
+    with pytest.raises(index.SearchIndexError, match="projects must be a list"):
+        index.update(initialized)
+    assert (initialized.home / index.INDEX_NAME).exists()
+    assert hashes(initialized) == {}
+
+    write(initialized, "registry.yaml", "version: 1\nprojects: []\n")
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
 
 
 def test_aft_reindex_runs_the_rebuild_from_the_command_line(
@@ -912,19 +958,34 @@ def test_a_line_inside_a_code_fence_is_the_quoted_text_and_not_a_heading(
     assert search(initialized, "digests", "bronze") == [f"{rel}#Summary"]
 
 
-def test_marks_carrying_a_language_name_close_no_fence(initialized: Config) -> None:
-    """A digest quoting the markup of a code block quotes its opening marks too, marks and
-    language name together: those are the way in, never the way out, or the block ends halfway
-    through the thing being quoted and everything after it belongs to someone else's section."""
-    rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", QUOTED_MARKUP_DIGEST)
+def test_a_fence_opened_inside_a_fence_ends_the_block_the_other_one_started(
+    initialized: Config,
+) -> None:
+    """A digest quoting markup quotes the marks of a block with marks of their own, and the state
+    only ever toggles: the inner line closes the block the outer one opened, the next inner line
+    opens one, and the outer line ends the page outside a block - so the section after the quote
+    is still a section and not quoted text."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", NESTED_FENCE_DIGEST)
 
     assert index.update(initialized) == []
-
     assert keys_of(initialized, "digests") == [f"{rel}#Handoff", f"{rel}#Summary"]
     body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
-    assert "~~~bash" in body
-    assert "# ship it" in body
-    assert "That is the whole recipe." in body
+    assert "aft reindex --collection bronze" in body
+
+
+def test_a_fence_that_never_closes_keeps_the_rest_of_the_page_inside_it(
+    initialized: Config,
+) -> None:
+    """A block that is never closed runs to the end of the page: what follows the marks is quoted
+    text, a section heading among it, and the page stays the one section the block sat in rather
+    than ending in a state the splitter has to guess at."""
+    rel = write(initialized, "digests/widget/2026/09/2026-09-28-pi-def.md", UNCLOSED_FENCE_DIGEST)
+
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "digests") == [f"{rel}#Summary"]
+    body = _column(row_for(initialized, "digests", f"{rel}#Summary"), "body")
+    assert "## Handoff" in body
+    assert search(initialized, "digests", "left") == [f"{rel}#Summary"]
 
 
 def _a_page(

@@ -225,6 +225,11 @@ _RECORD_BUILD = (
     f" ON CONFLICT (name) DO UPDATE SET stamp = excluded.stamp"
 )
 
+#: Whether the index holds anything a build wrote. A run records a hash for every file it read
+#: and the state of every archive row it read, in the same transaction as the rows themselves,
+#: so with neither record the file holds no row whose meaning a stamp would vouch for.
+_HOLDS_ROWS = f"SELECT EXISTS (SELECT 1 FROM {FILES_TABLE}) OR EXISTS (SELECT 1 FROM {EVIDENCE})"
+
 # SQLite takes a table name in the statement text and never as a parameter, so every
 # statement that names one is written once here from `COLLECTIONS` and `FILES_TABLE` - this
 # module's own constants, never a caller's string.
@@ -293,11 +298,12 @@ _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
 
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
 
-# Opens or closes a fenced block: up to three spaces of indentation, then three of the same
-# character and whatever names the language on the way in. A line of those marks alone - same
-# character, at least as many of them, nothing after - closes the block. A `#` line inside one is
-# a comment in the quoted text rather than a heading of the page (`_prose_chunks`).
-_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+# Opens and closes a fenced block: up to three spaces of indentation, then three of the same
+# character. A line matching it opens a block when none is open and closes the one that is,
+# and nothing else changes that state; a document ending inside a block simply ends there. A
+# `#` line inside a block is the comment of a quoted command rather than a heading of the page
+# (`_prose_chunks`).
+_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
@@ -642,20 +648,19 @@ def _prose_chunks(body: str) -> list[tuple[str, str]]:
     quoting the commands of the session it covers quotes `#` lines with it, so a heading-shaped
     line in the middle of a code sample is the comment of that command and belongs, with the
     rest of the block, to the section that holds it - not a heading, a row, or a ranking of its
-    own."""
+    own.
+
+    A fence line opens a block when none is open and closes the one that is, and nothing else
+    changes that state, so the state cannot drift: a block that is never closed runs to the end
+    of the page and a block opened inside another ends at that inner line."""
     chunks: list[tuple[str, list[str]]] = []
     heading = ""
     lines: list[str] = []
-    fence = ""
+    in_fence = False
     for line in body.split("\n"):
-        marker = _FENCE.match(line)
-        if marker is not None:
-            mark, rest = marker.group(1), marker.group(2)
-            if not fence:
-                fence = mark
-            elif mark[0] == fence[0] and len(mark) >= len(fence) and not rest.strip():
-                fence = ""
-        elif not fence:
+        if _FENCE.match(line) is not None:
+            in_fence = not in_fence
+        elif not in_fence:
             found = _PROSE_HEADING.match(line.rstrip())
             if found is not None:
                 chunks.append((heading, lines))
@@ -928,16 +933,26 @@ def _require_current_build(conn: sqlite3.Connection, path: Path) -> None:
     states its collection admits, and the project it carries are decided here rather than in the
     vault. An index written under other rules therefore answers a query looking exactly as
     trustworthy as a fresh one, and the only honest answer to finding one is the rebuild that
-    replaces its rows. A file that recorded no stamp is the same case - it was written by rules
-    that said nothing about themselves."""
+    replaces its rows.
+
+    Two answers are refusals and say so differently: rows carrying another build's stamp mean
+    what that build meant, and rows carrying no stamp at all came from a build that said nothing
+    about itself. An index with no stamp and no rows has never been built - its tables may be
+    there from a run that failed before writing a row - and is written now like any new one."""
     recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
-    if recorded is not None and recorded[0] == BUILD_STAMP:
+    if recorded is None:
+        if conn.execute(_HOLDS_ROWS).fetchone()[0]:
+            raise SearchIndexError(
+                f"the index at {path} holds rows written before an index said which build wrote"
+                " them, so nothing vouches for what they mean: run aft reindex to rebuild it"
+                " from the vault and the archive"
+            )
         return
-    raise SearchIndexError(
-        f"the index at {path} holds rows written by"
-        f" {recorded[0] if recorded else 'a build that recorded no stamp'}, not by build"
-        f" {BUILD_STAMP}: run aft reindex to rebuild it from the vault and the archive"
-    )
+    if recorded[0] != BUILD_STAMP:
+        raise SearchIndexError(
+            f"the index at {path} holds rows written by build {recorded[0]}, not by build"
+            f" {BUILD_STAMP}: run aft reindex to rebuild it from the vault and the archive"
+        )
 
 
 def _record_build(conn: sqlite3.Connection) -> None:
@@ -980,14 +995,12 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     this file is disposable - `reindex` rebuilds it from the vault and the archive - so it is
     opened without the archive's secure delete.
 
-    A file that was already here is asked who wrote its rows, and an answer that is not this
-    A file that was already here is asked who wrote its rows, and an answer that is not this
-    build's is refused before a row of ours joins them - asked after the schema is created, so
-    that a file old enough to predate the stamp still answers the question instead of failing
-    it. `rebuild` is the one caller that may skip the asking, since what it drops is every row
-    the answer would be about."""
+    A file already holding rows is asked who wrote them, and an answer that is not this build's
+    is refused before a row of ours joins them - asked after the schema is created, so that a
+    file old enough to predate the stamp still answers the question instead of failing it.
+    `rebuild` is the one caller that may skip the asking, since what it drops is every row the
+    answer would be about."""
     path = _db_path(config)
-    already_there = path.exists()
     conn: sqlite3.Connection | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -995,7 +1008,7 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
         _create(conn)
-        if already_there and not rebuild:
+        if not rebuild:
             _require_current_build(conn, path)
     except BaseException as exc:
         if conn is not None:
