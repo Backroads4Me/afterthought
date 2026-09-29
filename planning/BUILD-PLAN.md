@@ -1,8 +1,8 @@
 # Afterthought build plan
 
 This plan turns [DESIGN.md](DESIGN.md) into tasks that one worker can each complete alone.
-It is written for firstmate to dispatch and for workers to build from. The design is the
-authority on behavior; this plan is the authority on sequence, interfaces and done
+Claude builds from it; the tasks merged before 2026-09-29 were built by firstmate's workers.
+The design is the authority on behavior; this plan is the authority on sequence, interfaces and done
 conditions. Where they disagree, the design wins and the plan gets corrected.
 
 M0 is built. Its code is the foundation every task below calls into, so read `src/aft/`
@@ -62,8 +62,8 @@ where possible, errors as exceptions caught once in `cli.main`.
 
 ## 3. Review checkpoints with `claude -p`
 
-Firstmate's own gate reviews every PR. On top of that, the PRs and milestones below get an
-independent review from Claude, run by the worker with `claude -p`:
+The PRs and milestones below get an independent review in a fresh `claude -p` session,
+separate from the one that wrote the code:
 
 | When | Why |
 |---|---|
@@ -71,7 +71,7 @@ independent review from Claude, run by the worker with `claude -p`:
 | Every PR touching `src/aft/dream/rules.py` or `src/aft/dream/apply.py` | The rules decide what becomes trusted memory |
 | Every PR changing a model prompt or JSON schema | Prompts are where silent quality loss hides |
 
-The worker runs, from the repository root:
+The builder runs, from the repository root:
 
 ```bash
 git diff origin/main...HEAD > /tmp/aft-review.diff
@@ -83,24 +83,22 @@ The diff is in /tmp/aft-review.diff." > /tmp/aft-review.md
 gh pr comment <pr> --body-file /tmp/aft-review.md
 ```
 
-The worker then fixes every finding marked `blocking` in the same PR, or replies on the PR
+The builder then fixes every finding marked `blocking` in the same PR, or replies on the PR
 explaining why a finding is wrong. Non-blocking findings are listed in the PR description
 for Ted.
 
-Firstmate's `captain.md` gives the standing permission for these checkpoints, and for
-nothing else. Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
+Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
   PRs, expect twenty to thirty reviews over the build.
 
-## 4. When a worker is unsure
+## 4. When the builder is unsure
 
-A worker that finds the design silent, contradictory, or wrong for the case in front of it
-does not guess. It stops the task, writes the question and the options it sees on the PR
-or to firstmate, and waits for an answer. Firstmate sorts the question:
+A builder that finds the design silent, contradictory, or wrong for the case in front of it
+does not guess. It writes the question and the options it sees, and sorts it:
 
-- **A design gap** is settled by firstmate with its Opus advisor: the design is silent, the
+- **A design gap** is settled by the builder: the design is silent, the
   answer follows from the design's principles, and it changes nothing the design already
   states (what a reader skips, how a script behaves on a rerun, which date a fact keeps).
-  The ruling and its reason go on the PR and in firstmate's rulings log, and Ted reviews
+  The ruling and its reason go on the PR, and Ted reviews
   the milestone's rulings at its end. Rulings Ted accepts are folded into this plan.
 - **A design change** goes to Ted: anything that contradicts the design or changes
   behavior it states, changes an interface other tasks depend on, adds or drops scope, adds
@@ -746,9 +744,6 @@ M5 after M3.2 and M4.6; M6 after M5; M7 after M3.2 and M4.6
 
 The first wave can run in parallel: M1.1, M1.2, M1.5, M2.1, M2.5 and M4.2.
 
-**M4.1, M4.3, M4.5 and M4.6 are built by Claude**, in order, not dispatched by firstmate.
-Each is a PR to this repository, green on CI and reviewed at the section 3 checkpoints. Claude
-starts M4.1 against the M2.6 interface and M4.3 once M3.1 merges; M4.5 needs M4.4, F4 and
-the page writer's remaining operations (`confirm`, `supersede`, `withdraw`, `mark_stale`),
-which stay with firstmate. Everything else in section 5, the follow-ups, and M5 to M7 stay
-with firstmate.
+Claude builds every remaining task, follow-up and milestone, one PR per task, in the order
+above. Branches firstmate left in flight are picked up as they stand, with their open review
+findings sorted under rule 10.
