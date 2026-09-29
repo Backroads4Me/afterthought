@@ -436,9 +436,10 @@ def _add_columns(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as lost_race:
             if "duplicate column name" not in str(lost_race):
                 raise
+        else:
+            _name_sessions_of_unknown_span(conn)
         if column not in _columns(conn, table):
             raise QueueError(f"queue table {table} has no {column} column to use")
-        _name_sessions_of_unknown_span(conn)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -448,17 +449,17 @@ def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 def _name_sessions_of_unknown_span(conn: sqlite3.Connection) -> None:
     """Name the sessions whose span state was unknown when the queue gained ``off_record``."""
-    unknown = [
+    named = [
         f"{agent}/{session_id}"
         for agent, session_id in conn.execute(
-            "SELECT agent, session_id FROM sessions WHERE watermark IS NOT NULL"
+            "SELECT agent, session_id FROM sessions WHERE watermark IS NOT NULL LIMIT 10"
         )
     ]
-    if unknown:
+    if named:
         LOGGER.warning(
-            "queue gained off_record: %s keep their watermark with no span stored, so they"
-            " resume on the record",
-            ", ".join(unknown),
+            "queue gained off_record: sessions resuming on the record with no span stored"
+            " include %s; open question on BUILD-PLAN M2.3",
+            ", ".join(named),
         )
 
 

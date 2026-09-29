@@ -583,6 +583,14 @@ def test_a_flagged_output_holding_nothing_at_all_is_still_dropped(cfg):
     assert kept([output("", "t1", is_error=True)], cfg) == []
 
 
+def test_a_flagged_output_of_nothing_but_space_keeps_nothing(cfg):
+    # Space is no more evidence than nothing: a flagged entry keeps neither a blank text
+    # nor a cap marker describing content that is not in it.
+    assert kept([output("   ", "t1", is_error=True)], cfg) == []
+    long_blank = "\n" * 600 + "error: the pipe broke\n"
+    assert kept([output(long_blank, "t2", is_error=True)], cfg) == ["error: the pipe broke"]
+
+
 def test_entries_keep_their_order_and_every_field_but_their_text(cfg):
     entries = [
         said("one", "u1"),

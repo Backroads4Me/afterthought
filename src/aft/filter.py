@@ -192,10 +192,11 @@ def _flagged_output(text: str) -> str | None:
     any other.
     """
     end = _word_end(text, FLAG_HEAD_CHARS)
-    head = text[:end] + (CAP_MARKER if end < len(text) else "")
+    head = text[:end]
     below = _tool_lines(text[end:])
-    if not head:
-        return None
+    if not head.strip():
+        return below
+    head = head + (CAP_MARKER if end < len(text) else "")
     return "\n".join([head, below]) if below else head
 
 
