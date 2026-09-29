@@ -255,8 +255,10 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
 def last_sweep(config: Config) -> datetime | None:
     """When the last completed sweep ran, or None before there has been one.
 
-    A sweep records this only after it has enqueued everything it found, so a sweep that
-    died partway leaves the window it was working open and finds those sessions again.
+    The sweep compares each session with its own watermark rather than with this, so the
+    value answers one question: whether this home has ever been swept. A home that has
+    not gets an opening sweep that records the fact and captures none of the sessions
+    that predate afterthought (BUILD-PLAN M2.2).
     """
     with _reading(config) as conn:
         row = conn.execute("SELECT value FROM meta WHERE key = ?", (LAST_SWEEP,)).fetchone()
@@ -264,7 +266,10 @@ def last_sweep(config: Config) -> datetime | None:
 
 
 def record_sweep(config: Config, now: datetime) -> None:
-    """Close the sweep window at ``now``: the next one looks at sessions touched after it."""
+    """Record that a sweep has run up to ``now``.
+
+    The stored time is what tells the next sweep it is not this home's first.
+    """
     with _writing(config) as conn:
         conn.execute(
             "INSERT INTO meta (key, value) VALUES (?, ?)"

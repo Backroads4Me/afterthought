@@ -7,13 +7,13 @@ session whose hook never fired, and a long-lived session that has grown enough t
 worth digesting in a chunk while it is still going.
 
 `enqueue` opens no transcript, so the hook stays cheap and never blocks on a file an
-agent is still writing. The sweep does read a session file, but never its conversation:
-the first records, for the directory the session was started in, and the end of it, for
-the watermark's record.
+agent is still writing. The sweep reads a session file itself: the records at its head,
+for the directory the session was started in, and its entries past the watermark, to
+ask whether anything is left to digest.
 
-Nothing here resolves a session to a project, reads a transcript's entries, filters, or
-advances a watermark. Resolution and digestion are the digest step's, and the watermark
-moves only when a digest is written (BUILD-PLAN M2.2).
+Nothing here resolves a session to a project, filters, digests, or advances a
+watermark. Resolution and digestion are the digest step's, and the watermark moves
+only when a digest is written (BUILD-PLAN M2.2).
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aft import readers
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.queue import enqueue, last_sweep, record_sweep, session_state
@@ -37,6 +38,10 @@ SESSION_DIRS = {
     CLAUDE: Path("~/.claude/projects"),
     PI: Path("~/.pi/agent/sessions"),
 }
+
+# How far back the sweep looks. A session whose file has not moved within this window is
+# left alone whatever its watermark says (BUILD-PLAN M2.2).
+SESSION_WINDOW = timedelta(days=7)
 
 # A session that has not written for this long is done talking, whatever its hook said.
 IDLE_AFTER = timedelta(minutes=30)
@@ -63,28 +68,30 @@ SWEEP_DETAIL = "sweep"
 
 
 def sweep(config: Config, now: datetime) -> list[SessionEvent]:
-    """Enqueue the sessions of both agents that this sweep window turned up.
+    """Enqueue the sessions of both agents that this sweep found uncaptured.
 
-    A session is capture work when the queue has no work in flight for it and it has
-    either gone quiet or outgrown its watermark, and only for files touched since the
-    last sweep: an untouched session cannot have new conversation in it.
+    Each session is compared with its own watermark, not with when the last sweep ran, so
+    a session whose hook never fired is found whatever the timer's cadence (BUILD-PLAN
+    M2.2). It is capture work when the queue has no work in flight for it, its file has
+    moved within the last seven days, and it holds entries past its watermark that it has
+    either gone quiet on for 30 minutes or outgrown by 200 KB.
 
-    Before the first sweep there is no window, and every transcript on the host would
-    fill it, spending the model budget on sessions that predate afterthought. So the
-    first sweep records where the window starts and enqueues nothing (BUILD-PLAN M2.2).
+    Before the first sweep this home has never been watched, and up to seven days of
+    sessions that predate afterthought would fill the queue on its first tick. So the
+    opening sweep records that the watching has begun and enqueues nothing
+    (BUILD-PLAN M2.2).
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
     """
-    since = last_sweep(config)
-    if since is None:
+    if last_sweep(config) is None:
         record_sweep(config, now)
         return []
     found: list[SessionEvent] = []
     for agent, directory in SESSION_DIRS.items():
         for path in _session_files(directory):
             try:
-                event = _candidate(config, agent, path, since, now)
+                event = _candidate(config, agent, path, now)
             except OSError:
                 # An agent's own cleanup can remove a transcript between the scan and the
                 # read of it. The session it held is gone, and the sweep moves on.
@@ -97,15 +104,15 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
     return found
 
 
-def _candidate(
-    config: Config, agent: str, path: Path, since: datetime, now: datetime
-) -> SessionEvent | None:
+def _candidate(config: Config, agent: str, path: Path, now: datetime) -> SessionEvent | None:
     """The event one session file earns from this sweep, or None for no work.
 
-    The checks run cheapest first: a timestamp, the queue, and only then the file.
+    The checks run cheapest first: a timestamp, the queue, the size of the file, and only
+    then the entries inside it.
     """
     touched = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-    if touched <= since:
+    if now - touched > SESSION_WINDOW:
+        # Past the seven days the sweep looks over, whatever its watermark holds.
         return None
     session_id = _session_id(agent, path)
     state = session_state(config, agent, session_id)
@@ -114,6 +121,11 @@ def _candidate(
     idle = now - touched >= IDLE_AFTER
     if not idle and not _grown_since_watermark(path, state.watermark, agent):
         return None
+    if not _has_new_entries(agent, path, state.watermark):
+        # The watermark names the session's last entry, so there is nothing left to digest
+        # however long the session has been quiet or however big the file has become.
+        return None
+
     cwd = _cwd_of(path)
     if cwd is None:
         # Nothing in the file names the directory it was started in, so there is no cwd
@@ -200,3 +212,22 @@ def _grown_since_watermark(path: Path, watermark: str | None, agent: str) -> boo
         tail = handle.read()
     record = re.escape(watermark.partition("#")[0].encode())
     return re.search(RECORD_ID_KEYS[agent] + rb"\s*:\s*\"" + record + rb"\"", tail) is None
+
+
+def _has_new_entries(agent: str, path: Path, watermark: str | None) -> bool:
+    """Whether a session holds entries its watermark does not answer for.
+
+    What an entry is, and the order they come in, belongs to the readers, so this asks
+    `aft.readers.read` for the entries after the watermark and stops at the first one it
+    answers with. The check above is one of size; this is the one of content, and a
+    session whose watermark already names its last entry is no work however long it has
+    sat quiet (BUILD-PLAN M2.2).
+
+    A transcript the reader cannot read is capture work rather than a session with
+    nothing to say: the file holds something a digest has to account for, and the job row
+    is how that failure reaches the report (BUILD-PLAN M2.1, DESIGN 14).
+    """
+    try:
+        return next(readers.read(agent, path, watermark), None) is not None
+    except readers.ReaderError:
+        return True
