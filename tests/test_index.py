@@ -680,6 +680,24 @@ def test_forgotten_and_purged_evidence_leaves_the_index(initialized: Config) -> 
     assert search(initialized, "evidence", "flange") == []
 
 
+def test_forgotten_evidence_leaves_no_bytes_in_the_index_files(initialized: Config) -> None:
+    """DESIGN 12: forgetting reaches everything afterthought controls. The proof is the raw
+    bytes of the index and its write-ahead log, not a query that comes back empty."""
+    secret = "the vault combination is zanzibar-quartz"
+    filler = [f"filler entry number {i} about nothing in particular" for i in range(20)]
+    evidence.store(initialized, "claude", "gone", None, entries(secret, *filler))
+    index.update(initialized)
+    files = [p for p in initialized.home.glob("index.sqlite*") if p.is_file()]
+    assert any(b"zanzibar" in p.read_bytes() for p in files)
+
+    evidence.forget(initialized, "gone")
+    index.update(initialized)
+
+    for path in initialized.home.glob("index.sqlite*"):
+        if path.is_file():
+            assert b"zanzibar" not in path.read_bytes(), path.name
+
+
 def test_forgetting_one_session_leaves_every_row_it_never_named(initialized: Config) -> None:
     """Each removal names the one archive key it means, so the session a forget never mentioned is
     still there afterwards - field for field, and still searchable. Removal that took the

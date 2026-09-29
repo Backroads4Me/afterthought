@@ -11,11 +11,13 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, index, inject, keys, lint, vault
+from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
-from aft.events import AdapterError, SessionEvent
+from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
+from aft.install import pi as pi_install
+from aft.library import manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -34,11 +36,14 @@ def main(argv: list[str] | None = None) -> int:
     except (
         ConfigError,
         claude_install.InstallError,
+        pi_install.InstallError,
         RegistryError,
         vault.VaultError,
         GitError,
         index.SearchIndexError,
         UsageError,
+        survey.SurveyError,
+        manifest.ManifestError,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -89,6 +94,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
+
     p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
     isub = p.add_subparsers(metavar="agent")
     q = isub.add_parser("claude", help="install the Claude Code hooks in ~/.claude/settings.json")
@@ -103,6 +109,26 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own hook entries and nothing else",
     )
     q.set_defaults(handler=cmd_install_claude)
+    q = isub.add_parser("pi", help="install the afterthought extension in pi's extensions dir")
+    q.add_argument("--dry-run", action="store_true", help="print the extension diff, write nothing")
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's own extension and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_pi)
+
+    p = sub.add_parser("library", help="import and manage library collections")
+    lsub = p.add_subparsers(metavar="action")
+    q = lsub.add_parser("survey", help="survey a collection directory before import")
+    q.add_argument("path", help="path to the collection directory")
+    q.add_argument("--json", action="store_true", help="output report as JSON")
+    q.set_defaults(handler=cmd_library_survey)
+
+    q = lsub.add_parser("validate", help="validate a collection manifest against DESIGN 11")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_validate)
     return parser
 
 
@@ -289,6 +315,46 @@ def cmd_install_claude(args) -> int:
     return 0
 
 
+def cmd_install_pi(args) -> int:
+    """Copy or remove afterthought's extension in the directory pi loads extensions from."""
+    extensions = pi_install.extensions_dir()
+    change = (
+        pi_install.uninstall(extensions, dry_run=args.dry_run)
+        if args.uninstall
+        else pi_install.install(extensions, dry_run=args.dry_run)
+    )
+    target = pi_install.target_path(extensions)
+    if not change.changed:
+        if args.uninstall:
+            print(f"no afterthought extension in {extensions}")
+        else:
+            print(f"{target} is already up to date")
+        return 0
+    # Every line of a preview says what the run itself would say, so the preview cannot
+    # promise less than the command does: the text as a diff when there is one, the copy a
+    # change makes of the text it replaces, and the paths it writes or takes away.
+    if args.dry_run and change.diff:
+        print(change.diff)
+    if change.backup is not None:
+        verb = "would back up" if args.dry_run else "backed up"
+        print(f"{verb} the previous {target.name} to {change.backup}")
+    if args.uninstall:
+        verb = "would remove" if args.dry_run else "removed"
+        print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+    else:
+        verb = "would write" if args.dry_run else "installed"
+        print(f"{verb} {target}")
+    return 0
+
+
+def cmd_library_survey(args) -> int:
+    return survey.run(args.path, as_json=args.json)
+
+
+def cmd_library_validate(args) -> int:
+    return manifest.run(args.manifest, path_override=args.path)
+
+
 # An agent's session waits on this command, so the whole hook gets one hard budget
 # before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1). The
 # budget is split up front between the two steps that can block: the stdin read takes
@@ -329,11 +395,13 @@ def _hook_event(args, payload: object) -> SessionEvent:
 def _dispatch(event: SessionEvent) -> None:
     """Hand one normalized event to the part of afterthought that consumes it.
 
-    ``session_start`` prints the injection block (M1.2); ``compaction`` and
-    ``session_end`` enqueue capture (M2.2). Neither exists yet, so a parsed event is
-    recognized and dropped here: there is nothing to print and nothing to enqueue,
-    which is the no output and exit 0 the hook contract asks for in the meantime.
+    ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
+    returns: no model call, no transcript read, no project resolution (DESIGN 8, BUILD-PLAN
+    M2.2). ``session_start`` is injection's, which the agents run as `aft inject` (M1.2),
+    so it prints nothing here, and the hook contract asks for silence and exit 0.
     """
+    if event.kind in (COMPACTION, SESSION_END):
+        queue.enqueue(load(), event)
 
 
 @contextmanager

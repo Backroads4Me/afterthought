@@ -929,6 +929,14 @@ def _create(conn: sqlite3.Connection, *, fresh: bool = False) -> None:
             ) from exc
 
 
+def _secure_delete_tokens(conn: sqlite3.Connection) -> None:
+    """Turn on FTS5's secure-delete for each collection, so a deleted row's tokens leave the
+    full-text index itself rather than lingering in its segments until a merge."""
+    for name in COLLECTIONS:
+        if not conn.execute(f"SELECT 1 FROM {name}_config WHERE k = 'secure-delete'").fetchone():
+            conn.execute(f"INSERT INTO {name}({name}, rank) VALUES ('secure-delete', 1)")
+
+
 def _insert(conn: sqlite3.Connection, collection: str, row: Row) -> None:
     _require_collection(collection)
     conn.execute(_INSERT[collection], row.values())
@@ -984,8 +992,12 @@ def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Conne
     conn = _connect(config, rebuild=rebuild)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        _secure_delete_tokens(conn)
         yield conn
         conn.commit()
+        # A reader still attached to the log keeps the checkpoint from finishing; the next
+        # write drains what this one could not.
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.Error as exc:
         conn.rollback()
         raise SearchIndexError(f"cannot write the index at {path}: {exc}") from exc
@@ -1000,9 +1012,11 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     """Open the index, creating it on first use.
 
     Connections stay in autocommit so the only transaction is the one `_writing` opens by hand,
-    and the journal is WAL so a search reads while a run writes. Unlike the evidence archive
-    this file is disposable - `reindex` rebuilds it from the vault and the archive - so it is
-    opened without the archive's secure delete.
+    and the journal is WAL so a search reads while a run writes. The index holds a copy of the
+    archive's conversation text, so a forget has to reach it (DESIGN 12): secure delete
+    overwrites the pages a delete frees, each collection's FTS5 secure-delete option takes a
+    removed row's tokens out of the full-text index, and `_writing` drains the write-ahead log
+    after every write.
 
     The file is asked who wrote its rows, and an answer that is not this build's is refused before
     a row of ours joins them - asked after the schema is created, so that a file old enough to
@@ -1014,6 +1028,7 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
+        conn.execute("PRAGMA secure_delete = ON")
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
         _create(conn)

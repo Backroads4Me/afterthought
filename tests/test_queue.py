@@ -20,10 +20,11 @@ from pathlib import Path
 
 import pytest
 
-from aft import capture, queue
+from aft import capture, evidence, queue
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
-from aft.readers import CLAUDE, PI
+from aft.filter import filter_entries
+from aft.readers import CLAUDE, PI, Entry
 
 # A hook and a digest worker are separate interpreters, so where a test needs a second
 # process it starts one, with its own imports and its own connection to the queue file.
@@ -200,7 +201,7 @@ def test_a_crash_between_reading_and_completing_leaves_the_job_retryable(
         ("running", os.getpid())
     ]
 
-    queue.complete(cfg, retry, "entry-7")
+    queue.complete(cfg, retry, "entry-7", off_record=False)
     assert queue.next_job(cfg) is None
 
 
@@ -249,14 +250,14 @@ def test_a_watermark_reaches_the_next_job_and_only_complete_moves_it(cfg: Config
     queue.enqueue(cfg, event(session_id="wm"))
     retry = queue.next_job(cfg)
     assert retry is not None and retry.watermark is None
-    queue.complete(cfg, retry, "entry-42")
+    queue.complete(cfg, retry, "entry-42", off_record=False)
 
     assert queue.session_state(cfg, CLAUDE, "wm").watermark == "entry-42"
     queue.enqueue(cfg, event(session_id="wm"))
     third = queue.next_job(cfg)
     assert third is not None and third.watermark == "entry-42", "the digest reads past it"
 
-    queue.complete(cfg, third, None)
+    queue.complete(cfg, third, None, off_record=False)
     assert queue.session_state(cfg, CLAUDE, "wm").watermark == "entry-42"
 
 
@@ -286,13 +287,13 @@ def test_a_session_digests_one_chunk_at_a_time_oldest_first(cfg: Config) -> None
 
     first = queue.next_job(cfg)
     assert first is not None and first.session_id == "earlier-session", "oldest work first"
-    queue.complete(cfg, first, "entry-1")
+    queue.complete(cfg, first, "entry-1", off_record=False)
 
     holding = queue.next_job(cfg)
     assert holding is not None and holding.session_id == "chunks" and holding.watermark is None
     assert queue.next_job(cfg) is None, "its next chunk waits for this one's watermark"
 
-    queue.complete(cfg, holding, "entry-9")
+    queue.complete(cfg, holding, "entry-9", off_record=False)
     second = queue.next_job(cfg)
     assert second is not None and second.session_id == "chunks"
     assert second.watermark == "entry-9", "the next chunk reads on from the last one's"
@@ -345,12 +346,12 @@ def test_the_sweep_chunks_a_long_session_that_outgrew_its_watermark(
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    queue.watching_since(cfg, NOW - timedelta(minutes=10))
 
     queue.enqueue(cfg, event(session_id="long-running", agent=PI, transcript=path))
     job = queue.next_job(cfg)
     assert job is not None
-    queue.complete(cfg, job, "entry-9")
+    queue.complete(cfg, job, "entry-9", off_record=False)
 
     found = capture.sweep(cfg, NOW)
 
@@ -368,7 +369,7 @@ def test_the_sweep_leaves_alone_what_is_quiet_enough_or_already_queued(
     waiting = session_file(sessions, CLAUDE, "waiting", touched=NOW - timedelta(minutes=31))
     digesting = session_file(sessions, CLAUDE, "digesting", touched=NOW - timedelta(minutes=31))
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=40))
+    queue.watching_since(cfg, NOW - timedelta(minutes=40))
 
     for session_id, path in (("digesting", digesting), ("waiting", waiting)):
         queue.enqueue(cfg, event(session_id=session_id, transcript=path))
@@ -380,6 +381,12 @@ def test_the_sweep_leaves_alone_what_is_quiet_enough_or_already_queued(
         cfg,
         "SELECT session_id, status FROM jobs ORDER BY session_id",
     ) == [("digesting", queue.RUNNING), ("waiting", queue.PENDING)]
+
+
+def progress(config: Config, session_id: str) -> tuple[str | None, bool, bool]:
+    """Where a Claude Code session's digest has read to, and whether work is in flight."""
+    state = queue.session_state(config, CLAUDE, session_id)
+    return state.watermark, state.off_record, state.has_open_job
 
 
 def hand_claim_to(config: Config, job: queue.Job, pid: int, age: timedelta) -> None:
@@ -426,8 +433,8 @@ def test_a_claim_whose_pid_was_recycled_to_a_live_process_ages_out(cfg: Config) 
 
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
-    queue.complete(cfg, retry, "entry-3")
-    assert queue.session_state(cfg, CLAUDE, "recycled") == queue.SessionState("entry-3", False)
+    queue.complete(cfg, retry, "entry-3", off_record=False)
+    assert progress(cfg, "recycled") == ("entry-3", False, False)
 
 
 def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None:
@@ -451,8 +458,8 @@ def test_a_claim_another_account_owns_ages_out(cfg: Config, monkeypatch) -> None
 
     retry = queue.next_job(cfg)
     assert retry is not None and retry.id == first.id, "the aged row is work again"
-    queue.complete(cfg, retry, "entry-3")
-    assert queue.session_state(cfg, CLAUDE, "other-owner") == queue.SessionState("entry-3", False)
+    queue.complete(cfg, retry, "entry-3", off_record=False)
+    assert progress(cfg, "other-owner") == ("entry-3", False, False)
 
 
 def test_a_claim_younger_than_one_work_cadence_is_left_alone(cfg: Config) -> None:
@@ -490,9 +497,9 @@ def test_a_worker_that_lost_its_claim_cannot_move_the_watermark(cfg: Config) -> 
     hand_claim_to(cfg, stale, holder, timedelta(0))
 
     with pytest.raises(queue.QueueError):
-        queue.complete(cfg, stale, "entry-99")
+        queue.complete(cfg, stale, "entry-99", off_record=False)
 
-    assert queue.session_state(cfg, CLAUDE, "slow-worker") == queue.SessionState(None, True)
+    assert progress(cfg, "slow-worker") == (None, False, True)
     assert query(cfg, "SELECT status, claimed_pid FROM jobs") == [(queue.RUNNING, holder)]
 
 
@@ -510,7 +517,7 @@ def test_a_worker_that_lost_its_claim_cannot_mark_the_row_failed(cfg: Config) ->
     assert query(cfg, "SELECT status, claimed_pid, error FROM jobs") == [
         (queue.RUNNING, holder, None)
     ]
-    assert queue.session_state(cfg, CLAUDE, "slow-failure") == queue.SessionState(None, True)
+    assert progress(cfg, "slow-failure") == (None, False, True)
 
 
 def test_closing_a_row_the_queue_no_longer_holds_is_an_error(cfg: Config) -> None:
@@ -521,7 +528,7 @@ def test_closing_a_row_the_queue_no_longer_holds_is_an_error(cfg: Config) -> Non
     (cfg.home / queue.QUEUE_NAME).unlink()
 
     with pytest.raises(queue.QueueError):
-        queue.complete(cfg, job, "entry-8")
+        queue.complete(cfg, job, "entry-8", off_record=False)
     with pytest.raises(queue.QueueError):
         queue.fail(cfg, job, "the model call failed")
     assert query(cfg, "SELECT count(*) FROM sessions") == [(0,)]
@@ -547,11 +554,11 @@ def test_a_watermark_quoted_only_as_a_parent_is_no_watermark_at_all(
         touched=NOW - timedelta(minutes=1),
     )
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: tmp_path / "no-claude", PI: sessions})
-    queue.record_sweep(cfg, NOW - timedelta(minutes=10))
+    queue.watching_since(cfg, NOW - timedelta(minutes=10))
     queue.enqueue(cfg, event(session_id="tree-jumped", agent=PI, transcript=path))
     job = queue.next_job(cfg)
     assert job is not None
-    queue.complete(cfg, job, "entry-9")
+    queue.complete(cfg, job, "entry-9", off_record=False)
 
     found = capture.sweep(cfg, NOW)
 
@@ -559,3 +566,305 @@ def test_a_watermark_quoted_only_as_a_parent_is_no_watermark_at_all(
         "the new branch is capture work the watermark must not answer for"
     )
     assert queue.next_job(cfg) is not None
+
+
+# The off-the-record span is the queue's to carry from one chunk of a session to the next,
+# beside the watermark it moves with (M2.2, M2.3). Each test here claims one job at a time,
+# so which session a claim belongs to is never left to chance.
+
+# Text a session would never want archived, written so it says so itself.
+PRIVATE = "the vault passphrase for staging is not-a-real-one at all"
+
+
+def prompt(text: str, entry_id: str) -> Entry:
+    return Entry(entry_id, NOW, "user", text, False)
+
+
+def test_a_span_open_in_one_session_is_no_other_sessions_span(cfg: Config) -> None:
+    """The state is keyed by session, and the second session keeps capturing."""
+    queue.enqueue(cfg, event(session_id="off-record"))
+    off = queue.next_job(cfg)
+    assert off is not None and off.session_id == "off-record"
+    assert (off.watermark, off.off_record) == (None, False), "a session starts on the record"
+    queue.complete(cfg, off, "o-3", off_record=True)
+
+    queue.enqueue(cfg, event(session_id="ordinary"))
+    ordinary = queue.next_job(cfg)
+    assert ordinary is not None and ordinary.session_id == "ordinary"
+    assert ordinary.off_record is False, "a neighbour's open span is not this session's"
+    queue.complete(cfg, ordinary, "n-1", off_record=False)
+
+    queue.enqueue(cfg, event(session_id="off-record"))
+    again = queue.next_job(cfg)
+    assert again is not None and again.session_id == "off-record"
+    assert (again.watermark, again.off_record) == ("o-3", True), "its own span is still open"
+    assert progress(cfg, "ordinary") == ("n-1", False, False)
+
+
+def test_two_agents_sessions_of_one_id_keep_their_own_span(cfg: Config) -> None:
+    """The queue holds a session per agent, and so does its span."""
+    queue.enqueue(cfg, event(session_id="shared", agent=CLAUDE))
+    claude = queue.next_job(cfg)
+    assert claude is not None and claude.agent == CLAUDE
+    queue.complete(cfg, claude, "c-1", off_record=True)
+
+    queue.enqueue(cfg, event(session_id="shared", agent=PI))
+    pi = queue.next_job(cfg)
+    assert pi is not None and pi.agent == PI
+    assert pi.off_record is False, "the same id in the other agent is a different session"
+
+
+def test_the_span_and_the_watermark_move_in_one_close_or_not_at_all(cfg: Config) -> None:
+    """One statement carries both, so no close leaves them describing different moments."""
+    stored = "SELECT watermark, off_record FROM sessions WHERE session_id = ?"
+
+    queue.enqueue(cfg, event(session_id="coupled"))
+    first = queue.next_job(cfg)
+    assert first is not None
+    queue.complete(cfg, first, "c-2", off_record=True)
+    assert query(cfg, stored, ("coupled",)) == [("c-2", 1)]
+
+    # A close that moves no watermark moves no span either: the next digest reads those
+    # entries again and derives the span from them rather than from a stored half.
+    queue.enqueue(cfg, event(session_id="coupled"))
+    second = queue.next_job(cfg)
+    assert second is not None and second.watermark == "c-2"
+    queue.complete(cfg, second, None, off_record=False)
+    assert query(cfg, stored, ("coupled",)) == [("c-2", 1)]
+
+    # And a close this process has no part in moves neither half of it.
+    queue.enqueue(cfg, event(session_id="coupled"))
+    third = queue.next_job(cfg)
+    assert third is not None
+    hand_claim_to(cfg, third, os.getppid(), timedelta(0))
+    with pytest.raises(queue.QueueError):
+        queue.complete(cfg, third, "c-9", off_record=False)
+
+
+def test_a_close_must_name_the_span_state(cfg: Config) -> None:
+    """Every close names the span's state: ``off_record`` is a required keyword (M2.3)."""
+    stored = "SELECT watermark, off_record FROM sessions WHERE session_id = ?"
+
+    queue.enqueue(cfg, event(session_id="unspoken"))
+    first = queue.next_job(cfg)
+    assert first is not None
+    queue.complete(cfg, first, "u-1", off_record=True)
+    queue.enqueue(cfg, event(session_id="unspoken"))
+    second = queue.next_job(cfg)
+    assert second is not None and second.off_record is True
+
+    with pytest.raises(TypeError):
+        queue.complete(cfg, second, "u-9")
+
+    assert query(cfg, stored, ("unspoken",)) == [("u-1", 1)], (
+        "the refusal left the last honest close exactly where it stood"
+    )
+    assert query(cfg, "SELECT status FROM jobs WHERE id = ?", (second.id,)) == [(queue.RUNNING,)], (
+        "a refused close never closed the row"
+    )
+
+
+def complete_a_chunk_off_the_record_and_exit(config: Config, closed: Path) -> None:
+    """Digest one chunk as a worker process would, and leave the span open behind.
+
+    The process exits without touching a module-level variable the next chunk could be
+    served from, so what a later claim finds can only be what the queue file holds.
+    """
+    try:
+        job = queue.next_job(config)
+        queue.complete(config, job, "w-4", off_record=True)
+        closed.write_text(job.id)
+    except BaseException:
+        traceback.print_exc()
+        os._exit(1)
+    os._exit(0)
+
+
+def test_a_span_one_process_stored_reaches_the_next_process_to_claim(
+    cfg: Config, tmp_path: Path
+) -> None:
+    """The state lives in the queue file, which is what survives a worker exiting."""
+    queue.enqueue(cfg, event(session_id="across-process"))
+    closed = tmp_path / "closed.txt"
+    worker = SPAWN.Process(target=complete_a_chunk_off_the_record_and_exit, args=(cfg, closed))
+    worker.start()
+    worker.join(timeout=60)
+    assert worker.exitcode == 0 and closed.exists(), "the worker never closed its chunk"
+
+    queue.enqueue(cfg, event(session_id="across-process"))
+    next_chunk = queue.next_job(cfg)
+    assert next_chunk is not None
+    assert (next_chunk.watermark, next_chunk.off_record) == ("w-4", True)
+
+
+def test_a_failed_job_hands_its_open_span_to_the_chunk_that_retries_it(cfg: Config) -> None:
+    """A retry resumes the same moment: the span is neither lost nor applied twice."""
+    stored = "SELECT watermark, off_record FROM sessions WHERE session_id = ?"
+
+    queue.enqueue(cfg, event(session_id="retried"))
+    first = queue.next_job(cfg)
+    assert first is not None
+    queue.complete(cfg, first, "r-4", off_record=True)
+
+    queue.enqueue(cfg, event(session_id="retried"))
+    second = queue.next_job(cfg)
+    assert second is not None
+    assert (second.watermark, second.off_record) == ("r-4", True)
+    queue.fail(cfg, second, "the model call failed")
+    assert query(cfg, stored, ("retried",)) == [("r-4", 1)], "a failure moves neither half"
+
+    queue.enqueue(cfg, event(session_id="retried"))
+    third = queue.next_job(cfg)
+    assert third is not None
+    assert (third.watermark, third.off_record) == ("r-4", True), "the retry resumes, not restarts"
+
+    kept, off_record = filter_entries(
+        [prompt("aft on", "r-5"), prompt("back to it", "r-6")], cfg, third.off_record
+    )
+    assert [entry.text for entry in kept] == ["back to it"]
+    assert off_record is False, "the one marker closes the span once"
+    queue.complete(cfg, third, "r-6", off_record=off_record)
+    assert query(cfg, stored, ("retried",)) == [("r-6", 0)]
+
+
+def test_a_span_opened_in_one_chunk_still_holds_the_next_chunk_of_its_session(
+    cfg: Config,
+) -> None:
+    """The leak's own shape, run the way capture runs it (M2.2, M2.3, DESIGN 12)."""
+    queue.enqueue(cfg, event(session_id="leaking"))
+    first = queue.next_job(cfg)
+    assert first is not None and first.session_id == "leaking"
+    kept, off_record = filter_entries(
+        [prompt("the plan", "e1"), prompt("aft off", "e2"), prompt(PRIVATE, "e3")], cfg
+    )
+    evidence.store(cfg, CLAUDE, first.session_id, None, kept)
+    queue.complete(cfg, first, "e3", off_record=off_record)
+    assert off_record is True, "the chunk ends inside the span it opened"
+
+    queue.enqueue(cfg, event(session_id="ordinary"))
+    ordinary = queue.next_job(cfg)
+    assert ordinary is not None and ordinary.session_id == "ordinary"
+    kept, off_record = filter_entries(
+        [prompt("the deploy needs a restart", "n1")], cfg, ordinary.off_record
+    )
+    assert [entry.text for entry in kept] == ["the deploy needs a restart"]
+    evidence.store(cfg, CLAUDE, ordinary.session_id, None, kept)
+    queue.complete(cfg, ordinary, "n1", off_record=off_record)
+
+    queue.enqueue(cfg, event(session_id="leaking"))
+    second = queue.next_job(cfg)
+    assert second is not None and second.session_id == "leaking"
+    assert (second.watermark, second.off_record) == ("e3", True)
+    kept, off_record = filter_entries(
+        [
+            prompt(PRIVATE + ", repeated", "e4"),
+            prompt("aft on", "e5"),
+            prompt("the deploy is next", "e6"),
+        ],
+        cfg,
+        second.off_record,
+    )
+    assert [entry.text for entry in kept] == ["the deploy is next"]
+    assert off_record is False
+    evidence.store(cfg, CLAUDE, second.session_id, None, kept)
+    queue.complete(cfg, second, "e6", off_record=off_record)
+
+    archived = [entry.text for entry in evidence.entries(cfg, "leaking")]
+    assert archived == ["the plan", "the deploy is next"], (
+        "the span's text reaches the archive in neither chunk, and what followed its "
+        "marker does reach it"
+    )
+    assert [entry.text for entry in evidence.entries(cfg, "ordinary")] == [
+        "the deploy needs a restart"
+    ]
+
+
+def test_a_queue_file_without_span_state_is_refused(cfg: Config) -> None:
+    """A queue file from before sessions carried span state is refused, never guessed at."""
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    conn.execute(
+        "CREATE TABLE sessions (agent TEXT NOT NULL, session_id TEXT NOT NULL,"
+        " watermark TEXT, PRIMARY KEY (agent, session_id))"
+    )
+    conn.close()
+
+    with pytest.raises(queue.QueueError, match="earlier build"):
+        queue.enqueue(cfg, event(session_id="old"))
+
+
+def sweep_dirs(monkeypatch, sessions: Path, tmp_path: Path) -> None:
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+
+
+def test_the_sweep_finds_a_session_the_last_sweep_ran_past(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A session still talking at one sweep is found by a later one, whatever the cadence:
+    each session is measured against its own progress, not the time of the last sweep."""
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "slow-to-quiet", touched=NOW - timedelta(minutes=20))
+
+    assert capture.sweep(cfg, NOW - timedelta(minutes=10)) == [], "still talking"
+    found = capture.sweep(cfg, NOW + timedelta(minutes=15))
+
+    assert [e.session_id for e in found] == [path.stem]
+
+
+def test_a_session_untouched_since_its_digest_read_it_is_not_offered_again(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A digest that kept nothing moves no watermark, and still ends the work: the file has
+    not moved since the digest claimed it. When the session speaks again, it is work."""
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    monkeypatch.setattr(queue, "_now", lambda: NOW)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "dry", touched=NOW - timedelta(minutes=31))
+    queue.enqueue(cfg, event(session_id="dry", transcript=path))
+    job = queue.next_job(cfg)
+    assert job is not None
+    queue.complete(cfg, job, None, off_record=False)
+
+    assert capture.sweep(cfg, NOW + timedelta(hours=1)) == []
+
+    later = NOW + timedelta(minutes=5)
+    os.utime(path, (later.timestamp(), later.timestamp()))
+    found = capture.sweep(cfg, NOW + timedelta(hours=1))
+    assert [e.session_id for e in found] == ["dry"]
+
+
+def test_a_failed_session_waits_before_it_is_offered_again(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    monkeypatch.setattr(queue, "_now", lambda: NOW)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    path = session_file(sessions, CLAUDE, "broken", touched=NOW - timedelta(minutes=40))
+    queue.enqueue(cfg, event(session_id="broken", transcript=path))
+    job = queue.next_job(cfg)
+    assert job is not None
+    queue.fail(cfg, job, "unrecognized transcript")
+
+    assert capture.sweep(cfg, NOW + timedelta(minutes=10)) == []
+    found = capture.sweep(cfg, NOW + capture.RETRY_AFTER + timedelta(minutes=1))
+    assert [e.session_id for e in found] == ["broken"]
+
+
+def test_the_sweep_looks_back_only_over_its_window(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    queue.watching_since(cfg, NOW - timedelta(days=30))
+    session_file(sessions, CLAUDE, "ancient", touched=NOW - timedelta(days=8))
+
+    assert capture.sweep(cfg, NOW) == []
+
+
+def test_watching_begins_once(cfg: Config) -> None:
+    assert queue.watching_since(cfg, NOW) == NOW
+    assert queue.watching_since(cfg, NOW + timedelta(days=1)) == NOW

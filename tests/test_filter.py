@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 
 from aft import config as configmod
-from aft.filter import CAP_MARKER, MAX_CHARS, filter_entries
+from aft.filter import CAP_MARKER, FLAG_HEAD_CHARS, MAX_CHARS, filter_entries
 from aft.readers import Entry
 from aft.redact import REDACTED, BadPattern
 
@@ -36,7 +36,7 @@ def output(text: str, entry_id: str = "t", is_error: bool = False) -> Entry:
 
 
 def kept(entries: list[Entry], config: configmod.Config) -> list[str]:
-    return [entry.text for entry in filter_entries(entries, config)]
+    return [entry.text for entry in filter_entries(entries, config)[0]]
 
 
 @pytest.fixture
@@ -143,7 +143,7 @@ def test_a_marker_said_mid_sentence_does_nothing(cfg):
     assert kept(entries, cfg) == [entry.text for entry in entries]
 
 
-def test_an_unclosed_span_runs_to_the_end_of_the_batch_handed_to_one_call(cfg):
+def test_an_unclosed_span_runs_to_the_end_of_the_entries_of_one_call(cfg):
     entries = [
         said("first", "e1"),
         said("aft off", "e2"),
@@ -164,6 +164,85 @@ def test_only_a_prompt_carries_a_marker(cfg):
         said("noted"),
     ]
     assert kept(entries, cfg) == [entry.text for entry in entries]
+
+
+# Capture delivers one session in chunks, so a span is decided across calls rather than
+# inside one: the state crosses a boundary in the caller's hands (M2.3, M2.2).
+
+
+def test_a_span_left_open_by_one_chunk_still_holds_over_the_next(cfg):
+    first, off_record = filter_entries(
+        [said("the plan", "e1"), said("aft off", "e2"), said("a note", "e3")], cfg
+    )
+    assert [entry.text for entry in first] == ["the plan"]
+    assert off_record is True, "the chunk ends inside the span it opened"
+
+    second, off_record = filter_entries(
+        [said("the staging host is bellwether", "e4"), answered("noted", "e5")],
+        cfg,
+        off_record,
+    )
+    assert [entry.text for entry in second] == []
+    assert off_record is True, "nothing in this chunk ended the span either"
+
+
+def test_the_resume_marker_of_a_later_chunk_ends_the_span_carried_to_it(cfg):
+    _, off_record = filter_entries([said("aft off", "e1"), said("a note", "e2")], cfg)
+    assert off_record is True
+
+    kept_entries, off_record = filter_entries(
+        [
+            said("still hidden", "e3"),
+            said("aft on", "e4"),
+            said("back to it", "e5"),
+            answered("the next step", "e6"),
+        ],
+        cfg,
+        off_record,
+    )
+    assert [entry.text for entry in kept_entries] == ["back to it", "the next step"]
+    assert off_record is False, "the session is on the record again from here on"
+
+
+def test_a_chunk_that_closes_a_span_hands_no_state_on_to_the_next(cfg):
+    # A span opened and closed inside one chunk leaves nothing for the next one to honour:
+    # the boundary cuts the entries, not the promise, and what the promise needs is that a
+    # span closed before the boundary stays closed.
+    _, off_record = filter_entries(
+        [said("aft off", "e1"), said("a note", "e2"), said("aft on", "e3")], cfg
+    )
+    assert off_record is False
+
+    kept_entries, _ = filter_entries([said("back to it", "e4")], cfg, off_record)
+    assert [entry.text for entry in kept_entries] == ["back to it"]
+
+
+def test_a_chunk_handed_an_open_span_carries_it_on_untouched(cfg):
+    # No marker, no change of state: a chunk of prose neither ends a span nor starts one.
+    kept_entries, off_record = filter_entries(
+        [said("the deploy notes", "e1"), answered("noted", "e2")], cfg, off_record=True
+    )
+    assert kept_entries == []
+    assert off_record is True
+
+
+def test_a_prompt_handed_an_open_span_is_dropped_before_the_rest(cfg):
+    # A span that came in open is dropped by the first step of the filter, so the secret it
+    # holds is never capped, never extracted from, and never redacted on its way out.
+    text = f"the staging key is {FAKE_KEY}"
+    kept_entries, off_record = filter_entries([said(text, "e1")], cfg, off_record=True)
+    assert kept_entries == []
+    assert off_record is True
+
+
+def test_an_error_flag_carried_into_an_open_span_does_not_keep_the_entry(cfg):
+    # Off the record outranks everything the keep step would have saved, a flagged tool
+    # output included.
+    text = "the run ended\nerror: the vault is locked"
+    entries = [output(text, "e1", is_error=True), said("aft on", "e2"), said("after", "e3")]
+    kept_entries, off_record = filter_entries(entries, cfg, off_record=True)
+    assert [entry.text for entry in kept_entries] == ["after"]
+    assert off_record is False
 
 
 def test_a_role_the_readers_do_not_produce_adds_no_text(cfg):
@@ -412,15 +491,111 @@ def test_a_reference_that_is_itself_a_credential_shape_keeps_its_line(cfg):
 
 
 def test_a_tool_entry_keeps_its_identity_and_its_error_flag(cfg):
-    [entry] = filter_entries([output("listing files\nerror: nope", "t-77", is_error=True)], cfg)
+    [entry], _ = filter_entries([output("listing files\nerror: nope", "t-77", is_error=True)], cfg)
     assert (entry.id, entry.role, entry.time, entry.is_error) == ("t-77", "tool", TIME, True)
-    assert entry.text == "error: nope"
+    # The agent flagged this output, so its head is kept whole: all 24 characters of it.
+    assert entry.text == "listing files\nerror: nope"
 
 
-def test_a_tool_output_with_nothing_to_report_is_dropped(cfg):
-    # What the agent flags is not what the archive can quote: a line-less output keeps no
-    # evidence, so the entry goes rather than becoming an empty one.
-    assert kept([output("all tests passed\n34 seconds\nno changes", is_error=True)], cfg) == []
+def test_an_unflagged_tool_output_with_nothing_to_report_is_dropped(cfg):
+    # An output the agent did not flag, with no failing line and no place to point at, is
+    # something a later session could re-run for itself, so the entry goes rather than
+    # becoming an empty one. One the agent did flag is kept whole by design: see
+    # test_a_flagged_output_keeps_its_head_when_no_line_matches.
+    assert kept([output("all tests passed\n34 seconds\nno changes")], cfg) == []
+
+
+# What an entry the agent flagged as an error keeps is the other half of the ruled keep step
+# (M2.3): the agent's own verdict makes the output itself into evidence.
+
+
+def test_a_flagged_output_keeps_its_head_when_no_line_matches(cfg):
+    # The plan's own case: an output the agent flagged, with no line any pattern names.
+    # Its first 500 characters are kept, by that number and only those, with the marker
+    # that says the head was cut short of the rest.
+    quiet = "collected 12 items\nall quiet on the worker\nno changes detected\n" * 40
+    assert len(quiet) > FLAG_HEAD_CHARS
+    [text] = kept([output(quiet, "t1", is_error=True)], cfg)
+    head = text.removesuffix(CAP_MARKER)
+    assert text.endswith(CAP_MARKER), "a head cut short says it is cut"
+    assert head == quiet[:FLAG_HEAD_CHARS], "the head is those 500 characters, by the number"
+
+
+def test_a_flagged_output_keeps_the_matching_lines_below_its_head(cfg):
+    # Below the head the ordinary rule still runs, so what a long dump adds is its failure
+    # lines and its references rather than the rest of the dump.
+    quiet = "collected 12 items\nno changes detected\n" * 40
+    below = "error: the pipe broke\nnothing to report\nsrc/aft/queue.py:41\nthe end"
+    text = quiet + below
+    [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
+    head, lines = kept_text.split(CAP_MARKER, 1)
+    assert lines == "\nerror: the pipe broke\nsrc/aft/queue.py:41"
+    assert text.startswith(head)
+    assert len(head) == FLAG_HEAD_CHARS, "the head is the budget, by the number"
+
+
+def test_the_error_flag_is_what_lets_an_outputs_head_through(cfg):
+    # The same text, flagged and unflagged: the flag is the whole difference between an
+    # entry the archive can quote and the few lines its patterns happen to name.
+    text = "listing the directory\nno changes detected\nerror: the vault is locked"
+    [flagged] = kept([output(text, "t1", is_error=True)], cfg)
+    [unflagged] = kept([output(text, "t2")], cfg)
+    assert flagged == text
+    assert unflagged == "error: the vault is locked"
+
+
+def test_a_flagged_output_is_capped_like_every_other_kept_text(cfg):
+    # A head plus the failure lines of a long dump can run past the budget. The same cap
+    # that bounds every other kept text bounds this one, and cuts it on a word: the long
+    # word here crosses the 1,500 limit, so it goes whole rather than leaving half of it
+    # archived. The head is the first 500 of the z run, none of which matches a pattern.
+    dump = "error: " + "ab " * 329 + "extraordinaryword"
+    [text] = kept([output("z" * 600 + "\n" + dump, "t1", is_error=True)], cfg)
+    assert text.endswith(CAP_MARKER)
+    assert "extraordinaryword" not in text
+    assert text.startswith("z" * FLAG_HEAD_CHARS)
+    assert len(text) <= MAX_CHARS + len(CAP_MARKER)
+
+
+def test_a_flagged_output_is_redacted_like_every_other_kept_text(cfg):
+    text = f"the deploy failed\nkey {FAKE_KEY} was rejected for the run"
+    [text] = kept([output(text, "t1", is_error=True)], cfg)
+    assert FAKE_KEY not in text
+    assert REDACTED in text
+    assert "the deploy failed" in text
+
+
+def test_a_secret_that_straddles_the_head_cut_leaves_no_fragment_behind(cfg):
+    # The budget cuts at 500 whatever sits there, so redaction runs first: the key is the
+    # marker before the cut reaches it, and no piece of a key can be left behind.
+    text = "the deploy failed\n" + "word " * 94 + "one " + FAKE_KEY + " was rejected"
+    start = text.index(FAKE_KEY)
+    assert start < FLAG_HEAD_CHARS < start + len(FAKE_KEY), "the key straddles the cut"
+    [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
+    assert kept_text.endswith(CAP_MARKER), "the head says it stopped short"
+    assert "sk-" not in kept_text, "no piece of the key reaches the archive"
+
+
+def test_a_flagged_output_holding_nothing_at_all_is_still_dropped(cfg):
+    # The head of an empty output is empty: there is nothing to keep, flagged or not.
+    assert kept([output("", "t1", is_error=True)], cfg) == []
+
+
+def test_a_flagged_output_of_nothing_but_space_keeps_nothing(cfg):
+    # Space is no more evidence than nothing: a flagged entry keeps neither a blank text
+    # nor a cap marker describing content that is not in it.
+    assert kept([output("   ", "t1", is_error=True)], cfg) == []
+    long_blank = "\n" * 600 + "error: the pipe broke\n"
+    assert kept([output(long_blank, "t2", is_error=True)], cfg) == ["error: the pipe broke"]
+
+
+def test_a_flagged_output_whose_run_outruns_the_head_budget_keeps_its_head(cfg):
+    # Compact JSON leaves no whitespace for a cut to land on: a flagged error whose first
+    # 500 characters are one unbroken run is cut by the budget, not dropped for a word.
+    text = "\n" + '{"a":"b",' * 125
+    assert len(text) > FLAG_HEAD_CHARS
+    [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
+    assert kept_text == text[:FLAG_HEAD_CHARS] + CAP_MARKER
 
 
 def test_entries_keep_their_order_and_every_field_but_their_text(cfg):
@@ -431,7 +606,7 @@ def test_entries_keep_their_order_and_every_field_but_their_text(cfg):
         output("nothing to see here", "t4"),
         said("three", "u5"),
     ]
-    result = filter_entries(entries, cfg)
+    result, _ = filter_entries(entries, cfg)
     assert [(entry.id, entry.role) for entry in result] == [
         ("u1", "user"),
         ("t2", "tool"),
@@ -452,7 +627,7 @@ def test_a_secret_inside_a_dropped_span_never_appears(cfg):
         said("aft on", "e4"),
         said(f"and the model key is {FAKE_KEY}", "e5"),
     ]
-    result = filter_entries(entries, cfg)
+    result, _ = filter_entries(entries, cfg)
     assert [entry.text for entry in result] == [f"and the model key is {REDACTED}"]
     assert result[0].text.count(REDACTED) == 1
 
