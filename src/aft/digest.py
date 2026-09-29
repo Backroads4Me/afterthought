@@ -220,7 +220,14 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     """
     _require_session_id(job.session_id)
     vault.require(config)
-    resolution = keys.resolve(job.cwd, registrymod.Registry.load(config.registry_path), config.host)
+    registry = registrymod.Registry.load(config.registry_path)
+    try:
+        resolution = keys.resolve(job.cwd, registry, config.host)
+    except GitError as exc:
+        # The directory belongs to whatever ran the session and goes away with it, so git
+        # failing there is this session's own loss. Git failing in the vault is the host's
+        # and still stops the run.
+        raise DigestError(f"{job.cwd} could not be read as a project: {exc}") from exc
     if resolution.slug is None:
         raise DigestError(
             f"{job.cwd} resolves to no project, so this session has nowhere to be filed"
@@ -581,7 +588,10 @@ def _write(config: Config, rel: str, text: str) -> Path:
     if path.is_file():
         raise DigestError(_collision(rel))
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix=".digest-", suffix=".md")
+    # A page is staged through a temporary in the directory that will hold it. The suffix is
+    # not ``.md`` because a run killed before the rename leaves the file behind, and a
+    # page-shaped file there is one `aft lint` reports and `aft inject` may take for a digest.
+    handle, tmp = tempfile.mkstemp(dir=path.parent, prefix=".digest-", suffix=".tmp")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)

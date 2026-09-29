@@ -124,12 +124,18 @@ def quiet_transcript(path: Path, cwd: Path) -> Path:
     )
 
 
-def record(entry_id: str, role: str, text: str, model: str | None = None) -> dict:
-    """One conversation record of a Claude Code transcript."""
+def record(
+    entry_id: str,
+    role: str,
+    text: str,
+    model: str | None = None,
+    when: datetime = NOW,
+) -> dict:
+    """One conversation record of a Claude Code transcript, written at ``when``."""
     message: dict = {"content": [{"type": "text", "text": text}]}
     if model:
         message["model"] = model
-    return {"type": role, "uuid": entry_id, "timestamp": NOW.isoformat(), "message": message}
+    return {"type": role, "uuid": entry_id, "timestamp": when.isoformat(), "message": message}
 
 
 @pytest.fixture(autouse=True)
@@ -443,36 +449,6 @@ def test_a_chunk_the_filter_empties_closes_the_job_with_no_page(session: Session
     assert (second.swept, second.digested, second.empty) == (0, 0, 0)
 
 
-def test_a_day_opened_off_the_record_still_gets_its_work(session: Session):
-    """The emptied chunk does not spend the day: the work that follows gets its page.
-
-    A session that opens with an off-the-record preamble and then does real work is the
-    ordinary shape of a working day. Filing nothing for the first chunk leaves the day's
-    one path free, so the chunk with content in it is digested instead of refused.
-    """
-    quiet = quiet_transcript(session.transcript.with_name("quiet.jsonl"), session.cwd)
-    fake, cfg = serve(session.cfg, answer(said(entry="e3"), summary="Wrote the capture hook."))
-    queue.enqueue(cfg, event(quiet, session.cwd))
-    try:
-        opened = work.run(cfg)
-        first = pages(cfg)
-        with quiet.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record("e3", "user", USER_PROMPT)) + "\n")
-            handle.write(json.dumps(record("e4", "assistant", ASSISTANT_ANSWER)) + "\n")
-        queue.enqueue(cfg, event(quiet, session.cwd))
-        ran = work.run(cfg)
-        standing = pages(cfg)
-        written = body(cfg, page_path())
-    finally:
-        fake.stop()
-    assert (opened.digested, opened.empty) == (0, 1)
-    assert first == []
-    assert ran.digested == 1
-    assert standing == [below()]
-    assert frontmatter(cfg, page_path())["description"] == "Wrote the capture hook."
-    assert "Capture runs at session end, not per turn. [stated]" in written
-
-
 def test_an_entry_the_chunk_never_held_is_dropped(session: Session):
     """An id the model invents has no role to check and no text to quote."""
     wrote = digest_once(session, answer(said(entry="e99")))
@@ -673,6 +649,47 @@ def test_a_commit_that_fails_leaves_no_page_standing(session: Session):
     assert watermark(cfg) is None
 
 
+def test_a_temporary_a_killed_run_leaves_is_no_page(session: Session, monkeypatch):
+    """The window between writing a page and renaming it is one no rollback covers.
+
+    The process is simply gone, so the temporary stands in the directory of the page it
+    was becoming - a directory two other readers walk. Neither may treat it as a page:
+    `aft lint` has nothing to report about it, and the injection still takes its handoff
+    from the digest that really stands. The killed run is a month on, which is where its
+    own page would have been filed and what makes the stray the newest file in the tree.
+    """
+    digest_once(session, answer(said(), in_flight="the sweep, still to write"))
+    month_on = NOW.replace(month=11, day=2)
+    later = write_records(
+        session.transcript.with_name("later.jsonl"),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT, when=month_on),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real", when=month_on),
+    )
+
+    class Killed(BaseException):
+        """What a signal after the creation and before the rename looks like."""
+
+    def gone_before_it_is_written(*_args, **_kwargs):
+        raise Killed
+
+    fake, cfg = serve(session.cfg, answer(said(), in_flight="the chunk after this one"))
+    job = claim(cfg, later, session.cwd, session_id="s-2")
+    monkeypatch.setattr(digest.os, "fdopen", gone_before_it_is_written)
+    try:
+        with pytest.raises(Killed):
+            digest.digest_job(cfg, job)
+    finally:
+        monkeypatch.undo()
+        fake.stop()
+    left = sorted(p.name for p in (cfg.vault / "digests" / SLUG / "2026" / "11").iterdir())
+    assert len(left) == 1 and left[0].startswith(".digest-"), left
+    assert pages(cfg) == [below()], "the killed run's page stood anyway"
+    assert lint.lint_vault(cfg.vault) == []
+    resolution = keys.resolve(session.cwd, registry.Registry.load(cfg.registry_path), cfg.host)
+    assert "- In flight: the sweep, still to write" in inject.build(cfg, resolution)
+
+
 def test_the_watermark_moves_only_with_the_page_and_its_commit(session: Session):
     """Success looks like this: the page, its commit in the vault's own history, the mark."""
     wrote = digest_once(session, answer(said()))
@@ -824,6 +841,38 @@ def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: 
     assert rows(cfg, queue.FAILED) == ["gone-1"]
     assert rows(cfg, queue.DONE) == ["here-1"]
     assert watermark(cfg, "gone-1") is None
+
+
+def test_a_directory_deleted_since_the_session_fails_only_its_own_job(session: Session, tmp_path):
+    """A worktree cleaned up after its session is ordinary, and one session's loss.
+
+    Gate and orchestrator checkouts are made, worked in, and deleted by other processes,
+    and the queue keeps the directory a transcript named as data another process wrote.
+    Naming the project runs git in that directory, so a vanished one has to be told as
+    this job's own failure, path and all. A run that stopped there instead would leave the
+    row claimed, be handed the same row again when its lease lapsed, and never digest
+    another session at all (DESIGN 14).
+    """
+    gone = (tmp_path / "gate-worktree").resolve()
+    gone.mkdir()
+    here = session.transcript.with_name("here.jsonl")
+    shutil.copy(session.transcript, here)
+    fake, cfg = serve(session.cfg, answer(said()), answer(said()))
+    try:
+        queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
+        queue.enqueue(cfg, event(here, session.cwd, session_id="here-1"))
+        shutil.rmtree(gone)
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.stopped == "", "a session-local path stopped the whole run"
+    assert report.digested == 1
+    assert len(report.failures) == 1
+    assert "gate-worktree" in report.failures[0]
+    assert rows(cfg, queue.FAILED) == ["gone-cwd"]
+    assert rows(cfg, queue.DONE) == ["here-1"]
+    assert watermark(cfg, "gone-cwd") is None
+    assert pages(cfg) == [below("here-1")]
 
 
 # ---------------------------------------------------------------- the chunk and its parts

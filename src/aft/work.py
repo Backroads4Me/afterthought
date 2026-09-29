@@ -112,7 +112,15 @@ def run(config: Config, now: datetime | None = None) -> Report:
                 break
             except FAILS_JOB as exc:
                 failures.append(f"job {job.id} ({job.session_id}): {exc}")
-                queue.fail(config, job, str(exc))
+                try:
+                    queue.fail(config, job, str(exc))
+                except QUEUE_LOST as lost:
+                    # Writing a failure down is a queue call like the sweep and the close: while
+                    # the queue cannot be used no row can be left behind, so the run stops with
+                    # its own reason rather than dying in the middle of reporting (DESIGN 14).
+                    failures.append(f"the queue: {lost}")
+                    stopped = STOP_QUEUE
+                    break
     except QUEUE_LOST as exc:
         failures.append(f"the queue: {exc}")
         stopped = STOP_QUEUE
