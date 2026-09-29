@@ -277,8 +277,8 @@ aft:
   evidence and a `resource` URI naming the session and entry.
 - **Anchors** tie a fact about code to a file, words that must appear in it, and the commit
   where that was verified (the repocodex pin check).
-- **Every footnote resolves.** A `[^id]` anywhere on a fact page, in a fact line or in the
-  note under it, names a source in the page's `sources`. Notes are read next to their fact,
+- **Every footnote resolves.** A `[^id]` anywhere on a fact page names a source in the
+  page's `sources`, and every source a fact line cites carries a quote. Notes are read next to their fact,
   so an unresolvable citation there is as misleading as one on the line.
 - **Text the tool did not write is never lost.** A person may type into a page, including
   answers under a note. The writer edits only what it can fully parse: an edit that would
@@ -453,7 +453,7 @@ so later evidence is applied after earlier evidence.
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
 | **R6 One project per unit of work** | A run never edits another project's pages. Global pages change only from `[stated]` facts. | Script |
 | **R7 Size caps** | Pages over their cap are flagged in the report. Condensing and splitting come after v1. | Script |
-| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
+| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
 | **R9 No free-form writes** | Model output is schema-constrained JSON. Only the script edits files. | Script |
 
 ### Authority to replace a fact
@@ -517,7 +517,7 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
    linked to the project
 6. two lines on how to search and read
 
-Candidates, stale and superseded lines, and dream reports are left out, and nothing is
+Candidates, stale, superseded and withdrawn lines, and dream reports are left out, and nothing is
 injected per tool call. agentmemory found that injecting context into every tool turn burned tokens and
 turned it off by default. The cap is a starting point; M5 tunes it by usefulness.
 

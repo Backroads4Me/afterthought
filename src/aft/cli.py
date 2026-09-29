@@ -11,10 +11,11 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, keys, lint, vault
+from aft import __version__, adapters, gitutil, inject, keys, lint, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
 from aft.events import AdapterError, SessionEvent
 from aft.gitutil import GitError
+from aft.install import claude as claude_install
 from aft.install import pi as pi_install
 from aft.registry import Registry, RegistryError, path_key, slugify
 
@@ -33,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.handler(args)
     except (
         ConfigError,
+        claude_install.InstallError,
         pi_install.InstallError,
         RegistryError,
         vault.VaultError,
@@ -55,6 +57,10 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("path", nargs="?", default=".")
     p.add_argument("--json", action="store_true")
     p.set_defaults(handler=cmd_key)
+
+    p = sub.add_parser("inject", help="print the memory a session starts with")
+    p.add_argument("path", nargs="?", default=".")
+    p.set_defaults(handler=cmd_inject)
 
     p = sub.add_parser("project", help="manage registered projects")
     psub = p.add_subparsers(metavar="action")
@@ -84,6 +90,18 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
     isub = p.add_subparsers(metavar="agent")
+    q = isub.add_parser("claude", help="install the Claude Code hooks in ~/.claude/settings.json")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the entries aft would add or remove, write nothing",
+    )
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's own hook entries and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_claude)
     q = isub.add_parser("pi", help="install the afterthought extension in pi's extensions dir")
     q.add_argument("--dry-run", action="store_true", help="print the extension diff, write nothing")
     q.add_argument(
@@ -130,6 +148,17 @@ def cmd_key(args) -> int:
     else:
         print(f"{result.slug or '-'}\t{result.kind}\t{result.root or '-'}")
     return 0 if result.registered else 1
+
+
+def cmd_inject(args) -> int:
+    """Print the block. The lookup records no alias: injection only reads memory."""
+    config = load()
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(Path(args.path), registry, config.host)
+    block = inject.build(config, result)
+    if block:
+        print(block)
+    return 0
 
 
 def _alias_writer(config: Config):
@@ -224,6 +253,34 @@ def cmd_lint(args) -> int:
     if findings:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_install_claude(args) -> int:
+    """Add or remove afterthought's hook entries in Claude Code's own settings file."""
+    settings = claude_install.settings_path()
+    change = (
+        claude_install.uninstall(settings, dry_run=args.dry_run)
+        if args.uninstall
+        else claude_install.install(settings, dry_run=args.dry_run)
+    )
+    if args.dry_run:
+        print(change.preview or f"no changes to {settings}")
+        return 0
+    if change.backup is not None:
+        print(f"backed up {settings} to {change.backup}")
+    if args.uninstall:
+        print(
+            f"removed afterthought's hooks from {settings}"
+            if change.changed
+            else f"no afterthought hooks to remove in {settings}"
+        )
+    else:
+        print(
+            f"installed afterthought's hooks in {settings}"
+            if change.changed
+            else f"afterthought's hooks are already in {settings}"
+        )
     return 0
 
 
