@@ -23,8 +23,8 @@ Three rules hold the user's own configuration safe:
   nothing else: every key of the user's keeps its place, a matcher group keeps its matcher
   once our hook leaves it, the ``hooks`` object an uninstall empties keeps its key as an
   empty object, and only an event list this very uninstall emptied of our last entry goes
-  with it, so a file is left as its author wrote it. The file is read, edited in place, and
-  written back with its key order intact.
+  with it, so nothing of the user's is moved or removed. The file is read, edited in place,
+  and written back with its key order intact.
 * A write goes to the file the settings path points at, so a symbolic link the user made
   there - into a version-controlled settings file, say - survives and keeps being read.
 * No settings file changes before a backup of its text is safe beside it, carrying that
