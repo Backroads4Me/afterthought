@@ -40,7 +40,12 @@ STALE = "stale"
 CONFLICT = "conflict"
 NEEDS_YOU = "needs-you"
 
-_CALLOUTS = {"conflict": CONFLICT, "question": NEEDS_YOU}
+# The note types a fact line can carry, and the state each one writes. This is the
+# table the parser reads, so it is the table a writer writes too.
+CALLOUTS = {
+    "conflict": CONFLICT,
+    "question": NEEDS_YOU,
+}
 _REF = r"\[\^[A-Za-z0-9_-]+\]"
 _TAIL = (
     r"\[(?P<source>[a-z]+)\] (?P<date>\d{4}-\d{2}-\d{2})"
@@ -197,7 +202,7 @@ def _start_callout(
 ) -> Callout | None:
     """Mark the fact with a note; None when the note is refused and writes no state."""
     match = _CALLOUT_START.match(line)
-    if not match or match.group("type") not in _CALLOUTS:
+    if not match or match.group("type") not in CALLOUTS:
         page.errors.append((number, "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'"))
         return None
     if not _valid_date(match.group("date")):
@@ -218,7 +223,7 @@ def _start_callout(
         return None
     callout = Callout(match.group("type"), match.group("date"), number)
     fact.callouts.append(callout)
-    fact.state = _CALLOUTS[callout.type]
+    fact.state = CALLOUTS[callout.type]
     return callout
 
 

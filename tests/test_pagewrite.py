@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from aft import config as configmod
 from aft import lint, page, pagewrite
+from aft import vault as vaultmod
 from aft.registry import Registry
 
 REL = Path("projects/widget/overview.md")
@@ -137,12 +139,27 @@ def make(initialized, template: str) -> pagewrite.PageDoc:
     path = initialized.vault / REL
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(template.replace("{project_id}", project.id))
-    return pagewrite.PageDoc.read(path)
+    return pagewrite.PageDoc.read(path, vault=initialized.vault)
 
 
 @pytest.fixture
 def doc(initialized) -> pagewrite.PageDoc:
     return make(initialized, PAGE)
+
+
+@pytest.fixture
+def projects_vault(tmp_path, monkeypatch) -> configmod.Config:
+    """A vault that itself sits under a directory named ``projects``, which is a layout
+    anyone can pick: the config names any absolute path.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    vault = tmp_path / "projects" / "afterthought"
+    (home / configmod.CONFIG_NAME).write_text(f'vault = "{vault}"\nhost = "testhost"\n')
+    monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    config = configmod.load()
+    vaultmod.init(config)
+    return config
 
 
 def edits(before: str, after: str) -> tuple[tuple[int, ...], tuple[str, ...]]:
@@ -186,7 +203,7 @@ def states(parsed: page.Page, section: str) -> list[tuple[str, str]]:
 
 
 def test_an_untouched_page_renders_as_it_was_read():
-    assert pagewrite.PageDoc(PAGE).render() == PAGE
+    assert pagewrite.PageDoc(PAGE, vault=Path("/vault")).render() == PAGE
 
 
 def test_add_fact_appends_under_its_kind(initialized, doc):
@@ -498,7 +515,7 @@ def test_a_hand_typed_tail_makes_every_operation_on_the_candidate_refuse(initial
     doc = make(initialized, PAGE)
     candidate = doc.fact("Long sessions need checkpoints.")
     doc.path.write_text(doc.render().replace(counts, f"{counts} pending review"))
-    doc = pagewrite.PageDoc.read(doc.path)
+    doc = pagewrite.PageDoc.read(doc.path, vault=doc.vault)
     assert [message for _, message in doc.page.errors] == [
         "a candidate may end only with its signal counts"
     ]
@@ -735,7 +752,7 @@ def test_a_struck_candidate_takes_no_edit_that_would_unstrike_it(initialized):
     doc = make(initialized, PAGE)
     candidate = doc.fact("Long sessions need checkpoints.")
     doc.path.write_text(doc.render().replace(CANDIDATE, f"{struck} (signals 1/3, sessions 1/2)"))
-    doc = pagewrite.PageDoc.read(doc.path)
+    doc = pagewrite.PageDoc.read(doc.path, vault=doc.vault)
     assert [message for _, message in doc.page.errors] == ["a candidate cannot be struck through"]
     before = doc.render()
     with pytest.raises(pagewrite.WriteError, match="no fact line"):
@@ -898,7 +915,7 @@ def test_a_hand_typed_tail_leaves_the_line_out_of_reach_of_the_note_operations(i
     doc = make(initialized, PAGE)
     line = doc.fact("The GPU host runs vLLM.")
     doc.path.write_text(doc.render().replace(STATE, f"{STATE} pending review"))
-    doc = pagewrite.PageDoc.read(doc.path)
+    doc = pagewrite.PageDoc.read(doc.path, vault=doc.vault)
     assert [message for _, message in doc.page.errors] == [
         "unrecognized text after the sources: 'pending review'"
     ]
@@ -1008,16 +1025,17 @@ def test_resolving_two_notes_appends_both_blocks_to_the_archive(initialized, doc
 
 
 def test_a_note_with_nowhere_to_be_archived_stays_on_the_page(initialized):
-    """Design 6 keys the archive by a project slug, which a page outside projects/<slug>/
-    does not have: its note stays on its page and no file is written.
+    """Design 6 keys the archive by a project slug and names no archive for a page outside
+    ``projects/<slug>/``, so its note stays on its page and no file is written.
     """
     noted = "\n".join([STATE, "> [!question] 2026-10-01", "> Does the host still run vLLM?"])
     doc = pagewrite.PageDoc(
         PAGE.replace(STATE, noted).replace("{project_id}", "p1"),
         initialized.vault / "global/preferences.md",
+        vault=initialized.vault,
     )
     before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="no archive"):
+    with pytest.raises(pagewrite.WriteError, match="names no archive"):
         doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
     assert doc.render() == before
     assert not (initialized.vault / "archive").exists()
@@ -1046,3 +1064,125 @@ def test_text_typed_below_a_note_stays_on_the_page_when_the_note_closes(initiali
         "",
     ]
     assert typed not in archived(initialized)
+
+
+def test_closing_a_note_under_an_answer_someone_typed_leaves_their_answer_alone(initialized):
+    """The ruling protects text the tool did not write; it does not hold a close because
+    the page reads badly while the note is open. The note goes to the archive, the answer
+    keeps every byte on the page, and the page ends up reading as grammar.
+    """
+    ours = [STATE, "> [!conflict] 2026-10-01", "> A session says SGLang."]
+    answer = ["", "> [!question] 2026-10-09", "> vLLM, restarted on Tuesday."]
+    noted = "\n".join([STATE, "", "> [!conflict] 2026-10-01", "> A session says SGLang.", *answer])
+    doc = make(initialized, PAGE.replace(STATE, noted))
+    assert [message for _, message in doc.page.errors] == [
+        "a callout cannot follow a conflict fact"
+    ]
+    line = doc.fact("The GPU host runs vLLM.")
+    before = doc.render()
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    result = written(initialized, doc)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.NEEDS_YOU)]
+    cut = without(without(before, line.line + 3), line.line + 2)
+    assert doc.render() == without(cut, line.line + 1)
+    assert archived(initialized)[-4:] == [*ours, ""]
+    assert "restarted on Tuesday" not in "".join(archived(initialized))
+
+
+def test_a_vault_under_a_projects_directory_archives_inside_itself(projects_vault):
+    """The archive key comes from the page's place in the vault the configuration names,
+    not from a directory named ``projects`` somewhere on the way to it.
+    """
+    noted = "\n".join([STATE, "> [!conflict] 2026-10-01", "> A session says SGLang."])
+    doc = make(projects_vault, PAGE.replace(STATE, noted))
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert states(written(projects_vault, doc), "State") == [
+        ("The GPU host runs vLLM.", page.ACTIVE)
+    ]
+    assert archived(projects_vault)[-4:] == [
+        STATE,
+        "> [!conflict] 2026-10-01",
+        "> A session says SGLang.",
+        "",
+    ]
+    assert not (projects_vault.vault.parent / "archive").exists()
+
+
+def test_an_archive_write_that_fails_leaves_page_and_archive_as_they_were(
+    initialized, doc, monkeypatch
+):
+    """The page edit and the archive write are one step: a note is never left on the page
+    and in the archive at once, nor filed in the archive and lost from the page.
+    """
+    doc.add_callout(
+        doc.fact("The index is plain SQLite."), "question", "Still plain SQLite?", "2026-10-01"
+    )
+    assert doc.resolve_callout(doc.fact("The index is plain SQLite.")) is True
+    doc.add_callout(
+        doc.fact("The GPU host runs vLLM."), "conflict", "A session says SGLang.", "2026-10-02"
+    )
+    archive = initialized.vault / "archive" / "widget.md"
+    was_archive, was_page = archive.read_bytes(), doc.render()
+    write, failures = Path.write_bytes, iter([OSError("no space left on device")])
+
+    def flaky(self, data, **kwargs):
+        error = next(failures, None)
+        if error is not None:
+            raise error
+        return write(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(OSError, match="no space left on device"):
+        doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+    assert archive.read_bytes() == was_archive
+    assert doc.render() == was_page
+    assert page.parse(doc.render(), REL).facts[1].state == page.CONFLICT
+
+
+def test_a_note_type_the_parser_grows_is_one_the_writer_writes(initialized, doc, monkeypatch):
+    """The writer writes the note types the parser reads, from the one table design 6's
+    fact state is defined by, so the two cannot drift apart.
+    """
+    monkeypatch.setitem(page.CALLOUTS, "watch", page.NEEDS_YOU)
+    assert doc.add_callout(
+        doc.fact("The GPU host runs vLLM."), "watch", "Keep an eye on this.", "2026-10-05"
+    )
+    result = written(initialized, doc)
+    assert states(result, "State") == [("The GPU host runs vLLM.", page.NEEDS_YOU)]
+    assert result.facts[1].callouts[0].type == "watch"
+
+
+def test_an_archive_file_named_by_hand_lints_after_the_writer_appends(initialized, doc):
+    """``archive/<slug>.md`` is a person-visible path, so the writer takes responsibility
+    for one it did not make: their text stays and the file gets the frontmatter every
+    page in the vault is linted for.
+    """
+    archive = initialized.vault / "archive"
+    archive.mkdir(parents=True)
+    (archive / "widget.md").write_text("# Resolved notes\n\nNothing here yet.\n")
+    assert doc.add_callout(doc.fact("The GPU host runs vLLM."), "question", "Still?", "2026-10-05")
+    assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
+    assert written(initialized, doc).facts[1].state == page.ACTIVE
+    text = (archive / "widget.md").read_text()
+    assert text.startswith("---\ntype: Archive\n")
+    assert "# Resolved notes\n\nNothing here yet." in text
+    assert archived(initialized)[-3:] == ["> [!question] 2026-10-05", "> Still?", ""]
+
+
+def test_an_archive_that_cannot_be_read_is_refused_with_its_path(initialized, doc):
+    """Rather than append into a file whose own frontmatter does not read, the writer says
+    which file it means and leaves both files alone.
+    """
+    archive = initialized.vault / "archive"
+    archive.mkdir(parents=True)
+    filed = archive / "widget.md"
+    assert doc.add_callout(doc.fact("The GPU host runs vLLM."), "question", "Still?", "2026-10-05")
+    before = doc.render()
+    for text in ["---\ntype: [Archive\n---\n", "---\ntype: Archive\n\n# Notes\n"]:
+        filed.write_text(text)
+        was = filed.read_bytes()
+        with pytest.raises(pagewrite.WriteError, match="cannot be read") as caught:
+            doc.resolve_callout(doc.fact("The GPU host runs vLLM."))
+        assert str(filed) in str(caught.value)
+        assert filed.read_bytes() == was
+        assert doc.render() == before

@@ -17,12 +17,14 @@ Two rules keep the result valid:
   round trip: the written line has to parse back to exactly that statement, so a statement
   ending in markup that only looks like a fact tail is carried as prose, and only blank
   text, ``~~``, an unresolved citation and a line break are refused by pattern.
-* The text an edit would produce is parsed before anything is written, and the page's
-  parse errors have to come out the set they were. An error the edit would add is a line
-  the grammar rejects; an error the edit would make disappear is the edit deleting text
-  that lies outside the grammar, which is text the tool did not write (design 6). Either
-  way the edit is refused and nothing is written, so a page that arrives broken stays
-  broken until a person fixes it and a good one never leaves the writer broken.
+* The text an edit would produce is parsed before anything is written: an edit may not
+  leave the page reading worse than it found it. An error the edit would add is a line the
+  grammar rejects; an error the edit would make disappear is the edit deleting text that
+  lies outside the grammar, which is text the tool did not write (design 6) - unless the
+  operation is itself carrying that text off, as resolving a note carries the whole note
+  out to its archive. Either way the edit is refused and nothing is written, so a page that
+  arrives broken stays broken until a person fixes it and a good one never leaves the
+  writer broken.
 
 Nothing here decides what a fact should become. Which operation a decision turns into,
 and when a candidate has earned promotion, is the rules' job; the writer only records
@@ -48,10 +50,6 @@ SIGNALS_GATE = 3
 SESSIONS_GATE = 2
 """Gate progress is written as ``(signals a/3, sessions c/2)``: design 9 R3 asks for 3
 signals across 2 sessions before a candidate leaves the Candidates section."""
-
-CALLOUT_TYPES = ("conflict", "question")
-"""The note types design 6's fact state writes under a line: ``[!conflict]`` for a
-dispute and ``[!question]`` for a question waiting on a person."""
 
 SECTION_FOR_KIND = {kind: section for section, kind in page.KIND_SECTIONS.items()}
 SECTION_ORDER = (*page.KIND_SECTIONS, page.CANDIDATES)
@@ -118,6 +116,17 @@ def _scalar(value: str) -> str:
     return json.dumps(value)  # escapes every code point YAML could reinterpret
 
 
+def _archive_header(slug: str) -> list[str]:
+    """The frontmatter an archive file starts with, so the vault still lints clean."""
+    return [
+        "---",
+        "type: Archive",
+        f"title: {_scalar(f'{slug} archive')}",
+        f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
+        "---",
+    ]
+
+
 def _next_id(sources: dict[str, dict]) -> str:
     highest = max(
         (int(m.group("n")) for sid in sources if (m := _SOURCE_ID.fullmatch(str(sid)))),
@@ -165,8 +174,9 @@ def _line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], boo
 class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
-    Read a page in, apply the operations, and write ``render()`` out. Operations take
-    the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
+    Read a page in from a vault, apply the operations, and write ``render()`` out. ``vault``
+    is the vault the page was read from, which is where a closed note is filed. Operations
+    take the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
     statement with ``fact()``; since an edit can move lines, a handle whose line has
     moved or changed since it was taken is refused rather than applied to the wrong line.
 
@@ -179,14 +189,15 @@ class PageDoc:
     text changed, so a run can tell an edit from a no-op.
     """
 
-    def __init__(self, text: str, path: Path | str = "page.md") -> None:
+    def __init__(self, text: str, path: Path | str = "page.md", *, vault: Path | str) -> None:
         self.path = Path(path)
+        self.vault = Path(vault)
         self.lines: list[str] = text.split("\n")
         self._page = page.parse(text, self.path)
 
     @classmethod
-    def read(cls, path: Path) -> PageDoc:
-        return cls(path.read_text(), path)
+    def read(cls, path: Path, *, vault: Path) -> PageDoc:
+        return cls(path.read_text(), path, vault=vault)
 
     def render(self) -> str:
         return "\n".join(self.lines)
@@ -360,8 +371,8 @@ class PageDoc:
         below = self.lines[found.line].rstrip() if found.line < len(self.lines) else ""
         if below.startswith(">"):
             raise WriteError(f"cannot add a callout here; {below} is already quote text")
-        if type not in CALLOUT_TYPES:
-            raise WriteError(f"unknown callout [{type}]; expected {' '.join(CALLOUT_TYPES)}")
+        if type not in page.CALLOUTS:
+            raise WriteError(f"unknown callout [{type}]; expected {' '.join(page.CALLOUTS)}")
         rows = [row.strip() for row in text.strip().split("\n")]
         if not all(rows):
             raise WriteError("a callout needs text and no blank lines in it")
@@ -383,7 +394,11 @@ class PageDoc:
 
         The blank line that set the note apart goes with it, so closing a note leaves no
         stack of blank lines behind. Text below the block stays on the page: it belongs to
-        the note only while the parse reads it as a note row.
+        the note only while the parse reads it as a note row. Every line the cut takes is
+        a line the archive is carrying off, so what this edit can still get wrong is a page
+        that reads worse afterwards. A page that reads better - an answer someone typed
+        under the note only reads as their answer once the note is off the line - is the
+        close working, not a refusal.
         """
         found = self._resolve(fact)
         if not found.callouts:
@@ -393,47 +408,85 @@ class PageDoc:
         stop = callout.line + len(callout.text)
         cut = start - 1 if not self.lines[start - 1].strip() else start
         block = [self.lines[found.line - 1], *self.lines[start:stop]]
+        archive = self._archive_edit(block)
         with self._atomic():
-            self._apply(cut, stop, [])
-            self._archive(block)
+            self._apply(cut, stop, [], carried_off=True)
+            self._write_archive(*archive)
         return True
 
     def _archive_file(self) -> Path:
         """The file this page's resolved notes go to: ``archive/<slug>.md`` (design 6).
 
-        Design 6 keys the archive by a project's slug, and a project page names its
-        project by the directory it lives under, so the file sits beside the ``projects``
-        directory holding the page. A page outside ``projects/<slug>/`` has no slug to key
-        it by, so its notes have nowhere to be archived.
+        Design 6 keys the archive by a project's slug, which is the directory a project
+        page lives under, read off the page's path within the vault - the same way
+        ``aft lint`` reads the project of a page. Design 6 names no archive for a page
+        outside ``projects/<slug>/``, so such a page has no archive file to write and its
+        note stays where it stands.
         """
-        parts = self.path.parts
-        for index, part in enumerate(parts):
-            if part == "projects" and index + 2 < len(parts):
-                return Path(*parts[:index], "archive", f"{parts[index + 1]}.md")
-        raise WriteError(f"{self.path} is not a project page, so its notes have no archive")
+        slug = None
+        try:
+            rel = self.path.relative_to(self.vault)
+        except ValueError:
+            rel = None
+        if rel is not None and len(rel.parts) > 2 and rel.parts[0] == "projects":
+            slug = rel.parts[1]
+        if slug is None:
+            raise WriteError(
+                f"{self.path} lies outside projects/<slug>/: design 6 names no archive"
+                " for such a page, so its note stays on the page"
+            )
+        return self.vault / "archive" / f"{slug}.md"
 
-    def _archive(self, block: Sequence[str]) -> None:
-        """Append ``block`` to the archive behind a blank line, creating the file.
+    def _archive_edit(self, block: Sequence[str]) -> tuple[Path, bytes | None, bytes]:
+        """The archive file, the bytes it holds now (``None`` when it does not exist yet),
+        and the bytes the block turns them into.
 
-        The rows go in as they were read. A file that does not exist yet starts with
-        frontmatter, so the vault still lints clean once the archive has a file in it.
+        The rows go in as they were read, and everything that can refuse refuses here,
+        before a byte is written. An archive file this writer did not make - one a person
+        named by hand, or one the maintenance pass filed - keeps its text and is given the
+        frontmatter every page in the vault needs to lint. A file that cannot be read is
+        refused with its path rather than appended into.
         """
         path = self._archive_file()
-        if path.exists():
-            text = path.read_text()
-        else:
-            slug = path.stem
-            text = "\n".join(
-                (
-                    "---",
-                    "type: Archive",
-                    f"title: {_scalar(f'{slug} archive')}",
-                    f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
-                    "---",
-                )
-            )
+        was = path.read_bytes() if path.exists() else None
+        text = self._archive_text(path, was)
+        lines = [*text.rstrip("\n").split("\n"), "", *block]
+        return path, was, ("\n".join(lines) + "\n").encode()
+
+    def _archive_text(self, path: Path, raw: bytes | None) -> str:
+        """The text a block gets appended to: a header on its own for a file not written yet,
+        an existing file's text, or that text with a header ahead of it when the file has
+        none of its own."""
+        header = "\n".join(_archive_header(path.stem))
+        if raw is None:
+            return header
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError:
+            raise WriteError(f"the archive {path} is not text") from None
+        frontmatter, _, _, error = page.split_frontmatter(text)
+        if error:
+            raise WriteError(f"the archive {path} cannot be read: {error}")
+        if frontmatter is not None:
+            return text
+        return header + "\n" + text
+
+    def _write_archive(self, path: Path, was: bytes | None, now: bytes) -> None:
+        """Write the archive, putting the file back exactly as it was if the write fails.
+
+        The page edit and this write are one step: a failure leaves the note on its page
+        and the archive byte for byte as it was, so a closed note is never left in two
+        places or in neither.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join([*text.rstrip("\n").split("\n"), "", *block]) + "\n")
+        try:
+            path.write_bytes(now)
+        except Exception:
+            if was is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(was)
+            raise
 
     # Lines and frontmatter
 
@@ -514,10 +567,9 @@ class PageDoc:
 
         ``_apply`` refuses its own edit before it writes; this covers the operation as a
         whole, so a refusal once an earlier edit is in place - a later edit, a statement
-        that does not read back, a move whose new line would not parse, a note with
-        nowhere to be archived - cannot leave that earlier edit behind. Text is never left
-        in two places either: an operation writes its archive block last, so nothing can
-        fail after the block has been appended.
+        that does not read back, a move whose new line would not parse - cannot leave that
+        earlier edit behind. It puts the page's lines back and nothing else: an operation
+        that writes outside the page restores that write itself.
         """
         was, was_page = list(self.lines), self._page
         try:
@@ -527,7 +579,9 @@ class PageDoc:
             self._page = was_page
             raise
 
-    def _apply(self, start: int, stop: int, new: Sequence[str]) -> None:
+    def _apply(
+        self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False
+    ) -> None:
         """Replace lines ``start`` to ``stop`` (0-based) with ``new``, or refuse.
 
         The text the edit would produce is parsed before any of it is written, and the
@@ -537,6 +591,12 @@ class PageDoc:
         tool did not write, so a page that arrives broken stays broken until a person
         fixes what the error names. Nothing is written either way. The refusal names the
         flagged lines whose text the edit would take, the lines it replaces first.
+
+        ``carried_off`` is an operation that keeps the lines it replaces somewhere else:
+        resolving a note files the whole note in its archive. Every one of those lines is
+        accounted for, and every line outside the range keeps its bytes, so a disappearing
+        error there names text either carried off or still on the page and reading as
+        grammar now - only an error the edit would add is a refusal.
         """
         known = Counter(message for _, message in self._page.errors)
         lines = [*self.lines[:start], *new, *self.lines[stop:]]
@@ -546,7 +606,7 @@ class PageDoc:
         if added:
             raise WriteError("; ".join(sorted(added)))
         gone = known - errors
-        if gone:
+        if gone and not carried_off:
             still = dict(gone)
             flagged = []
             lost = sorted(
