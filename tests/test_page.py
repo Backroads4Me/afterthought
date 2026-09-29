@@ -215,7 +215,7 @@ def test_note_after_a_rejected_struck_line_has_no_fact_to_be_about():
         "> [!conflict] 2026-01-03\n"
     )
     result = parse(fact_page(body))
-    assert "a callout must follow the fact it is about" in [message for _, message in result.errors]
+    assert "a callout cannot mark a refused fact line" in [m for _, m in result.errors]
     assert actionable(result) == ["A fact."]
 
 
@@ -227,26 +227,25 @@ def test_note_after_prose_in_a_fact_section_has_no_fact_to_be_about():
         "> [!conflict] 2026-01-03\n"
     )
     result = parse(fact_page(body))
-    assert "a callout must follow the fact it is about" in [m for _, m in result.errors]
+    assert "a callout marks the fact line directly above it" in [m for _, m in result.errors]
     assert actionable(result) == ["A fact."]
 
 
 def test_a_note_with_an_invalid_date_writes_no_state():
     body = (
         "## Facts\n"
-        "- A fact. [stated] 2026-01-01 [^a]\n"
-        "> [!conflict] 2026-13-01\n"
-        "> A session says otherwise.\n"
+        "- The index is SQLite. [stated] 2026-09-28 [^a]\n"
+        "\n"
+        "> [!conflict] 2026-09-31\n"
+        "> A session says the index changed, and this is my answer.\n"
+        "> The answer lines are mine and are not broken callouts.\n"
     )
     result = parse(fact_page(body))
-    assert [message for _, message in result.errors] == [
-        "invalid date 2026-13-01",
-        "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'",
-    ]
+    assert [message for _, message in result.errors] == ["invalid date 2026-09-31"]
     assert [(f.statement, f.state, f.callouts) for f in result.facts] == [
-        ("A fact.", page.ACTIVE, [])
+        ("The index is SQLite.", page.ACTIVE, [])
     ]
-    assert actionable(result) == ["A fact."]
+    assert actionable(result) == ["The index is SQLite."]
 
 
 def test_trailing_text_rejected():
@@ -264,7 +263,7 @@ def test_candidate_rules():
 
 def test_callout_rules():
     orphan = "## Facts\n> [!conflict] 2026-01-01\n"
-    assert errors_for(orphan) == ["a callout must follow the fact it is about"]
+    assert errors_for(orphan) == ["a callout marks the fact line directly above it"]
     bad = "## Facts\n- A. [stated] 2026-01-01 [^a]\n> [!note] 2026-01-01\n"
     assert "expected '> [!conflict]" in errors_for(bad)[0]
     struck = (

@@ -137,13 +137,20 @@ def parse(text: str, path: Path) -> Page:
     page_type = (frontmatter or {}).get("type")
     section: str | None = None
     last_fact: Fact | None = None
+    fact_refused = False
     callout: Callout | None = None
+    in_note = False
     for offset, line in enumerate(body.split("\n")):
         number = start + offset
         stripped = line.rstrip()
-        if callout is not None and stripped.startswith(">"):
-            callout.text.append(stripped[1:].strip())
+        note_line = stripped.startswith(">")
+        if in_note and note_line:
+            # The lines under a note header are text someone typed: absorbed into the note
+            # block and never reported as a header of their own.
+            if callout is not None:
+                callout.text.append(stripped[1:].strip())
             continue
+        in_note = note_line
         callout = None
         if not stripped:
             continue
@@ -153,6 +160,7 @@ def parse(text: str, path: Path) -> Page:
             section = stripped[3:].strip()
             page.sections.append(section)
             last_fact = None
+            fact_refused = False
             if (
                 section not in KIND_SECTIONS
                 and section != CANDIDATES
@@ -165,16 +173,18 @@ def parse(text: str, path: Path) -> Page:
             continue
         if section not in KIND_SECTIONS and section != CANDIDATES:
             continue  # prose section, or an unknown one already reported
-        if stripped.startswith(">"):
-            callout = _start_callout(page, stripped, number, last_fact)
+        if note_line:
+            callout = _start_callout(page, stripped, number, last_fact, fact_refused)
             continue
         if stripped.startswith("- "):
             fact = _parse_fact(page, stripped[2:], number, section)
+            fact_refused = fact is None
         else:
             page.errors.append((number, "only fact lines are allowed in a fact section"))
             fact = None
+            fact_refused = False
         # Only a line the parser accepted holds a fact, so a note after a hand-typed
-        # sentence or a refused line has no fact to be about and is reported rather than
+        # sentence or a refused line has no fact to mark and is reported rather than
         # marking the fact above it.
         last_fact = fact
         if fact is not None:
@@ -182,7 +192,9 @@ def parse(text: str, path: Path) -> Page:
     return page
 
 
-def _start_callout(page: Page, line: str, number: int, fact: Fact | None) -> Callout | None:
+def _start_callout(
+    page: Page, line: str, number: int, fact: Fact | None, fact_refused: bool
+) -> Callout | None:
     """Mark the fact with a note; None when the note is refused and writes no state."""
     match = _CALLOUT_START.match(line)
     if not match or match.group("type") not in _CALLOUTS:
@@ -192,7 +204,14 @@ def _start_callout(page: Page, line: str, number: int, fact: Fact | None) -> Cal
         page.errors.append((number, f"invalid date {match.group('date')}"))
         return None
     if fact is None:
-        page.errors.append((number, "a callout must follow the fact it is about"))
+        page.errors.append(
+            (
+                number,
+                "a callout cannot mark a refused fact line"
+                if fact_refused
+                else "a callout marks the fact line directly above it",
+            )
+        )
         return None
     if fact.state != ACTIVE:
         page.errors.append((number, f"a callout cannot follow a {fact.state} fact"))

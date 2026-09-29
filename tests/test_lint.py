@@ -180,3 +180,13 @@ def test_a_refused_lines_footnotes_are_still_checked(initialized):
     assert "projects/widget/overview.md:16: footnote [^s9] is not defined in sources" in found
     assert "projects/widget/overview.md:19: footnote [^s9] is not defined in sources" in found
     assert "projects/widget/overview.md:19: footnote [^s8] is not defined in sources" in found
+
+
+def test_typed_answers_under_a_refused_note_are_not_findings(initialized):
+    project = register(initialized)
+    text = PAGE.format(project_id=project.id) + (
+        "\n> [!conflict] 2026-09-31\n> That day does not exist, but this answer is mine.\n"
+        "> It is not a broken callout header.\n"
+    )
+    write(initialized, "projects/widget/overview.md", text)
+    assert messages(initialized) == ["projects/widget/overview.md:18: invalid date 2026-09-31"]
