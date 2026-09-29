@@ -626,6 +626,40 @@ def test_a_settings_file_afterthought_cannot_read_aborts_without_writing(tmp_pat
         assert list(settings.parent.glob("settings.json.aft-*")) == []
 
 
+UNENCODABLE = '{"note": "\\ud800"}\n'
+
+
+def test_settings_text_that_will_not_encode_is_refused_without_writing(tmp_path):
+    """JSON that survives reading but cannot be written back is still a refusal."""
+    settings = settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(UNENCODABLE, encoding="utf-8")
+
+    with pytest.raises(InstallError) as refused:
+        claude_install.install(settings)
+
+    assert str(settings) in str(refused.value)
+    assert settings.read_text(encoding="utf-8") == UNENCODABLE
+    assert list(settings.parent.glob("*.bak")) == []
+    assert list(settings.parent.glob("settings.json.aft-*")) == []
+
+
+def test_the_command_reports_settings_it_cannot_write_back(tmp_path, monkeypatch, capsys):
+    """The unencodable file is refused like any other, not as a traceback."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(UNENCODABLE, encoding="utf-8")
+
+    assert main(["install", "claude"]) == 2
+
+    refusal = capsys.readouterr().err
+    assert refusal.startswith("aft: ")
+    assert "Traceback" not in refusal
+    assert settings.read_text(encoding="utf-8") == UNENCODABLE
+    assert list(settings.parent.iterdir()) == [settings]
+
+
 def test_the_command_reports_an_unreadable_settings_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HOME", str(tmp_path))
     settings = claude_install.settings_path()

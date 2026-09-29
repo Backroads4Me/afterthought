@@ -352,8 +352,9 @@ def _write(settings: Path, text: str, original: str | None) -> Path | None:
     there yet, or the target of a dangling link - keeps the private mode its temporary
     file was created under. The previous text is backed up only once the new one is
     staged and the replace is next, so a refusal never leaves behind a copy of text that
-    was never superseded. A directory afterthought cannot write in is refused the same way
-    a file it cannot read is.
+    was never superseded, and the staged file is taken back whenever the replace did not
+    happen. A directory afterthought cannot write in, and settings text that will not encode
+    as UTF-8, are refused the same way a file it cannot read is.
     """
     try:
         settings.parent.mkdir(parents=True, exist_ok=True)
@@ -365,9 +366,9 @@ def _write(settings: Path, text: str, original: str | None) -> Path | None:
                 os.chmod(temporary, stat.S_IMODE(settings.stat().st_mode))
             backup = _backup(settings, original)
             os.replace(temporary, settings)
-        except OSError:
-            os.unlink(temporary)
-            raise
-    except OSError as exc:
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except (OSError, UnicodeEncodeError) as exc:
         raise InstallError(f"cannot write {settings} ({exc}); it was not changed") from exc
     return backup
