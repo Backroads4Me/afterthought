@@ -591,6 +591,15 @@ def test_a_flagged_output_of_nothing_but_space_keeps_nothing(cfg):
     assert kept([output(long_blank, "t2", is_error=True)], cfg) == ["error: the pipe broke"]
 
 
+def test_a_flagged_output_whose_run_outruns_the_head_budget_keeps_its_head(cfg):
+    # Compact JSON leaves no whitespace for a cut to land on: a flagged error whose first
+    # 500 characters are one unbroken run is cut by the budget, not dropped for a word.
+    text = "\n" + '{"a":"b",' * 125
+    assert len(text) > FLAG_HEAD_CHARS
+    [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
+    assert kept_text == text[:FLAG_HEAD_CHARS] + CAP_MARKER
+
+
 def test_entries_keep_their_order_and_every_field_but_their_text(cfg):
     entries = [
         said("one", "u1"),

@@ -191,7 +191,7 @@ def _flagged_output(text: str) -> str | None:
     same cap and redaction as every other kept text, so a flagged entry is bounded like
     any other.
     """
-    end = _word_end(text, FLAG_HEAD_CHARS)
+    end = _word_end(text, FLAG_HEAD_CHARS) or min(FLAG_HEAD_CHARS, len(text))
     head = text[:end]
     below = _tool_lines(text[end:])
     if not head.strip():
