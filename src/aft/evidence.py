@@ -186,7 +186,8 @@ def purge(config: Config, now: datetime) -> int:
     The space the rows took stays in the file for the entries that come after, which is
     how the archive holds its size without a VACUUM of its own. The text itself does not
     stay: its pages are written over on the way to the free list, and what went is written
-    out of the write-ahead log (DESIGN 12).
+    out of the write-ahead log - unless another process is reading that log, which is
+    reported rather than left as expired text (DESIGN 12).
     """
     days = config.settings.evidence.retention_days
     if days < 0:
@@ -214,9 +215,11 @@ def forget(config: Config, session_id: str) -> None:
     """Remove every archived entry of one session, and the text they held (DESIGN 12,
     `aft forget session`).
 
-    The rows go, the write-ahead log is emptied, and the archive is rewritten, so the
+    The rows go, the write-ahead log is drained, and the archive is rewritten, so the
     forgotten words are not left in a freed page or in the log for whoever opens the file
-    next. Rewriting the archive is why this is a command a person runs, not a sweep.
+    next. A log another process is reading cannot be drained, and that is reported rather
+    than returned as a forgetting the bytes contradict. Rewriting the archive is why this
+    is a command a person runs and not a sweep, and it happens only when rows went.
 
     The archive only. The index rows, the digest files and the curated lines resting on
     the session are the command's to remove and withdraw (BUILD-PLAN M2.8), and the
@@ -229,8 +232,9 @@ def forget(config: Config, session_id: str) -> None:
     if not _db_path(config).exists():
         return
     with _writing(config) as conn:
-        conn.execute("DELETE FROM evidence WHERE session_id = ?", (session_id,))
-    _release(config, rewrite=True)
+        removed = conn.execute("DELETE FROM evidence WHERE session_id = ?", (session_id,)).rowcount
+    if removed:
+        _release(config, rewrite=True)
 
 
 def _row(entry: Entry, session_id: str, agent: str, project_id: str | None) -> tuple:
@@ -368,18 +372,33 @@ def _writing(config: Config) -> Iterator[sqlite3.Connection]:
 def _release(config: Config, *, rewrite: bool) -> None:
     """Empty the write-ahead log after a write that removed rows, and rewrite the archive
 
-    when told to. The committed pages move back into the archive file and the log is cut
-    off, so the log keeps no page of the text that was just removed. ``rewrite`` vacuums
-    as well, which is what clears the pages a delete freed inside the file itself;
-    `forget` pays for that and `purge`, which runs on a timer, does not (DESIGN 12).
-    Neither statement runs inside a transaction, so this follows the write that removed
-    the rows rather than joining it.
+    when told to. ``rewrite`` vacuums as well as draining the log, which is what clears the
+    pages a delete freed inside the file itself; `forget` pays for that and `purge`, which
+    runs on a timer, does not (DESIGN 12). Neither statement runs inside a transaction, so
+    this follows the write that removed the rows rather than joining it.
     """
+    path = _db_path(config)
     with _reading(config) as conn:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _drain_log(conn, path)
         if rewrite:
             conn.execute("VACUUM")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            _drain_log(conn, path)
+
+
+def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
+    """Move the committed pages back into the archive file and cut the write-ahead log off
+    behind them, so the log keeps no page of what a delete just released (DESIGN 12).
+
+    A checkpoint that could not finish answers with a row and sets no error, and a log
+    another process is reading cannot finish. That is reported: the removed text is still
+    in that log, and returning quietly would claim it was not.
+    """
+    busy, frames, moved = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        raise EvidenceError(
+            f"the write-ahead log of {path} is held open by another reader:"
+            f" {frames - moved} of its {frames} pages still hold what was removed"
+        )
 
 
 def _connect(config: Config) -> sqlite3.Connection:
@@ -404,12 +423,15 @@ def _connect(config: Config) -> sqlite3.Connection:
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
         conn.executescript(_SCHEMA)
-    except sqlite3.Error as exc:
-        # `_reading` and `_writing` never receive a connection that failed to open, so
-        # this is the only place its handle can be given back.
+    except BaseException as exc:
+        # `_reading` and `_writing` never receive a connection that failed to open, and
+        # the mode pragma's own refusal is not a database error, so this is the only place
+        # the handle can be given back.
         if conn is not None:
             conn.close()
-        raise EvidenceError(f"cannot open the evidence archive at {path}: {exc}") from exc
+        if isinstance(exc, sqlite3.Error):
+            raise EvidenceError(f"cannot open the evidence archive at {path}: {exc}") from exc
+        raise
     return conn
 
 
@@ -424,13 +446,15 @@ def _journal_mode(conn: sqlite3.Connection) -> str:
 def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
     """Put the archive in WAL mode, on the connection that first touches the file.
 
-    Changing the journal mode wants the file to itself and answers ``database is locked``
-    at once when another process holds it, so the first two processes to touch a new
-    archive cannot both set it on the first try; the one that loses is told, and its work
-    is a rerun. The mode is re-read rather than trusted from the write, because a pragma
-    that refuses by answering with the mode it kept - on a file system that cannot share
-    memory, say - sets no error at all. WAL is what lets a reader go past a writer, so a
-    file that will not do it says so rather than quietly archiving into another journal.
+    Changing the journal mode wants the file to itself, so the pragma waits out the
+    connection's busy timeout - the ``timeout=`` given at connect - and then raises
+    ``database is locked``. The first two
+    processes to touch a new archive cannot both set it, and the one that loses is told,
+    since its work is a rerun. The mode is re-read rather than trusted from the write,
+    because a pragma that refuses by answering with the mode it kept - on a file system
+    that cannot share memory, say - sets no error at all. WAL is what lets a reader go past
+    a writer, so a file that will not do it says so rather than quietly archiving into
+    another journal.
     """
     conn.execute("PRAGMA journal_mode = wal")
     mode = _journal_mode(conn)

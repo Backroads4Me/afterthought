@@ -113,6 +113,20 @@ def held_write_lock(config: configmod.Config) -> Iterator[None]:
         holder.close()
 
 
+@contextmanager
+def held_read_snapshot(config: configmod.Config) -> Iterator[None]:
+    """A reader that keeps its snapshot of the archive open, the way `aft trace` in one
+    process does while `aft forget session` runs in another."""
+    reader = sqlite3.connect(db(config), isolation_level=None, timeout=0.05)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM evidence").fetchone()
+    try:
+        yield
+    finally:
+        reader.rollback()
+        reader.close()
+
+
 def connection_is_open(conn: sqlite3.Connection) -> bool:
     """Whether the connection still holds its handle: a closed one refuses to work."""
     try:
@@ -528,13 +542,41 @@ def test_forgetting_a_session_leaves_its_words_in_none_of_the_files(cfg):
     assert db(cfg).stat().st_size < size_before, "the rewrite is what clears freed pages"
 
 
+def test_a_log_another_reader_holds_open_is_not_reported_as_forgotten(cfg):
+    """A reader going past a writer is what WAL is for, and a log a reader is attached to
+    cannot be drained: the checkpoint answers busy in a row and sets no error. The removed
+    text is still in it then, so the command says so instead of returning a success the
+    bytes contradict, and once the reader is gone the log drains and the words go."""
+    written = zlib.compress(FORGOTTEN_TEXT.encode("utf-8"))
+    evidence.store(cfg, "claude", "gone", None, [entry("e1", text=FORGOTTEN_TEXT)])
+    evidence.store(cfg, "pi", "kept", None, [entry("k1", text="the kept session")])
+
+    with held_read_snapshot(cfg):
+        with pytest.raises(evidence.EvidenceError) as excinfo:
+            evidence.forget(cfg, "gone")
+        assert str(db(cfg)) in str(excinfo.value)
+        assert any(written in f.read_bytes() for f in archive_files(cfg)), (
+            "the error is about this residue, so the residue has to be there"
+        )
+
+    assert evidence.entries(cfg, "gone") == []
+    for archived in archive_files(cfg):
+        assert written not in archived.read_bytes(), archived.name
+
+
 def test_forget_of_a_session_that_is_not_there_changes_nothing(cfg):
-    evidence.store(cfg, "claude", "s1", None, [entry("e1")])
-    before = (row_count(cfg), stored(cfg, "s1"))
+    """A typo is no reason to rewrite the archive: with nothing to delete, `forget` leaves
+    the rows and every byte of the file where they were, the way it only rewrites the
+    archive when a delete actually released something."""
+    filler = [
+        entry(f"f{i}", text=f"filler that names no ledger at all, number {i}") for i in range(200)
+    ]
+    evidence.store(cfg, "claude", "s1", None, filler)
+    before = (row_count(cfg), stored(cfg, "s1"), db(cfg).read_bytes())
 
     evidence.forget(cfg, "never-captured")
 
-    assert (row_count(cfg), stored(cfg, "s1")) == before
+    assert (row_count(cfg), stored(cfg, "s1"), db(cfg).read_bytes()) == before
 
 
 def test_forget_and_reads_before_any_archive_write_no_file(cfg):
@@ -658,6 +700,21 @@ def test_an_archive_that_refuses_the_write_ahead_log_leaves_no_handle(cfg, monke
         db(cfg).chmod(0o644)
 
     assert str(db(cfg)) in str(excinfo.value)
+    assert opened
+    assert not any(connection_is_open(conn) for conn in opened)
+
+
+def test_an_archive_whose_mode_never_arrives_leaves_no_handle(cfg, monkeypatch):
+    """A file system that cannot share memory answers the mode pragma with the mode it kept
+    and sets no error, which is a refusal the module reports itself - and that refusal is
+    not a database error, so the open has to give its handle back on that path too."""
+    evidence.store(cfg, "claude", "s1", None, [entry("e1")])
+    monkeypatch.setattr(evidence, "_journal_mode", lambda conn: "delete")
+    opened = spy_on_opens(monkeypatch)
+
+    with pytest.raises(evidence.EvidenceError, match="stays in delete mode"):
+        evidence.entries(cfg, "s1")
+
     assert opened
     assert not any(connection_is_open(conn) for conn in opened)
 
