@@ -171,6 +171,24 @@ def enqueue(config: Config, event: SessionEvent) -> None:
         )
 
 
+def session_cwd(config: Config, session_id: str) -> Path | None:
+    """The directory the queue last saw this session running in, or None if it never saw it.
+
+    A row is the only place a session's directory is written down (M2.2: a row carries no
+    project, and the evidence archive keeps no path), so this is what a step that starts
+    from a session id alone - ``aft redigest`` - has to go on when it asks whether the
+    session was a worker's or sits under ``capture.exclude_paths``. The newest event wins,
+    because a session that was moved mid-conversation is classified as it last stood.
+    """
+    with _reading(config) as conn:
+        row = conn.execute(
+            "SELECT cwd FROM jobs WHERE session_id = ?"
+            " ORDER BY event_time DESC, created_time DESC, id DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    return Path(row[0]) if row else None
+
+
 def drop_job(config: Config, job: Job | str) -> None:
     """Remove a job row from the queue without recording it as done or failed."""
     job_id = job.id if isinstance(job, Job) else job

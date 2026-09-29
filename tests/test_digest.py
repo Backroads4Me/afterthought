@@ -2075,3 +2075,117 @@ def test_an_archiving_failure_that_is_not_a_lost_directory_reaches_the_run(
         assert evidence.entries(cfg, "worker-1") == []
     finally:
         fake.stop()
+
+
+def test_redigesting_a_worker_session_keeps_its_role(session: Session, tmp_path):
+    """A rebuilt digest is still the machine's own, not a person's.
+
+    A worker's confirmed lines count toward no minimum, so a rebuild that filed the same
+    words as a primary would let the machine appear to back what it said alongside a person
+    (rules.py, BUILD-PLAN M2.7). The rebuild starts from a session id, so the role has to be
+    re-derived from the directory the queue last saw that session in.
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    worker_answer = answer(
+        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+    )
+    fake, cfg = serve(session.cfg, worker_answer, worker_answer)
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)])
+        transcript = write_records(
+            tmp_path / "worker.jsonl",
+            {"cwd": str(worker_dir)},
+            record("w1", "user", "Worker ran tests: all green."),
+            record("w2", "assistant", "Recorded test results.", model="claude-real"),
+        )
+        queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+        assert work.run(with_budget(cfg, 100_000)).digested == 1
+        written = next(p for p in pages(cfg) if "worker-1" in p)
+        before = frontmatter(cfg, f"digests/{written}")
+        assert before["aft"]["role"] == "worker"
+        assert before["aft"]["facts"][0]["role"] == "worker"
+
+        rebuilt = digest.redigest(cfg, "worker-1", NOW)
+
+        after = frontmatter(cfg, rebuilt.path)
+        assert after["aft"]["role"] == "worker"
+        assert after["aft"]["facts"][0]["role"] == "worker"
+    finally:
+        fake.stop()
+
+
+def test_an_excluded_session_is_refused_a_rebuild(session: Session):
+    """A session under capture.exclude_paths gets no page from a rebuild either.
+
+    The archive can hold a session captured before its directory was named in
+    `exclude_paths`, and `aft redigest` is the one path that would put those words in the
+    vault after the decision said not to - so it refuses before the model is asked, not
+    after (BUILD-PLAN M2.7).
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        assert work.run(with_budget(cfg, 100_000)).digested == 1
+        assert pages(cfg) != [], "the session was never archived, so nothing is at stake"
+
+        cfg = with_capture(cfg, exclude_paths=[str(session.cwd)])
+        with pytest.raises(digest.DigestError, match="excludes"):
+            digest.redigest(cfg, SESSION, NOW)
+
+        assert len(fake.requests) == 1, "the rebuild spent a token on an excluded session"
+    finally:
+        fake.stop()
+
+
+def test_a_run_whose_endpoint_is_down_still_archives_its_workers(session: Session, tmp_path):
+    """Waiting for a model is no reason to leave a worker's words out of the archive.
+
+    Archiving reads a transcript and writes rows; it spends no token. So an outage stops the
+    digests and not the storing, which is the whole point of the worker role (M2.7).
+    """
+    (session.cfg.home / "config.toml").write_text(
+        (session.cfg.home / "config.toml").read_text(encoding="utf-8")
+        + '[model]\nendpoint = "http://127.0.0.1:9/v1"\nname = "fake-model"\n'
+        + f'[capture]\nworker_paths = ["{tmp_path / "worker_repo"}"]\n[work]\n'
+        + "daily_token_budget = 100000\n",
+        encoding="utf-8",
+    )
+    cfg = configmod.load()
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    transcript = write_records(
+        tmp_path / "worker.jsonl",
+        {"cwd": str(worker_dir)},
+        record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+    )
+    queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+
+    report = work.run(cfg)
+
+    assert report.stopped == work.STOP_UNREACHABLE
+    assert report.digested == 0
+    assert pages(cfg) == []
+    assert any("nitrile gasket" in entry.text for entry in evidence.entries(cfg, "worker-1"))
+    assert watermark(cfg, "worker-1") is None, "an archiving run moved the digest watermark"
+
+
+def test_what_the_index_could_not_read_is_said_by_the_run(session: Session):
+    """A page the index could not read is named by the run, not dropped on the floor.
+
+    The report is a list of lines the caller has to do something with; a worker that ignored
+    it would leave the same file unreadable on every run forever, with nothing on the line to
+    say why one project's words never come up in a search (BUILD-PLAN M3.1).
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        project_dir = cfg.vault / "projects" / SLUG
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "not-text.md").write_bytes(b"---\ntitle: \xff\xfe\n---\n\n## Facts\n\n")
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+
+        report = work.run(with_budget(cfg, 100_000))
+
+        assert report.digested == 1, "an unreadable page stopped the digest it never touched"
+        assert report.stopped == ""
+        assert [line for line in report.failures if "not-text.md" in line], report.failures
+    finally:
+        fake.stop()

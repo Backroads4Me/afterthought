@@ -795,9 +795,24 @@ def redigest(
     The entries come from the evidence archive rather than a transcript, so this works
     even when the transcript has expired or is no longer present. The resulting digest
     replaces any existing digest page for that session in the vault.
+
+    A rebuild starts from a session id, so the role comes from the directory the queue last
+    saw that session in: a worker's digest rebuilt without its role files a primary digest,
+    whose confirmed lines then count toward the one session the dream's minimum is measured
+    against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
+    outright - exclusion says its words are not the vault's, and a rebuild of an archive
+    written before that decision was added does not change the answer.
     """
     _require_session_id(session_id)
     vault.require(config)
+
+    cwd = queue.session_cwd(config, session_id)
+    if cwd is not None and is_excluded(cwd, config):
+        raise DigestError(
+            f"session {session_id!r} ran in {cwd}, which capture excludes,"
+            " so its words are not this vault's to rebuild"
+        )
+    role = rules.WORKER if cwd is not None and is_worker(cwd, config) else rules.PRIMARY
 
     entries = evidence.entries(config, session_id)
     if not entries:
@@ -852,7 +867,7 @@ def redigest(
 
     for part in parts(entries):
         answer = _model_answer(config, prompt, render(part), schema)
-        part_facts, part_dropped = verify(config, session_id, part, answer["facts"])
+        part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
@@ -870,6 +885,7 @@ def redigest(
         dropped,
         when,
         now or datetime.now(UTC),
+        role=role,
     )
     dropped.extend(refused)
 

@@ -22,10 +22,11 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from aft import capture, digest, model, queue, vault
+from aft import capture, digest, index, model, queue, vault
 from aft.config import Config
 from aft.evidence import EvidenceError
 from aft.gitutil import GitError
+from aft.index import SearchIndexError
 from aft.model import ModelError
 from aft.readers import ReaderError
 from aft.registry import RegistryError
@@ -43,8 +44,12 @@ QUEUE_LOST = (queue.QueueError, sqlite3.Error)
 
 # The failures that belong to the endpoint or the vault rather than to a session: every job
 # left in the queue would meet the same one, so the run ends on the first of them and what is
-# left stays queued, claimed only by a lease that the next run reclaims.
-STOPS_RUN = (ModelError, VaultError, GitError, RegistryError, *QUEUE_LOST)
+# left stays queued, claimed only by a lease that the next run reclaims. An index that will
+# not be written - another build's rows, or a file that is not an index at all - is a fourth
+# of these: the digest is the worker's job and the index is the host's state, and DESIGN 14
+# says the host's state ends the run with its own words rather than stamping job after job
+# failed for something no session caused.
+STOPS_RUN = (ModelError, VaultError, GitError, RegistryError, SearchIndexError, *QUEUE_LOST)
 
 # The failures that belong to one session: the job is marked failed with its reason and the
 # next session gets its turn.
@@ -75,24 +80,36 @@ class Report:
         return ", ".join(said)
 
 
+def _archive_worker(config: Config, job: queue.Job, failures: list[str]) -> str:
+    """Park one worker session in the evidence archive and the index.
+
+    Returns the reason the run stops, or "" when the session was parked - or when the
+    failure was only this job's, which is said and left at that.
+    """
+    try:
+        digest.archive_worker_job(config, job)
+    except FAILS_JOB as exc:
+        failures.append(f"job {job.id} ({job.session_id}): {exc}")
+    except STOPS_RUN as exc:
+        failures.append(f"job {job.id} ({job.session_id}): {exc}")
+        return STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+    return ""
+
+
 def _archive_workers(config: Config, failures: list[str]) -> str:
     """Park every waiting worker session in the evidence archive and the index.
 
-    A worker's words stay searchable while it waits for budget, and its job keeps its
-    watermark unmoved, so the digest that budget eventually buys still reads the chunk this
-    run skipped. One job's failure is that job's own; a failure that stops the run stops
-    this loop too, rather than being logged once per worker (BUILD-PLAN M2.7).
+    A worker's words stay searchable while it waits for budget, and archiving moves no
+    watermark, so the digest that budget eventually buys still reads the chunk this run
+    skipped. One job's failure is that job's own; a failure that stops the run stops this
+    loop too, rather than being logged once per worker (BUILD-PLAN M2.7).
 
     Returns the reason the run stops, or "" when every worker was parked.
     """
     for job in queue.pending_jobs(config, role="worker"):
-        try:
-            digest.archive_worker_job(config, job)
-        except FAILS_JOB as exc:
-            failures.append(f"job {job.id} ({job.session_id}): {exc}")
-        except STOPS_RUN as exc:
-            failures.append(f"job {job.id} ({job.session_id}): {exc}")
-            return STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+        reason = _archive_worker(config, job, failures)
+        if reason:
+            return reason
     return ""
 
 
@@ -144,35 +161,57 @@ def run(config: Config, now: datetime | None = None) -> Report:
                     stopped = STOP_QUEUE
                     break
 
-        # Worker sessions: digested only with budget left after primary sessions.
-        # When budget is short, worker sessions are archived and indexed without digesting.
-        if stopped == STOP_BUDGET or model.tokens_used_today(config, moment) >= budget:
-            stopped = _archive_workers(config, failures) or STOP_BUDGET
-        elif not stopped:
-            while True:
-                if model.tokens_used_today(config, moment) >= budget:
-                    stopped = _archive_workers(config, failures) or STOP_BUDGET
-                    break
-                job = queue.next_job(config, role="worker")
-                if job is None:
-                    break
-                try:
-                    if digest.digest_job(config, job, moment) is None:
-                        empty += 1
-                    else:
-                        digested += 1
-                except STOPS_RUN as exc:
-                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
-                    stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
-                    break
-                except FAILS_JOB as exc:
-                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
-                    try:
-                        queue.fail(config, job, str(exc))
-                    except QUEUE_LOST as lost:
-                        failures.append(f"the queue: {lost}")
-                        stopped = STOP_QUEUE
+        # Worker sessions: digested only with budget left after primary sessions. With none
+        # left they are archived and indexed without digesting, which spends no token - so it
+        # happens even when the endpoint is down or a primary stopped the run, because no
+        # reason to call a model is a reason to leave a worker's words out of the archive.
+        # Only a queue that cannot be used stops this: nothing can be read or written then.
+        if stopped != STOP_QUEUE:
+            if stopped or model.tokens_used_today(config, moment) >= budget:
+                stopped = _archive_workers(config, failures) or stopped or STOP_BUDGET
+            else:
+                while True:
+                    if model.tokens_used_today(config, moment) >= budget:
+                        stopped = _archive_workers(config, failures) or STOP_BUDGET
                         break
+                    job = queue.next_job(config, role="worker")
+                    if job is None:
+                        break
+                    try:
+                        if digest.digest_job(config, job, moment) is None:
+                            empty += 1
+                        else:
+                            digested += 1
+                    except STOPS_RUN as exc:
+                        failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                        stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+                        if stopped != STOP_QUEUE:
+                            # A model that will not answer is no reason to leave a worker's
+                            # words out of the archive: storing them spends no token, and this
+                            # job's text was read as far as the digest could get with it.
+                            _archive_worker(config, job, failures)
+                            _archive_workers(config, failures)
+                        break
+                    except FAILS_JOB as exc:
+                        failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                        try:
+                            queue.fail(config, job, str(exc))
+                        except QUEUE_LOST as lost:
+                            failures.append(f"the queue: {lost}")
+                            stopped = STOP_QUEUE
+                            break
+
+        # What this run committed is indexed here, and what the index could not read is said
+        # out loud rather than dropped: the digest step's own update runs before its commit,
+        # so the page just written is only searchable after this one, and a report line that
+        # nobody read would leave a file unreadable on every run without ever naming it.
+        try:
+            failures += [f"the index: {line}" for line in index.update(config)]
+        except SearchIndexError as exc:
+            # The digest is committed and the queue is settled; an index this run cannot
+            # write - another build's stamp, a file that is not the index - is reported and
+            # does not undo the work (DESIGN 14, BUILD-PLAN M3.1).
+            failures.append(f"the index: {exc}")
     except QUEUE_LOST as exc:
         failures.append(f"the queue: {exc}")
         stopped = STOP_QUEUE

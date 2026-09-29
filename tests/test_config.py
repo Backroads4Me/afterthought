@@ -57,25 +57,39 @@ def test_default_config_text_loads(home):
     assert configmod.load().settings == configmod.Settings()
 
 
-def test_path_matching_and_roles(home):
+def test_path_matching_and_roles(home, tmp_path):
     (home / "config.toml").write_text(
         "[capture]\n"
-        'exclude_paths = ["~/secret", "/srv/excluded/"]\n'
-        'worker_paths = ["~/workers", "/srv/workers"]\n'
+        f'exclude_paths = ["{tmp_path / "secret"}"]\n'
+        f'worker_paths = ["{tmp_path / "workers"}", "{tmp_path / "opt" / "workers"}"]\n'
     )
     cfg = configmod.load()
 
-    secret_dir = Path.home() / "secret" / "project"
-    excluded_dir = Path("/srv/excluded/run1")
-    worker_dir = Path.home() / "workers" / "w1"
-    primary_dir = Path("/srv/other/normal")
+    secret_dir = tmp_path / "secret" / "project"
+    worker_dir = tmp_path / "workers" / "w1"
+    second_worker = tmp_path / "opt" / "workers"
+    primary_dir = tmp_path / "opt" / "other" / "normal"
 
     assert configmod.is_excluded(secret_dir, cfg) is True
-    assert configmod.is_excluded(excluded_dir, cfg) is True
     assert configmod.is_excluded(worker_dir, cfg) is False
     assert configmod.is_excluded(primary_dir, cfg) is False
 
     assert configmod.is_worker(worker_dir, cfg) is True
-    assert configmod.is_worker(Path("/srv/workers"), cfg) is True
+    assert configmod.is_worker(second_worker, cfg) is True
     assert configmod.is_worker(primary_dir, cfg) is False
     assert configmod.is_worker(secret_dir, cfg) is False
+
+
+def test_a_tilde_in_a_path_list_names_the_home_directory(home):
+    """A path written ``~/secret`` in config.toml is the home directory, not a directory
+    called ``~``, so excluding one's own work needs no host spelled out (DESIGN 12).
+
+    This is the one place in this file that names a directory outside the temporary home,
+    because the expansion is the thing under test: the paths are compared as names and
+    nothing here is created, read, or written.
+    """
+    (home / "config.toml").write_text('[capture]\nexclude_paths = ["~/secret"]\n')
+    cfg = configmod.load()
+
+    assert configmod.is_excluded(Path.home() / "secret" / "project", cfg) is True
+    assert configmod.is_excluded(Path.home().parent / "secret", cfg) is False
