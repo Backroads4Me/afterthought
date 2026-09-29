@@ -15,7 +15,7 @@ takes, with Claude Code's own event name as the argument ``adapters/claude.py`` 
 file's path is an argument of every function here so a test can point it at a temporary
 file; `settings_path` is the default the command line uses.
 
-Two rules hold the user's own configuration safe:
+Three rules hold the user's own configuration safe:
 
 * A merge touches only what afterthought owns. Other people's hook entries keep their
   position and their order, and uninstall removes command hooks and nothing else: every key
@@ -23,10 +23,12 @@ Two rules hold the user's own configuration safe:
   and an event list or the ``hooks`` object that uninstall empties stays empty rather than
   going away. The file is read, edited in place, and written back with its key order
   intact.
-* Every write is preceded by a backup of the text it replaces, given that file's own mode,
-  and nothing is written at all to a file whose text afterthought cannot read as JSON.
-  `install`, `uninstall`, `_read` and `_backup` each state their rule where a reader of a
-  write will find it.
+* A write goes to the file the settings path points at, so a symbolic link the user made
+  there - into a version-controlled settings file, say - survives and keeps being read.
+* No settings file changes before a backup of its text is safe beside it, carrying that
+  file's own mode, and nothing changes at all to a file whose text afterthought cannot read
+  as JSON. `install`, `uninstall`, `_read`, `_backup` and `_write` each state their rule
+  where a reader of a write will find it.
 """
 
 from __future__ import annotations
@@ -102,7 +104,7 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     added = False
     for event in HOOK_EVENTS:
         groups = _groups(hooks, event)
-        if _count(groups, event) == 0:
+        if not _already_runs(groups, event):
             groups.append(_group(event))
             added = True
 
@@ -167,14 +169,13 @@ def _runs(hook: object, event: str) -> bool:
     return isinstance(hook, dict) and hook.get("command") == hook_command(event)
 
 
-def _count(groups: list, event: str) -> int:
-    """How many of afterthought's own command hooks a list of groups runs."""
-    return sum(
-        1
+def _already_runs(groups: list, event: str) -> bool:
+    """Whether these groups already run afterthought's own hook for this event."""
+    return any(
+        _runs(hook, event)
         for group in groups
         if isinstance(group, dict) and isinstance(group.get("hooks"), list)
         for hook in group["hooks"]
-        if _runs(hook, event)
     )
 
 
@@ -264,6 +265,19 @@ def _groups(hooks: dict, event: str) -> list:
     return groups
 
 
+def _target(settings: Path) -> Path:
+    """The file the settings path points at.
+
+    ``os.replace`` would unlink a symbolic link the user made at that path and put a
+    plain file where the link was, silently taking the linked file - usually the one in
+    their dotfiles - out of use. Every read, backup and write then goes to the same
+    file the link names, and the link itself is left alone.
+    """
+    if not settings.is_symlink():
+        return settings
+    return Path(os.path.realpath(settings))
+
+
 def _commit(
     settings: Path, original: str | None, document: dict, *, changed: bool, dry_run: bool
 ) -> Change:
@@ -271,24 +285,25 @@ def _commit(
 
     Nothing is written when nothing changed, so a second install leaves the file's bytes
     untouched and no backup behind. An unchanged merge is not reformatted either, which
-    keeps a hand-written settings file hand-written.
+    keeps a hand-written settings file hand-written. What is written goes to the file the
+    settings path points at, so a symbolic link the user made there keeps working.
     """
     if not changed:
         return Change(changed=False, backup=None, diff="")
+    target = _target(settings)
     after = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
     diff = "\n".join(
         difflib.unified_diff(
             (original or "").splitlines(),
             after.splitlines(),
-            fromfile=f"{settings} (before)",
-            tofile=f"{settings} (after)",
+            fromfile=f"{target} (before)",
+            tofile=f"{target} (after)",
+            lineterm="",
         )
     )
     if dry_run:
         return Change(changed=True, backup=None, diff=diff)
-    backup = _backup(settings, original)
-    _write(settings, after)
-    return Change(changed=True, backup=backup, diff=diff)
+    return Change(changed=True, backup=_write(target, after, original), diff=diff)
 
 
 def _backup(settings: Path, original: str | None) -> Path | None:
@@ -307,30 +322,29 @@ def _backup(settings: Path, original: str | None) -> Path | None:
     if not original:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    try:
-        mode = stat.S_IMODE(settings.stat().st_mode)
-        for suffix in itertools.count():
-            tail = "" if suffix == 0 else f"-{suffix}"
-            backup = settings.with_name(f"{settings.name}.aft-{stamp}{tail}.bak")
-            try:
-                handle = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError:
-                continue
-            with os.fdopen(handle, "w", encoding="utf-8") as output:
-                output.write(original)
-            os.chmod(backup, mode)
-            return backup
-    except OSError as exc:
-        raise InstallError(f"cannot back up {settings} ({exc}); nothing was written") from exc
+    mode = stat.S_IMODE(settings.stat().st_mode)
+    for suffix in itertools.count():
+        tail = "" if suffix == 0 else f"-{suffix}"
+        backup = settings.with_name(f"{settings.name}.aft-{stamp}{tail}.bak")
+        try:
+            handle = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(handle, "w", encoding="utf-8") as output:
+            output.write(original)
+        os.chmod(backup, mode)
+        return backup
 
 
-def _write(settings: Path, text: str) -> None:
-    """Put the new text in place in one step, so a crash leaves the old file or the new one.
+def _write(settings: Path, text: str, original: str | None) -> Path | None:
+    """Put the new text in place in one step, and return the backup of the text it replaces.
 
     A half-written settings file costs the user their whole Claude Code configuration, so
-    the text goes to a temporary file in the same directory and ``os.replace`` moves it
-    over the old one, keeping that file's permissions. A directory afterthought cannot
-    write in is refused the same way a file it cannot read is.
+    the new text goes to a temporary file in the same directory and ``os.replace`` moves it
+    over the old one, keeping that file's permissions. The previous text is backed up only
+    once the new one is staged and the replace is next, so a refusal never leaves behind a
+    copy of text that was never superseded. A directory afterthought cannot write in is
+    refused the same way a file it cannot read is.
     """
     try:
         settings.parent.mkdir(parents=True, exist_ok=True)
@@ -340,9 +354,11 @@ def _write(settings: Path, text: str) -> None:
             with os.fdopen(handle, "w", encoding="utf-8") as output:
                 output.write(text)
             os.chmod(temporary, mode)
+            backup = _backup(settings, original)
             os.replace(temporary, settings)
         except OSError:
             os.unlink(temporary)
             raise
     except OSError as exc:
-        raise InstallError(f"cannot write {settings} ({exc}); nothing was written") from exc
+        raise InstallError(f"cannot write {settings} ({exc}); it was not changed") from exc
+    return backup

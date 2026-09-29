@@ -242,16 +242,17 @@ def test_a_write_is_preceded_by_a_backup_holding_the_previous_text(tmp_path):
     assert read_settings(change.backup) == PEOPLE
 
 
-def test_a_backup_cannot_be_read_more_widely_than_the_file_it_copies(tmp_path):
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_the_backup_carries_the_mode_of_the_settings_file_it_copies(tmp_path, mode):
     settings = settings_in(tmp_path)
     write_settings(settings, PEOPLE)
-    os.chmod(settings, 0o600)
+    os.chmod(settings, mode)
 
     change = claude_install.install(settings)
 
     assert change.backup is not None
-    assert stat.S_IMODE(change.backup.stat().st_mode) == 0o600
-    assert stat.S_IMODE(settings.stat().st_mode) == 0o600
+    assert stat.S_IMODE(change.backup.stat().st_mode) == mode
+    assert stat.S_IMODE(settings.stat().st_mode) == mode
 
 
 class ClockAt:
@@ -464,6 +465,11 @@ def test_dry_run_prints_the_resulting_diff_and_writes_nothing(tmp_path, monkeypa
     assert main(["install", "claude", "--dry-run"]) == 0
 
     printed = capsys.readouterr().out
+    lines = printed.splitlines()
+    assert lines[0] == f"--- {settings} (before)"
+    assert lines[1] == f"+++ {settings} (after)"
+    assert lines[2].startswith("@@ ")
+    assert "" not in lines
     assert added_values(printed) == [
         value
         for event in claude_install.HOOK_EVENTS
@@ -571,5 +577,41 @@ def test_the_command_reports_a_settings_file_it_cannot_write(tmp_path, monkeypat
 
     err = capsys.readouterr().err
     assert err.startswith("aft: cannot write")
+    assert "it was not changed" in err
+    assert list(tmp_path.rglob("settings.json.aft-*")) == []
     assert str(settings) in err
     assert settings.parent.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_a_symbolic_link_at_the_settings_path_survives_the_install(tmp_path):
+    """A settings file the user keeps in their dotfiles stays the file Claude Code reads."""
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir(parents=True)
+    text = json.dumps(PEOPLE, indent=2) + "\n"
+    real.write_text(text, encoding="utf-8")
+    settings = settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.symlink_to(real)
+
+    change = claude_install.install(settings)
+
+    assert settings.is_symlink()
+    assert foreign_commands(command_order(real)) == command_order(PEOPLE)
+    assert aft_commands() <= {command for _, command in command_order(real)}
+    assert change.backup is not None
+    assert change.backup.parent == real.parent.resolve()
+    assert json.loads(change.backup.read_text(encoding="utf-8")) == PEOPLE
+
+
+def test_install_through_a_dangling_link_writes_its_target(tmp_path):
+    """A link to a settings file not written yet gets a target, not a plain file."""
+    real = tmp_path / "dotfiles" / "settings.json"
+    settings = settings_in(tmp_path)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.symlink_to(real)
+
+    change = claude_install.install(settings)
+
+    assert change.changed is True and change.backup is None
+    assert settings.is_symlink()
+    assert set(read_settings(real)["hooks"]) == set(claude_install.HOOK_EVENTS)
