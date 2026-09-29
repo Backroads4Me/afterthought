@@ -152,9 +152,12 @@ def _section_for(kind: str) -> str:
     return section
 
 
-def _line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
+def line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
     """What a fact line says, apart from the line number it currently sits on."""
     return fact.statement, fact.source, fact.date, fact.refs, fact.struck
+
+
+_line_identity = line_identity
 
 
 class PageDoc:
@@ -258,6 +261,86 @@ class PageDoc:
         )
         self._apply(last + 1, last + 1, [f"{indent}{line}" for line in entry])
         return new_id
+
+    def scrub_source(self, source_id: str, marker: str = "[forgotten]") -> bool:
+        """Replace the quote and title of a source entry with a marker (design 12, M2.8).
+
+        Footnotes citing this source still resolve, but verbatim text from the forgotten
+        session is removed from the frontmatter.
+        """
+        source_id = str(source_id)
+        if source_id not in self.sources:
+            raise WriteError(f"source {source_id} is not in the frontmatter")
+        bounds = self._fm_bounds()
+        if bounds is None:
+            raise WriteError("the page has no frontmatter")
+        key = self._key_line("sources", bounds)
+        if key is None:
+            raise WriteError("the page has no sources block")
+        last = self._sources_end(key, bounds)
+
+        sources_indent = next(
+            (
+                match.group("indent")
+                for line in self.lines[key + 1 : last + 1]
+                if (match := _ENTRY_LINE.match(line))
+            ),
+            "  ",
+        )
+        entry_starts: list[int] = [
+            idx
+            for idx in range(key + 1, last + 1)
+            if (m := _ENTRY_LINE.match(self.lines[idx])) and m.group("indent") == sources_indent
+        ]
+
+        for k, start in enumerate(entry_starts):
+            stop = entry_starts[k + 1] if k + 1 < len(entry_starts) else last + 1
+            entry_lines = self.lines[start:stop]
+            raw = "\n".join(entry_lines)
+            try:
+                data = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                data = None
+            entry_dict: dict = {}
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                entry_dict = data[0]
+            elif isinstance(data, dict):
+                entry_dict = data
+
+            if str(entry_dict.get("id")) != source_id:
+                continue
+
+            entry_data = self.sources.get(source_id, entry_dict)
+            quote_val = entry_data.get("quote")
+            title_val = entry_data.get("title")
+            text_val = entry_data.get("text")
+            has_title = "title" in entry_data or "title" in entry_dict
+            has_text = "text" in entry_data or "text" in entry_dict
+
+            if (
+                quote_val == marker
+                and (not has_title or title_val == marker)
+                and (not has_text or text_val == marker)
+            ):
+                return False
+
+            cont_indent = sources_indent + "  "
+            resource = entry_data.get("resource", "")
+            new_lines = [
+                f"{sources_indent}- id: {source_id}",
+                f"{cont_indent}resource: {_scalar(str(resource))}",
+            ]
+            if has_title:
+                new_lines.append(f"{cont_indent}title: {_scalar(marker)}")
+            if has_text:
+                new_lines.append(f"{cont_indent}text: {_scalar(marker)}")
+            new_lines.append(f"{cont_indent}quote: {_scalar(marker)}")
+
+            with self._atomic():
+                self._apply(start, stop, new_lines)
+            return True
+
+        raise WriteError(f"could not find source {source_id} entry lines in frontmatter")
 
     def add_fact(
         self,
@@ -477,6 +560,21 @@ class PageDoc:
             self._apply(found.line - 1, found.line, [])
             at = self._append_line(section, line)
             return self._fact_written(at, found.statement)
+
+    def remove_candidate(self, fact: page.Fact) -> bool:
+        """Remove a candidate line resting on forgotten evidence (design 12, M2.8)."""
+        found = self._resolve(fact)
+        if found.section != page.CANDIDATES:
+            raise WriteError("only a candidate line can be removed")
+        at = found.line - 1
+        idx = at + 1
+        while idx < len(self.lines) and not self.lines[idx].strip():
+            idx += 1
+        if found.callouts or (idx < len(self.lines) and self.lines[idx].lstrip().startswith(">")):
+            raise WriteError("a line with an open note cannot be removed; close the note first")
+        with self._atomic():
+            self._apply(at, at + 1, [])
+        return True
 
     # Lines and frontmatter
 

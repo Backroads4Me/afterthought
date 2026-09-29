@@ -20,6 +20,8 @@ from aft import evidence, index, lint, page, pagewrite, vault
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
 
+FORGOTTEN_MARKER = "[forgotten]"
+
 
 @dataclass(frozen=True)
 class SessionForgetReport:
@@ -29,14 +31,21 @@ class SessionForgetReport:
     evidence_removed: bool
     digests_removed: tuple[str, ...]
     lines_withdrawn: tuple[str, ...]
+    lines_unwithdrawn: tuple[str, ...]
     vault_committed: bool
+    candidates_removed: tuple[str, ...] = ()
+
+    @property
+    def unwithdrawn_lines(self) -> tuple[str, ...]:
+        return self.lines_unwithdrawn
 
 
 def forget_session(config: Config, session_id: str) -> SessionForgetReport:
     """Remove every trace of one session that afterthought controls (DESIGN 12, M2.8).
 
-    Removes the session's evidence rows, index rows, and digest files, and marks curated
-    lines resting only on that session as withdrawn with PageDoc.withdraw.
+    Removes the session's evidence rows, index rows, and digest files, marks curated
+    lines resting only on that session as withdrawn with PageDoc.withdraw, scrubs
+    quotes of sources citing that session, and removes candidate lines resting only on it.
     """
     evidence._require_name(session_id, "session id")
     vault.require(config)
@@ -46,6 +55,8 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
 
     digests_removed: list[str] = []
     lines_withdrawn: list[str] = []
+    lines_unwithdrawn: list[str] = []
+    candidates_removed: list[str] = []
     pages_modified: list[str] = []
 
     with vault.locked(config):
@@ -65,7 +76,8 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                         parent = parent.parent
 
         today = datetime.now(UTC).date().isoformat()
-        for fact_dir_name in lint.FACT_DIRS:
+        fact_dirs = (*lint.FACT_DIRS, "archive")
+        for fact_dir_name in fact_dirs:
             fact_dir = config.vault / fact_dir_name
             if not fact_dir.exists():
                 continue
@@ -86,28 +98,65 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                 if not session_sources:
                     continue
 
+                rel = p.relative_to(config.vault).as_posix()
+                original_text = doc.render()
                 withdrawn_on_page: list[str] = []
+                candidates_on_page: list[str] = []
+                unwithdrawn_on_page: list[str] = []
+                skipped_facts: set[tuple] = set()
+
                 while True:
                     target = None
                     for fact in doc.page.facts:
                         if (
                             fact.section in page.KIND_SECTIONS
-                            and fact.state in (page.ACTIVE, page.STALE)
+                            and fact.state
+                            in (page.ACTIVE, page.STALE, page.CONFLICT, page.NEEDS_YOU)
                             and fact.refs
                             and all(ref in session_sources for ref in fact.refs)
+                            and pagewrite.line_identity(fact) not in skipped_facts
                         ):
                             target = fact
                             break
                     if target is None:
                         break
-                    doc.withdraw(target, today)
-                    withdrawn_on_page.append(target.statement)
+                    try:
+                        doc.withdraw(target, today)
+                        withdrawn_on_page.append(target.statement)
+                    except pagewrite.WriteError:
+                        skipped_facts.add(pagewrite.line_identity(target))
+                        unwithdrawn_on_page.append(f"{rel}:{target.line}: {target.statement}")
 
-                if withdrawn_on_page:
+                while True:
+                    target = None
+                    for fact in doc.page.facts:
+                        if (
+                            fact.section == page.CANDIDATES
+                            and fact.refs
+                            and all(ref in session_sources for ref in fact.refs)
+                            and pagewrite.line_identity(fact) not in skipped_facts
+                        ):
+                            target = fact
+                            break
+                    if target is None:
+                        break
+                    try:
+                        doc.remove_candidate(target)
+                        candidates_on_page.append(target.statement)
+                    except pagewrite.WriteError:
+                        skipped_facts.add(pagewrite.line_identity(target))
+                        unwithdrawn_on_page.append(f"{rel}:{target.line}: {target.statement}")
+
+                for sid in sorted(session_sources):
+                    doc.scrub_source(sid, marker=FORGOTTEN_MARKER)
+
+                if doc.render() != original_text:
                     p.write_text(doc.render(), encoding="utf-8")
-                    rel = p.relative_to(config.vault).as_posix()
                     pages_modified.append(rel)
                     lines_withdrawn.extend(withdrawn_on_page)
+                    candidates_removed.extend(candidates_on_page)
+
+                lines_unwithdrawn.extend(unwithdrawn_on_page)
 
         to_commit = [*digests_removed, *pages_modified]
         committed = False
@@ -121,7 +170,9 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         evidence_removed=True,
         digests_removed=tuple(digests_removed),
         lines_withdrawn=tuple(lines_withdrawn),
+        lines_unwithdrawn=tuple(lines_unwithdrawn),
         vault_committed=committed,
+        candidates_removed=tuple(candidates_removed),
     )
 
 

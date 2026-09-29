@@ -395,6 +395,13 @@ def cmd_forget_session(args) -> int:
         f"{len(report.digests_removed)} digest file(s), "
         f"withdrew {len(report.lines_withdrawn)} curated line(s)"
     )
+    if report.lines_unwithdrawn:
+        print(
+            f"{len(report.lines_unwithdrawn)} line(s) with open notes could not be withdrawn; "
+            "close the note and rerun:"
+        )
+        for line in report.lines_unwithdrawn:
+            print(f"  {line}")
     print("the vault's git history still holds older commits; rewrite history to remove them")
     return 0
 

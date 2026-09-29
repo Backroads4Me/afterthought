@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import cli, evidence, index, pagewrite, registry
+from aft import cli, evidence, forget, index, lint, pagewrite, registry
 from aft import config as configmod
 from aft.config import Config
 from aft.readers import Entry
@@ -126,7 +126,8 @@ def test_forget_session_removes_every_trace_and_byte_level_erasure(initialized: 
             "sources:\n"
             f"  - id: sf\n"
             f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
-            '    quote: "something"\n'
+            f'    title: "Session with {FORGOTTEN_PHRASE}"\n'
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
             f"  - id: sk\n"
             f"    resource: aft://session/claude/{KEPT_SESSION}#k1\n"
             '    quote: "something else"\n'
@@ -174,6 +175,10 @@ def test_forget_session_removes_every_trace_and_byte_level_erasure(initialized: 
     assert facts_by_statement["Solely on forgotten session."].state == "withdrawn"
     assert facts_by_statement["On both sessions."].state == "active"
     assert facts_by_statement["Solely on kept session."].state == "active"
+    assert curated_doc.sources["sf"]["quote"] == "[forgotten]"
+    assert curated_doc.sources["sf"].get("title") == "[forgotten]"
+    assert curated_doc.sources["sk"]["quote"] == "something else"
+    assert lint.lint_vault(initialized.vault) == []
 
     # Byte-level verification across archive, index, write-ahead logs, and vault working tree
     for p in files_matching(initialized.home, "evidence.sqlite"):
@@ -284,6 +289,197 @@ def test_forget_session_unknown_leaves_state_intact(initialized: Config, capsys)
     out = capsys.readouterr().out
     assert "the vault's git history still holds older commits" in out
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_forget_session_with_open_note_does_not_abort_and_reports(initialized: Config, capsys):
+    """When a line with an open note cannot be withdrawn, forget_session withdraws other lines,
+    scrubs source quotes, and lists the un-withdrawable line in the report and CLI output."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("beta", "Beta")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register beta"], initialized.vault)
+
+    entry = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry])
+
+    page_rel = "projects/beta/overview.md"
+    create_curated_page(
+        initialized.vault,
+        page_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Beta\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    title: "Beta notes on {FORGOTTEN_PHRASE}"\n'
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Line with open note. [stated] 2026-10-01 [^sf]\n"
+            "> [!question] 2026-10-01\n"
+            "> Should this line remain?\n"
+            "- Line without note. [stated] 2026-10-01 [^sf]\n"
+        ),
+    )
+    index.update(initialized)
+
+    # First run: open note stops line 1 from being withdrawn, but line 2 is withdrawn
+    code = cli.main(["forget", "session", FORGOTTEN_SESSION])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "1 line(s) with open notes could not be withdrawn; close the note and rerun:" in out
+    assert "Line with open note." in out
+    assert page_rel in out
+    assert "withdrew 1 curated line(s)" in out
+
+    doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
+    facts = {f.statement: f for f in doc.page.facts}
+    assert facts["Line with open note."].state == "needs-you"
+    assert facts["Line without note."].state == "withdrawn"
+    assert doc.sources["sf"]["quote"] == "[forgotten]"
+    assert doc.sources["sf"]["title"] == "[forgotten]"
+    assert lint.lint_vault(initialized.vault) == []
+
+    # Close note and rerun forget: now the line is withdrawn
+    cur_text = (initialized.vault / page_rel).read_text(encoding="utf-8")
+    closed_lines = [line for line in cur_text.splitlines() if not line.startswith(">")]
+    (initialized.vault / page_rel).write_text("\n".join(closed_lines) + "\n", encoding="utf-8")
+    run_git(["add", page_rel], initialized.vault)
+    run_git(["commit", "-q", "-m", "close note on line"], initialized.vault)
+
+    code2 = cli.main(["forget", "session", FORGOTTEN_SESSION])
+    assert code2 == 0
+    out2 = capsys.readouterr().out
+    assert "could not be withdrawn" not in out2
+    assert "withdrew 1 curated line(s)" in out2
+
+    doc2 = pagewrite.PageDoc.read(initialized.vault / page_rel)
+    facts2 = {f.statement: f for f in doc2.page.facts}
+    assert facts2["Line with open note."].state == "withdrawn"
+    assert facts2["Line without note."].state == "withdrawn"
+    assert lint.lint_vault(initialized.vault) == []
+
+
+def test_forget_session_mixed_session_line_scrubs_source_quote_and_keeps_line_active(
+    initialized: Config,
+):
+    """Lines citing both the forgotten session and another session stay active,
+    while the forgotten session's source quote is scrubbed so footnotes still resolve."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("gamma", "Gamma")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register gamma"], initialized.vault)
+
+    entry_f = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    entry_k = Entry("k1", NOW, "user", KEPT_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry_f])
+    evidence.store(initialized, "claude", KEPT_SESSION, prj.id, [entry_k])
+
+    page_rel = "projects/gamma/overview.md"
+    create_curated_page(
+        initialized.vault,
+        page_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Gamma\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    title: "Title with {FORGOTTEN_PHRASE}"\n'
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            f"  - id: sk\n"
+            f"    resource: aft://session/claude/{KEPT_SESSION}#k1\n"
+            f'    quote: "{KEPT_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Mixed evidence decision. [stated] 2026-10-01 [^sf] [^sk]\n"
+            "- Forgotten evidence decision. [stated] 2026-10-01 [^sf]\n"
+            "- Kept evidence decision. [stated] 2026-10-01 [^sk]\n"
+        ),
+    )
+    index.update(initialized)
+
+    report = forget.forget_session(initialized, FORGOTTEN_SESSION)
+    assert report.lines_withdrawn == ("Forgotten evidence decision.",)
+    assert report.lines_unwithdrawn == ()
+
+    doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
+    facts = {f.statement: f for f in doc.page.facts}
+    assert facts["Mixed evidence decision."].state == "active"
+    assert facts["Forgotten evidence decision."].state == "withdrawn"
+    assert facts["Kept evidence decision."].state == "active"
+
+    # Source sf is scrubbed with the fixed marker; sk is unchanged
+    assert doc.sources["sf"]["quote"] == "[forgotten]"
+    assert doc.sources["sf"]["title"] == "[forgotten]"
+    assert doc.sources["sk"]["quote"] == KEPT_PHRASE
+
+    # Both footnotes on the mixed line still resolve cleanly
+    assert lint.lint_vault(initialized.vault) == []
+    # Forgotten phrase is absent from the working tree
+    assert FORGOTTEN_PHRASE.encode("utf-8") not in (initialized.vault / page_rel).read_bytes()
+
+
+def test_forget_session_candidate_lines_scrubbed_or_removed(initialized: Config):
+    """Candidate lines resting only on the forgotten session are removed,
+    while candidate lines resting on mixed sessions remain with scrubbed source quotes."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("delta", "Delta")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register delta"], initialized.vault)
+
+    entry_f = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    entry_k = Entry("k1", NOW, "user", KEPT_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry_f])
+    evidence.store(initialized, "claude", KEPT_SESSION, prj.id, [entry_k])
+
+    page_rel = "projects/delta/overview.md"
+    create_curated_page(
+        initialized.vault,
+        page_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Delta\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            f"  - id: sk\n"
+            f"    resource: aft://session/claude/{KEPT_SESSION}#k1\n"
+            f'    quote: "{KEPT_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Candidates\n\n"
+            "- Forgotten candidate. [inferred] 2026-10-01 [^sf] (signals 1/3, sessions 1/2)\n"
+            "- Mixed candidate. [inferred] 2026-10-01 [^sf] [^sk] (signals 2/3, sessions 2/2)\n"
+            "- Kept candidate. [inferred] 2026-10-01 [^sk] (signals 1/3, sessions 1/2)\n"
+        ),
+    )
+    index.update(initialized)
+
+    report = forget.forget_session(initialized, FORGOTTEN_SESSION)
+    assert report.candidates_removed == ("Forgotten candidate.",)
+
+    doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
+    statements = [f.statement for f in doc.page.facts]
+    assert "Forgotten candidate." not in statements
+    assert "Mixed candidate." in statements
+    assert "Kept candidate." in statements
+    assert doc.sources["sf"]["quote"] == "[forgotten]"
+    assert lint.lint_vault(initialized.vault) == []
+    assert FORGOTTEN_PHRASE.encode("utf-8") not in (initialized.vault / page_rel).read_bytes()
 
 
 def test_forget_pattern_redacts_archive_and_byte_level_erasure(initialized: Config, capsys):
