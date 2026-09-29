@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -160,11 +161,13 @@ def _added_lines(root: Path, checkpoint: str, rel: str) -> set[int]:
     return added
 
 
-# A bare bullet carries none of a fact line's tail: no source tag, no footnote, and no
-# date where a line's date would stand.
+# A bare bullet carries none of a fact line's tail: no source tag, no footnote and no
+# strikethrough, so the grammar reads no fact out of it and the person's words reach no memory.
+# A bullet that ends in a date while carrying no tag and no footnote is such a line: a date with
+# nothing to attach it to is a fact line missing its source, not a complete one. Which lines hold
+# a fact is the grammar's to say, and `page.Page.rejected` is what the grammar says (F2).
 _TAG = re.compile(r"\[(?:" + "|".join(page.SOURCES) + r")\]")
 _FOOTNOTE = re.compile(r"\[\^[A-Za-z0-9_-]+\]")
-_TRAILING_DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 
 
 def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | None:
@@ -172,10 +175,11 @@ def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | No
     or the tagged page would not read back as it should."""
     text = path.read_text(encoding="utf-8")
     before = page.parse(text, path)
+    refused = {number for number, _, _ in before.rejected}
     bare = [
         (number, line[2:].strip())
         for number, section, line in _body_lines(text, before.body_start)
-        if number in added and section in page.KIND_SECTIONS and _bare(line)
+        if number in added and number in refused and section in page.KIND_SECTIONS and _bare(line)
     ]
     if not bare:
         return None
@@ -198,9 +202,22 @@ def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | No
         fact = facts.get(number + shift)
         if fact is None or fact.statement != statement or fact.source != "stated":
             return None
-    if len(after.errors) != len(before.errors) - len(bare):
+    if _new_problem(before, after):
         return None
     return result
+
+
+def _new_problem(before: page.Page, after: page.Page) -> bool:
+    """Whether tagging wrote a complaint the page did not already carry.
+
+    Tagging a bare bullet can quiet more than its own refusal: a note written under that bullet
+    marked nothing while the line held no fact, and marks the stated fact once it does. So the
+    check is that no kind of complaint grew, not that one error per tagged line went away - the
+    latter left a page whose bullets carry notes untagged, whole, person's words and all.
+    """
+    was = Counter(message for _, message in before.errors)
+    now = Counter(message for _, message in after.errors)
+    return any(count > was[message] for message, count in now.items())
 
 
 def _body_lines(text: str, body_start: int):
@@ -216,13 +233,7 @@ def _bare(line: str) -> bool:
     if not line.startswith("- "):
         return False
     body = line[2:].strip()
-    return bool(
-        body
-        and "~~" not in body
-        and not _TAG.search(body)
-        and not _FOOTNOTE.search(body)
-        and not _TRAILING_DATE.search(body)
-    )
+    return bool(body and "~~" not in body and not _TAG.search(body) and not _FOOTNOTE.search(body))
 
 
 def waiting_digests(vault_path: Path) -> dict[str, list[Path]]:
