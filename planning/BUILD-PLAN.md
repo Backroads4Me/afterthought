@@ -521,7 +521,8 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
     outside the grammar (a hand-typed tail, an extra note row) refuses with a reason instead
     of rebuilding the line, and an edit may never make a parse error disappear by deleting
     the bytes it flagged. `resolve_callout` moves the whole note, header and every row, to
-    `archive/<slug>.md` with the date and the fact it belonged to, and never deletes it.
+    `archive/<page path>` (the page's own vault path under `archive/`, so
+    `global/preferences.md` archives to `archive/global/preferences.md`) with the date and the fact it belonged to, and never deletes it.
   - `add_callout` refuses a note whose text cites a `[^id]` missing from the page's
     sources; `aft lint` checks note footnotes the same way (on main since M0).
   - Statements are checked by round trip, not by pattern: a statement is accepted when the
@@ -600,7 +601,7 @@ Give a reason of at most 200 characters that a person can check against the quot
   `projects/<slug>/overview.md` and registers the project on its first curated fact;
   checks anchors with ripgrep against the default branch (skipping anchors whose commit is
   not yet on it), marking a broken anchor stale and clearing the mark when the words appear
-  again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<slug>.md`; flags
+  again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<page path>`, the page's own vault path under `archive/`; flags
   pages over 12,000 characters in the report; regenerates each `index.md` and appends to
   `log.md`; runs lint and aborts the run without committing if lint fails; marks consumed
   digests with `aft.consumed: <commit>`; makes one commit per project run.

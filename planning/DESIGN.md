@@ -179,7 +179,8 @@ never includes runtime state.
     index.md               generated list of the project's pages
     overview.md            the main page
   digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>[-<n>].md
-  archive/<slug>.md        superseded lines older than 90 days
+  archive/<page path>      a page's resolved notes and superseded lines older than 90 days,
+                           at the page's own vault path (archive/projects/<slug>/overview.md)
   references/<name>/       reference pages for one library collection (section 11)
   library/<name>/          the collection's source files, read-only after import
   reports/
