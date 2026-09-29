@@ -91,8 +91,8 @@ def sweep(config: Config, now: datetime) -> list[SessionEvent]:
     file has moved (BUILD-PLAN M2.2).
 
     The queue is read once for the whole walk, whatever files it walks: every session is
-    asked the same questions of the same rows, and only a file that has moved since a
-    sweep last read it is opened again (BUILD-PLAN M2.2).
+    asked the same questions of the same rows, and a file goes to the reader only once it
+    has moved since a sweep last read that file to no work (BUILD-PLAN M2.2).
 
     A swept session's event carries the time its transcript last moved, not the time of
     the sweep, so that later quiet-period checks measure session activity (DESIGN 9).
@@ -161,14 +161,14 @@ def _candidate(
     if not _has_new_entries(agent, path, state.watermark):
         # The watermark names the session's last entry, so there is nothing left to digest
         # however long the session has been quiet or however big the file has become.
-        note_observed(config, agent, session_id, state.watermark, stat.st_mtime, stat.st_size)
+        note_observed(config, agent, session_id, stat.st_mtime, stat.st_size)
         return None
 
     cwd = _cwd_of(path)
     if cwd is None:
         # Nothing in the file names the directory it was started in, so there is no cwd
         # for the digest to resolve and no event to hand it (BUILD-PLAN M2.6).
-        note_observed(config, agent, session_id, state.watermark, stat.st_mtime, stat.st_size)
+        note_observed(config, agent, session_id, stat.st_mtime, stat.st_size)
         return None
     return SessionEvent(
         agent=agent,
