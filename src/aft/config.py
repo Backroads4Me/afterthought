@@ -123,6 +123,8 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
     vault = Path(settings.vault).expanduser()
     if not vault.is_absolute():
         raise ConfigError(f"{path}: vault must be an absolute path, got {settings.vault!r}")
+    if settings.dream.interval_minutes <= 0:
+        raise ConfigError(f"{path}: dream.interval_minutes must be positive")
     host = settings.host or default_host()
     return Config(home=home, vault=vault, host=host, settings=settings)
 
