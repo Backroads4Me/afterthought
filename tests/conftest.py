@@ -1,5 +1,6 @@
-"""Shared fixtures. Every test runs against a temporary home, vault and git identity, so
-nothing touches real memory or the user's git configuration."""
+"""Shared fixtures. Every test runs against a temporary home, vault and git identity, with
+no proxy in the way, so nothing touches real memory, the network, or the user's git
+configuration."""
 
 from __future__ import annotations
 
@@ -27,6 +28,15 @@ def isolated_git(tmp_path_factory, monkeypatch):
     )
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+@pytest.fixture(autouse=True)
+def direct_connection(monkeypatch):
+    """Nothing reaches the network: a loopback request would otherwise be sent through a
+    proxy when the environment names one, taking it away from the fake endpoint."""
+    proxies = ("http_proxy", "https_proxy", "all_proxy")
+    for name in (*proxies, *(name.upper() for name in proxies)):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
