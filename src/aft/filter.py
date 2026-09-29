@@ -14,9 +14,11 @@ so every path that returns kept text - a prompt, an answer, extracted tool lines
 remnant of a cap - is capped and redacted the same way. There is no path that hands back
 kept text and misses them.
 
-Two things the design asks of capture are not here because an entry stream cannot answer
+Three things the design asks of capture are not here because an entry stream cannot answer
 them: session exclusions and the two-prompt floor both need the session a stream came
-from, which is the queue's and the digest's to know (M2.2, M2.6, M2.7).
+from, which is the queue's and the digest's to know (M2.2, M2.6, M2.7). The third needs
+the same knowledge from outside a stream: whether an off-the-record span was already
+open when the entries of a call begin.
 """
 
 from __future__ import annotations

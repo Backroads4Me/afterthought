@@ -143,7 +143,7 @@ def test_a_marker_said_mid_sentence_does_nothing(cfg):
     assert kept(entries, cfg) == [entry.text for entry in entries]
 
 
-def test_an_unclosed_span_runs_to_the_end_of_the_session(cfg):
+def test_an_unclosed_span_runs_to_the_end_of_the_batch_handed_to_one_call(cfg):
     entries = [
         said("first", "e1"),
         said("aft off", "e2"),
