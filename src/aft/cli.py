@@ -13,6 +13,7 @@ from pathlib import Path
 
 from aft import __version__, adapters, gitutil, index, inject, keys, lint, queue, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
+from aft.dream import schedule
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
@@ -91,6 +92,9 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
     p.set_defaults(handler=cmd_reindex)
+
+    p = sub.add_parser("dream", help="turn waiting digests into curated facts")
+    p.set_defaults(handler=cmd_dream)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
@@ -301,6 +305,23 @@ def cmd_reindex(args) -> int:
     for line in report:
         print(line)
     print(f"rebuilt the search index at {config.home / index.INDEX_NAME}")
+    return 0
+
+
+def cmd_dream(args) -> int:
+    """Run the dream once. Everything it does is `aft.dream.schedule`'s; this says what it
+    did with each project that has digests waiting."""
+    result = schedule.run(load())
+    if not result.waiting:
+        print("no digests waiting")
+    if result.checkpoint:
+        print(f"committed hand edits as {result.checkpoint[:12]}")
+    for slug in result.ran:
+        print(f"{slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug in result.active:
+        print(f"{slug}: skipped, a session was active within the quiet period")
+    for slug in result.edited:
+        print(f"{slug}: skipped, the vault has hand edits within the quiet period")
     return 0
 
 
