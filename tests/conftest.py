@@ -39,6 +39,12 @@ def direct_connection(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def isolated_systemd(monkeypatch):
+    """Never invoke real systemd during tests."""
+    monkeypatch.setattr("aft.install.systemd._default_runner", lambda cmd: None)
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch) -> Path:
     home = tmp_path / "home"

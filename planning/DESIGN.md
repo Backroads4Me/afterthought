@@ -178,8 +178,9 @@ never includes runtime state.
   projects/<slug>/
     index.md               generated list of the project's pages
     overview.md            the main page
-  digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md
-  archive/<slug>.md        superseded lines older than 90 days
+  digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>[-<n>].md
+  archive/<page path>      a page's resolved notes and superseded lines older than 90 days,
+                           at the page's own vault path (archive/projects/<slug>/overview.md)
   references/<name>/       reference pages for one library collection (section 11)
   library/<name>/          the collection's source files, read-only after import
   reports/
@@ -316,7 +317,10 @@ A working directory resolves to one project:
 
 Each project has a stable id separate from its slug, so a rename rewrites nothing else.
 `aft project list`, `aft project rename` and `aft project forget` manage the registry.
-Global facts apply in every project.
+Global facts apply in every project. The digest keeps every verified fact with its scope.
+Dreaming files a global `[stated]` fact on `global/preferences.md` when it is a preference
+and on `global/environment.md` for every other kind; a global fact that is not `[stated]`
+is skipped and reported (R6).
 
 ## 8. Capture and digest
 
@@ -369,7 +373,9 @@ Sessions under configured worker paths (orchestrator worktrees, validation gates
 evidence of a lower rank. Their filtered text goes into the archive and the search index,
 which costs no model time, so an error like a failed test run stays findable. They are
 digested only when the day's model budget has room, and a fact from a worker session stays
-a candidate until a primary session corroborates it.
+a candidate until a primary session corroborates it. Worker evidence never confirms a
+standing line either: a `confirm` from a worker session is skipped and reported, so it
+adds no source and no date.
 
 ### The digest
 
@@ -405,7 +411,10 @@ then:
 
 - drops any fact whose quote does not appear in the cited entry (whitespace-normalized)
 - drops `[stated]` unless the cited entry is one of your turns
-- writes the digest as an OKF file (`type: Session Digest`) under `digests/`
+- writes the digest as an OKF file (`type: Session Digest`) under `digests/`: one page
+  per job. The first job for a session on a day writes `<date>-<agent>-<session>.md`, and
+  later jobs that day add `-2`, `-3` before `.md`. A digest's content never changes once
+  written; dreaming only marks it consumed, so each page is dreamed once, in session order.
 
 ## 9. Dreaming
 
@@ -453,7 +462,7 @@ so later evidence is applied after earlier evidence.
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
 | **R6 One project per unit of work** | A run never edits another project's pages. Global pages change only from `[stated]` facts. | Script |
 | **R7 Size caps** | Pages over their cap are flagged in the report. Condensing and splitting come after v1. | Script |
-| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
+| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it; the line keeps its date, since matching words are not a verified quote. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
 | **R9 No free-form writes** | Model output is schema-constrained JSON. Only the script edits files. | Script |
 
 ### Authority to replace a fact

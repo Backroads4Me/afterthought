@@ -1,8 +1,8 @@
 # Afterthought build plan
 
 This plan turns [DESIGN.md](DESIGN.md) into tasks that one worker can each complete alone.
-It is written for firstmate to dispatch and for workers to build from. The design is the
-authority on behavior; this plan is the authority on sequence, interfaces and done
+Claude builds from it; the tasks merged before 2026-09-29 were built by firstmate's workers.
+The design is the authority on behavior; this plan is the authority on sequence, interfaces and done
 conditions. Where they disagree, the design wins and the plan gets corrected.
 
 M0 is built. Its code is the foundation every task below calls into, so read `src/aft/`
@@ -35,6 +35,14 @@ These rules apply to every task and every pull request.
 9. **Never write to the real vault or `~/.afterthought`** during a task. Installing into
    the real environment (`aft install`, systemd units, hooks) is done by Ted, at milestone
    ends, from the checklists in section 6.
+10. **One review round, then merge.** A PR gets one fix round from its gate review. Only
+    blocking findings hold the merge: privacy (text reaching the archive, index or model
+    that must not), data loss, the trust rules (R1 to R9, the authority table, quote
+    verification), or a broken interface that other tasks build against. They are fixed in
+    that round, and a second round only verifies those fixes. Every other finding is listed
+    in the PR description and collected into one follow-up task per module, dispatched
+    after the milestone's plan tasks. A PR merges when CI is green and no blocking finding
+    is open. The section 3 checkpoints still run, and their findings are sorted the same way.
 
 ## 2. What M0 provides
 
@@ -54,8 +62,8 @@ where possible, errors as exceptions caught once in `cli.main`.
 
 ## 3. Review checkpoints with `claude -p`
 
-Firstmate's own gate reviews every PR. On top of that, the PRs and milestones below get an
-independent review from Claude, run by the worker with `claude -p`:
+The PRs and milestones below get an independent review in a fresh `claude -p` session,
+separate from the one that wrote the code:
 
 | When | Why |
 |---|---|
@@ -63,36 +71,33 @@ independent review from Claude, run by the worker with `claude -p`:
 | Every PR touching `src/aft/dream/rules.py` or `src/aft/dream/apply.py` | The rules decide what becomes trusted memory |
 | Every PR changing a model prompt or JSON schema | Prompts are where silent quality loss hides |
 
-The worker runs, from the repository root:
+The builder runs, from the repository root:
 
 ```bash
 git diff origin/main...HEAD > /tmp/aft-review.diff
-claude -p --model claude-opus-5-5 --allowedTools "Read,Grep,Glob" \
-  "$(cat planning/review-prompt.md)
-Task: <task id and title>
-Design sections: <sections the task cites>
-The diff is in /tmp/aft-review.diff." > /tmp/aft-review.md
+{ cat planning/review-prompt.md
+  printf '\nTask: %s\nDesign sections: %s\nThe diff is in /tmp/aft-review.diff.\n' \
+    "<task id and title>" "<sections the task cites>"
+} | claude -p --model claude-opus-5-5 --allowedTools "Read,Grep,Glob" > /tmp/aft-review.md
 gh pr comment <pr> --body-file /tmp/aft-review.md
 ```
 
-The worker then fixes every finding marked `blocking` in the same PR, or replies on the PR
+The builder then fixes every finding marked `blocking` in the same PR, or replies on the PR
 explaining why a finding is wrong. Non-blocking findings are listed in the PR description
 for Ted.
 
-Firstmate's `captain.md` gives the standing permission for these checkpoints, and for
-nothing else. Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
+Each review spends Claude allowance. At roughly ten checkpoints plus the rules and prompt
   PRs, expect twenty to thirty reviews over the build.
 
-## 4. When a worker is unsure
+## 4. When the builder is unsure
 
-A worker that finds the design silent, contradictory, or wrong for the case in front of it
-does not guess. It stops the task, writes the question and the options it sees on the PR
-or to firstmate, and waits for an answer. Firstmate sorts the question:
+A builder that finds the design silent, contradictory, or wrong for the case in front of it
+does not guess. It writes the question and the options it sees, and sorts it:
 
-- **A design gap** is settled by firstmate with its Opus advisor: the design is silent, the
+- **A design gap** is settled by the builder: the design is silent, the
   answer follows from the design's principles, and it changes nothing the design already
   states (what a reader skips, how a script behaves on a rerun, which date a fact keeps).
-  The ruling and its reason go on the PR and in firstmate's rulings log, and Ted reviews
+  The ruling and its reason go on the PR, and Ted reviews
   the milestone's rulings at its end. Rulings Ted accepts are folded into this plan.
 - **A design change** goes to Ted: anything that contradicts the design or changes
   behavior it states, changes an interface other tasks depend on, adds or drops scope, adds
@@ -158,7 +163,7 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
 - **Behavior:** reads files only; no model, no index. Layers in order, each trimmed to fit
   what remains of `inject.max_chars`, never cutting a fact line in half:
   1. `# Memory: <title>` and the overview's `description`
-  2. last session: `handoff` from the newest digest in `digests/<slug>/` (empty until M2)
+  2. last session: `handoff` from the newest digest in `digests/<slug>/` (the highest part on the newest day) (empty until M2)
   3. active and conflict/needs-you facts from `projects/<slug>/overview.md` in the order
      State, Decisions, Lessons, Procedures, Facts, References; a conflict or question is
      marked `(disputed)` or `(waiting on Ted)` after the line; source tags and footnotes are
@@ -272,7 +277,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Files:** `src/aft/queue.py`, `src/aft/capture.py`, `src/aft/cli.py` (wiring the
   `compaction` and `session_end` events of `aft hook` to `enqueue`), `tests/test_queue.py`.
 - **Interface:** `enqueue(config, event) -> None`; `next_job(config) -> Job | None`;
-  `complete(config, job, watermark)`; `fail(config, job, error)`; `sweep(config, now)`.
+  `complete(config, job, watermark, *, off_record)`, where `off_record` is required; `fail(config, job, error)`; `sweep(config, now)`.
 - **Behavior:** the queue is `~/.afterthought/queue.sqlite` in WAL mode. `enqueue` writes one
   row inside `BEGIN IMMEDIATE` and returns; it never calls a model and never reads the
   transcript. A session has one watermark (the last digested entry id), updated only when
@@ -357,8 +362,10 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Behavior:** for one job: resolve the project from the event's cwd; read entries after
   the watermark; filter; store evidence; render entries as `[<id>] <ROLE> <time>:\n<text>`;
   call the model with the prompt and schema below; verify each fact (quote found in its
-  entry; `stated` only from a user entry; `kind` and `scope` valid); write the digest to
-  `digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md` as an OKF page (`type: Session
+  entry; `stated` only from a user entry; `kind` and `scope` valid; a global fact is kept
+  with its scope, never dropped for it); write the digest to
+  `digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md` (a later job for the same
+  session and day adds `-2`, `-3` before `.md`; a written digest's content never changes) as an OKF page (`type: Session
   Digest`) with the summary, handoff, and verified facts, each fact carrying its source
   entry and quote; record dropped facts and the reason in the digest's frontmatter under
   `aft.dropped`; advance the watermark; commit under the vault lock. A chunk over
@@ -495,8 +502,14 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
   digest is waiting. For each project with waiting digests and no session activity for
   `dream.quiet_minutes` (from the queue's last event time): if the vault has uncommitted
   changes modified within the quiet period, skip the project this run; older uncommitted
-  changes are committed first as `checkpoint: human edits`, and lines Ted added are tagged
-  `[stated]` with a source `resource: aft://edit/<commit>` whose quote is the line itself.
+  changes are committed first as `checkpoint: human edits`, holding Ted's bytes verbatim.
+  Then, in a second commit `aft: tag hand edits from <commit>`, each line Ted added in that
+  checkpoint as a bare bullet (`- <text>`, no tag, date or footnote) in a kind section of a
+  fact page (`projects/<slug>/*.md` except `index.md`, and `global/*.md`) is rewritten as
+  `- <text> [stated] <date> [^id]`, dated with the checkpoint commit's UTC date, with a
+  source `resource: aft://edit/<commit>` whose quote is the text. A line Ted typed or edited
+  in full fact-line form keeps exactly what Ted wrote. The vault-wide check for recent edits
+  skips every project for the run.
   Holds `vault.locked` for the whole run.
 - **Tests:** no digests, no commit; recent hand edit, project skipped; older hand edit,
   checkpoint commit separate from the dream commit.
@@ -519,7 +532,8 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
     outside the grammar (a hand-typed tail, an extra note row) refuses with a reason instead
     of rebuilding the line, and an edit may never make a parse error disappear by deleting
     the bytes it flagged. `resolve_callout` moves the whole note, header and every row, to
-    `archive/<slug>.md` with the date and the fact it belonged to, and never deletes it.
+    `archive/<page path>` (the page's own vault path under `archive/`, so
+    `global/preferences.md` archives to `archive/global/preferences.md`) with the date and the fact it belonged to, and never deletes it.
   - `add_callout` refuses a note whose text cites a `[^id]` missing from the page's
     sources; `aft lint` checks note footnotes the same way (on main since M0).
   - Statements are checked by round trip, not by pattern: a statement is accepted when the
@@ -536,7 +550,8 @@ Done when: the fixture suite in DESIGN 15 (M4) passes.
 - **Files:** `src/aft/dream/decide.py`, `src/aft/prompts/decide.md`,
   `src/aft/prompts/decide.schema.json`, `tests/test_decide.py`.
 - **Behavior:** for each verified fact from a waiting digest, search the project's pages
-  (and global pages for global facts) for the ten most related active or candidate lines,
+  for a project fact, or only the global pages for a global fact (R6 lets a global fact edit
+  nothing else; reference pages scoped to several projects are outside v1), for the ten most related active or candidate lines,
   number them `L1` to `L10`, and ask the model for one decision.
 - **Prompt** (`src/aft/prompts/decide.md`):
 
@@ -581,8 +596,11 @@ Give a reason of at most 200 characters that a person can check against the quot
   replaces a `preference` or `decision`, and contradicting one produces `needs you`;
   replacing requires evidence newer than the target's date; an inferred fact stays a
   candidate until 3 signals across 2 primary sessions, with signals older than 30 days
-  counting half; a worker-only fact stays a candidate; a global page changes only from
-  `[stated]`.
+  counting half; a worker-only fact stays a candidate, and a `confirm` from a worker session is skipped
+  and reported (no source, no date); a global page changes only from
+  `[stated]`, and a global fact that is not `[stated]` is skipped and reported. A global
+  `preference` goes to `global/preferences.md`; every other global kind goes to
+  `global/environment.md`.
 - **Tests:** one test per cell of the authority table and per rule, including every
   refusal. This file is where most of the build's tests live.
 - **Review checkpoint:** every PR touching this file.
@@ -595,7 +613,7 @@ Give a reason of at most 200 characters that a person can check against the quot
   `projects/<slug>/overview.md` and registers the project on its first curated fact;
   checks anchors with ripgrep against the default branch (skipping anchors whose commit is
   not yet on it), marking a broken anchor stale and clearing the mark when the words appear
-  again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<slug>.md`; flags
+  again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<page path>`, the page's own vault path under `archive/`; flags
   pages over 12,000 characters in the report; regenerates each `index.md` and appends to
   `log.md`; runs lint and aborts the run without committing if lint fails; marks consumed
   digests with `aft.consumed: <commit>`; makes one commit per project run.
@@ -679,9 +697,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   memory consumers ignore them, but lint and the seed script can see them. Additive: nothing
   existing changes. Tests: a refused line appears in `rejected` and not in `facts`.
 - **F3 Filter carries off-the-record across chunks and keeps flagged errors** (after M2.3,
-  with M2.2). Implements the M2.3 interface and behavior above.
+  with M2.2). Implements the M2.3 interface and behavior above. No queue file predates
+  this, so a queue file without per-session span state is refused, not migrated.
 - **F4 Clear stale** (after M4.2). `PageDoc.clear_stale(fact, date)` removes a stale mark;
-  M4.5 uses it when an anchor's words reappear. Test: a cleared line parses as active and
+  M4.5 uses it when an anchor's words reappear; the line keeps its date. Trust decisions
+  such as whether a replacement is newer live in `aft.dream.rules`; the writer only writes. Test: a cleared line parses as active and
   lints.
 
 ## 6. Ted's checklists at milestone ends
@@ -728,3 +748,7 @@ M5 after M3.2 and M4.6; M6 after M5; M7 after M3.2 and M4.6
 ```
 
 The first wave can run in parallel: M1.1, M1.2, M1.5, M2.1, M2.5 and M4.2.
+
+Claude builds every remaining task, follow-up and milestone, one PR per task, in the order
+above. Branches firstmate left in flight are picked up as they stand, with their open review
+findings sorted under rule 10.

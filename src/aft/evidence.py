@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aft import redact
 from aft.config import Config
 from aft.readers import Entry
 
@@ -244,6 +245,51 @@ def forget(config: Config, session_id: str) -> None:
     # Drained always, rewritten only when this delete released pages: a refusal is how a
     # forgetting may end, and the retry has to clear that residue or refuse again.
     _release(config, rewrite=bool(removed))
+
+
+def session_info(config: Config, session_id: str) -> tuple[str, str | None] | None:
+    """The agent and project id of an archived session, or None if not archived."""
+    session_id = _require_name(session_id, "session id")
+    if not _db_path(config).exists():
+        return None
+    with _reading(config) as conn:
+        row = conn.execute(
+            "SELECT agent, project_id FROM evidence WHERE session_id = ? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+def redact_pattern(config: Config, pattern: str | re.Pattern[str]) -> int:
+    """Redact matches of ``pattern`` across the archive (DESIGN 12, `aft forget pattern`).
+
+    Every entry in the archive is decompressed, searched for matches, and rewritten with
+    the matched text replaced by ``[redacted]``. Rewritten entries are compressed and
+    stored back. If any entries were rewritten, the archive is vacuumed and its write-ahead
+    log is drained, so the original text does not remain in freed pages or in the log.
+    Returns the number of entries rewritten.
+    """
+    compiled = redact.compile_patterns([pattern])[0]
+    if not _db_path(config).exists():
+        return 0
+    with _writing(config) as conn:
+        rows = conn.execute("SELECT session_id, entry_id, text FROM evidence").fetchall()
+        rewritten: list[tuple[bytes, str, str]] = []
+        for session_id, entry_id, blob in rows:
+            text = _unpack(blob, entry_id)
+            new_text = compiled.sub(redact.REDACTED, text)
+            if new_text != text:
+                new_blob = zlib.compress(new_text.encode("utf-8"))
+                rewritten.append((new_blob, session_id, entry_id))
+        if rewritten:
+            conn.executemany(
+                "UPDATE evidence SET text = ? WHERE session_id = ? AND entry_id = ?",
+                rewritten,
+            )
+    _release(config, rewrite=bool(rewritten))
+    return len(rewritten)
 
 
 def _row(entry: Entry, session_id: str, agent: str, project_id: str | None) -> tuple:

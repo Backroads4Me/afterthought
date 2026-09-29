@@ -32,6 +32,8 @@ def test_values_and_sections(home):
         ("valut = '/x'\n", "unknown setting valut"),
         ("[dream]\ninterval = 5\n", "unknown setting dream.interval"),
         ("[dream]\ninterval_minutes = '5'\n", "dream.interval_minutes must be an integer"),
+        ("[dream]\ninterval_minutes = 0\n", "dream.interval_minutes must be positive"),
+        ("[dream]\ninterval_minutes = -5\n", "dream.interval_minutes must be positive"),
         ("[library]\ncommit = 1\n", "library.commit must be true or false"),
         ("[evidence]\nretention_days = true\n", "must be an integer"),
         ("[capture]\nworker_paths = '/w'\n", "must be a list of strings"),

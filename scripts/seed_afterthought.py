@@ -9,11 +9,14 @@ in a scratch directory, so a page that breaks the page grammar never reaches the
 (design section 6, BUILD-PLAN M1.5).
 
 The page is memory people edit, so an existing one is left alone unless the run says
-``--overwrite``. On such a run a fact whose statement and quote are unchanged keeps the date
-the page already carried: re-reading the same source is not new evidence. An existing page whose
-fact lines cite sources its own frontmatter does not define stops the run, since the dates on
-it cannot be read. Lines of the old page that the page parser rejects are counted and named in
-the report, because they hold dates the run could not carry.
+``--overwrite``. The seed bootstraps a page once; after that the page is curated memory, so an
+overwrite may only carry the page's own dates across. A fact whose statement and quote are
+unchanged keeps the date the page already carried, because re-reading the same source is not new
+evidence. Everything else the page holds that this run's facts do not write stops it instead: a
+hand-written, reworded or refiled line, a candidate, a state mark on a seeded line, a line the
+page parser rejects, an extra frontmatter key, tag or anchor, a source the page adds or rewrites.
+Each is named in the error, so curating the page never means losing it to a re-seed
+(BUILD-PLAN F1).
 
 Usage: uv run python scripts/seed_afterthought.py [--overwrite] <vault>
 """
@@ -241,20 +244,170 @@ def check_quotes(facts: tuple[SeedFact, ...], design: str) -> None:
             raise SeedError(f"quote is not verbatim under {fact.heading!r}: {fact.quote!r}")
 
 
-def prior_page(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
-    """Read the page already in the vault: the dates it carries and the lines it cannot show.
+def frontmatter_of(facts: tuple[SeedFact, ...], project_id: str) -> dict:
+    """The frontmatter the seed writes: one quoted source per fact, plus the page's identity."""
+    return {
+        "type": "Project",
+        "title": SLUG,
+        "description": DESCRIPTION,
+        "tags": ["memory", "agents"],
+        "sources": [
+            {
+                "id": f"s{index}",
+                "resource": f"{DESIGN_RESOURCE}#{fact.heading}",
+                "quote": fact.quote,
+            }
+            for index, fact in enumerate(facts, start=1)
+        ],
+        "aft": {"project": project_id},
+    }
 
-    Dates are keyed by the statement and quote that make a fact the same fact. A line whose
-    date is not a date is dropped from the carry, so the run dates that fact anew rather than
-    copying the bad text into the page it writes. A line citing a source the page does not
-    define with a usable quote is the opposite case: there the run cannot tell an unchanged
-    fact from a new one, so it refuses the page instead of rewriting the date its facts were
-    seen on. A line the parser rejects cannot be carried at all, so it comes back for the run
-    to report.
+
+def sections_of(facts: tuple[SeedFact, ...]) -> list[str]:
+    """The kind sections the seed writes, in the order it writes them."""
+    used = {fact.section for fact in facts}
+    return [section for section in pagemod.KIND_SECTIONS if section in used]
+
+
+def _source_edits(found: list, want: list) -> list[str]:
+    """Name each source an existing page adds, drops, or rewrites."""
+    seeded = {entry["id"]: entry for entry in want}
+    edits: list[str] = []
+    seen: set[str] = set()
+    for entry in found:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            edits.append("the page has a source that is not a mapping with an id")
+            continue
+        source_id = entry["id"]
+        if source_id not in seeded:
+            edits.append(f"the page adds the source {source_id}")
+            continue
+        seen.add(source_id)
+        edits += [
+            f"the page rewrites source {source_id}'s {field}"
+            for field in ("resource", "quote")
+            if entry.get(field) != seeded[source_id][field]
+        ]
+    dropped = [sid for sid in seeded if sid not in seen]
+    return [*edits, *(f"the page drops the source {sid}" for sid in dropped)]
+
+
+def _frontmatter_edits(key: str, found: object, want: object) -> list[str]:
+    """Name how one frontmatter key of an existing page differs from what the seed writes."""
+    if found == want:
+        return []
+    if key == "sources" and isinstance(found, list) and isinstance(want, list):
+        return _source_edits(found, want)
+    if key == "tags" and isinstance(found, list) and isinstance(want, list):
+        return [
+            *(f"the page adds the tag {tag!r}" for tag in found if tag not in want),
+            *(f"the page drops the tag {tag!r}" for tag in want if tag not in found),
+        ] or [f"the page rewrites the {key} list"]
+    if key == "aft" and isinstance(found, dict) and isinstance(want, dict):
+        return [
+            *(f"the page adds aft.{name}" for name in found if name not in want),
+            *(f"the page drops aft.{name}" for name in want if name not in found),
+            *(
+                f"the page rewrites aft.{name}"
+                for name in want
+                if name in found and found[name] != want[name]
+            ),
+        ] or [f"the page rewrites the {key} block"]
+    return [f"the page rewrites the frontmatter's {key}"]
+
+
+def curated_edits(
+    page: pagemod.Page,
+    facts: tuple[SeedFact, ...],
+    project_id: str,
+    quotes: dict[str, str],
+) -> list[str]:
+    """Name everything an existing page holds that this run's facts did not write (F1).
+
+    A fact line is the seed's own only when its section, its statement and the quote of the
+    source it cites are exactly one entry of ``facts``, which is what makes a reworded line, a
+    hand-written line and a seeded fact filed under another kind section edits rather than facts
+    the run may date afresh and write back over. The dates the page carries are the one thing it
+    may own, since the carry reads them, and so is the order of its lines and sections.
+    """
+    want = frontmatter_of(facts, project_id)
+    found = page.frontmatter if isinstance(page.frontmatter, dict) else {}
+    edits: list[str] = []
+    for key in found:
+        if not isinstance(key, str):
+            edits.append("the page has a frontmatter key that is not a name")
+        elif key not in want:
+            edits.append(f"the page adds the frontmatter key {key!r}")
+    for key in want:
+        if key not in found:
+            edits.append(f"the page drops the frontmatter key {key!r}")
+        else:
+            edits += _frontmatter_edits(key, found[key], want[key])
+    wanted = sections_of(facts)
+    edits += [
+        f"the page adds the section {section!r}"
+        for section in page.sections
+        if section not in wanted
+    ]
+    edits += [
+        f"the page drops the section {section!r}"
+        for section in wanted
+        if section not in page.sections
+    ]
+    seeded = {
+        (fact.section, fact.statement, fact.quote): f"s{index}"
+        for index, fact in enumerate(facts, start=1)
+    }
+    filed = {(statement, quote): section for section, statement, quote in seeded}
+    held: dict[tuple[str, str, str], int] = {}
+    for fact in page.facts:
+        at = f"line {fact.line}"
+        if fact.state == pagemod.CANDIDATE:
+            edits.append(f"{at} holds a candidate, which the seed never writes")
+            continue
+        quote = quotes.get(fact.refs[0]) if len(fact.refs) == 1 else None
+        pair = (fact.section, fact.statement, quote)
+        if pair in seeded:
+            if pair in held:
+                edits.append(f"{at} repeats the fact the seed holds at line {held[pair]}")
+            else:
+                held[pair] = fact.line
+        if fact.state != pagemod.ACTIVE:
+            edits.append(f"{at} is marked {fact.state}")
+        elif fact.source != "observed":
+            edits.append(f"{at} is tagged [{fact.source}]; the seed writes [observed]")
+        if len(fact.refs) != 1:
+            edits.append(f"{at} cites {len(fact.refs)} sources; the seed writes exactly one")
+        elif pair not in seeded:
+            if (fact.statement, quote) in filed:
+                edits.append(f"{at} files the seed's fact under {fact.section!r}")
+            else:
+                edits.append(f"{at} holds wording the seed never wrote: {fact.statement!r}")
+    edits += [
+        f"the page drops the fact the seed cites as [^{source_id}]: {pair[1]!r}"
+        for pair, source_id in seeded.items()
+        if pair not in held
+    ]
+    return edits
+
+
+def prior_page(
+    path: Path, facts: tuple[SeedFact, ...], project_id: str
+) -> dict[tuple[str, str], str]:
+    """Read the dates an existing page carries, refusing a page the seed did not write whole.
+
+    Dates are keyed by the statement and quote that make a fact the same fact. A line citing a
+    source the page does not define with a usable quote is checked before the edits below, since
+    there the run cannot tell an unchanged fact from a new one at all.
     """
     if not path.exists():
-        return {}, []
+        return {}
     page = pagemod.parse(path.read_text(), path)
+    if page.errors:
+        raise SeedError(
+            f"{path} is not a page the parser can read: "
+            + "; ".join(f"line {number}: {message}" for number, message in page.errors)
+        )
     quotes = {
         str(source["id"]): source["quote"]
         for source in (page.frontmatter or {}).get("sources") or []
@@ -269,47 +422,29 @@ def prior_page(path: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
             f"{path} cites {', '.join(unreadable)}, which its frontmatter does not define with "
             "a quote: repair the page, or remove it and seed fresh"
         )
-    carried: dict[tuple[str, str], str] = {}
-    for fact in page.facts:
-        try:
-            date.fromisoformat(fact.date)
-        except ValueError:
-            continue
-        for ref in fact.refs:
-            carried[(fact.statement, quotes[ref])] = fact.date
-    rejected = [f"{path}:{number}: {message}" for number, message in page.errors]
-    return carried, rejected
+    edits = curated_edits(page, facts, project_id, quotes)
+    if edits:
+        raise SeedError(
+            f"{path} holds text the seed did not write: "
+            + "; ".join(edits)
+            + "; the seed writes a page once, so curate it by hand, or remove it and seed fresh"
+        )
+    return {(fact.statement, quotes[ref]): fact.date for fact in page.facts for ref in fact.refs}
 
 
 def render(facts: tuple[SeedFact, ...], project_id: str, dates: dict[tuple[str, str], str]) -> str:
     """Render the overview page: sources in the frontmatter, one dated fact line per fact."""
-    sources = [
-        {
-            "id": f"s{index}",
-            "resource": f"{DESIGN_RESOURCE}#{fact.heading}",
-            "quote": fact.quote,
-        }
-        for index, fact in enumerate(facts, start=1)
-    ]
-    frontmatter = {
-        "type": "Project",
-        "title": SLUG,
-        "description": DESCRIPTION,
-        "tags": ["memory", "agents"],
-        "sources": sources,
-        "aft": {"project": project_id},
-    }
     statements: dict[str, list[str]] = {section: [] for section in pagemod.KIND_SECTIONS}
     for index, fact in enumerate(facts, start=1):
         day = dates[(fact.statement, fact.quote)]
         statements[fact.section].append(f"- {fact.statement} [observed] {day} [^s{index}]")
     lines: list[str] = []
-    for section, entries in statements.items():
-        if not entries:
-            continue
-        lines += [f"## {section}", "", *entries, ""]
+    for section in sections_of(facts):
+        lines += [f"## {section}", "", *statements[section], ""]
     body = "\n".join(lines).rstrip("\n") + "\n"
-    front = yaml.safe_dump(frontmatter, sort_keys=False, width=10_000, allow_unicode=True)
+    front = yaml.safe_dump(
+        frontmatter_of(facts, project_id), sort_keys=False, width=10_000, allow_unicode=True
+    )
     return f"---\n{front}---\n\n{body}"
 
 
@@ -324,11 +459,12 @@ def lint_page(text: str, registry: Registry) -> list[str]:
         return [str(finding) for finding in lint_file(Path(scratch), rel, registry)]
 
 
-def seed(vault_path: Path, overwrite: bool = False) -> tuple[bool, list[str]]:
-    """Write and commit the seed page into ``vault_path``.
+def seed(vault_path: Path, overwrite: bool = False) -> bool:
+    """Write and commit the seed page into ``vault_path``, or refuse to touch a curated one.
 
-    Returns whether it committed and the lines of the page it replaced that the page parser
-    rejected, which the run names rather than dropping silently.
+    Returns whether the run committed a change. An existing page is read for its dates first, and
+    a page holding anything the seed did not write stops the run before anything is rendered
+    (BUILD-PLAN F1).
     """
     check_quotes(FACTS, DESIGN.read_text())
     config = replace(load(), vault=vault_path)
@@ -345,7 +481,7 @@ def seed(vault_path: Path, overwrite: bool = False) -> tuple[bool, list[str]]:
         if path.exists() and not overwrite:
             raise SeedError(f"{path} already exists; pass --overwrite to replace it")
         today = date.today().isoformat()
-        carried, rejected = prior_page(path)
+        carried = prior_page(path, FACTS, project.id)
         dates = {
             (fact.statement, fact.quote): carried.get((fact.statement, fact.quote), today)
             for fact in FACTS
@@ -356,7 +492,7 @@ def seed(vault_path: Path, overwrite: bool = False) -> tuple[bool, list[str]]:
             raise SeedError("the seeded page does not lint: " + "; ".join(findings))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
-        return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE), rejected
+        return vault.commit(config.vault, [REL_PATH], COMMIT_MESSAGE)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -368,21 +504,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--overwrite",
         action="store_true",
-        help=f"replace {REL_PATH} where the vault already has one",
+        help=f"replace {REL_PATH} where the vault holds the page this seed wrote and nothing else",
     )
     args = parser.parse_args(argv)
     vault_path = Path(args.vault).expanduser().resolve()
     try:
-        committed, rejected = seed(vault_path, overwrite=args.overwrite)
+        committed = seed(vault_path, overwrite=args.overwrite)
     except (SeedError, ConfigError, GitError, RegistryError, vault.VaultError, OSError) as exc:
         print(f"seed_afterthought: {exc}", file=sys.stderr)
         return 2
-    if rejected:
-        print(
-            f"seed_afterthought: the parser rejected {len(rejected)} of the old page's lines: "
-            + "; ".join(rejected),
-            file=sys.stderr,
-        )
     state = "committed" if committed else "unchanged"
     print(f"seeded {REL_PATH} into {vault_path} ({len(FACTS)} facts, {state})")
     return 0

@@ -5,18 +5,38 @@ from __future__ import annotations
 import argparse
 import json
 import signal
+import sqlite3
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import __version__, adapters, gitutil, inject, keys, lint, vault
+from aft import (
+    __version__,
+    adapters,
+    digest,
+    evidence,
+    forget,
+    gitutil,
+    index,
+    inject,
+    keys,
+    lint,
+    queue,
+    redact,
+    search,
+    vault,
+    work,
+)
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
-from aft.events import AdapterError, SessionEvent
+from aft.dream import schedule
+from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.install import systemd as systemd_install
+from aft.library import importing, manifest, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -36,10 +56,21 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         claude_install.InstallError,
         pi_install.InstallError,
+        systemd_install.InstallError,
         RegistryError,
         vault.VaultError,
         GitError,
+        index.SearchIndexError,
+        search.SearchError,
         UsageError,
+        survey.SurveyError,
+        manifest.ManifestError,
+        queue.QueueError,
+        sqlite3.Error,
+        digest.DigestError,
+        evidence.EvidenceError,
+        importing.ImportError,
+        redact.BadPattern,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
@@ -83,6 +114,56 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("lint", help="check the vault's pages")
     p.set_defaults(handler=cmd_lint)
 
+    p = sub.add_parser(
+        "work",
+        help="sweep for missed sessions and digest queued work within the day's budget",
+    )
+    p.set_defaults(handler=cmd_work)
+
+    p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
+    p.set_defaults(handler=cmd_reindex)
+
+    p = sub.add_parser("dream", help="turn waiting digests into curated facts")
+    p.set_defaults(handler=cmd_dream)
+
+    p = sub.add_parser("forget", help="remove session evidence or redact patterns")
+    fsub = p.add_subparsers(metavar="target")
+    q = fsub.add_parser("session", help="remove every trace of one session")
+    q.add_argument("session_id", help="the session id to forget")
+    q.set_defaults(handler=cmd_forget_session)
+    q = fsub.add_parser("pattern", help="redact a regular expression across the archive")
+    q.add_argument("pattern", help="the regular expression to redact")
+    q.set_defaults(handler=cmd_forget_pattern)
+
+    p = sub.add_parser("redigest", help="rebuild a session digest from archived evidence")
+    p.add_argument("session_id", help="the session id to redigest")
+    p.set_defaults(handler=cmd_redigest)
+
+    p = sub.add_parser("search", help="search memory with BM25 ranking")
+    p.add_argument("query", help="words to search for")
+    p.add_argument("--project", help="search within a project and global pages")
+    p.add_argument("--all", action="store_true", help="search across all projects")
+    p.add_argument("--archive", action="store_true", help="include archived superseded facts")
+    p.add_argument("--reports", action="store_true", help="include dream reports")
+    p.add_argument("--json", action="store_true", help="output hits as JSON")
+    p.add_argument("--limit", type=int, default=8, help="maximum number of hits (default 8)")
+    p.set_defaults(handler=cmd_search)
+
+    p = sub.add_parser("read", help="read a memory page at the specified depth")
+    p.add_argument("path", help="path to the page file")
+    p.add_argument(
+        "--level",
+        choices=["outline", "abstract", "full"],
+        default="full",
+        help="depth: outline, abstract, or full (default full)",
+    )
+    p.set_defaults(handler=cmd_read)
+
+    p = sub.add_parser("trace", help="trace a fact quote back to session evidence")
+    p.add_argument("page", help="path to the page")
+    p.add_argument("source_id", nargs="?", default=None, help="source id, e.g. s1 or [^s1]")
+    p.set_defaults(handler=cmd_trace)
+
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
@@ -110,6 +191,38 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own extension and nothing else",
     )
     q.set_defaults(handler=cmd_install_pi)
+    q = isub.add_parser(
+        "timer",
+        help="install systemd user timer and service units for background work",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the unit files aft would write or remove, write nothing",
+    )
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's systemd user units and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_timer)
+
+    p = sub.add_parser("library", help="import and manage library collections")
+    lsub = p.add_subparsers(metavar="action")
+    q = lsub.add_parser("survey", help="survey a collection directory before import")
+    q.add_argument("path", help="path to the collection directory")
+    q.add_argument("--json", action="store_true", help="output report as JSON")
+    q.set_defaults(handler=cmd_library_survey)
+
+    q = lsub.add_parser("validate", help="validate a collection manifest against DESIGN 11")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_validate)
+
+    q = lsub.add_parser("import", help="import a library collection into the vault")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_import)
     return parser
 
 
@@ -256,6 +369,123 @@ def cmd_lint(args) -> int:
     return 0
 
 
+def cmd_work(args) -> int:
+    """Digest the queue within the day's budget, say how far the run got, then dream.
+
+    A job that could not be digested is an exit status a timer can see, not a line only
+    the run's own log holds; the work it could not do stays queued either way (DESIGN 14).
+    """
+    config = load()
+    report = work.run(config)
+    print(f"aft work: {report.line()}")
+    for failure in report.failures:
+        print(f"aft work: {failure}", file=sys.stderr)
+    _dream(config)
+    return 1 if report.failures else 0
+
+
+def cmd_reindex(args) -> int:
+    """Rebuild the search index. Everything it does is `aft.index`'s; this names the file it
+    wrote and repeats the pages it could not read."""
+    config = load()
+    vault.require(config)
+    report = index.reindex(config)
+    for line in report:
+        print(line)
+    print(f"rebuilt the search index at {config.home / index.INDEX_NAME}")
+    return 0
+
+
+def cmd_dream(args) -> int:
+    """Run the dream once. Everything it does is `aft.dream.schedule`'s."""
+    _dream(load())
+    return 0
+
+
+def _dream(config: Config) -> None:
+    """Run the dream and say what it did with each project that has digests waiting."""
+    result = schedule.run(config)
+    if not result.waiting:
+        print("aft dream: no digests waiting")
+    if result.checkpoint:
+        print(f"aft dream: committed hand edits as {result.checkpoint[:12]}")
+    if result.tagged:
+        print(f"aft dream: tagged hand-typed lines [stated] in {', '.join(result.tagged)}")
+    for slug in result.ran:
+        print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug in result.active:
+        print(f"aft dream: {slug}: skipped, a session was active within the quiet period")
+    for slug in result.edited:
+        print(f"aft dream: {slug}: skipped, the vault has hand edits within the quiet period")
+
+
+def cmd_forget_session(args) -> int:
+    config = load()
+    vault.require(config)
+    report = forget.forget_session(config, args.session_id)
+    print(
+        f"forgot session {args.session_id}: removed evidence, "
+        f"{len(report.digests_removed)} digest file(s), "
+        f"withdrew {len(report.lines_withdrawn)} curated line(s), "
+        f"removed {len(report.candidates_removed)} candidate line(s)"
+    )
+    if report.lines_unwithdrawn:
+        print(
+            f"{len(report.lines_unwithdrawn)} line(s) with open notes could not be withdrawn; "
+            "close the note and rerun:"
+        )
+        for line in report.lines_unwithdrawn:
+            print(f"  {line}")
+    print("the vault's git history still holds older commits; rewrite history to remove them")
+    return 0
+
+
+def cmd_forget_pattern(args) -> int:
+    config = load()
+    vault.require(config)
+    count = forget.forget_pattern(config, args.pattern)
+    print(f"redacted {count} {'entry' if count == 1 else 'entries'} in the evidence archive")
+    existing = list(config.settings.capture.redact_patterns)
+    if args.pattern not in existing:
+        existing.append(args.pattern)
+    print("Add this line to config.toml under [capture]:")
+    print(f"redact_patterns = {json.dumps(existing)}")
+    print("the vault's git history still holds older commits; rewrite history to remove them")
+    return 0
+
+
+def cmd_redigest(args) -> int:
+    config = load()
+    vault.require(config)
+    result = digest.redigest(config, args.session_id)
+    print(f"rebuilt digest at {result.path}")
+    return 0
+
+
+def cmd_search(args) -> int:
+    config = load()
+    return search.search_command(
+        config,
+        args.query,
+        project=args.project,
+        all_projects=args.all,
+        archive=args.archive,
+        reports=args.reports,
+        as_json=args.json,
+        limit=args.limit,
+    )
+
+
+def cmd_read(args) -> int:
+    config = load()
+    return search.read_command(config, args.path, level=args.level)
+
+
+def cmd_trace(args) -> int:
+    config = load()
+    return search.trace_command(config, args.page, args.source_id)
+
+
 def cmd_install_claude(args) -> int:
     """Add or remove afterthought's hook entries in Claude Code's own settings file."""
     settings = claude_install.settings_path()
@@ -316,6 +546,43 @@ def cmd_install_pi(args) -> int:
     return 0
 
 
+def cmd_install_timer(args) -> int:
+    """Install or remove afterthought's systemd user service and timer units."""
+    unit_dir = systemd_install.unit_dir()
+    cfg = load()
+    change = (
+        systemd_install.uninstall(unit_dir, dry_run=args.dry_run)
+        if args.uninstall
+        else systemd_install.install(unit_dir, config=cfg, dry_run=args.dry_run)
+    )
+    if not change.changed:
+        if args.uninstall:
+            print(f"no afterthought timer units to remove in {unit_dir}")
+        else:
+            print(f"afterthought timer units in {unit_dir} are already up to date")
+        return 0
+    if args.dry_run:
+        print(change.preview or f"no changes to {unit_dir}")
+        return 0
+    if args.uninstall:
+        print(f"removed {', '.join(str(p) for p in change.units)}")
+    else:
+        print(f"installed {', '.join(str(p) for p in change.units)}")
+    return 0
+
+
+def cmd_library_survey(args) -> int:
+    return survey.run(args.path, as_json=args.json)
+
+
+def cmd_library_validate(args) -> int:
+    return manifest.run(args.manifest, path_override=args.path)
+
+
+def cmd_library_import(args) -> int:
+    return importing.run(args.manifest, path_override=args.path)
+
+
 # An agent's session waits on this command, so the whole hook gets one hard budget
 # before the agent's own hook timeout would have to rescue it (BUILD-PLAN M1.1). The
 # budget is split up front between the two steps that can block: the stdin read takes
@@ -356,11 +623,15 @@ def _hook_event(args, payload: object) -> SessionEvent:
 def _dispatch(event: SessionEvent) -> None:
     """Hand one normalized event to the part of afterthought that consumes it.
 
-    ``session_start`` prints the injection block (M1.2); ``compaction`` and
-    ``session_end`` enqueue capture (M2.2). Neither exists yet, so a parsed event is
-    recognized and dropped here: there is nothing to print and nothing to enqueue,
-    which is the no output and exit 0 the hook contract asks for in the meantime.
+    ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
+    returns: no model call, no transcript read, no project resolution (DESIGN 8, BUILD-PLAN
+    M2.2). ``session_start`` is injection's, which the agents run as `aft inject` (M1.2),
+    so it prints nothing here, and the hook contract asks for silence and exit 0.
     """
+    if event.kind in (COMPACTION, SESSION_END):
+        cfg = load()
+        queue.enqueue(cfg, event)
+        systemd_install.trigger_early(cfg)
 
 
 @contextmanager

@@ -28,4 +28,9 @@ directory; the test suite does this so it never touches real memory.
 | `aft inject [path]` | Print the memory a session starts with; reads the vault's files only |
 | `aft project list\|add\|rename\|forget` | Manage the project registry |
 | `aft lint` | Check every page against OKF v0.2 and the fact-line grammar |
+| `aft work` | Sweep for sessions no hook reported, then digest the queue within the day's token budget; exits 1 when a job could not be digested, and 0 when the budget simply ran out |
 | `aft install pi [--dry-run\|--uninstall]` | Copy this checkout's extension into pi's extensions directory, preview it, or remove it again |
+| `aft reindex` | Drop the search index and rebuild it from the vault's files and the evidence archive, naming any page it could not read |
+| `aft search "<words>"` | Search memory with BM25 ranking across pages, digests, and evidence |
+| `aft read <path> [--level outline\|abstract\|full]` | Print a page at outline, abstract, or full depth |
+| `aft trace <page> <source-id>` | Print a fact's source quote and the session entries around it |

@@ -13,23 +13,20 @@ Two rules keep the result valid:
   written that ``page.parse`` would reject or that ``aft.lint`` would report: a known
   kind, a known source tag, a real date, and footnotes whose source exists and carries
   a quote wherever the edit writes one: the footnotes of a line and any ``[^id]`` inside
-  a statement or a note (design 6, design 9 R1). A statement is accepted by
+  a statement (design 6, design 9 R1). A statement is accepted by
   round trip: the written line has to parse back to exactly that statement, so a statement
   ending in markup that only looks like a fact tail is carried as prose, and only blank
   text, ``~~``, an unresolved citation and a line break are refused by pattern.
-* The text an edit would produce is parsed before anything is written: an edit may not
-  leave the page reading worse than it found it. An error the edit would add is a line the
-  grammar rejects; an error the edit would make disappear is the edit deleting text that
-  lies outside the grammar, which is text the tool did not write (design 6) - unless the
-  operation is itself carrying that text off, as resolving a note carries the whole note
-  out to its archive. Either way the edit is refused and nothing is written, so a page that
-  arrives broken stays broken until a person fixes it and a good one never leaves the
-  writer broken.
+* The text an edit would produce is parsed before anything is written, and the page's
+  parse errors have to come out the set they were. An error the edit would add is a line
+  the grammar rejects; an error the edit would make disappear is the edit deleting text
+  that lies outside the grammar, which is text the tool did not write (design 6). Either
+  way the edit is refused and nothing is written, so a page that arrives broken stays
+  broken until a person fixes it and a good one never leaves the writer broken.
 
 Nothing here decides what a fact should become. Which operation a decision turns into,
 and when a candidate has earned promotion, is the rules' job; the writer only records
-the state it is told to record. A note it is told to close travels out to the page's
-archive instead of being deleted: design 6 never loses text the tool did not write.
+the state it is told to record.
 """
 
 from __future__ import annotations
@@ -116,17 +113,6 @@ def _scalar(value: str) -> str:
     return json.dumps(value)  # escapes every code point YAML could reinterpret
 
 
-def _archive_header(slug: str) -> list[str]:
-    """The frontmatter an archive file starts with, so the vault still lints clean."""
-    return [
-        "---",
-        "type: Archive",
-        f"title: {_scalar(f'{slug} archive')}",
-        f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
-        "---",
-    ]
-
-
 def _next_id(sources: dict[str, dict]) -> str:
     highest = max(
         (int(m.group("n")) for sid in sources if (m := _SOURCE_ID.fullmatch(str(sid)))),
@@ -166,17 +152,36 @@ def _section_for(kind: str) -> str:
     return section
 
 
-def _line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
+def line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool]:
     """What a fact line says, apart from the line number it currently sits on."""
     return fact.statement, fact.source, fact.date, fact.refs, fact.struck
+
+
+_line_identity = line_identity
+
+
+def _archive_slug(rel: Path) -> str:
+    if rel.parts and rel.parts[0] == "projects" and len(rel.parts) > 1:
+        return rel.parts[1]
+    return rel.stem
+
+
+def _archive_header(rel: Path) -> list[str]:
+    slug = _archive_slug(rel)
+    return [
+        "---",
+        "type: Archive",
+        f"title: {_scalar(f'{slug} archive')}",
+        f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
+        "---",
+    ]
 
 
 class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
-    Read a page in from a vault, apply the operations, and write ``render()`` out. ``vault``
-    is the vault the page was read from, which is where a closed note is filed. Operations
-    take the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
+    Read a page in, apply the operations, and write ``render()`` out. Operations take
+    the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
     statement with ``fact()``; since an edit can move lines, a handle whose line has
     moved or changed since it was taken is refused rather than applied to the wrong line.
 
@@ -189,15 +194,21 @@ class PageDoc:
     text changed, so a run can tell an edit from a no-op.
     """
 
-    def __init__(self, text: str, path: Path | str = "page.md", *, vault: Path | str) -> None:
+    def __init__(
+        self,
+        text: str,
+        path: Path | str = "page.md",
+        *,
+        vault: Path | str | None = None,
+    ) -> None:
         self.path = Path(path)
-        self.vault = Path(vault)
+        self.vault = Path(vault) if vault is not None else None
         self.lines: list[str] = text.split("\n")
         self._page = page.parse(text, self.path)
 
     @classmethod
-    def read(cls, path: Path, *, vault: Path) -> PageDoc:
-        return cls(path.read_text(), path, vault=vault)
+    def read(cls, path: Path, *, vault: Path | None = None) -> PageDoc:
+        return cls(path.read_text(encoding="utf-8"), path, vault=vault)
 
     def render(self) -> str:
         return "\n".join(self.lines)
@@ -275,6 +286,86 @@ class PageDoc:
         self._apply(last + 1, last + 1, [f"{indent}{line}" for line in entry])
         return new_id
 
+    def scrub_source(self, source_id: str, marker: str = "[forgotten]") -> bool:
+        """Replace the quote and title of a source entry with a marker (design 12, M2.8).
+
+        Footnotes citing this source still resolve, but verbatim text from the forgotten
+        session is removed from the frontmatter.
+        """
+        source_id = str(source_id)
+        if source_id not in self.sources:
+            raise WriteError(f"source {source_id} is not in the frontmatter")
+        bounds = self._fm_bounds()
+        if bounds is None:
+            raise WriteError("the page has no frontmatter")
+        key = self._key_line("sources", bounds)
+        if key is None:
+            raise WriteError("the page has no sources block")
+        last = self._sources_end(key, bounds)
+
+        sources_indent = next(
+            (
+                match.group("indent")
+                for line in self.lines[key + 1 : last + 1]
+                if (match := _ENTRY_LINE.match(line))
+            ),
+            "  ",
+        )
+        entry_starts: list[int] = [
+            idx
+            for idx in range(key + 1, last + 1)
+            if (m := _ENTRY_LINE.match(self.lines[idx])) and m.group("indent") == sources_indent
+        ]
+
+        for k, start in enumerate(entry_starts):
+            stop = entry_starts[k + 1] if k + 1 < len(entry_starts) else last + 1
+            entry_lines = self.lines[start:stop]
+            raw = "\n".join(entry_lines)
+            try:
+                data = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                data = None
+            entry_dict: dict = {}
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                entry_dict = data[0]
+            elif isinstance(data, dict):
+                entry_dict = data
+
+            if str(entry_dict.get("id")) != source_id:
+                continue
+
+            entry_data = self.sources.get(source_id, entry_dict)
+            quote_val = entry_data.get("quote")
+            title_val = entry_data.get("title")
+            text_val = entry_data.get("text")
+            has_title = "title" in entry_data or "title" in entry_dict
+            has_text = "text" in entry_data or "text" in entry_dict
+
+            if (
+                quote_val == marker
+                and (not has_title or title_val == marker)
+                and (not has_text or text_val == marker)
+            ):
+                return False
+
+            cont_indent = sources_indent + "  "
+            resource = entry_data.get("resource", "")
+            new_lines = [
+                f"{sources_indent}- id: {source_id}",
+                f"{cont_indent}resource: {_scalar(str(resource))}",
+            ]
+            if has_title:
+                new_lines.append(f"{cont_indent}title: {_scalar(marker)}")
+            if has_text:
+                new_lines.append(f"{cont_indent}text: {_scalar(marker)}")
+            new_lines.append(f"{cont_indent}quote: {_scalar(marker)}")
+
+            with self._atomic():
+                self._apply(start, stop, new_lines)
+            return True
+
+        raise WriteError(f"could not find source {source_id} entry lines in frontmatter")
+
     def add_fact(
         self,
         kind: str,
@@ -332,6 +423,151 @@ class PageDoc:
         self._apply(index, index + 1, [line])
         return True
 
+    def confirm(self, fact: page.Fact, source: str, date: str) -> bool:
+        """Cite one more source on a standing line and carry its date (design 9, confirm).
+
+        A line's date is the date it was last evidenced (design 6), so it becomes the later
+        of the date it carries and ``date``; an older confirmation adds its footnote and
+        leaves the date. A source the line already cites adds nothing. On a candidate the
+        gate progress is rewritten from the footnotes it ends up with; whether that carries
+        it over the gate is the rules' call, made through ``promote``. A line that no
+        longer stands (superseded, withdrawn or stale) takes no evidence.
+        """
+        found = self._resolve(fact)
+        if found.state in (page.SUPERSEDED, page.WITHDRAWN, page.STALE):
+            raise WriteError(f"a {found.state} line is no longer memory to confirm")
+        (ref,) = self._check_refs((source,))
+        refs = found.refs if ref in found.refs else (*found.refs, ref)
+        latest = max(found.date, _check_date(date))
+        suffix = _counts_suffix(refs, self.sources) if found.section == page.CANDIDATES else ""
+        line = _fact_line(found.statement, found.source, latest, refs, suffix=suffix)
+        return self._rewrite(found, line)
+
+    def supersede(
+        self,
+        fact: page.Fact,
+        statement: str,
+        tag: str,
+        date: str,
+        refs: Sequence[str],
+        *,
+        by: str | None = None,
+    ) -> page.Fact:
+        """Replace an active line with a new one and strike the old one (design 6, 9).
+
+        The old line is struck through and ends ``superseded <date> by [^by]``; the new
+        line sits directly above it in the same section, as in design 6's example, carrying
+        ``statement`` with ``tag``, ``date`` and ``refs``. ``by`` is the footnote that links
+        the struck line to its replacement, so it has to be one the replacement cites; it
+        defaults to the replacement's first footnote. ``date`` is both the replacement's
+        date last evidenced and the date of the strike, since the evidence that replaced
+        the line is what dates the replacement. Whether the replacement has the authority
+        is R4's call, made before this is called.
+        """
+        found = self._resolve(fact)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate is promoted or left, never superseded")
+        if found.state != page.ACTIVE:
+            raise WriteError(f"only an active line can be superseded; this one is {found.state}")
+        statement = self._check_statement(statement)
+        refs = self._check_refs(refs)
+        if not refs:
+            raise WriteError("a replacement needs a source to cite")
+        by = refs[0] if by is None else str(by)
+        if by not in refs:
+            raise WriteError(f"the replacement has to cite [^{by}], the source that links to it")
+        date = _check_date(date)
+        new = _fact_line(statement, _check_source_tag(tag), date, refs)
+        struck = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            struck=True,
+            suffix=f" superseded {date} by [^{by}]",
+        )
+        with self._atomic():
+            at = found.line - 1
+            self._apply(at, at + 1, [new, struck])
+            self._line_reads(at + 2, found.statement, page.SUPERSEDED)
+            return self._fact_written(at + 1, statement)
+
+    def withdraw(self, fact: page.Fact, date: str) -> bool:
+        """Strike a line out of memory after ``aft forget`` (design 6, withdrawn).
+
+        A stale line can be withdrawn too, and its stale mark gives way to the strike, since
+        a withdrawn line is out of memory whatever its anchor says. A line already withdrawn
+        is left as it is, keeping the date it was first withdrawn on.
+        """
+        found = self._resolve(fact)
+        date = _check_date(date)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate line cannot be struck through")
+        if found.state == page.WITHDRAWN:
+            return False
+        if found.state == page.SUPERSEDED:
+            raise WriteError("a superseded line is already out of memory")
+        if found.callouts:
+            raise WriteError("a line with an open note cannot be struck; close the note first")
+        line = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            struck=True,
+            suffix=f" withdrawn {date}",
+        )
+        return self._rewrite(found, line, page.WITHDRAWN)
+
+    def mark_stale(self, fact: page.Fact, reason: str, date: str) -> bool:
+        """Mark an active line stale, ending it ``(stale <date>: <reason>)`` (design 6, R8).
+
+        A line already stale keeps the date and reason it went stale with, so a check that
+        finds the same broken anchor on every run changes nothing. A line with an open note
+        cannot carry the mark (the parse refuses a note under a stale line), which is R8's
+        "only reported until the note is closed".
+        """
+        found = self._resolve(fact)
+        date = _check_date(date)
+        reason = reason.strip() if isinstance(reason, str) else ""
+        if not reason:
+            raise WriteError("a stale mark needs a reason")
+        if "\n" in reason or "\r" in reason or ")" in reason:
+            raise WriteError("a stale reason is one line without ')'")
+        self._check_citations(reason)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate may end only with its signal counts")
+        if found.state == page.STALE:
+            return False
+        if found.state != page.ACTIVE:
+            raise WriteError(f"only an active line can go stale; this one is {found.state}")
+        line = _fact_line(
+            found.statement,
+            found.source,
+            found.date,
+            found.refs,
+            suffix=f" (stale {date}: {reason})",
+        )
+        return self._rewrite(found, line, page.STALE)
+
+    def clear_stale(self, fact: page.Fact, date: str) -> bool:
+        """Take the stale mark off a line whose anchor matches again (R8, M4.5).
+
+        The line goes back to the plain active line it was, with the date it was last
+        evidenced unchanged: words reappearing in a file are not a quote, so they are not
+        new evidence. ``date`` is the day the anchor matched again, which M4.5 reports; it
+        is checked, and the grammar gives it no place on the line. A line that is not stale
+        is left as it is.
+        """
+        found = self._resolve(fact)
+        _check_date(date)
+        if found.state == page.ACTIVE:
+            return False
+        if found.state != page.STALE:
+            raise WriteError(f"only a stale line has a stale mark; this one is {found.state}")
+        line = _fact_line(found.statement, found.source, found.date, found.refs)
+        return self._rewrite(found, line, page.ACTIVE)
+
     def promote(self, candidate: page.Fact, kind: str) -> page.Fact:
         """Move a candidate out of Candidates to become an active fact (design 6).
 
@@ -348,6 +584,21 @@ class PageDoc:
             self._apply(found.line - 1, found.line, [])
             at = self._append_line(section, line)
             return self._fact_written(at, found.statement)
+
+    def remove_candidate(self, fact: page.Fact) -> bool:
+        """Remove a candidate line resting on forgotten evidence (design 12, M2.8)."""
+        found = self._resolve(fact)
+        if found.section != page.CANDIDATES:
+            raise WriteError("only a candidate line can be removed")
+        at = found.line - 1
+        idx = at + 1
+        while idx < len(self.lines) and not self.lines[idx].strip():
+            idx += 1
+        if found.callouts or (idx < len(self.lines) and self.lines[idx].lstrip().startswith(">")):
+            raise WriteError("a line with an open note cannot be removed; close the note first")
+        with self._atomic():
+            self._apply(at, at + 1, [])
+        return True
 
     def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
         """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).
@@ -415,27 +666,27 @@ class PageDoc:
         return True
 
     def _archive_file(self) -> Path:
-        """The file this page's resolved notes go to: ``archive/<slug>.md`` (design 6).
+        """The file this page's resolved notes go to: ``archive/<page path>`` (design 6, ruling 7943f9a).
 
-        Design 6 keys the archive by a project's slug, which is the directory a project
-        page lives under, read off the page's path within the vault - the same way
-        ``aft lint`` reads the project of a page. Design 6 names no archive for a page
-        outside ``projects/<slug>/``, so such a page has no archive file to write and its
-        note stays where it stands.
+        The archive target mirrors the page's own path inside the vault - a project page's
+        overview to ``archive/projects/<slug>/overview.md``, ``global/preferences.md`` to
+        ``archive/global/preferences.md``, a reference page the same way.
         """
-        slug = None
-        try:
-            rel = self.path.relative_to(self.vault)
-        except ValueError:
-            rel = None
-        if rel is not None and len(rel.parts) > 2 and rel.parts[0] == "projects":
-            slug = rel.parts[1]
-        if slug is None:
+        if self.vault is None:
             raise WriteError(
-                f"{self.path} lies outside projects/<slug>/: design 6 names no archive"
-                " for such a page, so its note stays on the page"
+                f"cannot archive note from {self.path}: PageDoc has no vault configured"
             )
-        return self.vault / "archive" / f"{slug}.md"
+        try:
+            rel = self.path.resolve().relative_to(self.vault.resolve())
+        except ValueError:
+            try:
+                rel = self.path.relative_to(self.vault)
+            except ValueError:
+                raise WriteError(
+                    f"{self.path} lies outside vault {self.vault}: design 6 names no archive"
+                    " for such a page, so its note stays on the page"
+                ) from None
+        return self.vault / "archive" / rel
 
     def _archive_edit(self, block: Sequence[str]) -> tuple[Path, bytes | None, bytes]:
         """The archive file, the bytes it holds now (``None`` when it does not exist yet),
@@ -457,11 +708,12 @@ class PageDoc:
         """The text a block gets appended to: a header on its own for a file not written yet,
         an existing file's text, or that text with a header ahead of it when the file has
         none of its own."""
-        header = "\n".join(_archive_header(path.stem))
+        rel = path.relative_to(self.vault / "archive") if self.vault else Path(path.name)
+        header = "\n".join(_archive_header(rel))
         if raw is None:
             return header
         try:
-            text = raw.decode()
+            text = raw.decode("utf-8")
         except UnicodeDecodeError:
             raise WriteError(f"the archive {path} is not text") from None
         frontmatter, _, _, error = page.split_frontmatter(text)
@@ -472,21 +724,18 @@ class PageDoc:
         return header + "\n" + text
 
     def _write_archive(self, path: Path, was: bytes | None, now: bytes) -> None:
-        """Write the archive, putting the file back exactly as it was if the write fails.
-
-        The page edit and this write are one step: a failure leaves the note on its page
-        and the archive byte for byte as it was, so a closed note is never left in two
-        places or in neither.
-        """
+        """Write the archive atomically, never truncating existing content (F1 fix)."""
+        import os
         path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
         try:
-            path.write_bytes(now)
+            tmp.write_bytes(now)
+            os.replace(tmp, path)
         except Exception:
-            if was is None:
-                path.unlink(missing_ok=True)
-            else:
-                path.write_bytes(was)
+            tmp.unlink(missing_ok=True)
             raise
+
+
 
     # Lines and frontmatter
 
@@ -514,6 +763,27 @@ class PageDoc:
                 f"the line does not read back as {statement!r}; it reads {found.statement!r}"
             )
         return found
+
+    def _rewrite(self, found: page.Fact, line: str, state: str | None = None) -> bool:
+        """Replace one fact line in place; whether its text changed.
+
+        The new line has to read back as the same statement, in ``state`` when one is
+        named and otherwise in the state the line had, or the edit is put back.
+        """
+        index = found.line - 1
+        if line == self.lines[index]:
+            return False
+        with self._atomic():
+            self._apply(index, index + 1, [line])
+            self._line_reads(found.line, found.statement, state or found.state)
+        return True
+
+    def _line_reads(self, line: int, statement: str, state: str) -> None:
+        """Refuse unless ``line`` parses as a fact with this statement in this state."""
+        found = next((fact for fact in self._page.facts if fact.line == line), None)
+        if found is None or found.statement != statement or found.state != state:
+            raw = self.lines[line - 1]
+            raise WriteError(f"line {line} does not read back as a {state} {statement!r}: {raw!r}")
 
     def _resolve(self, fact: page.Fact) -> page.Fact:
         """The fact in the current text this handle names: its line, and every field of
@@ -568,8 +838,7 @@ class PageDoc:
         ``_apply`` refuses its own edit before it writes; this covers the operation as a
         whole, so a refusal once an earlier edit is in place - a later edit, a statement
         that does not read back, a move whose new line would not parse - cannot leave that
-        earlier edit behind. It puts the page's lines back and nothing else: an operation
-        that writes outside the page restores that write itself.
+        earlier edit behind.
         """
         was, was_page = list(self.lines), self._page
         try:
@@ -579,9 +848,7 @@ class PageDoc:
             self._page = was_page
             raise
 
-    def _apply(
-        self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False
-    ) -> None:
+    def _apply(self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False) -> None:
         """Replace lines ``start`` to ``stop`` (0-based) with ``new``, or refuse.
 
         The text the edit would produce is parsed before any of it is written, and the
@@ -591,12 +858,6 @@ class PageDoc:
         tool did not write, so a page that arrives broken stays broken until a person
         fixes what the error names. Nothing is written either way. The refusal names the
         flagged lines whose text the edit would take, the lines it replaces first.
-
-        ``carried_off`` is an operation that keeps the lines it replaces somewhere else:
-        resolving a note files the whole note in its archive. Every one of those lines is
-        accounted for, and every line outside the range keeps its bytes, so a disappearing
-        error there names text either carried off or still on the page and reading as
-        grammar now - only an error the edit would add is a refusal.
         """
         known = Counter(message for _, message in self._page.errors)
         lines = [*self.lines[:start], *new, *self.lines[stop:]]

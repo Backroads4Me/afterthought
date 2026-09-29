@@ -161,6 +161,32 @@ aft:
 - The session wrote the injection block. [observed] {date} [^s1]
 """
 
+# A digest page as M2.6 writes it, with the instant the digest step filed it under
+# ``generated.at``.
+STAMPED_DIGEST = """\
+---
+type: Session Digest
+title: Widget session {date}
+description: Digest of the widget session on {date}.
+sources: []
+generated:
+  by: aft 0.0.0 / test-model
+  at: {at}
+aft:
+  project: p_widget
+  handoff:
+    in_flight: {in_flight}
+    failed:
+      - the parserless draft
+    open:
+      - the pi extension
+---
+
+## Facts
+
+- The session wrote the injection block. [observed] {date} [^s1]
+"""
+
 PAGES = """\
 - Widget API: How to call a widget over HTTP. (aft read projects/widget/api.md)
 - Widget spec: Dimensions and tolerances for every widget. \
@@ -540,6 +566,54 @@ def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_pa
     block = inject.build(widget, resolve(widget, tmp_path / "widget"))
     assert "- In flight: the block" in block
     assert "the September draft" not in block
+
+
+@pytest.mark.parametrize("session", ["one", "550e8400-e29b-41d4-a716-446655440000"])
+def test_the_highest_part_of_the_newest_day_supplies_the_handoff(widget, tmp_path, session):
+    """A session digested more than once in a day files ``-2``, ``-3`` beside its first
+    page, and the last session's handoff is the highest part's, whatever order the
+    directory lists them in and even when the session id itself ends in digits."""
+    day = widget.vault / "digests/widget/2026/10"
+    for suffix, in_flight in [
+        ("-3", "the third part"),
+        ("", "the first part"),
+        ("-2", "the second"),
+    ]:
+        write(
+            day / f"2026-10-06-pi-{session}{suffix}.md",
+            DIGEST.format(date="2026-10-06", in_flight=in_flight),
+        )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "- In flight: the third part" in block
+    for earlier in ("the first part", "the second", "the block"):
+        assert earlier not in block
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["'2026-10-07T22:30:00Z'", "2026-10-07T22:30:00"],
+    ids=["a quoted utc stamp", "an unquoted stamp with no offset"],
+)
+def test_the_digest_written_last_supplies_the_handoff(widget, tmp_path, stamp):
+    """Two sessions digested on one day: the one whose name sorts first ran on last, and
+    the ``generated.at`` its page carries is what says so."""
+    day = widget.vault / "digests/widget/2026/10"
+    write(
+        day / "2026-10-07-pi-aardvark.md",
+        STAMPED_DIGEST.format(date="2026-10-07", at=stamp, in_flight="the closing edit"),
+    )
+    write(
+        day / "2026-10-07-pi-zebra.md",
+        STAMPED_DIGEST.format(
+            date="2026-10-07",
+            at="'2026-10-07T14:05:00Z'",
+            in_flight="the abandoned draft",
+        ),
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "- In flight: the closing edit" in block
+    for earlier in ("the abandoned draft", "the block"):
+        assert earlier not in block
 
 
 def test_a_frontmatter_block_scalar_stays_on_one_line(widget, tmp_path):

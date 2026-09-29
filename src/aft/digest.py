@@ -1,0 +1,863 @@
+"""The digest: one queued job in, one session digest page out (DESIGN 8, BUILD-PLAN M2.6).
+
+A job is one chunk of one session. The digest reads the entries past that session's
+watermark, hands what the filter keeps to the evidence archive and to the model, and keeps
+only what a script can check: a fact stands when its quote is the words of the entry it
+cites and, for ``stated``, when that entry is one of Ted's turns (DESIGN 8). The model
+decides what is worth remembering; the script decides what is allowed to become memory,
+and everything it refuses is written down with the reason, so a digest that says nothing
+was kept reads differently when the verifier was broken than when the session was empty.
+
+What the model is asked for is the prompt and the schema shipped beside this module, and
+what comes back is filed as an OKF page under ``digests/`` (DESIGN 6): its summary is the
+page's ``description``, its handoff is ``aft.handoff`` - which is what ``aft inject``
+reads as a session's "last session" layer (DESIGN 10) - and its facts are ordinary fact
+lines whose footnotes name the session and entry each quote came from, so the quote a
+future dream re-checks is the one on the page.
+
+The watermark moves last and only once the chunk has been dealt with: a page that was not
+written leaves the session's read position where it was, and a chunk the filter emptied
+moves it with no page at all, because those entries are decided and have nothing left to
+file. A watermark that runs ahead of a decision loses the session quietly and looks
+exactly like success (DESIGN 14).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import tempfile
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from importlib.resources import files
+from pathlib import Path
+
+import yaml
+
+from aft import __version__, evidence, index, keys, model, page, pagewrite, queue, readers, vault
+from aft import filter as filtermod
+from aft import registry as registrymod
+from aft.config import Config
+from aft.gitutil import GitError, git
+from aft.model import ModelError
+from aft.page import KIND_SECTIONS
+from aft.readers import USER, Entry
+
+# The page type a digest carries (BUILD-PLAN M2.6).
+PAGE_TYPE = "Session Digest"
+
+PROMPT_FILE = "prompts/digest.md"
+SCHEMA_FILE = "prompts/digest.schema.json"
+
+# The per-chunk input cap of DESIGN 13, which the plan states as 30,000 input tokens.
+MAX_CHUNK_TOKENS = 30_000
+# Nothing in the build counts tokens (BUILD-PLAN 1.6 allows no new dependency and no
+# tokenizer is vendored), so the cap is enforced on characters at four to a token, which
+# is the usual reading of English prose and the same estimate the output cap uses.
+CHARS_PER_TOKEN = 4
+# The answer's own room, from the schema's limits at the same estimate: a summary of 800
+# characters, a 400-character handoff and twenty facts of two 300-character fields plus
+# four short ones are about 14,000 characters, and the round-up covers the JSON around it.
+MAX_OUTPUT_TOKENS = 4_000
+
+# A page's body is fact sections only (DESIGN 6), so a fact's kind is the heading it sits
+# under. A fact's scope is no part of that line, so it travels in the page's own record.
+SCOPES = frozenset({"project", "global"})
+# DESIGN 9 R6: why dreaming passes over a global fact Ted did not commit to himself. The
+# digest records it beside the fact, so the skip is reported and the fact stays written.
+GLOBAL_NOT_STATED = "a global page changes only from [stated]"
+
+
+class DigestError(Exception):
+    """A job this digest cannot honour: no project to file under, no transcript to read,
+    or a session id no page path can be built from."""
+
+
+class AnswerRefused(DigestError):
+    """The endpoint answered this chunk and its answer failed the digest schema.
+
+    The endpoint is up and the fault is this chunk's, so the job is marked failed with the
+    model's own words as its reason, its watermark stays where it was, and the run moves on
+    to the next session."""
+
+
+# What aft.model reports when the endpoint answered and the answer was the fault: the one
+# ModelError family a later job would not necessarily meet again. Every other ModelError is
+# the endpoint or its setup - unreachable, redirected, a key unset, an answer that cannot be
+# billed - and every job left in the queue would meet those alike, so they stay the run's
+# failure (DESIGN 14).
+ANSWER_REFUSED = "the answer failed its schema"
+
+# A session id reaches this module on a queue row another process wrote, and it goes into a
+# page's path, so it must be a name and nothing else: no separator, no drive form, and no
+# longer than the bound the endpoint's own schema-name rule uses.
+SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
+_DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
+
+# A page is staged through a temporary in the directory that will hold it. The suffix is not
+# a page extension because a run killed before the rename leaves the file in the vault,
+# where `aft lint` and `aft inject` would find a page-shaped file with no page behind it.
+PAGE_TEMP_PREFIX = ".digest-"
+PAGE_TEMP_SUFFIX = ".tmp"
+# A digest page holds one session's conversation, so the file belongs to its owner alone.
+PAGE_MODE = 0o600
+
+
+@dataclass(frozen=True)
+class SessionRef:
+    """A reference to a session: its agent and session id."""
+
+    agent: str
+    session_id: str
+
+
+@dataclass(frozen=True)
+class Fact:
+    """One verified fact, with the entry its quote came from."""
+
+    statement: str
+    kind: str
+    source: str
+    quote: str
+    entry: str
+    scope: str
+    date: str  # the day of that entry, which is the line's date last evidenced
+
+
+@dataclass(frozen=True)
+class Dropped:
+    """One fact the script refused, and why, as the digest's frontmatter records it."""
+
+    statement: str
+    kind: str
+    source: str
+    entry: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Digest:
+    """What one job left in the vault: the page, the facts it kept, the ones it refused."""
+
+    path: str
+    facts: tuple[Fact, ...]
+    dropped: tuple[Dropped, ...]
+    watermark: str
+
+
+def prompt_text() -> str:
+    """The system prompt every digest call sends, shipped as the plan's fixed text."""
+    return (files("aft") / PROMPT_FILE).read_text(encoding="utf-8")
+
+
+def digest_schema() -> dict:
+    """The schema the model's answer is constrained and checked by (BUILD-PLAN M2.6)."""
+    try:
+        text = (files("aft") / SCHEMA_FILE).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DigestError(
+            f"the shipped digest schema at {SCHEMA_FILE} cannot be read: {exc}"
+        ) from exc
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise DigestError(f"the shipped digest schema at {SCHEMA_FILE} is not JSON: {exc}") from exc
+
+
+def tokens(text: str) -> int:
+    """What ``text`` costs against the chunk cap: see ``CHARS_PER_TOKEN``."""
+    return math.ceil(len(text) / CHARS_PER_TOKEN)
+
+
+def render(entries: Sequence[Entry]) -> str:
+    """The chunk as the prompt is told to read it: ``[<id>] <ROLE> <time>`` and its text.
+
+    The entry id leads each block because the schema asks the model to name the id each
+    quote came from, and the role and time because the prompt distinguishes Ted's own
+    commitments from the agent's, and dates a fact by when it was said.
+    """
+    return "\n\n".join(
+        f"[{entry.id}] {entry.role.upper()} {entry.time.isoformat()}:\n{entry.text}"
+        for entry in entries
+    )
+
+
+def split_parts(entries: Sequence[Entry], budget: int) -> list[list[Entry]]:
+    """The entries in order, in parts that each fit ``budget`` input tokens.
+
+    A part is cut between entries, never inside one, so no entry arrives split or lost
+    (BUILD-PLAN M2.6). An entry larger than the whole budget stands alone in its part:
+    the cap bounds what goes in one call, and the only way to honour both that and an
+    entry that cannot be cut is to give the call more than the cap rather than cut up the
+    conversation or drop it.
+    """
+    parts: list[list[Entry]] = []
+    part: list[Entry] = []
+    used = 0
+    for entry in entries:
+        cost = tokens(render([entry]))
+        if part and used + tokens(_JOIN) + cost > budget:
+            parts.append(part)
+            part, used = [], 0
+        part.append(entry)
+        used += cost + (tokens(_JOIN) if len(part) > 1 else 0)
+    if part:
+        parts.append(part)
+    return parts
+
+
+_JOIN = "\n\n"
+
+
+def parts(entries: Sequence[Entry]) -> list[list[Entry]]:
+    """The parts one job's entries are sent in, with the prompt paid for first.
+
+    The parts of one job are one digest and one page; what the cap bounds is one call, so
+    a chunk over it is a session digested in parts and filed as one page. The cap is on the
+    call's input, which is the prompt and the chunk together, so the prompt's own tokens
+    come off the budget before the entries are divided.
+    """
+    return split_parts(entries, max(1, MAX_CHUNK_TOKENS - tokens(prompt_text())))
+
+
+def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> Digest | None:
+    """Digest one queued job, or report that it held nothing to digest.
+
+    Reads, filter, archive, model, verify, page, watermark, commit, in that order: the
+    archive takes the chunk before the model sees it, because the page's quotes are found
+    in the archive, and the watermark moves only once the page stands in git or the chunk
+    is known to hold nothing the filter would keep.
+
+    Returns ``None`` when the job held nothing to digest, which closes it and files no
+    page. A session with no entry past its watermark keeps the mark it had; a chunk the
+    filter emptied moves the mark past the entries read, because those are decided and
+    would be decided again by every later run.
+    """
+    _require_session_id(job.session_id)
+    vault.require(config)
+    registry = registrymod.Registry.load(config.registry_path)
+    try:
+        resolution = keys.resolve(job.cwd, registry, config.host)
+    except GitError as exc:
+        # The directory belongs to whatever ran the session and goes away with it, so git
+        # failing there is this session's own loss. Git failing in the vault is the host's
+        # and still stops the run.
+        raise DigestError(f"{job.cwd} could not be read as a project: {exc}") from exc
+    if resolution.slug is None:
+        raise DigestError(
+            f"{job.cwd} resolves to no project, so this session has nowhere to be filed"
+        )
+    if job.transcript_path is None:
+        raise DigestError(f"job {job.id} names no transcript for session {job.session_id}")
+
+    read = list(readers.read(job.agent, job.transcript_path, job.watermark))
+    if not read:
+        queue.complete(config, job, None, off_record=job.off_record)
+        return None
+
+    # The span state starts where the session's last digest left it and runs through the
+    # job's entries in order, so a span opened in an earlier chunk still holds here and one
+    # left open at the end of this chunk holds over the next (DESIGN 12, M2.3). The parts
+    # below are cut from what this one pass kept, so they share its state in order.
+    kept, off_record = filtermod.filter_entries(read, config, job.off_record)
+    if not kept:
+        # Nothing the filter left to digest: the entries were read and decided, so the
+        # mark moves and the job closes. A page of nothing would stand as the session's
+        # last word and speak for the work that came after it.
+        queue.complete(config, job, read[-1].id, off_record=off_record)
+        return None
+
+    evidence.store(
+        config,
+        job.agent,
+        job.session_id,
+        None if resolution.project is None else resolution.project.id,
+        kept,
+    )
+
+    # The page's own name is taken here, before a token is spent on it, from what already
+    # stands in the day's directory: a job writes the page it is given and never a page
+    # another job wrote.
+    when = read[-1].time.astimezone(UTC).date()
+    rel = _path(config, resolution.slug, job.agent, job.session_id, when)
+
+    facts: list[Fact] = []
+    dropped: list[Dropped] = []
+    summaries: list[str] = []
+    handoffs: list[dict[str, object]] = []
+    prompt = prompt_text()
+    schema = digest_schema()
+    # One page per job, whatever the number of parts: the parts of one job are one digest,
+    # and a handoff is what stood at the end of the part that read it, so the last part's is
+    # the job's. Summaries are joined uncut - a page's description has no cap, so nothing is
+    # truncated at the join, and a reader sees every part's own words.
+    for part in parts(kept):
+        answer = _model_answer(config, prompt, render(part), schema)
+        part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"])
+        facts.extend(part_facts)
+        dropped.extend(part_dropped)
+        summaries.append(answer["summary"])
+        handoffs.append(answer["handoff"])
+
+    page, on_page, refused = _page(
+        config,
+        job,
+        rel,
+        resolution.slug,
+        resolution,
+        summaries,
+        handoffs[-1],
+        facts,
+        dropped,
+        when,
+        now or datetime.now(UTC),
+    )
+    dropped.extend(refused)
+    rel = _write(
+        config, rel, page, lambda: _path(config, resolution.slug, job.agent, job.session_id, when)
+    )
+    # The watermark is the last entry read, not the last one kept: what the filter threw
+    # away has been decided, and reading it again would decide it again (DESIGN 8).
+    queue.complete(config, job, read[-1].id, off_record=off_record)
+    return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
+
+
+def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:
+    """One digest call and its answer, with a refused answer told as this job's failure.
+
+    An answer that failed its schema on both of the model's attempts is this chunk's own
+    problem: the job is marked failed with the model's reason, its watermark stays where it
+    was, and the next session gets its turn. Anything else aft.model raises is the endpoint
+    or its setup, which every job left would meet alike, so it stays a ModelError and the
+    run stops with the queue kept for a later attempt (DESIGN 14: an endpoint that is down
+    leaves the jobs queued).
+    """
+    try:
+        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS)
+    except ModelError as exc:
+        if exc.__cause__ is None and ANSWER_REFUSED in str(exc):
+            raise AnswerRefused(str(exc)) from exc
+        raise
+
+
+def verify(
+    config: Config, session_id: str, part: Sequence[Entry], facts: Sequence[dict]
+) -> tuple[list[Fact], list[Dropped]]:
+    """The facts of one part that pass the design's checks, and the refusals beside them.
+
+    Each check is the design's (DESIGN 8, and the kinds and scopes the plan's schema
+    enumerates), and the first one a fact fails is the reason it is recorded by. Nothing
+    here judges what a fact is worth: that is the prompt's job, and a script that decided
+    value as well would put its own taste into memory.
+    """
+    by_id = {entry.id: entry for entry in part}
+    kept: list[Fact] = []
+    dropped: list[Dropped] = []
+    for fact in facts:
+        entry = by_id.get(fact["entry"])
+        if entry is None:
+            dropped.append(_refused(fact, f"entry {fact['entry']} is not an entry of this chunk"))
+            continue
+        if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
+            dropped.append(_refused(fact, f"the quote is not found in entry {entry.id}"))
+            continue
+        if fact["source"] == "stated" and entry.role != USER:
+            dropped.append(
+                _refused(fact, f"[stated] cites entry {entry.id}, which is not one of Ted's turns")
+            )
+            continue
+        if fact["kind"] not in KIND_SECTIONS.values():
+            dropped.append(_refused(fact, f"unknown kind {fact['kind']!r}"))
+            continue
+        if fact["scope"] not in SCOPES:
+            dropped.append(_refused(fact, f"unknown scope {fact['scope']!r}"))
+            continue
+        kept.append(
+            Fact(
+                statement=fact["statement"],
+                kind=fact["kind"],
+                source=fact["source"],
+                quote=fact["quote"],
+                entry=entry.id,
+                scope=fact["scope"],
+                date=entry.time.astimezone(UTC).date().isoformat(),
+            )
+        )
+    return kept, dropped
+
+
+def _refused(fact: dict, reason: str) -> Dropped:
+    return Dropped(
+        statement=fact["statement"],
+        kind=fact["kind"],
+        source=fact["source"],
+        entry=fact["entry"],
+        reason=reason,
+    )
+
+
+def _require_session_id(session_id: str) -> None:
+    """The session id as a name a page can be filed under, or this job's refusal.
+
+    The id reaches this module on a queue row another process wrote, where the only check
+    was that it was not empty, and DESIGN 6 files a digest page by it - so a value that
+    could step outside ``digests/`` would have a directory created and a page written
+    outside the vault before the commit refused it. Refusing the name here closes every
+    use the digest makes of it: the page's path, and the ``aft://session/...`` source each
+    fact line cites, which is what ``aft trace`` and the dream's quote check follow.
+    """
+    if SESSION_ID.match(session_id) is None:
+        raise DigestError(
+            f"session id {session_id!r} is not a name a digest page can be filed under"
+        )
+
+
+def _path(config: Config, slug: str, agent: str, session_id: str, when: date) -> str:
+    """The page's path in the vault, as DESIGN 6 lays it out, in the part this job owns.
+
+    A session's first job of a day writes the plain name and every job after it takes the
+    next free part - ``-2``, ``-3`` - because one job is one page and a digest's content
+    never changes once written (DESIGN 8). The part comes from what already stands in the
+    directory, so a job never pays for a model call on a page another job already holds.
+    """
+    stem = f"{when:%Y-%m-%d}-{agent}-{session_id}"
+
+    def name(part: int) -> str:
+        return f"{stem}.md" if part == 1 else f"{stem}-{part}.md"
+
+    directory = config.vault / "digests" / slug / f"{when:%Y}" / f"{when:%m}"
+    part = 1
+    while (directory / name(part)).is_file():
+        part += 1
+    return f"digests/{slug}/{when:%Y}/{when:%m}/{name(part)}"
+
+
+def _page(
+    config: Config,
+    session: queue.Job | SessionRef,
+    rel: str,
+    slug: str,
+    resolution: keys.Resolution,
+    summaries: Sequence[str],
+    handoff: dict,
+    facts: Sequence[Fact],
+    dropped: Sequence[Dropped],
+    when: date,
+    stamp: datetime,
+) -> tuple[str, tuple[Fact, ...], tuple[Dropped, ...]]:
+    """The digest page: the frontmatter, then the fact lines the script kept.
+
+    Returns the page's text, the facts that made it onto the page, and any the page
+    writer refused - a statement it cannot write as one line is a fact this digest did
+    not write, and it belongs in the same record as the verifier's refusals rather than
+    in prose, which DESIGN 6 does not allow on a fact page at all.
+
+    The frontmatter is written whole because this page is new; the fact lines and the
+    sources they cite go through the page writer, which refuses text its own parse would
+    not read back, so a page that leaves here lints (DESIGN 6). What that writer took is
+    what ``aft.facts`` names, so the record beside a page and the lines on it cannot part.
+    """
+    frontmatter = _frontmatter(
+        config, resolution, slug, summaries, handoff, facts, dropped, when, stamp
+    )
+    text, written, refused = _written(frontmatter, rel, session, facts)
+    if refused:
+        # A line the writer would not take never reached the page, so the record beside it
+        # names it as dropped and keeps the kept list to the lines a reader can find.
+        frontmatter = _frontmatter(
+            config,
+            resolution,
+            slug,
+            summaries,
+            handoff,
+            written,
+            [*dropped, *refused],
+            when,
+            stamp,
+        )
+        text, written, _ = _written(frontmatter, rel, session, facts)
+    return text, tuple(written), tuple(refused)
+
+
+def _frontmatter(
+    config: Config,
+    resolution: keys.Resolution,
+    slug: str,
+    summaries: Sequence[str],
+    handoff: dict,
+    kept: Sequence[Fact],
+    dropped: Sequence[Dropped],
+    when: date,
+    stamp: datetime,
+) -> dict:
+    """The page's OKF frontmatter, with afterthought's own fields under one ``aft`` key.
+
+    ``aft.facts`` is what this job verified and the page carries, the scope of each fact
+    included - the fact line has no field for it (DESIGN 6) - and ``aft.dropped`` is what
+    the verifier or the page writer refused, with the reason each one failed on.
+    """
+    aft: dict[str, object] = {}
+    if resolution.project is not None:
+        aft["project"] = resolution.project.id
+    aft["handoff"] = {
+        "in_flight": handoff["in_flight"],
+        "failed": list(handoff["failed"]),
+        "open": list(handoff["open"]),
+    }
+    if kept:
+        aft["facts"] = [_verified(fact) for fact in kept]
+    if dropped:
+        aft["dropped"] = [_record(fact) for fact in dropped]
+    return {
+        "type": PAGE_TYPE,
+        "title": f"{_title(resolution, slug)} session {when:%Y-%m-%d}",
+        # DESIGN 6: a page's summary is its description, and a fact page holds no prose.
+        "description": " ".join(summary for summary in summaries if summary),
+        "generated": {
+            "by": f"aft {__version__} / {config.settings.model.name}",
+            "at": f"{stamp:%Y-%m-%dT%H:%M:%SZ}",
+        },
+        "aft": aft,
+    }
+
+
+def _written(
+    frontmatter: dict,
+    rel: str,
+    session: queue.Job | SessionRef,
+    facts: Sequence[Fact],
+) -> tuple[str, list[Fact], list[Dropped]]:
+    """The page these facts make, and the ones the page writer would not take.
+
+    A refused line comes back out of the page it was tried on, so no source of its is
+    left standing with no fact line to cite it, and the page the writer refuses is never
+    the page that gets written.
+    """
+    doc = pagewrite.PageDoc(_text(frontmatter), rel)
+    written: list[Fact] = []
+    refused: list[Dropped] = []
+    for fact in facts:
+        before = doc.render()
+        try:
+            _add(doc, session, fact)
+        except pagewrite.WriteError as exc:
+            doc = pagewrite.PageDoc(before, rel)
+            refused.append(_refused(_words(fact), str(exc)))
+        else:
+            written.append(fact)
+    return doc.render(), written, refused
+
+
+def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) -> None:
+    """One fact onto the page, with the source its line cites (DESIGN 6).
+
+    The source names the session and the entry the quote came from, so `aft trace` and
+    the dream's quote check both find the words again where the page says they are.
+    """
+    source = doc.add_source(
+        f"aft://session/{session.agent}/{session.session_id}#{fact.entry}",
+        title=f"{session.agent} session {session.session_id}",
+        quote=fact.quote,
+    )
+    doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, [source])
+
+
+def _text(frontmatter: dict) -> str:
+    """A new page's opening: the frontmatter block and the blank line the format wants."""
+    return (
+        "---\n"
+        + yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True, width=100_000)
+        + "---\n\n"
+    )
+
+
+def _record(fact: Dropped) -> dict:
+    """One dropped fact as the frontmatter carries it."""
+    return {
+        "statement": fact.statement,
+        "kind": fact.kind,
+        "source": fact.source,
+        "entry": fact.entry,
+        "reason": fact.reason,
+    }
+
+
+def _verified(fact: Fact) -> dict:
+    """One fact the page carries, as the verifier verified it, scope and all.
+
+    The fact line has no field for scope (DESIGN 6), so the page's own record names it, and
+    a global fact whose source is not one of Ted's own commitments carries the rule it will
+    be skipped for (DESIGN 9 R6). Where such a fact is filed later is not this page's to say.
+    """
+    record = {
+        "statement": fact.statement,
+        "kind": fact.kind,
+        "source": fact.source,
+        "entry": fact.entry,
+        "scope": fact.scope,
+    }
+    if fact.scope == "global" and fact.source != "stated":
+        record["skip"] = GLOBAL_NOT_STATED
+    return record
+
+
+def _words(fact: Fact) -> dict:
+    """A verified fact in the shape a refusal is recorded from."""
+    return {
+        "statement": fact.statement,
+        "kind": fact.kind,
+        "source": fact.source,
+        "entry": fact.entry,
+    }
+
+
+def _title(resolution: keys.Resolution, slug: str) -> str:
+    return resolution.project.title if resolution.project is not None else slug
+
+
+def _reap_orphans(directory: Path) -> None:
+    """Take away the page temporaries of ``directory`` that no live writer can be holding.
+
+    A temporary is open only for the moment between its creation and its rename, so one
+    older than the floor of the queue's claim lease was left by a run that died there, and
+    nothing else would ever collect it. A younger sibling is another worker's page in
+    progress and stands.
+    """
+    oldest_allowed = datetime.now(UTC) - queue.CLAIM_LEASE_FLOOR
+    for stray in directory.glob(f"{PAGE_TEMP_PREFIX}*"):
+        try:
+            if datetime.fromtimestamp(stray.stat().st_mtime, UTC) < oldest_allowed:
+                stray.unlink()
+        except OSError:
+            continue
+
+
+def _write(config: Config, rel: str, text: str, choose: Callable[[], str]) -> str:
+    """Put the page in the vault and commit it, or leave the vault exactly as it was, and
+    return the path it was filed at.
+
+    The path arrives chosen by ``_path`` before any model call, and is checked again under
+    the vault lock right before the rename: if another process working the same session (a
+    job that outlived its claim lease while another run reclaimed it) filed that part in the
+    meantime, ``choose`` names the next free part and the page takes that one instead. The
+    lock holds until the commit, so the part found free stays free. A page written here is
+    always a page that was not there a moment ago and never replaces one some other job
+    wrote.
+
+    The commit is the last step. A page the commit did not take is taken back out on the
+    way as well: the file goes, and so does the index entry that staging put beside it,
+    because a staged page is a page the next commit of anything at all would carry into
+    memory. So a failure leaves no page standing that the watermark does not know about.
+    """
+    path = config.vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _reap_orphans(path.parent)
+    handle, tmp = tempfile.mkstemp(
+        dir=path.parent, prefix=PAGE_TEMP_PREFIX, suffix=PAGE_TEMP_SUFFIX
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.chmod(tmp, PAGE_MODE)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    with vault.locked(config):
+        if (config.vault / rel).exists():
+            rel = choose()
+        path = config.vault / rel
+        try:
+            os.replace(tmp, path)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        try:
+            vault.commit(config.vault, [rel], f"aft: digest {rel}")
+        except (GitError, vault.VaultError):
+            # The page went into git's index before the commit refused it, and a staged
+            # page is taken by whichever commit comes next, so the index loses it with the
+            # file - and both go under the lock the commit was attempted under.
+            path.unlink(missing_ok=True)
+            git(["reset", "-q", "--", rel], cwd=config.vault, check=False)
+            raise
+    return rel
+
+
+def _is_session_resource(resource: str, session_id: str) -> bool:
+    """Whether an aft:// URI cites ``session_id``."""
+    if not resource:
+        return False
+    uri = resource.split("#", 1)[0]
+    if uri.startswith("aft://session/"):
+        parts = uri.removeprefix("aft://session/").split("/")
+        if parts[-1] == session_id:
+            return True
+    return False
+
+
+def _is_session_digest(path: Path, session_id: str) -> bool:
+    """Whether ``path`` is a digest file belonging to ``session_id``."""
+    if not path.is_file() or path.suffix != ".md":
+        return False
+    match = _DIGEST_NAME.match(path.stem)
+    if match is None:
+        return False
+    sess = match.group("session")
+    is_exact = sess == session_id
+    prefix, sep, suffix = sess.rpartition("-")
+    is_multipart = bool(sep and suffix.isdigit() and prefix == session_id)
+    if not is_exact and not is_multipart:
+        return False
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        frontmatter, _, _, _ = page.split_frontmatter(text)
+        if isinstance(frontmatter, dict):
+            sources = frontmatter.get("sources")
+            if isinstance(sources, list):
+                session_sources = [
+                    str(s.get("resource", ""))
+                    for s in sources
+                    if isinstance(s, dict)
+                    and str(s.get("resource", "")).startswith("aft://session/")
+                ]
+                if session_sources:
+                    return any(_is_session_resource(res, session_id) for res in session_sources)
+    except OSError:
+        pass
+
+    return is_exact
+
+
+def redigest(
+    config: Config,
+    session_id: str,
+    now: datetime | None = None,
+) -> Digest:
+    """Rebuild a digest from archived evidence alone (DESIGN 8, BUILD-PLAN M2.8).
+
+    The entries come from the evidence archive rather than a transcript, so this works
+    even when the transcript has expired or is no longer present. The resulting digest
+    replaces any existing digest page for that session in the vault.
+    """
+    _require_session_id(session_id)
+    vault.require(config)
+
+    entries = evidence.entries(config, session_id)
+    if not entries:
+        raise DigestError(f"no archived evidence for session {session_id!r}")
+
+    info = evidence.session_info(config, session_id)
+    agent = info[0] if info else None
+    project_id = info[1] if info else None
+
+    registry = registrymod.Registry.load(config.registry_path)
+    project = registry.by_id(project_id) if project_id else None
+    slug = project.slug if project else None
+
+    if slug is None:
+        digests_root = config.vault / "digests"
+        if digests_root.exists():
+            for f in digests_root.rglob("*.md"):
+                if _is_session_digest(f, session_id):
+                    rel_parts = f.relative_to(config.vault).parts
+                    if len(rel_parts) >= 2:
+                        slug = rel_parts[1]
+                        project = registry.by_slug(slug)
+                        break
+
+    if slug is None:
+        raise DigestError(
+            f"session {session_id!r} resolves to no project,"
+            " so this session has nowhere to be filed"
+        )
+
+    if agent is None:
+        agent = "claude"
+
+    when = entries[-1].time.astimezone(UTC).date()
+    rel = f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
+
+    resolution = keys.Resolution(
+        kind=keys.PATH,
+        cwd=Path("."),
+        project=project,
+        slug=slug,
+        root=None,
+        alias_added=False,
+    )
+
+    facts: list[Fact] = []
+    dropped: list[Dropped] = []
+    summaries: list[str] = []
+    handoffs: list[dict[str, object]] = []
+    prompt = prompt_text()
+    schema = digest_schema()
+
+    for part in parts(entries):
+        answer = _model_answer(config, prompt, render(part), schema)
+        part_facts, part_dropped = verify(config, session_id, part, answer["facts"])
+        facts.extend(part_facts)
+        dropped.extend(part_dropped)
+        summaries.append(answer["summary"])
+        handoffs.append(answer["handoff"])
+
+    page_text, on_page, refused = _page(
+        config,
+        SessionRef(agent=agent, session_id=session_id),
+        rel,
+        slug,
+        resolution,
+        summaries,
+        handoffs[-1],
+        facts,
+        dropped,
+        when,
+        now or datetime.now(UTC),
+    )
+    dropped.extend(refused)
+
+    target_path = config.vault / rel
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    _reap_orphans(target_path.parent)
+
+    handle, tmp = tempfile.mkstemp(
+        dir=target_path.parent, prefix=PAGE_TEMP_PREFIX, suffix=PAGE_TEMP_SUFFIX
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(page_text)
+        os.chmod(tmp, PAGE_MODE)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+    with vault.locked(config):
+        digests_root = config.vault / "digests"
+        old_paths: list[str] = []
+        if digests_root.exists():
+            for f in list(digests_root.rglob("*.md")):
+                if _is_session_digest(f, session_id) and f != target_path:
+                    old_paths.append(f.relative_to(config.vault).as_posix())
+                    f.unlink()
+                    parent = f.parent
+                    while parent != digests_root and parent.exists():
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
+        try:
+            os.replace(tmp, target_path)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+        paths_to_commit = list(set([*old_paths, rel]))
+        vault.commit(config.vault, paths_to_commit, f"aft: redigest {session_id}")
+
+    index.update(config)
+    return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=entries[-1].id)

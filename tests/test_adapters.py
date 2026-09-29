@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -357,3 +358,28 @@ def test_a_stalled_stdin_and_a_blocked_write_share_one_budget(home, monkeypatch,
 
     assert (code, captured.out, captured.err) == (0, "", "")
     assert elapsed < HOOK_TIMEOUT_SECONDS + HOOK_TIMING_SLACK_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("name", "agent", "hook_event"),
+    [
+        ("claude-pre-compact.json", "claude", "PreCompact"),
+        ("claude-session-end.json", "claude", "SessionEnd"),
+        ("pi-session-shutdown.json", "pi", "session_shutdown"),
+    ],
+)
+def test_a_capture_event_writes_one_queue_row(home, monkeypatch, capsys, name, agent, hook_event):
+    """Compaction and session end are capture work: the hook leaves one pending row."""
+    assert run_hook(monkeypatch, capsys, agent, hook_event, payload_text(name)) == (0, "", "")
+    conn = sqlite3.connect(home / "queue.sqlite")
+    try:
+        rows = conn.execute("SELECT agent, status FROM jobs").fetchall()
+    finally:
+        conn.close()
+    assert rows == [(agent, "pending")]
+
+
+def test_a_session_start_writes_no_queue_row(home, monkeypatch, capsys):
+    text = payload_text("claude-session-start.json")
+    assert run_hook(monkeypatch, capsys, "claude", "SessionStart", text) == (0, "", "")
+    assert not (home / "queue.sqlite").exists()
