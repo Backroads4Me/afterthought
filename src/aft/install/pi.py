@@ -270,7 +270,8 @@ def _backup(target: Path, original: str | None, *, dry_run: bool) -> Path | None
     """Name the file that keeps the text this change replaces or removes, and copy the text
     into it unless the change is only being previewed. This is the backup rule, where a
     reader of a write meets it: afterthought's extension file changes only once its previous
-    text is safe next to it, and a preview says that copy is coming without making it.
+    text is on the device in a file beside it, and a preview says that copy is coming
+    without making it.
 
     The copy is named for the tool that made it and stamped with the UTC second, so one
     install never overwrites another's backup. A file with no text of its own has nothing to
@@ -281,7 +282,10 @@ def _backup(target: Path, original: str | None, *, dry_run: bool) -> Path | None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = target.with_name(f"{target.name}.aft-{stamp}.bak")
     if not dry_run:
-        backup.write_text(original, encoding="utf-8")
+        with open(backup, "w", encoding="utf-8") as copy:
+            copy.write(original)
+            copy.flush()
+            os.fsync(copy.fileno())
     return backup
 
 
@@ -289,8 +293,10 @@ def _write(target: Path, text: str) -> None:
     """Put the extension in place in one step, so a crash leaves the old file or the new one.
 
     The text goes to a temporary file in the same directory and ``os.replace`` moves it over
-    the old one; the new file keeps the permissions of the one it replaces, and an extension
-    file pi has already loaded keeps looking like the file it expected.
+    the old one, with its bytes fsynced before that rename so the published name never stands
+    over text the device has not taken. The new file keeps the permissions of the one it
+    replaces, and an extension file pi has already loaded keeps looking like the file it
+    expected.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
     mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
@@ -298,6 +304,8 @@ def _write(target: Path, text: str) -> None:
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as output:
             output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
         os.chmod(temporary, mode)
         os.replace(temporary, target)
     except OSError:

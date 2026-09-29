@@ -128,6 +128,44 @@ def test_install_backs_up_the_text_it_replaces(extensions):
     )
 
 
+def test_no_name_is_published_before_its_bytes_reach_the_device(tmp_path, monkeypatch):
+    """A machine dying mid-install must leave either the old file or the new one whole, so a
+    name may only stand where its bytes are already on the device.
+
+    The evidence is the bytes a descriptor holds as it is synced, the bytes the temp file holds
+    as it is renamed, and the order of those two events, not the final content alone.
+    """
+    extensions = tmp_path / "extensions"
+    target = pi_install.target_path(extensions)
+    hand_edited = "// hand written by somebody else\n"
+    target.parent.mkdir(parents=True)
+    target.write_text(hand_edited, encoding="utf-8")
+
+    sized: list[int] = []
+    published: list[bytes] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def watch_fsync(fd: int) -> None:
+        sized.append(os.fstat(fd).st_size)  # bytes the descriptor holds as it is synced
+        real_fsync(fd)
+
+    def watch_replace(src: str, dst: os.PathLike[str] | str) -> None:
+        published.append(Path(src).read_bytes())  # complete, or the name publishes a partial
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", watch_fsync)
+    monkeypatch.setattr(os, "replace", watch_replace)
+
+    change = pi_install.install(extensions)
+
+    # the text being replaced is durable first, then the new text, then the rename alone
+    assert sized == [len(hand_edited.encode()), len(SHIPPED.encode())]
+    assert published == [SHIPPED.encode()]
+    assert target.read_text(encoding="utf-8") == SHIPPED
+    assert change.backup is not None
+    assert change.backup.read_text(encoding="utf-8") == hand_edited
+
+
 def test_install_refuses_a_directory_where_the_extension_belongs(extensions):
     target = pi_install.target_path(extensions)
     target.mkdir(parents=True)
