@@ -76,10 +76,25 @@ def test_rename_moves_directories(initialized, tmp_path):
     page = initialized.vault / "projects" / "widget" / "overview.md"
     page.parent.mkdir(parents=True)
     page.write_text("placeholder")
-    vault.commit(initialized.vault, ["projects"], "add page")
+    digest = initialized.vault / "digests" / "widget" / "2026" / "09" / "digest.md"
+    digest.parent.mkdir(parents=True)
+    digest.write_text("digest placeholder")
+    archive_proj = initialized.vault / "archive" / "projects" / "widget" / "overview.md"
+    archive_proj.parent.mkdir(parents=True)
+    archive_proj.write_text("archive proj placeholder")
+    archive_legacy = initialized.vault / "archive" / "widget.md"
+    archive_legacy.parent.mkdir(parents=True, exist_ok=True)
+    archive_legacy.write_text("archive legacy placeholder")
+    vault.commit(initialized.vault, ["projects", "digests", "archive"], "add files")
     assert main(["project", "rename", "widget", "gadget"]) == 0
     assert (initialized.vault / "projects" / "gadget" / "overview.md").exists()
     assert not (initialized.vault / "projects" / "widget").exists()
+    assert (initialized.vault / "digests" / "gadget" / "2026" / "09" / "digest.md").exists()
+    assert not (initialized.vault / "digests" / "widget").exists()
+    assert (initialized.vault / "archive" / "projects" / "gadget" / "overview.md").exists()
+    assert not (initialized.vault / "archive" / "projects" / "widget").exists()
+    assert (initialized.vault / "archive" / "gadget.md").exists()
+    assert not (initialized.vault / "archive" / "widget.md").exists()
     assert Registry.load(initialized.registry_path).by_slug("gadget") is not None
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
 

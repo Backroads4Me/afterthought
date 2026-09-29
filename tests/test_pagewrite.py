@@ -1384,7 +1384,7 @@ def test_resolve_callout_archives_the_note_verbatim_with_the_line_it_was_about(i
         "description: Notes and lines resolved out of widget.",
         "---",
         "",
-        STATE,
+        f"> {STATE}",
         *note,
         "",
     ]
@@ -1401,11 +1401,11 @@ def test_resolving_two_notes_appends_both_blocks_to_the_archive(initialized, doc
     written(initialized, doc)
     assert archived(initialized)[-9:] == [
         "",
-        "- The index is plain SQLite. [stated] 2026-09-20 [^s1]",
+        "> - The index is plain SQLite. [stated] 2026-09-20 [^s1]",
         "> [!question] 2026-10-01",
         "> Is plain SQLite still the plan?",
         "",
-        STATE,
+        f"> {STATE}",
         "> [!conflict] 2026-10-02",
         "> A session says SGLang.",
         "",
@@ -1456,7 +1456,7 @@ def test_text_typed_below_a_note_stays_on_the_page_when_the_note_closes(initiali
     ]
     assert typed in doc.render()
     assert archived(initialized)[-4:] == [
-        STATE,
+        f"> {STATE}",
         "> [!conflict] 2026-10-01",
         "> A session says SGLang.",
         "",
@@ -1483,7 +1483,7 @@ def test_closing_a_note_under_an_answer_someone_typed_leaves_their_answer_alone(
     assert states(result, "State") == [("The GPU host runs vLLM.", page.NEEDS_YOU)]
     cut = without(without(before, line.line + 3), line.line + 2)
     assert doc.render() == without(cut, line.line + 1)
-    assert archived(initialized)[-4:] == [*ours, ""]
+    assert archived(initialized)[-4:] == [f"> {STATE}", *ours[1:], ""]
     assert "restarted on Tuesday" not in "".join(archived(initialized))
 
 
@@ -1498,7 +1498,7 @@ def test_a_vault_under_a_projects_directory_archives_inside_itself(projects_vaul
         ("The GPU host runs vLLM.", page.ACTIVE)
     ]
     assert archived(projects_vault, REL)[-4:] == [
-        STATE,
+        f"> {STATE}",
         "> [!conflict] 2026-10-01",
         "> A session says SGLang.",
         "",
@@ -1584,3 +1584,58 @@ def test_an_archive_that_cannot_be_read_is_refused_with_its_path(initialized, do
         assert str(filed) in str(caught.value)
         assert filed.read_bytes() == was
         assert doc.render() == before
+
+
+def test_add_callout_writes_trailing_blank_when_line_below_is_non_blank(initialized):
+    """When the line below the fact is non-blank (e.g. typed prose or another fact),
+    add_callout writes a trailing blank line so typed text sitting below the fact is
+    not absorbed into the note blockquote.
+    """
+    typed = "Some typed prose sitting right under the fact."
+    doc = make(initialized, PAGE.replace(STATE, f"{STATE}\n{typed}"))
+    fact = doc.fact("The GPU host runs vLLM.")
+    assert doc.add_callout(fact, "conflict", "A session says SGLang.", "2026-10-05")
+
+    lines = doc.render().splitlines()
+    callout_idx = lines.index("> [!conflict] 2026-10-05")
+    assert lines[callout_idx - 1] == ""  # blank line above callout
+    assert lines[callout_idx + 1] == "> A session says SGLang."
+    assert lines[callout_idx + 2] == ""  # trailing blank line written below callout
+    assert lines[callout_idx + 3] == typed  # typed text is not absorbed into callout
+
+    reparsed = page.parse(doc.render(), REL)
+    note = reparsed.facts[1].callouts[0]
+    assert note.text == ["A session says SGLang."]
+
+
+def test_carried_off_narrowed_to_errors_on_removed_lines(initialized):
+    """narrow carried_off: when carried_off=True, only errors on the removed lines are
+    allowed to be carried off. An error outside the removed lines that disappears must still
+    trigger WriteError.
+    """
+    doc = make(initialized, PAGE)
+    doc.lines.insert(25, "## InvalidSection")
+    doc._page = page.parse("\n".join(doc.lines), REL)
+    assert any("unknown section 'InvalidSection'" in msg for _, msg in doc.page.errors)
+
+    # Error outside the removed lines: if line 26's error disappears during an edit to lines 27..28
+    doc.lines.pop(25)
+    with pytest.raises(pagewrite.WriteError, match="this edit would drop text outside the grammar"):
+        doc._apply(27, 28, [doc.lines[27]], carried_off=True)
+
+    # Error on the removed lines: removing lines 25..26 with carried_off=True is permitted
+    doc.lines.insert(25, "## InvalidSection")
+    doc._page = page.parse("\n".join(doc.lines), REL)
+    doc._apply(25, 26, [], carried_off=True)
+    assert not any("unknown section 'InvalidSection'" in msg for _, msg in doc.page.errors)
+
+
+def test_archive_slug_uses_vault_path_slug():
+    """_archive_slug delegates to vault.path_slug, falling back to stem for non-project paths."""
+    from aft.pagewrite import _archive_slug
+
+    assert _archive_slug(Path("projects/widget/overview.md")) == "widget"
+    assert _archive_slug(Path("archive/projects/widget/overview.md")) == "widget"
+    assert _archive_slug(Path("archive/widget.md")) == "widget"
+    assert _archive_slug(Path("global/preferences.md")) == "preferences"
+    assert _archive_slug(Path("random/custom.md")) == "custom"

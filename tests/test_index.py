@@ -1179,16 +1179,19 @@ def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
     widget = register(initialized, "widget")
     digest = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
     rested = write(initialized, "archive/widget.md", ARCHIVE)
+    rested_mirrored = write(initialized, "archive/projects/widget/overview.md", ARCHIVE)
     unknown = write(initialized, "digests/gizmo/2026/09/2026-09-28-pi-def.md", DIGEST)
     every_project = write(initialized, "global/preferences.md", PREFERENCES)
     assert index.update(initialized) == []
 
     digest_row = row_for(initialized, "digests", f"{digest}#Summary")
     rested_row = row_for(initialized, "archive", f"{rested}#Decisions")
+    rested_mirrored_row = row_for(initialized, "archive", f"{rested_mirrored}#Decisions")
     unknown_row = row_for(initialized, "digests", f"{unknown}#Summary")
     global_row = row_for(initialized, "pages", f"{every_project}#Preferences")
     assert _column(digest_row, "project_id") == widget.id
     assert _column(rested_row, "project_id") == widget.id
+    assert _column(rested_mirrored_row, "project_id") == widget.id
     assert _column(unknown_row, "project_id") is None
     assert _column(global_row, "project_id") is None
 
@@ -1349,3 +1352,22 @@ def test_unreadable_pages_are_reported_and_the_good_page_still_indexes(
 
     assert index.update(initialized) == []
     assert f"{dangling}#Decisions" in keys_of(initialized, "pages")
+
+
+def test_path_slug_handles_all_vault_layouts():
+    from aft import vault
+
+    assert vault.path_slug("projects/widget/overview.md") == "widget"
+    assert vault.path_slug(Path("projects/widget/overview.md")) == "widget"
+    assert vault.path_slug("projects/widget") == "widget"
+    assert vault.path_slug("projects") is None
+    assert vault.path_slug("digests/widget/2026/09/2026-09-30-session.md") == "widget"
+    assert vault.path_slug("archive/projects/widget/overview.md") == "widget"
+    assert vault.path_slug("archive/projects/widget") == "widget"
+    assert vault.path_slug("archive/widget.md") == "widget"
+    assert vault.path_slug("archive/index.md") is None
+    assert vault.path_slug("archive/global/preferences.md") is None
+    assert vault.path_slug("global/preferences.md") is None
+    assert vault.path_slug("reports/needs-you.md") is None
+    assert vault.path_slug("references/col/ref.md") is None
+    assert vault.path_slug("") is None

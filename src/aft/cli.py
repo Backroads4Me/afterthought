@@ -337,9 +337,11 @@ def cmd_project_rename(args) -> int:
         for old, new in (
             (f"projects/{args.old}", f"projects/{args.new}"),
             (f"digests/{args.old}", f"digests/{args.new}"),
+            (f"archive/projects/{args.old}", f"archive/projects/{args.new}"),
             (f"archive/{args.old}.md", f"archive/{args.new}.md"),
         ):
             if (config.vault / old).exists():
+                (config.vault / new).parent.mkdir(parents=True, exist_ok=True)
                 (config.vault / old).rename(config.vault / new)
                 changed += [old, new]
         vault.commit(config.vault, changed, f"aft: rename {args.old} to {args.new}")
