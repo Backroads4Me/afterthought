@@ -75,11 +75,10 @@ The builder runs, from the repository root:
 
 ```bash
 git diff origin/main...HEAD > /tmp/aft-review.diff
-claude -p --model claude-opus-5-5 --allowedTools "Read,Grep,Glob" \
-  "$(cat planning/review-prompt.md)
-Task: <task id and title>
-Design sections: <sections the task cites>
-The diff is in /tmp/aft-review.diff." > /tmp/aft-review.md
+{ cat planning/review-prompt.md
+  printf '\nTask: %s\nDesign sections: %s\nThe diff is in /tmp/aft-review.diff.\n' \
+    "<task id and title>" "<sections the task cites>"
+} | claude -p --model claude-opus-5-5 --allowedTools "Read,Grep,Glob" > /tmp/aft-review.md
 gh pr comment <pr> --body-file /tmp/aft-review.md
 ```
 
