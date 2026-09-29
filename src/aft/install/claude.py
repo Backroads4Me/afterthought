@@ -21,9 +21,10 @@ Three rules hold the user's own configuration safe:
   command line inside the matcher groups of its three event lists. Other people's hook
   entries keep their position and their order, and uninstall removes command hooks and
   nothing else: every key of the user's keeps its place, a matcher group keeps its matcher
-  once our hook leaves it, and an event list or the ``hooks`` object that uninstall empties
-  stays empty rather than going away. The file is read, edited in place, and written back
-  with its key order intact.
+  once our hook leaves it, the ``hooks`` object an uninstall empties keeps its key as an
+  empty object, and only an event list this very uninstall emptied of our last entry goes
+  with it, so a file is left as its author wrote it. The file is read, edited in place, and
+  written back with its key order intact.
 * A write goes to the file the settings path points at, so a symbolic link the user made
   there - into a version-controlled settings file, say - survives and keeps being read.
 * No settings file changes before a backup of its text is safe beside it, carrying that
@@ -94,10 +95,12 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     Every event that does not already run our command gets one group of our own, appended
     after the elements already there: an entry is never inserted before, sorted among, or
     substituted for a hook someone else wrote. An event that already runs our command is
-    left exactly as it is, whether our command sits in the group an install wrote or in one
-    the user moved it into, so installing twice changes nothing on the second run, and an
-    entry the user edited after installing - its timeout, its matcher - stays as they set
-    it.
+    left exactly as it is: an event's whole list is searched, at any depth, for the command
+    line before anything is appended, so aft never writes a second copy of a command the
+    event already runs - whether that command sits in the group an install wrote, in one the
+    user moved it into, or in an element the user wrote by hand. Installing twice therefore
+    changes nothing on the second run, and an entry the user edited after installing - its
+    timeout, its matcher - stays as they set it.
     The command line is the whole identity of an entry, which is what makes our own
     entries findable again without a marker field of afterthought's in the user's file.
     """
@@ -107,7 +110,7 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
     entries = []
     for event in HOOK_EVENTS:
         groups = _groups(hooks, event)
-        if all(_remove(element, event) is element for element in groups):
+        if not any(_runs(element, hook_command(event)) for element in groups):
             groups.append(_group(event))
             entries.append(event)
 
@@ -120,15 +123,18 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     Only the three events afterthought installs are read, and within them only the command
     hooks running ``aft hook claude <event>`` inside a matcher group - the shape an install
     writes, plus whatever the user changed inside such a group. Nothing else is deleted and
-    nothing is reordered: an element that is not ours keeps its keys and its place, an
-    event keeps its key, the ``hooks`` object keeps its key. A command line of ours that
+    nothing is reordered: an element that is not ours keeps its keys and its place, and an
+    event array that still holds one of them keeps its key. A command line of ours that
     someone wrote directly into an event list, one level above where an install writes,
-    is theirs and stays. A container stays where it is even when our hook was the last
-    thing in it, so an emptied event list is left as an empty list and an emptied
-    ``hooks`` object as an empty object, which Claude Code runs as nothing. Only a group
-    left holding nothing but an empty ``hooks`` list goes, because it holds no key of
-    anyone's. Telling our own containers from the user's would mean remembering what was
-    installed; this rule needs no history to be right.
+    is theirs and stays.
+    A container of aft's goes only when this very operation empties it and it then holds no
+    key of anyone's: a group left holding nothing but an empty ``hooks`` list, and an event
+    list whose last entry was our hook. An array this operation found empty, and one it
+    leaves holding a hook of someone else's, keep their keys, so an event key is dropped only
+    by the run that emptied it and an array the user left empty survives uninstall for the
+    reason it looks empty. The ``hooks`` object itself is never dropped: an empty one costs
+    Claude Code nothing, and choosing between the object an install created and one the file
+    already had would need the history this rule does not have.
     """
     document, original = _read(settings)
     hooks = document.get("hooks")
@@ -141,13 +147,18 @@ def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
         if not isinstance(groups, list):
             continue
         kept = []
+        removed = False
         for element in groups:
             left = _remove(element, event)
             if left is not element:
+                removed = True
                 entries.append(event)
             if left is not _DROPPED:
                 kept.append(left)
-        groups[:] = kept
+        if removed and not kept:
+            del hooks[event]
+        else:
+            groups[:] = kept
 
     return _commit(settings, original, document, entries=entries, adding=False, dry_run=dry_run)
 
@@ -180,6 +191,25 @@ def _is_ours(hook: object, event: str) -> bool:
     return isinstance(hook, dict) and hook.get("command") == hook_command(event)
 
 
+def _runs(value: object, command: str) -> bool:
+    """Whether one command line appears anywhere inside a value, at any depth.
+
+    Install asks this of a whole event list, so a hook a person wrote by hand - aft's command
+    as a bare element of the list, or nested inside a group of theirs at whatever depth they
+    chose - counts as that event already running the command, and install leaves it alone
+    rather than writing a second copy of it. Deletion does not use this: ``_remove``
+    recognizes only the shape an install writes, so an element aft cannot attribute to itself
+    survives uninstall.
+    """
+    if isinstance(value, str):
+        return value == command
+    if isinstance(value, dict):
+        return any(_runs(nested, command) for nested in value.values())
+    if isinstance(value, list):
+        return any(_runs(nested, command) for nested in value)
+    return False
+
+
 _DROPPED = object()
 
 
@@ -188,8 +218,8 @@ def _remove(element: object, event: str) -> object:
 
     Only a group's own ``hooks`` list is searched for our command line, so every other
     element - a bare command hook someone wrote by hand, a string, a number, a JSON null -
-    comes back as the element itself, which is how install and uninstall tell an element
-    they rewrote from one they left alone. The ``_DROPPED`` sentinel, compared by identity,
+    comes back as the element itself, which is how uninstall tells an element it rewrote from
+    one it left alone. The ``_DROPPED`` sentinel, compared by identity,
     comes back for a group left holding nothing but an empty ``hooks`` list, the one shape
     that holds no key of anyone's. A group with a matcher, or any other key of its own,
     keeps that key even once our hook is gone.
@@ -213,18 +243,20 @@ def _read(settings: Path) -> tuple[dict, str | None]:
     """The document in ``settings`` and the text it came from; no file reads as no settings.
 
     BUILD-PLAN M1.3 requires an invalid settings file to abort without writing, and this is
-    the one place that decides what invalid means: a file that cannot be opened at all,
-    text that is not UTF-8, text that is not JSON, a JSON value that is not an object, a
-    ``hooks`` key that is not an object, and a value where one of afterthought's three
-    events lives that is not a list. Each is refused rather than overwritten, because a
-    file afterthought cannot read is a file it cannot merge into, and it is somebody's
-    working configuration. Text with nothing in it is the exception: an empty
-    file is a file with no settings yet, not a broken one.
+    the one place that decides what invalid means: a file that cannot be opened or even
+    looked up - a settings directory the user cannot search, say - text that is not UTF-8,
+    text that is not JSON, a JSON value that is not an object, a ``hooks`` key that is not an
+    object, and a value where one of afterthought's three events lives that is not a list.
+    Each is refused rather than overwritten, because a file afterthought cannot read is a
+    file it cannot merge into, and it is somebody's working configuration. Text with nothing
+    in it is the exception, and so is a name that holds no file at all: an absent settings
+    file is one with no settings yet, not a broken one, and so is a name under a path whose
+    parent is no directory - which the write then refuses as the write it is.
     """
-    if not settings.exists():
-        return {}, None
     try:
         original = settings.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return {}, None
     except UnicodeDecodeError as exc:
         raise InstallError(f"{settings} is not UTF-8 text ({exc}); nothing was written") from exc
     except OSError as exc:

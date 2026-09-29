@@ -296,7 +296,7 @@ def test_uninstall_leaves_every_hook_of_the_users_own(tmp_path):
     """What install added uninstall takes back, and nothing else moves."""
     settings = settings_in(tmp_path)
     theirs = command_order(PEOPLE)
-    write_settings(settings, PEOPLE)
+    text = write_settings(settings, PEOPLE)
 
     claude_install.install(settings)
     assert claude_install.uninstall(settings).changed is True
@@ -306,35 +306,68 @@ def test_uninstall_leaves_every_hook_of_the_users_own(tmp_path):
     assert after["hooks"]["PreToolUse"] == PEOPLE["hooks"]["PreToolUse"]
     assert after["hooks"]["SessionStart"] == PEOPLE["hooks"]["SessionStart"]
     assert after["hooks"]["Stop"] == PEOPLE["hooks"]["Stop"]
-    assert after["hooks"]["PreCompact"] == []
-    assert after["hooks"]["SessionEnd"] == []
-    assert list(after) == list(PEOPLE)
+    # The event keys aft emptied are gone; the user's own keys keep their order.
+    assert list(after["hooks"]) == ["PreToolUse", "SessionStart", "Stop"]
+    assert settings.read_text(encoding="utf-8") == text
 
 
-def test_uninstall_leaves_the_containers_it_emptied(tmp_path):
-    """An emptied event list stays a list and an emptied ``hooks`` object stays one."""
+def test_install_then_uninstall_returns_the_file_to_its_earlier_bytes(tmp_path):
+    """An install a later uninstall follows leaves no container of aft's behind."""
     settings = settings_in(tmp_path)
-    write_settings(settings, {"model": "claude-opus"})
+    document = {
+        "model": "claude-opus",
+        "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}]},
+    }
+    text = write_settings(settings, document)
+
+    claude_install.install(settings)
+    assert set(read_settings(settings)["hooks"]) == {"Stop", *claude_install.HOOK_EVENTS}
+
+    claude_install.uninstall(settings)
+
+    assert settings.read_text(encoding="utf-8") == text
+
+
+def test_uninstall_drops_only_the_event_keys_this_operation_emptied(tmp_path):
+    """An array aft filled and then emptied goes; one holding their hook stays."""
+    settings = settings_in(tmp_path)
+    theirs = {"hooks": [{"type": "command", "command": "echo theirs"}]}
+    write_settings(settings, {"hooks": {"SessionStart": [theirs]}})
 
     claude_install.install(settings)
     claude_install.uninstall(settings)
 
-    assert read_settings(settings) == {
-        "model": "claude-opus",
-        "hooks": {"SessionStart": [], "PreCompact": [], "SessionEnd": []},
-    }
+    assert read_settings(settings) == {"hooks": {"SessionStart": [theirs]}}
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        [],
+        [{"hooks": [{"type": "command", "command": "echo theirs"}]}],
+    ],
+)
+def test_uninstall_leaves_an_event_array_it_did_not_empty(tmp_path, array):
+    """An array this operation emptied nothing out of keeps its key, empty or populated."""
+    settings = settings_in(tmp_path)
+    text = write_settings(settings, {"hooks": {"PreCompact": array}})
+
+    change = claude_install.uninstall(settings)
+
+    assert change.changed is False and change.preview == ""
+    assert settings.read_text(encoding="utf-8") == text
 
 
 def test_uninstall_leaves_a_hooks_object_the_file_already_had(tmp_path):
+    """The ``hooks`` object the file already had keeps its key; only aft's event keys leave."""
     settings = settings_in(tmp_path)
-    write_settings(settings, {"hooks": {}})
+    text = write_settings(settings, {"hooks": {}})
 
     claude_install.install(settings)
     claude_install.uninstall(settings)
 
-    assert read_settings(settings) == {
-        "hooks": {"SessionStart": [], "PreCompact": [], "SessionEnd": []}
-    }
+    assert read_settings(settings) == {"hooks": {}}
+    assert settings.read_text(encoding="utf-8") == text
 
 
 def test_uninstall_leaves_a_matcher_group_that_held_only_our_hook(tmp_path):
@@ -366,17 +399,23 @@ def test_uninstall_leaves_a_matcher_group_that_held_only_our_hook(tmp_path):
     }
 
 
-def test_install_leaves_a_hand_written_element_of_the_event_list_where_it_is(tmp_path):
-    """An element one level above what an install writes is not aft's to rewrite or move."""
+@pytest.mark.parametrize(
+    "element",
+    [
+        {"type": "command", "command": HOOK_COMMAND, "timeout": 30},
+        {"matcher": "clear", "hooks": [{"type": "command", "command": HOOK_COMMAND}]},
+    ],
+)
+def test_install_adds_no_copy_of_a_command_an_event_list_already_runs(tmp_path, element):
+    """An event list already running aft's command gets no second copy of it."""
     settings = settings_in(tmp_path)
-    hand_written = {"type": "command", "command": HOOK_COMMAND, "timeout": 30}
-    write_settings(settings, {"hooks": {"SessionStart": [hand_written]}})
+    write_settings(settings, {"hooks": {"SessionStart": [element]}})
 
-    claude_install.install(settings)
+    assert claude_install.install(settings).changed is True
 
-    after = read_settings(settings)["hooks"]["SessionStart"]
-    assert after[0] == hand_written
-    assert after[-1] == {"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]}
+    after = read_settings(settings)
+    assert after["hooks"]["SessionStart"] == [element]
+    assert set(after["hooks"]) == set(claude_install.HOOK_EVENTS)
 
 
 def test_uninstall_leaves_a_hand_written_element_of_the_event_list(tmp_path):
@@ -420,8 +459,7 @@ def test_everything_aft_did_not_add_survives_install_and_uninstall_in_order(tmp_
                 },
                 {"matcher": "clear", "hooks": []},
             ],
-            "PreCompact": [],
-            "SessionEnd": [],
+            # PreCompact and SessionEnd held nothing but aft's own entry, so both keys left.
         }
     }
 
@@ -684,6 +722,28 @@ def test_the_command_reports_a_settings_path_it_cannot_open(tmp_path, monkeypatc
 
     assert capsys.readouterr().err.startswith("aft: cannot read")
     assert settings.is_dir() and list(settings.iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can search a directory at any mode")
+def test_the_command_reports_a_settings_directory_it_cannot_search(tmp_path, monkeypatch, capsys):
+    """A settings directory the user cannot search is refused, never raised as a traceback."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    text = '{"model": "claude-opus"}\n'
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(text, encoding="utf-8")
+    os.chmod(settings.parent, 0o400)  # readable, but no name inside can be looked up
+    try:
+        assert main(["install", "claude"]) == 2
+        refusal = capsys.readouterr().err
+    finally:
+        os.chmod(settings.parent, 0o700)
+
+    assert refusal.startswith("aft: cannot read")
+    assert "Traceback" not in refusal
+    assert settings.read_text(encoding="utf-8") == text
+    assert list(settings.parent.iterdir()) == [settings]
 
 
 def test_the_command_reports_a_settings_file_it_cannot_write(tmp_path, monkeypatch, capsys):
