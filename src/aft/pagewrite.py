@@ -102,7 +102,7 @@ def _fact_line(
 
 def _scalar(value: str) -> str:
     """A frontmatter value as one YAML line: plain where that round-trips, else quoted."""
-    if _PLAIN_YAML.match(value):
+    if _PLAIN_YAML.fullmatch(value):
         try:
             if yaml.safe_load(value) == value:
                 return value
@@ -162,11 +162,6 @@ def _section_for(kind: str) -> str:
     return section
 
 
-def _guard_state(fact: page.Fact, allowed: tuple[str, ...], action: str) -> None:
-    if fact.state not in allowed:
-        raise WriteError(f"cannot {action} a {fact.state} fact; expected {' or '.join(allowed)}")
-
-
 def _guard_struck(fact: page.Fact, action: str) -> None:
     if fact.struck:
         raise WriteError(f"cannot {action} a struck line; it carries its own marker")
@@ -176,9 +171,9 @@ class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
     Read a page in, apply the operations, and write ``render()`` out. Operations take
-    the ``page.Fact`` they are about, taken from ``facts`` or looked up by statement
-    with ``fact()``; since an edit can move lines, a fact from before the last edit is
-    refused rather than applied to the wrong line.
+    the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
+    statement with ``fact()``; since an edit can move lines, a fact from before the
+    last edit is refused rather than applied to the wrong line.
 
     Operations that create or move a line return its new ``page.Fact``, because its
     line number has changed; operations that edit a line in place return whether the
@@ -201,14 +196,6 @@ class PageDoc:
     def page(self) -> page.Page:
         """The parse of the current text."""
         return self._page
-
-    @property
-    def facts(self) -> list[page.Fact]:
-        return self._page.facts
-
-    @property
-    def sections(self) -> list[str]:
-        return self._page.sections
 
     @property
     def sources(self) -> dict[str, dict]:

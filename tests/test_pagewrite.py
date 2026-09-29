@@ -47,8 +47,6 @@ aft:
 - Long sessions need checkpoints. [inferred] 2026-09-30 [^s2] (signals 1/3, sessions 1/2)
 """
 
-STATE_FACT = "- The GPU host runs vLLM. [observed] 2026-09-30 [^s1]"
-HANDED_STRUCK = "- ~~The GPU host runs vLLM.~~ [observed] 2026-09-30 [^s1] deprecated last year"
 BROKEN_FM = PAGE.replace("title: widget", "title: [widget")
 
 CANDIDATE = "- Long sessions need checkpoints. [inferred] 2026-09-30 [^s2]"
@@ -91,6 +89,25 @@ sources:
 aft:
   project: {project_id}
 ---
+
+## Facts
+"""
+
+INLINE_SOURCES = """\
+---
+type: Project
+title: widget
+description: A page whose sources list was typed by hand.
+sources: [{id: s1, resource: aft://session/pi/def, quote: "switched to FTS5"}]
+aft:
+  project: {project_id}
+---
+
+## Facts
+"""
+
+NO_FRONTMATTER = """\
+# Widget
 
 ## Facts
 """
@@ -152,11 +169,6 @@ def written(initialized, doc: pagewrite.PageDoc) -> page.Page:
 
 def states(parsed: page.Page, section: str) -> list[tuple[str, str]]:
     return [(fact.statement, fact.state) for fact in parsed.facts if fact.section == section]
-
-
-def archived(initialized) -> list[str]:
-    """The lines of the project's archive file, as the writer left it on disk."""
-    return (initialized.vault / "archive/widget.md").read_text().split("\n")
 
 
 def test_an_untouched_page_renders_as_it_was_read():
@@ -360,6 +372,66 @@ def test_add_source_adds_the_key_where_design_orders_it(initialized):
     ]
 
 
+def test_add_source_refuses_a_list_someone_typed_inline(initialized):
+    doc = make(initialized, INLINE_SOURCES)
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="cannot append to an inline sources list"):
+        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+    assert doc.render() == before
+
+
+def test_add_source_refuses_a_page_with_no_frontmatter(initialized):
+    doc = make(initialized, NO_FRONTMATTER)
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="no frontmatter to add a source to"):
+        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+    assert doc.render() == before
+
+
+def test_a_source_value_ending_in_a_line_break_is_written_as_one_line(initialized, doc):
+    """A quote or title off a transcript keeps its break: the value goes out quoted on
+    a single line, so the frontmatter gains no stray blank line.
+    """
+    before = doc.render()
+    new_id = doc.add_source(
+        "aft://session/pi/ghi#entry-4",
+        title="Capture hook test\n",
+        quote="we will use SQLite\n",
+    )
+    assert new_id == "s3"
+    written(initialized, doc)
+    assert edits(before, doc.render()) == (
+        (),
+        (
+            "  - id: s3",
+            "    resource: aft://session/pi/ghi#entry-4",
+            '    title: "Capture hook test\\n"',
+            '    quote: "we will use SQLite\\n"',
+        ),
+    )
+    assert doc.sources["s3"] == {
+        "id": "s3",
+        "resource": "aft://session/pi/ghi#entry-4",
+        "title": "Capture hook test\n",
+        "quote": "we will use SQLite\n",
+    }
+
+
+def test_a_source_value_with_an_interior_line_break_rounds_trip(initialized, doc):
+    before = doc.render()
+    doc.add_source("aft://edit/4f2a91c", quote="first line\nsecond line")
+    written(initialized, doc)
+    assert edits(before, doc.render()) == (
+        (),
+        (
+            "  - id: s3",
+            "    resource: aft://edit/4f2a91c",
+            '    quote: "first line\\nsecond line"',
+        ),
+    )
+    assert doc.sources["s3"]["quote"] == "first line\nsecond line"
+
+
 def test_a_hand_typed_tail_makes_every_operation_on_the_candidate_refuse(initialized):
     counts = f"{CANDIDATE} (signals 1/3, sessions 1/2)"
     doc = make(initialized, PAGE.replace(counts, f"{counts} pending review"))
@@ -483,6 +555,23 @@ def test_promote_undoes_the_move_when_the_new_line_would_not_parse(initialized):
     assert doc.render() == before
 
 
+def test_a_note_a_person_typed_under_a_candidate_stops_the_move(initialized):
+    """A callout is text these operations do not own: a move that would change what it
+    reads as is refused, and the note stays where it was typed.
+    """
+    line = f"{CANDIDATE} (signals 1/3, sessions 1/2)"
+    note = f"{line}\n\n> [!question] 2026-10-01\n> Did the capture hook replace this?"
+    doc = make(initialized, PAGE.replace(line, note))
+    assert [message for _, message in doc.page.errors] == [
+        "a callout cannot follow a candidate fact",
+        "expected '> [!conflict] YYYY-MM-DD' or '> [!question] ...'",
+    ]
+    before = doc.render()
+    with pytest.raises(pagewrite.WriteError, match="a callout must follow the fact"):
+        doc.promote(doc.fact("Long sessions need checkpoints."), "state")
+    assert doc.render() == before
+
+
 def test_a_page_that_arrives_broken_still_takes_its_edit(initialized):
     doc = make(initialized, BROKEN)
     before = doc.render()
@@ -505,6 +594,14 @@ def test_a_fact_read_before_an_edit_is_refused(initialized, doc):
     doc.add_fact("decision", "Ship from a tag.", "stated", "2026-10-04", ("s1",))
     with pytest.raises(pagewrite.WriteError, match="moved"):
         doc.update_counts(candidate)
+
+
+def test_a_statement_on_two_lines_is_only_named_by_a_fact_handle(initialized, doc):
+    """``fact()`` answers for one line or refuses: nothing stops duplicate statements."""
+    doc.add_fact("state", "The GPU host runs vLLM.", "observed", "2026-10-04", ("s1",))
+    written(initialized, doc)
+    with pytest.raises(pagewrite.WriteError, match="2 lines read"):
+        doc.fact("The GPU host runs vLLM.")
 
 
 def test_a_struck_candidate_takes_no_edit_that_would_unstrike_it(initialized):
