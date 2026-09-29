@@ -1923,8 +1923,9 @@ def test_dream_commit_carries_only_the_paths_the_run_wrote(initialized, home, fa
         sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
     )
 
+    p_id = registry.by_slug("widget").id
     notes = cfg.vault / "projects" / "widget" / "notes.md"
-    notes.write_text(NOTES_PAGE, encoding="utf-8")
+    notes.write_text(NOTES_PAGE.replace("p_widget", p_id), encoding="utf-8")
     vault.commit(cfg.vault, ["projects/widget/notes.md"], "add notes")
 
     write_digest(
@@ -1992,8 +1993,9 @@ def test_lint_rollback_restores_run_writes_not_unrelated_edits(
         sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
     )
 
+    p_id = registry.by_slug("widget").id
     notes = cfg.vault / "projects" / "widget" / "notes.md"
-    notes.write_text(NOTES_PAGE, encoding="utf-8")
+    notes.write_text(NOTES_PAGE.replace("p_widget", p_id), encoding="utf-8")
     vault.commit(cfg.vault, ["projects/widget/notes.md"], "add notes")
     notes.write_text(notes.read_text() + "- No RGB on the desk lamp. [stated] 2026-10-04 [^s1]\n")
 
