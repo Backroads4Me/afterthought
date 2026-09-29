@@ -586,6 +586,47 @@ class PageDoc:
             self._apply(at, at + 1, [])
         return True
 
+    def add_callout(
+        self,
+        fact: page.Fact,
+        type: str,
+        text: str,
+        date: str,
+    ) -> None:
+        """Add an open [!conflict] or [!question] callout under an active fact line (design 6)."""
+        found = self._resolve(fact)
+        if found.section == page.CANDIDATES:
+            raise WriteError("a candidate line cannot have a callout")
+        if found.state != page.ACTIVE or found.callouts:
+            msg = (
+                f"only an active line without open notes can receive a callout; "
+                f"this is {found.state}"
+            )
+            raise WriteError(msg)
+        date = _check_date(date)
+        if type == "needs-you":
+            type = "question"
+        if type not in ("conflict", "question"):
+            raise WriteError(f"unknown callout type {type!r}")
+        text = text.strip()
+        if not text:
+            raise WriteError("a callout needs text")
+        self._check_citations(text)
+
+        callout_lines = [f"> [!{type}] {date}"]
+        for line in text.splitlines():
+            line_str = line.strip()
+            if line_str.startswith(">"):
+                line_str = line_str[1:].lstrip()
+            callout_lines.append(f"> {line_str}" if line_str else ">")
+
+        at = found.line - 1
+        has_next_non_empty = at + 1 < len(self.lines) and bool(self.lines[at + 1].strip())
+        insert = ["", *callout_lines, ""] if has_next_non_empty else ["", *callout_lines]
+
+        with self._atomic():
+            self._apply(at + 1, at + 1, insert)
+
     # Lines and frontmatter
 
     def fact(self, statement: str) -> page.Fact:

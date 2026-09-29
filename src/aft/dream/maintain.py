@@ -6,6 +6,7 @@ flagging oversize pages, regenerating index.md files, and appending to log.md.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -135,7 +136,7 @@ def check_anchors(
                     target_str = str(word)
                     if rg_bin is not None:
                         rg_res = subprocess.run(
-                            [rg_bin, "-F", "-q", target_str],
+                            [rg_bin, "-F", "-q", "--", target_str],
                             input=content,
                             capture_output=True,
                             text=True,
@@ -282,17 +283,35 @@ def archive_superseded(
             needed_refs = list(fact.refs)
             if fact.superseded_by and fact.superseded_by not in needed_refs:
                 needed_refs.append(fact.superseded_by)
+
+            ref_mapping: dict[str, str] = {}
             for ref in needed_refs:
-                if ref not in doc_archive.sources:
-                    src_entry = doc.sources.get(ref)
-                    if src_entry:
-                        doc_archive.add_source(
-                            resource=src_entry.get("resource", ""),
-                            title=src_entry.get("title", ""),
-                            quote=src_entry.get("quote", ""),
+                src_entry = doc.sources.get(ref)
+                if src_entry:
+                    res = src_entry.get("resource", "")
+                    q = src_entry.get("quote", "")
+                    title = src_entry.get("title", "")
+                    target_id: str | None = None
+                    for existing_id, existing_s in doc_archive.sources.items():
+                        if existing_s.get("resource") == res and existing_s.get("quote") == q:
+                            target_id = existing_id
+                            break
+                    if target_id is None:
+                        target_id = doc_archive.add_source(
+                            resource=res,
+                            title=title,
+                            quote=q,
                         )
+                    ref_mapping[ref] = target_id
+
             section = fact.section or "Decisions"
             line_content = doc.archive_superseded(fact)
+            if ref_mapping:
+                line_content = re.sub(
+                    r"\[\^([A-Za-z0-9_-]+)\]",
+                    lambda m, mapping=ref_mapping: f"[^{mapping.get(m.group(1), m.group(1))}]",
+                    line_content,
+                )
             doc_archive._append_line(section, line_content)
             archived.append(
                 ArchivedLine(

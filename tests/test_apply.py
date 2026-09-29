@@ -384,10 +384,14 @@ def test_refused_supersede_becomes_conflict_or_needs_you(initialized, home, fake
     assert len(report.conflicts) == 1
     assert report.conflicts[0].new_statement == "Server has 8 cores."
 
-    # Standing lines untouched
+    # Standing lines untouched and callouts written to the page
     text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "- No RGB lighting. [stated] 2026-09-01 [^s1]" in text
     assert "- Server has 16 cores. [observed] 2026-09-20 [^s1]" in text
+    assert "> [!question]" in text
+    assert "observed RGB" in text
+    assert "> [!conflict]" in text
+    assert "seen 8 cores" in text
 
 
 def test_tentative_statement_stays_suggested(initialized, home, fake):

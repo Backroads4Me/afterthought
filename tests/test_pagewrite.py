@@ -1189,3 +1189,60 @@ def test_remove_candidate_removes_line_and_refuses_non_candidate_or_open_note(in
     doc.remove_candidate(doc.fact("Candidate to remove."))
     assert "Candidate to remove." not in doc.render()
     assert "Candidate with note." in doc.render()
+
+
+def test_add_callout_success_and_refusals(initialized):
+    """Adding a callout marks the active fact and refuses invalid states or citations."""
+    page_text = (
+        "---\n"
+        "type: Project\n"
+        "title: Demo\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-1#e1\n"
+        '    quote: "words 1"\n'
+        "aft:\n"
+        "  project: p_demo\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- Standing fact. [stated] 2026-10-01 [^s1]\n"
+        "- Another fact. [observed] 2026-10-01 [^s1]\n\n"
+        "## Candidates\n\n"
+        "- Candidate line. [inferred] 2026-10-01 [^s1] (signals 1/3, sessions 1/2)\n"
+    )
+    doc = make(initialized, page_text)
+
+    # Candidate refuses callout
+    with pytest.raises(pagewrite.WriteError, match="candidate line cannot have a callout"):
+        doc.add_callout(doc.fact("Candidate line."), "question", "Why?", "2026-10-02")
+
+    # Uncited footnote in callout text refuses
+    with pytest.raises(pagewrite.WriteError, match="source s99 is not in the frontmatter"):
+        doc.add_callout(
+            doc.fact("Standing fact."), "question", "Disputed by [^s99]", "2026-10-02"
+        )
+
+    # Unknown callout type refuses
+    with pytest.raises(pagewrite.WriteError, match="unknown callout type"):
+        doc.add_callout(doc.fact("Standing fact."), "info", "Info note", "2026-10-02")
+
+    # Success: add question callout
+    doc.add_callout(
+        doc.fact("Standing fact."), "question", "Is this choice durable? ([^s1])", "2026-10-02"
+    )
+    updated = doc.fact("Standing fact.")
+    assert updated.state == page.NEEDS_YOU
+    assert len(updated.callouts) == 1
+    assert updated.callouts[0].type == "question"
+    assert "> [!question] 2026-10-02" in doc.render()
+    assert "> Is this choice durable? ([^s1])" in doc.render()
+
+    # Once a note is open, adding another callout refuses
+    with pytest.raises(pagewrite.WriteError, match="without open notes"):
+        doc.add_callout(updated, "conflict", "Another dispute", "2026-10-03")
+
+    # Success: add conflict callout to another fact
+    doc.add_callout(doc.fact("Another fact."), "conflict", "Disputed fact.", "2026-10-02")
+    fact2 = doc.fact("Another fact.")
+    assert fact2.state == page.CONFLICT
+    assert "> [!conflict] 2026-10-02" in doc.render()

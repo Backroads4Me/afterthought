@@ -406,3 +406,115 @@ aft:
     assert {c.sid for c in cleared3} == {"s1", "s2"}
     p3 = page.parse(overview.read_text(), overview.relative_to(root))
     assert p3.facts[0].state == page.ACTIVE
+
+
+def test_anchor_check_handles_word_starting_with_dash(initialized, tmp_path):
+    """An anchor word starting with - is passed with -- to rg and does not exit 2."""
+    repo = make_repo(tmp_path / "widget")
+    (repo / "cli.py").write_text("def run(options): return '--dry-run' in options\n")
+    run_git(["add", "cli.py"], repo)
+    run_git(["commit", "-m", "add dry-run option"], repo)
+    commit_sha = run_git(["rev-parse", "HEAD"], repo)
+
+    registry = Registry.load(initialized.registry_path)
+    proj = registry.add("widget", "Widget")
+    registry.add_path(proj, path_key(initialized.host, repo))
+    registry.save()
+
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(f"""---
+type: Project
+title: widget
+sources:
+  - id: s1
+    resource: aft://session/claude/123#e1
+    quote: "dry run mode"
+aft:
+  project: {proj.id}
+  anchors:
+    s1: {{path: cli.py, all_of: ["--dry-run"], commit: {commit_sha}}}
+---
+
+## Facts
+
+- CLI supports dry run mode. [observed] 2026-09-30 [^s1]
+""")
+    vault.commit(root, ["projects"], "seed")
+
+    broken, cleared = maintain.check_anchors(root, proj, TODAY, initialized.host)
+    assert broken == []
+    assert cleared == []
+    p = page.parse(overview.read_text(), overview.relative_to(root))
+    assert p.facts[0].state == page.ACTIVE
+
+
+def test_archived_superseded_line_remaps_footnotes(initialized):
+    """Archived superseded lines remap footnote ids to the archive page sources."""
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+
+    overview.write_text("""---
+type: Project
+title: widget
+sources:
+  - id: s1
+    resource: aft://session/c/1#e1
+    quote: "active quote 1"
+  - id: s2
+    resource: aft://session/c/1#e2
+    quote: "active quote 2"
+  - id: s3
+    resource: aft://session/c/2#e1
+    quote: "superseded line quote"
+  - id: s4
+    resource: aft://session/c/2#e2
+    quote: "other quote"
+  - id: s5
+    resource: aft://session/c/3#e1
+    quote: "replacement line quote"
+aft:
+  project: p_widget
+---
+
+## Decisions
+
+- Active fact. [stated] 2026-09-01 [^s1]
+- ~~Expired decision.~~ [stated] 2026-05-01 [^s3] superseded 2026-05-02 by [^s5]
+""")
+    vault.commit(root, ["projects"], "seed")
+
+    archived = maintain.archive_superseded(root, "widget", TODAY)
+    assert len(archived) == 1
+    assert archived[0].statement == "Expired decision."
+
+    # Verify original page no longer has the superseded line
+    doc_orig = page.parse(overview.read_text(), overview.relative_to(root))
+    assert len(doc_orig.facts) == 1
+    assert doc_orig.facts[0].statement == "Active fact."
+
+    # Verify archive page
+    archive_file = root / "archive" / "projects" / "widget" / "overview.md"
+    assert archive_file.exists()
+    doc_archive = page.parse(archive_file.read_text(), archive_file.relative_to(root))
+    assert len(doc_archive.errors) == 0
+    assert len(doc_archive.facts) == 1
+
+    archived_fact = doc_archive.facts[0]
+    assert archived_fact.statement == "Expired decision."
+    assert archived_fact.state == page.SUPERSEDED
+    assert archived_fact.superseded_by is not None
+
+    # Both footnotes on the archived line must resolve to sources in the archive page
+    source_list = (doc_archive.frontmatter or {}).get("sources") or []
+    source_map = {str(s["id"]): s for s in source_list}
+    for ref in archived_fact.refs:
+        assert ref in source_map
+        assert source_map[ref]["quote"] == "superseded line quote"
+
+    by_ref = archived_fact.superseded_by
+    assert by_ref in source_map
+    assert source_map[by_ref]["quote"] == "replacement line quote"
+
