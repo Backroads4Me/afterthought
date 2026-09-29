@@ -15,6 +15,7 @@ from aft import __version__, adapters, gitutil, keys, lint, vault
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, load, resolve_home
 from aft.events import AdapterError, SessionEvent
 from aft.gitutil import GitError
+from aft.install import pi as pi_install
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -30,7 +31,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return args.handler(args)
-    except (ConfigError, RegistryError, vault.VaultError, GitError, UsageError) as exc:
+    except (
+        ConfigError,
+        pi_install.InstallError,
+        RegistryError,
+        vault.VaultError,
+        GitError,
+        UsageError,
+    ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
 
@@ -73,6 +81,16 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
+    p = sub.add_parser("install", help="install afterthought into an agent's own configuration")
+    isub = p.add_subparsers(metavar="agent")
+    q = isub.add_parser("pi", help="install the afterthought extension in pi's extensions dir")
+    q.add_argument("--dry-run", action="store_true", help="print the extension diff, write nothing")
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's own extension and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_pi)
     return parser
 
 
@@ -205,6 +223,29 @@ def cmd_lint(args) -> int:
     if findings:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_install_pi(args) -> int:
+    """Copy or remove afterthought's extension in the directory pi loads extensions from."""
+    extensions = pi_install.extensions_dir()
+    change = (
+        pi_install.uninstall(extensions, dry_run=args.dry_run)
+        if args.uninstall
+        else pi_install.install(extensions, dry_run=args.dry_run)
+    )
+    target = pi_install.target_path(extensions)
+    if args.dry_run:
+        print(change.diff or f"{target} is already what afterthought ships")
+        return 0
+    if change.backup is not None:
+        print(f"backed up the previous {target.name} to {change.backup}")
+    if args.uninstall:
+        print(
+            f"removed {target}" if change.changed else f"no afterthought extension in {extensions}"
+        )
+    else:
+        print(f"installed {target}" if change.changed else f"{target} is already up to date")
     return 0
 
 
