@@ -176,8 +176,8 @@ class PageDoc:
 
     Read a page in, apply the operations, and write ``render()`` out. Operations take
     the ``page.Fact`` they are about, taken from ``page.facts`` or looked up by
-    statement with ``fact()``; since an edit can move lines, a fact from before the
-    last edit is refused rather than applied to the wrong line.
+    statement with ``fact()``; since an edit can move lines, a handle whose line has
+    moved or changed since it was taken is refused rather than applied to the wrong line.
 
     Operations that create or move a line return its new ``page.Fact``, because its
     line number has changed; operations that edit a line in place return whether the
@@ -455,6 +455,8 @@ class PageDoc:
         if header is None:
             return self._insert_section(section, line)
         at = self._section_end(header)
+        # Design 6 keeps a blank line under a section header, and a note belongs to the
+        # fact above it, so a fact appended after either starts below a blank line.
         gap = at == header + 1 or self.lines[at - 1].rstrip().startswith(">")
         self._apply(at, at, ["", line] if gap else [line])
         return at + (2 if gap else 1)
