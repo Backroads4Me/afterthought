@@ -1,0 +1,412 @@
+"""Search, read and trace: query memory, inspect pages, and trace evidence.
+
+The search index is queried with BM25 ranking over active memory (pages, digests,
+and evidence) by default. The archive is searched only with --archive, and dream
+reports only with --reports. Reading opens pages at outline, abstract, or full depth.
+Tracing links a curated fact's source quote to its session context in the evidence archive.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from aft import evidence, index, inject, keys, page, vault
+from aft.config import Config
+from aft.registry import Registry
+
+_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
+
+class SearchError(Exception):
+    """A search, read, or trace operation that cannot be completed."""
+
+
+@dataclass(frozen=True)
+class Hit:
+    """One search hit from the index."""
+
+    path: str
+    description: str
+    snippet: str
+    collection: str = ""
+    heading: str = ""
+    rank: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "description": self.description,
+            "snippet": self.snippet,
+        }
+
+
+def search(
+    config: Config,
+    query: str,
+    *,
+    project: str | None = None,
+    all_projects: bool = False,
+    archive: bool = False,
+    reports: bool = False,
+    limit: int = 8,
+) -> list[Hit]:
+    """Query the search index with BM25 ranking across active collections."""
+    vault.require(config)
+    index.update(config)
+
+    fts5_query = _to_fts5_query(query)
+    if not fts5_query:
+        return []
+
+    target_project_id: str | None = None
+    filter_global_only = False
+
+    if not all_projects:
+        registry = Registry.load(config.registry_path)
+        if project is not None:
+            proj = registry.by_slug(project)
+            if proj is None:
+                raise SearchError(f"unknown project {project!r}")
+            target_project_id = proj.id
+        else:
+            resolution = keys.resolve(Path.cwd(), registry, config.host)
+            if resolution.project is not None:
+                target_project_id = resolution.project.id
+            else:
+                filter_global_only = True
+
+    db_path = config.home / index.INDEX_NAME
+    if not db_path.exists():
+        return []
+
+    collections = [index.PAGES, index.DIGESTS, index.EVIDENCE]
+    if archive:
+        collections.append(index.ARCHIVE)
+    if reports:
+        collections.append(index.REPORTS)
+
+    conn = sqlite3.connect(db_path, timeout=index.BUSY_TIMEOUT_SECONDS)
+    conn.row_factory = sqlite3.Row
+    try:
+        available_tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "library" in available_tables and "library" not in collections:
+            collections.append("library")
+
+        active_collections = [c for c in collections if c in available_tables]
+        if not active_collections:
+            return []
+
+        selects: list[str] = []
+        params: list[Any] = []
+
+        for col in active_collections:
+            rank_expr = index.rank_expression(col)
+            where_clauses = [f"{col} MATCH ?"]
+            params.append(fts5_query)
+
+            if target_project_id is not None:
+                where_clauses.append("(project_id = ? OR project_id IS NULL)")
+                params.append(target_project_id)
+            elif filter_global_only:
+                where_clauses.append("project_id IS NULL")
+
+            where_sql = " AND ".join(where_clauses)
+            selects.append(
+                f"SELECT '{col}' AS collection, path, description, heading, "
+                f"snippet({col}, -1, '', '', '...', 16) AS snippet, "
+                f"{rank_expr} AS rank "
+                f"FROM {col} WHERE {where_sql}"
+            )
+
+        full_sql = " UNION ALL ".join(selects) + " ORDER BY rank ASC"
+        cursor = conn.execute(full_sql, params)
+
+        seen_paths: set[str] = set()
+        hits: list[Hit] = []
+
+        for row in cursor.fetchall():
+            path_val = row["path"]
+            if path_val in seen_paths:
+                continue
+            seen_paths.add(path_val)
+
+            desc = " ".join((row["description"] or "").split())
+            snip = " ".join((row["snippet"] or "").split())
+
+            hits.append(
+                Hit(
+                    path=path_val,
+                    description=desc,
+                    snippet=snip,
+                    collection=row["collection"],
+                    heading=row["heading"] or "",
+                    rank=float(row["rank"]),
+                )
+            )
+            if len(hits) >= limit:
+                break
+
+        return hits
+    except sqlite3.OperationalError as exc:
+        raise SearchError(f"search failed: {exc}") from exc
+    finally:
+        conn.close()
+
+
+def search_command(
+    config: Config,
+    query: str,
+    *,
+    project: str | None = None,
+    all_projects: bool = False,
+    archive: bool = False,
+    reports: bool = False,
+    as_json: bool = False,
+    limit: int = 8,
+) -> int:
+    """Run search and print formatted hits."""
+    hits = search(
+        config,
+        query,
+        project=project,
+        all_projects=all_projects,
+        archive=archive,
+        reports=reports,
+        limit=limit,
+    )
+    if as_json:
+        print(json.dumps([h.to_dict() for h in hits], indent=2))
+    else:
+        for hit in hits:
+            desc = hit.description or "-"
+            print(f"{hit.path}\t{desc}\t{hit.snippet}")
+    return 0
+
+
+def read_page(config: Config, path_str: str, level: str = "full") -> str:
+    """Read a page file at outline, abstract, or full depth."""
+    path = _resolve_page_path(config, path_str)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SearchError(f"cannot read {path_str}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise SearchError(f"{path_str} is not UTF-8 text: {exc}") from exc
+
+    if level == "full":
+        return text
+    elif level == "outline":
+        return _extract_outline(text)
+    elif level == "abstract":
+        return _extract_abstract(text, path)
+    else:
+        raise SearchError(f"unknown level {level!r}; expected outline, abstract, or full")
+
+
+def read_command(config: Config, path: str, level: str = "full") -> int:
+    """Run read and print the page content at the requested depth."""
+    content = read_page(config, path, level=level)
+    if content:
+        print(content)
+    return 0
+
+
+def trace(config: Config, page_path_str: str, source_id: str) -> str:
+    """Trace a source quote from a page back to its session evidence context."""
+    path = _resolve_page_path(config, page_path_str)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SearchError(f"cannot read {page_path_str}: {exc}") from exc
+
+    frontmatter, _, _, err = page.split_frontmatter(text)
+    if err or not isinstance(frontmatter, dict):
+        raise SearchError(
+            f"cannot parse frontmatter of {page_path_str}: {err or 'missing frontmatter'}"
+        )
+
+    clean_id = source_id.strip().removeprefix("[").removesuffix("]").removeprefix("^")
+    sources = frontmatter.get("sources")
+    if not isinstance(sources, list):
+        raise SearchError(f"no sources found in {page_path_str}")
+
+    matched_source: dict | None = None
+    for s in sources:
+        if isinstance(s, dict) and str(s.get("id")) == clean_id:
+            matched_source = s
+            break
+
+    if matched_source is None:
+        raise SearchError(f"source {source_id!r} not found in {page_path_str}")
+
+    quote = str(matched_source.get("quote") or "")
+    resource = str(matched_source.get("resource") or "")
+
+    entries_text = _find_trace_context(config, resource, quote)
+    if entries_text is None:
+        return (
+            f"{quote}\n\nThe full context has expired."
+            if quote
+            else "The full context has expired."
+        )
+    return f"{quote}\n\n{entries_text}" if quote else entries_text
+
+
+def trace_command(config: Config, page: str, source_id: str | None = None) -> int:
+    """Run trace and print the quote and evidence context."""
+    if source_id is None:
+        if "#" in page:
+            page, _, source_id = page.partition("#")
+        else:
+            raise SearchError("source id required: aft trace <page> <source-id>")
+
+    output = trace(config, page, source_id)
+    print(output)
+    return 0
+
+
+def _to_fts5_query(query: str) -> str | None:
+    """Extract and quote search terms for an FTS5 MATCH expression."""
+    terms: list[str] = []
+    for match in re.finditer(r'"([^"]*)"|(\S+)', query):
+        quoted, bare = match.groups()
+        if quoted:
+            s = quoted.strip()
+            if s:
+                escaped = s.replace('"', '""')
+                terms.append(f'"{escaped}"')
+        elif bare:
+            s = bare.strip()
+            if s:
+                escaped = s.replace('"', '""')
+                terms.append(f'"{escaped}"')
+    if not terms:
+        return None
+    return " OR ".join(terms)
+
+
+def _resolve_page_path(config: Config, path_str: str) -> Path:
+    """Resolve a page path against the current directory or vault."""
+    p = Path(path_str)
+    if p.is_absolute() and p.exists():
+        return p
+    cwd_path = Path.cwd() / p
+    if cwd_path.exists():
+        return cwd_path
+    vault_path = config.vault / p
+    if vault_path.exists():
+        return vault_path
+    if p.exists():
+        return p
+    raise SearchError(f"file not found: {path_str}")
+
+
+def _extract_outline(text: str) -> str:
+    """Extract headings outside fenced code blocks."""
+    _, body, _, _ = page.split_frontmatter(text)
+    headings: list[str] = []
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    for line in body.splitlines():
+        fence_match = _FENCE.match(line)
+        if fence_match:
+            chars = fence_match.group(1)
+            char = chars[0]
+            count = len(chars)
+            if not in_fence:
+                in_fence = True
+                fence_char = char
+                fence_len = count
+                continue
+            elif char == fence_char and count >= fence_len and not fence_match.group(2).strip():
+                in_fence = False
+                continue
+        if in_fence:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            headings.append(stripped)
+    return "\n".join(headings)
+
+
+def _extract_abstract(text: str, path: Path) -> str:
+    """Extract page description plus active facts."""
+    frontmatter, _, _, _ = page.split_frontmatter(text)
+    description = ""
+    if isinstance(frontmatter, dict):
+        description = inject.one_line(frontmatter.get("description")) or ""
+    parsed = page.parse(text, path)
+    active_facts = [f for f in parsed.facts if f.state == page.ACTIVE]
+    lines: list[str] = []
+    if description:
+        lines.append(description)
+    if active_facts:
+        if lines:
+            lines.append("")
+        for fact in active_facts:
+            lines.append(f"- {fact.statement}")
+    return "\n".join(lines)
+
+
+def _find_trace_context(config: Config, resource: str, quote: str) -> str | None:
+    """Find the three entries around a resource quote in the evidence archive."""
+    parsed = _parse_session_resource(resource)
+    if parsed is None:
+        return None
+    session_id, entry_id = parsed
+
+    session_entries = evidence.entries(config, session_id)
+    if not session_entries:
+        return None
+
+    target_idx: int | None = None
+    for idx, entry in enumerate(session_entries):
+        if entry.id == entry_id:
+            target_idx = idx
+            break
+
+    if target_idx is None and quote:
+        for idx, entry in enumerate(session_entries):
+            if evidence.find_quote(config, session_id, entry.id, quote):
+                target_idx = idx
+                break
+
+    if target_idx is None:
+        return None
+
+    if len(session_entries) <= 3:
+        window = session_entries
+    elif target_idx == 0:
+        window = session_entries[:3]
+    elif target_idx == len(session_entries) - 1:
+        window = session_entries[-3:]
+    else:
+        window = session_entries[target_idx - 1 : target_idx + 2]
+
+    rendered = [
+        f"[{entry.id}] {entry.role.upper()} {entry.time.isoformat()}:\n{entry.text}"
+        for entry in window
+    ]
+    return "\n\n".join(rendered)
+
+
+def _parse_session_resource(resource: str) -> tuple[str, str] | None:
+    """Parse session id and entry id from an aft session resource URI."""
+    if not resource.startswith("aft://session/"):
+        return None
+    rest = resource.removeprefix("aft://session/")
+    path_part, sep, entry_id = rest.partition("#")
+    if not sep or not entry_id:
+        return None
+    parts = path_part.split("/")
+    session_id = parts[-1]
+    return session_id, entry_id
