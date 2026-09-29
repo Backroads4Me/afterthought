@@ -10,6 +10,7 @@ a layer's first line leaves that layer out and says so plainly under ``Cut``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -82,24 +83,37 @@ def _heading(project: Project, overview: pagemod.Page | None) -> Part:
 
 
 def _handoff_part(config: Config, slug: str) -> Part:
-    """The handoff of the newest digest for the project, if there is one. Digests arrive
-    with M2.6, so until then this part is empty."""
+    """The "Last session" part: the handoff of the project's newest digest, and nothing
+    when the project has no digest."""
     digest = _newest_digest(config.vault / "digests" / slug)
     return _part("Last session", [] if digest is None else handoff(_frontmatter(digest)))
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The latest digest under ``directory``, which M2.6 files at
-    ``digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md`` (design 6)."""
+    """The latest digest under ``directory``, which the digest step files under ``digests/``
+    as design 6 lays out: on the newest day, the highest part."""
     return max(directory.rglob("*.md"), key=_digest_date, default=None)
 
 
-def _digest_date(digest: Path) -> tuple[int, int, str]:
-    """The date a digest is filed under: its year and month directories as numbers,
-    then the ``<date>-<agent>-<session>`` name that follows them. The directories read
-    as numbers so an unpadded month cannot sort an older digest above a newer one."""
+# A digest name's part suffix: a session's second and later digests of one day are filed
+# as ``<date>-<agent>-<session>-2``, ``-3``, and a name without a suffix is part 1.
+_PART = re.compile(r"-(\d+)\Z")
+
+
+def _digest_date(digest: Path) -> tuple[int, int, str, int]:
+    """Where a digest sorts: its year and month directories as numbers, then the
+    ``<date>-<agent>-<session>`` name that follows them, then its part as a number.
+
+    The directories read as numbers so an unpadded month cannot sort an older digest above
+    a newer one, and the part reads as a number so a session's ``-2`` sorts above its
+    unsuffixed first page and ``-10`` above ``-9``. A session id whose last group is digits
+    reads here as a name and a large part; its own later parts carry the whole id in their
+    name, which sorts above that shorter name, so the highest part still wins.
+    """
     parts = digest.parts
-    return (_as_int(parts[-3]), _as_int(parts[-2]), digest.name)
+    found = _PART.search(digest.stem)
+    name, part = (digest.stem[: found.start()], int(found.group(1))) if found else (digest.stem, 1)
+    return (_as_int(parts[-3]), _as_int(parts[-2]), name, part)
 
 
 def _as_int(part: str) -> int:

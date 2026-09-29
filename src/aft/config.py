@@ -48,6 +48,15 @@ class DreamConfig:
 
 
 @dataclass(frozen=True)
+class WorkConfig:
+    """The cap on one day of ``aft work``. DESIGN 13 expects about 55,000 input tokens a
+    day of digests plus a smaller amount of dreaming; four times that bounds a loop that
+    has gone wrong without ever parking an ordinary day's work."""
+
+    daily_token_budget: int = 200_000
+
+
+@dataclass(frozen=True)
 class InjectConfig:
     max_chars: int = 8000
 
@@ -67,6 +76,7 @@ class Settings:
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     dream: DreamConfig = field(default_factory=DreamConfig)
+    work: WorkConfig = field(default_factory=WorkConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
 
@@ -197,6 +207,12 @@ retention_days = 90
 [dream]
 interval_minutes = 30
 quiet_minutes = 15
+
+[work]
+# Tokens one day of "aft work" may spend before the rest of the queue waits for
+# tomorrow. An ordinary day of digests is about 55,000, so this is about four times
+# that: enough for a heavy day, short enough to bound a run that has gone wrong.
+daily_token_budget = 200000
 
 [inject]
 max_chars = 8000
