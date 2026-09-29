@@ -161,9 +161,9 @@ class NewFact:
     edit: a global fact goes only to a global page, and only when it is ``[stated]``."""
 
     explicit_correction: bool = False
-    """You corrected the record yourself. It counts only when a verified quote of yours
-    backs it; then it skips R3's gate and replaces any standing line its quote is newer
-    than (design 9)."""
+    """You corrected the record yourself. It counts only on a ``[stated]`` fact backed by a
+    verified quote of yours from a primary session, and then it skips R3's gate, which
+    promotes a candidate line it confirms (design 9)."""
 
 
 @dataclass(frozen=True)
@@ -282,7 +282,9 @@ def check(
         return reject("R1")
 
     # R2: [stated] means you committed to it, so the quote has to be your own words.
-    if new_fact.source == "stated" and not _yours(context.evidence):
+    if new_fact.source == "stated" and not any(
+        quote.verified and quote.yours for quote in context.evidence
+    ):
         return reject("R2")
 
     # R6: one project per run, a global fact goes only to a global page and a project fact
@@ -381,14 +383,12 @@ def _supersede(new_fact: NewFact, target_line: page.Fact, context: Context) -> O
     claims about its own date carries no replacement. Without either the old line stands
     and the result is a conflict, or needs you when it is one of your commitments that is
     contradicted."""
-    if _corrected(new_fact, context) and _newer_than_the_line(
-        _yours(context.evidence), target_line
-    ):
-        return apply("supersede")  # an explicit correction from you replaces anything
     authority = AUTHORITY.get(target_line.kind or "", ())
     # The quote that carries the authority is the one that has to be newer: your own words
     # for a [stated] fact, any verified quote for an [observed] one.
-    carrying = _yours(context.evidence) if new_fact.source == "stated" else context.evidence
+    carrying = (
+        _yours(context.evidence) if new_fact.source == "stated" else _primary(context.evidence)
+    )
     if new_fact.source in authority and _newer_than_the_line(carrying, target_line):
         return apply("supersede")
     return downgrade(_refusal(new_fact, target_line), "R4")
@@ -405,13 +405,19 @@ def _newer_than_the_line(quotes, target_line: page.Fact) -> bool:
 
 
 def _yours(evidence: tuple[Evidence, ...]) -> list[Evidence]:
-    """The verified quotes in your own words (R2)."""
-    return [q for q in evidence if q.verified and q.yours]
+    """The verified quotes in your own words from a primary session: the ones that carry
+    your authority, which nothing said in a worker session does (design 8)."""
+    return [q for q in _primary(evidence) if q.yours]
 
 
 def _corrected(new_fact: NewFact, context: Context) -> bool:
-    """An explicit correction counts only when a verified quote of yours backs it."""
-    return new_fact.explicit_correction and bool(_yours(context.evidence))
+    """An explicit correction is your own ``[stated]`` words, backed by a verified quote of
+    yours from a primary session. Anything less is not a correction from you."""
+    return (
+        new_fact.explicit_correction
+        and new_fact.source == "stated"
+        and bool(_yours(context.evidence))
+    )
 
 
 def _refusal(new_fact: NewFact, target_line: page.Fact) -> str:

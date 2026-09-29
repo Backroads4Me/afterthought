@@ -552,7 +552,7 @@ def test_an_unverified_quote_is_no_signal_at_all():
 def test_an_explicit_correction_from_you_skips_the_gate():
     outcome = check(
         decide("add", line=None),
-        new_fact(source="inferred", explicit_correction=True),
+        new_fact(source="stated", explicit_correction=True),
         None,
         ctx(sig("a", "2026-10-04")),
     )
@@ -1015,7 +1015,7 @@ def test_a_suggested_candidate_leaves_only_over_the_gate(
 def test_an_explicit_correction_promotes_a_candidate_without_the_gate():
     outcome = check(
         decide("confirm"),
-        new_fact(source="inferred", explicit_correction=True),
+        new_fact(source="stated", explicit_correction=True),
         line(CHECKPOINTS),
         ctx(sig("a", "2026-10-04")),
     )
@@ -1328,14 +1328,44 @@ def test_an_explicit_correction_without_a_quote_of_yours_skips_no_gate():
     assert outcome == downgrade("candidate", "R3")
 
 
-def test_your_explicit_correction_replaces_a_line_the_table_would_keep():
+def test_your_explicit_correction_promotes_the_candidate_it_confirms():
     outcome = check(
-        decide("supersede"),
-        new_fact(source="inferred", explicit_correction=True),
-        line(NO_RGB),
+        decide("confirm"),
+        new_fact(source="stated", explicit_correction=True),
+        line(SWEEP),
         ctx(sig("a", NEWER)),
     )
-    assert outcome == apply("supersede")
+    assert outcome == apply("promote")
+
+
+def test_a_correction_in_your_words_from_a_worker_session_skips_no_gate():
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="stated", explicit_correction=True),
+        line(SWEEP),
+        ctx(sig("p", OLDER, yours=False), sig("w", NEWER, origin=rules.WORKER)),
+    )
+    assert outcome == apply("confirm")
+
+
+def test_a_worker_quote_is_never_the_newer_quote_a_supersede_needs():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed"),
+        line(VLLM),
+        ctx(sig("p", "2026-09-01"), sig("w", NEWER, origin=rules.WORKER)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_your_words_from_a_worker_session_replace_no_preference():
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="stated", kind="preference"),
+        line(NO_RGB),
+        ctx(sig("p", "2026-09-01", yours=False), sig("w", NEWER, origin=rules.WORKER)),
+    )
+    assert outcome == downgrade("conflict", "R4")
 
 
 def test_a_global_fact_that_is_not_stated_is_refused():
