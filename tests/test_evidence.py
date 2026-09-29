@@ -129,6 +129,41 @@ def held_read_snapshot(config: configmod.Config) -> Iterator[None]:
         reader.close()
 
 
+@contextmanager
+def committed_pages_in_the_log(
+    config: configmod.Config, session_id: str, said: Entry
+) -> Iterator[None]:
+    """Rows a second connection has committed into the archive and left standing in its
+    write-ahead log, the way the digest archiving a chunk in one process does while
+    `aft forget session` runs in another. That connection stays open, so nothing but a
+    checkpoint made by some other call moves those pages into the archive file."""
+    writer = sqlite3.connect(db(config), isolation_level=None, timeout=0.05)
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute(
+        "INSERT INTO evidence (session_id, entry_id, agent, project_id, time, role, text,"
+        " is_error) VALUES (?, ?, 'pi', NULL, ?, ?, ?, 0)",
+        (
+            session_id,
+            said.id,
+            said.time.isoformat(),
+            said.role,
+            zlib.compress(said.text.encode("utf-8")),
+        ),
+    )
+    writer.commit()
+    try:
+        yield
+    finally:
+        writer.close()
+
+
+def log_bytes(config: configmod.Config) -> int:
+    """What the archive's write-ahead log still holds: zero once every committed page has
+    been written back into the archive file and the log cut off behind them."""
+    wal = db(config).with_name(db(config).name + "-wal")
+    return wal.stat().st_size if wal.exists() else 0
+
+
 def connection_is_open(conn: sqlite3.Connection) -> bool:
     """Whether the connection still holds its handle: a closed one refuses to work."""
     try:
@@ -424,6 +459,66 @@ def test_a_window_of_zero_keeps_nothing_older_than_now(make_config):
     assert [e.id for e in evidence.entries(cfg, "s1")] == ["now"]
 
 
+# Draining the log: what the archive is left holding after a deleting call.
+
+
+def test_a_purge_that_removed_nothing_still_refuses_a_log_it_cannot_drain(make_config):
+    """The expired rows went on a run whose drain another process's reader refused, and those
+    rows are not coming back: the next purge finds nothing to delete, and if it answered
+    quietly nothing else in the module would have a reason to drain that log, so the expired
+    text would sit in the archive for good (DESIGN 12). Every purge therefore attempts the
+    drain, so every run while the reader holds the log says so, and the run after the reader
+    goes clears the stored text out of the archive and its log both."""
+    cfg = make_config(retention_days=7)
+    written = zlib.compress(FORGOTTEN_TEXT.encode("utf-8"))
+    filler = [
+        entry(f"f{i}", at(days=1), text=f"filler that names no ledger at all, number {i}")
+        for i in range(200)
+    ]
+    evidence.store(
+        cfg,
+        "claude",
+        "s1",
+        None,
+        [entry("expired", at(days=30), text=FORGOTTEN_TEXT), *filler],
+    )
+    assert any(written in f.read_bytes() for f in archive_files(cfg)), (
+        "the expired text has to be in the archive for its absence afterwards to mean anything"
+    )
+
+    with held_read_snapshot(cfg):
+        for attempt in ("first", "retry"):
+            with pytest.raises(evidence.EvidenceError) as excinfo:
+                evidence.purge(cfg, NOW)
+            assert str(db(cfg)) in str(excinfo.value), attempt
+            assert any(written in f.read_bytes() for f in archive_files(cfg)), (
+                f"the {attempt} refuses because of this residue, so the residue is there"
+            )
+        assert row_count(cfg) == 200, "the expired row went even though the drain did not"
+
+    assert evidence.purge(cfg, NOW) == 0
+    assert [e.id for e in evidence.entries(cfg, "s1")] == [f"f{i}" for i in range(200)]
+    for archived in archive_files(cfg):
+        assert written not in archived.read_bytes(), archived.name
+
+
+def test_a_purge_with_nothing_to_remove_rewrites_no_archive_even_with_a_reader(cfg):
+    """The nightly run still has to be cheap now that it drains whatever its delete removed:
+    a checkpoint with no page to move writes nothing, so a reader attached to the archive -
+    `aft trace` in another window - neither makes a healthy purge rewrite the file nor hands
+    it a refusal to report."""
+    kept = [entry("e1", at(days=2)), entry("e2", at(days=1))]
+    evidence.store(cfg, "claude", "s1", None, kept)
+    before = db(cfg).read_bytes()
+
+    with held_read_snapshot(cfg):
+        assert evidence.purge(cfg, NOW) == 0
+        assert log_bytes(cfg) == 0, "the drain ran over a log with nothing in it"
+
+    assert db(cfg).read_bytes() == before
+    assert evidence.entries(cfg, "s1") == kept
+
+
 # Quote verification: spacing is the only thing set aside.
 
 WRAPPED = (
@@ -590,10 +685,12 @@ def test_a_retry_of_a_refused_forgetting_does_not_claim_the_forgetting(cfg):
         assert written not in archived.read_bytes(), archived.name
 
 
-def test_forget_of_a_session_that_is_not_there_changes_nothing(cfg):
-    """A typo is no reason to rewrite the archive: with nothing to delete, `forget` leaves
-    the rows and every byte of the file where they were, the way it only rewrites the
-    archive when a delete actually released something."""
+def test_forget_of_a_session_that_is_not_there_writes_no_row_and_rewrites_nothing(cfg):
+    """A typo is no reason to rewrite the archive: with nothing to delete, `forget` writes no
+    row, touches none that are there, and leaves the file's bytes as they were. It vacuums
+    only a delete that released pages, and this archive has no page of its own waiting in a
+    log, so the drain it still runs moves nothing; pages another connection left standing
+    there are that drain's own case."""
     filler = [
         entry(f"f{i}", text=f"filler that names no ledger at all, number {i}") for i in range(200)
     ]
@@ -603,6 +700,27 @@ def test_forget_of_a_session_that_is_not_there_changes_nothing(cfg):
     evidence.forget(cfg, "never-captured")
 
     assert (row_count(cfg), stored(cfg, "s1"), db(cfg).read_bytes()) == before
+
+
+def test_a_forgetting_of_a_session_that_is_not_there_still_drains_the_log(cfg):
+    """Draining is not something `forget` only does when it deleted rows: the log is what
+    holds released text until some run moves it. And moving it folds into the archive file
+    whatever another live connection had already committed there, so the claim is that every
+    row survives - the other writer's included - while the log it left standing is cut off."""
+    filler = [
+        entry(f"f{i}", text=f"filler that names no ledger at all, number {i}") for i in range(200)
+    ]
+    evidence.store(cfg, "claude", "s1", None, filler)
+    said = entry("o1", text=FORGOTTEN_TEXT)
+
+    with committed_pages_in_the_log(cfg, "written-elsewhere", said):
+        assert log_bytes(cfg) > 0, "the other connection has to have pages waiting in the log"
+        evidence.forget(cfg, "never-captured")
+        assert log_bytes(cfg) == 0, "the log drains whatever this call deleted"
+
+    assert evidence.entries(cfg, "written-elsewhere") == [said]
+    assert [e.id for e in evidence.entries(cfg, "s1")] == [f"f{i}" for i in range(200)]
+    assert row_count(cfg) == 201
 
 
 def test_forget_and_reads_before_any_archive_write_no_file(cfg):

@@ -185,9 +185,11 @@ def purge(config: Config, now: datetime) -> int:
 
     The space the rows took stays in the file for the entries that come after, which is
     how the archive holds its size without a VACUUM of its own. The text itself does not
-    stay: its pages are written over on the way to the free list, and what went is written
-    out of the write-ahead log - unless another process is reading that log, which is
-    reported rather than left as expired text (DESIGN 12).
+    stay: its pages are written over on the way to the free list, and the write-ahead log is
+    drained on every run, whether or not this one removed rows, so a run that follows a
+    refused drain finishes it instead of returning quietly over expired text the log still
+    holds. A log another process is reading cannot be drained, and that is reported rather
+    than returned as a clean sweep (DESIGN 12).
     """
     days = config.settings.evidence.retention_days
     if days < 0:
@@ -206,8 +208,7 @@ def purge(config: Config, now: datetime) -> int:
         return 0
     with _writing(config) as conn:
         removed = conn.execute("DELETE FROM evidence WHERE time < ?", (cutoff,)).rowcount
-    if removed:
-        _release(config, rewrite=False)
+    _release(config, rewrite=False)
     return removed
 
 
@@ -229,8 +230,10 @@ def forget(config: Config, session_id: str) -> None:
     vault's git history is beyond any of them: forgetting explains how to rewrite that,
     and never does it.
 
-    A session with no rows leaves every row and byte of the archive where it was, and an
-    archive that was never written has nothing to drain.
+    A session with no rows writes no row of the archive and does not rewrite it. Its run
+    still drains the write-ahead log, which folds into the archive file whatever another
+    live connection had already committed into it: no row is lost by that, and an archive
+    that was never written has nothing to drain.
     """
     session_id = _require_name(session_id, "session id")
     if not _db_path(config).exists():
@@ -393,9 +396,9 @@ def _release(config: Config, *, rewrite: bool) -> None:
     ``rewrite`` vacuums as well as draining the log, which is what clears the pages a delete
     freed inside the file itself; `forget` pays for that when it deleted something, and
     `purge`, which runs on a timer, never does (DESIGN 12). Neither statement runs inside a
-    transaction, so this follows the write that removed the rows rather than joining it, and
-    `forget` calls it even after a delete that removed nothing: a previous refusal is how a
-    forgetting can end, and the text it named is still in that log."""
+    transaction, so this follows the write it releases rather than joining it. Both callers
+    run it whatever their delete removed: a refused drain is how either can end, and the
+    pages it named stay outside the archive file until a later call moves them or refuses."""
     path = _db_path(config)
     with _reading(config) as conn:
         _drain_log(conn, path)
@@ -406,17 +409,17 @@ def _release(config: Config, *, rewrite: bool) -> None:
 
 def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
     """Move the committed pages back into the archive file and cut the write-ahead log off
-    behind them, so the log keeps no page of what a delete just released (DESIGN 12).
+    behind them, so nothing a caller released is left in the log (DESIGN 12).
 
     A checkpoint that could not finish answers with a row and sets no error, and a log
-    another process is reading cannot finish. That is reported: the removed text is still
-    in that log, and returning quietly would claim it was not.
+    another process is reading cannot finish. That is reported: pages are still sitting
+    outside the archive file then, and returning quietly would say they were not.
     """
     busy, frames, moved = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
     if busy:
         raise EvidenceError(
             f"the write-ahead log of {path} is held open by another reader:"
-            f" {frames - moved} of its {frames} pages still hold what was removed"
+            f" {frames - moved} of its {frames} pages are still outside the archive file"
         )
 
 
