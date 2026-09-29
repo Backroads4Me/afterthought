@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["add", "confirm", "supersede", "conflict", "skip"]
+    },
+    "line": {
+      "type": ["string", "null"],
+      "enum": ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10", null],
+      "description": "The existing line the action names. Required for confirm, supersede and conflict; null for add and skip."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  },
+  "required": ["action", "line", "reason"],
+  "additionalProperties": false
+}
