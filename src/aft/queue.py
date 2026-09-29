@@ -19,6 +19,7 @@ over (BUILD-PLAN M2.2, M2.3).
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import time
@@ -32,6 +33,8 @@ from aft.events import SessionEvent
 from aft.ids import new_id
 
 QUEUE_NAME = "queue.sqlite"
+
+LOGGER = logging.getLogger(__name__)
 
 
 class QueueError(Exception):
@@ -102,11 +105,6 @@ CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("sessions", "off_record", "INTEGER NOT NULL DEFAULT 0"),
 )
-
-# The queue files this process has brought to the current schema. A column once added stays
-# added, so a connect past the first one skips the check rather than paying for a table
-# read on every open: the capture hook holds a millisecond budget (DESIGN 8).
-_MIGRATED: set[Path] = set()
 
 
 @dataclass(frozen=True)
@@ -217,7 +215,8 @@ def complete(
     config: Config,
     job: Job,
     watermark: str | None,
-    off_record: bool = False,
+    *,
+    off_record: bool,
 ) -> None:
     """Close a job and record where its digest left this session: its watermark, and
     whether an off-the-record span is open there.
@@ -225,8 +224,9 @@ def complete(
     This is where a session's watermark moves, and nowhere else: the digest step calls it
     with the entry it ended on when it wrote that digest (DESIGN 8, BUILD-PLAN M2.2).
     ``off_record`` is the second element of the ``filter_entries`` call over that chunk
-    (M2.3). It moves in the same statement as the watermark because the two describe one
-    moment: the end of what this session has been read through. Advance a watermark and
+    (M2.3), and a caller has to give it: a close never guesses a span's state. It moves in
+    the same statement as the watermark because the two describe one moment: the end of
+    what this session has been read through. Advance a watermark and
     leave the span behind and the next chunk reads its first entry as though no span were
     open; store a span against a watermark that did not move and the next chunk is held
     off the record for text no digest has read yet. A watermark of None closes the job and
@@ -412,9 +412,7 @@ def _connect(config: Config) -> sqlite3.Connection:
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn)
     conn.executescript(_SCHEMA)
-    if path not in _MIGRATED:
-        _add_columns(conn)
-        _MIGRATED.add(path)
+    _add_columns(conn)
     return conn
 
 
@@ -425,23 +423,43 @@ def _add_columns(conn: sqlite3.Connection) -> None:
     `_SCHEMA` has gained since has to arrive by ``ALTER TABLE`` before any statement names
     it. A second process can win that race, and its column is the one this connection then
     finds, so an ``ALTER`` that reports the name already taken is checked rather than
-    raised: the queue opened either way. A column still missing after that is a queue this
-    version cannot read, and is reported as one.
+    raised: the queue opened either way. Any other report the ``ALTER`` makes - a locked
+    database above all - is the queue's own trouble and is raised as it stands. A column
+    still missing after all that is a queue this version cannot read, and is reported
+    as one.
     """
     for table, column, definition in _ADDED_COLUMNS:
         if column in _columns(conn, table):
             continue
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as lost_race:
+            if "duplicate column name" not in str(lost_race):
+                raise
         if column not in _columns(conn, table):
             raise QueueError(f"queue table {table} has no {column} column to use")
+        _name_sessions_of_unknown_span(conn)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
     """The names of ``table``'s columns as the file on disk has them."""
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _name_sessions_of_unknown_span(conn: sqlite3.Connection) -> None:
+    """Name the sessions whose span state was unknown when the queue gained ``off_record``."""
+    unknown = [
+        f"{agent}/{session_id}"
+        for agent, session_id in conn.execute(
+            "SELECT agent, session_id FROM sessions WHERE watermark IS NOT NULL"
+        )
+    ]
+    if unknown:
+        LOGGER.warning(
+            "queue gained off_record: %s keep their watermark with no span stored, so they"
+            " resume on the record",
+            ", ".join(unknown),
+        )
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:

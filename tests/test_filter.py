@@ -511,12 +511,16 @@ def test_an_unflagged_tool_output_with_nothing_to_report_is_dropped(cfg):
 
 def test_a_flagged_output_keeps_its_head_when_no_line_matches(cfg):
     # The plan's own case: an output the agent flagged, with no line any pattern names.
-    # Its first 500 characters are kept, and only those.
+    # The whole words within its first 500 characters are kept, and only those, with the
+    # marker that says the head was cut short of the rest.
     quiet = "collected 12 items\nall quiet on the worker\nno changes detected\n" * 40
     assert len(quiet) > FLAG_HEAD_CHARS
     [text] = kept([output(quiet, "t1", is_error=True)], cfg)
-    assert text == quiet[:FLAG_HEAD_CHARS]
-    assert len(text) == FLAG_HEAD_CHARS
+    head = text.removesuffix(CAP_MARKER)
+    assert text.endswith(CAP_MARKER), "a head cut short says it is cut"
+    assert quiet.startswith(head)
+    assert len(head) <= FLAG_HEAD_CHARS, "the 500-character budget still holds"
+    assert quiet[len(head)].isspace(), "the cut falls between words, never inside one"
 
 
 def test_a_flagged_output_keeps_the_matching_lines_below_its_head(cfg):
@@ -526,7 +530,10 @@ def test_a_flagged_output_keeps_the_matching_lines_below_its_head(cfg):
     below = "error: the pipe broke\nnothing to report\nsrc/aft/queue.py:41\nthe end"
     text = quiet + below
     [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
-    assert kept_text == text[:FLAG_HEAD_CHARS] + "\nerror: the pipe broke\nsrc/aft/queue.py:41"
+    head, lines = kept_text.split(CAP_MARKER, 1)
+    assert lines == "\nerror: the pipe broke\nsrc/aft/queue.py:41"
+    assert text.startswith(head)
+    assert len(head) <= FLAG_HEAD_CHARS
 
 
 def test_the_error_flag_is_what_lets_an_outputs_head_through(cfg):
@@ -558,6 +565,17 @@ def test_a_flagged_output_is_redacted_like_every_other_kept_text(cfg):
     assert FAKE_KEY not in text
     assert REDACTED in text
     assert "the deploy failed" in text
+
+
+def test_a_secret_that_straddles_the_head_cut_leaves_no_fragment_behind(cfg):
+    # A cut may not hand redaction half a key: the head stops at a word, so a secret is
+    # either whole inside it, where the patterns know it, or whole outside it.
+    text = "the deploy failed\n" + "word " * 94 + "one " + FAKE_KEY + " was rejected"
+    start = text.index(FAKE_KEY)
+    assert start < FLAG_HEAD_CHARS < start + len(FAKE_KEY), "the key straddles the cut"
+    [kept_text] = kept([output(text, "t1", is_error=True)], cfg)
+    assert kept_text.endswith(CAP_MARKER), "the head says it stopped short"
+    assert "sk-" not in kept_text, "no piece of the key reaches the archive"
 
 
 def test_a_flagged_output_holding_nothing_at_all_is_still_dropped(cfg):

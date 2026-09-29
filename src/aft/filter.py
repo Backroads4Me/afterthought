@@ -49,7 +49,6 @@ CAP_MARKER = " [...]"
 FLAG_HEAD_CHARS = 500
 
 # An off-the-record marker, matched only at the start of a prompt's text: discussing the
-# An off-the-record marker, matched only at the start of a prompt's text: discussing the
 # markers never triggers them (DESIGN 12). The phrase is the one the design names, with
 # its words spaced; leading whitespace and case do not matter, and trailing punctuation
 # is fine because the lookahead asks only that the phrase ends here. A word joined on
@@ -185,25 +184,23 @@ def _flagged_output(text: str) -> str | None:
     """The head of an output the agent flagged as an error, with the lines below it to keep.
 
     The agent's flag is its own verdict, so what it reported is evidence whatever its lines
-    happen to look like: the first ``FLAG_HEAD_CHARS`` characters are kept even when none of
-    them matches a pattern (M2.3). Below the head the rule for an unflagged output still
-    holds, so a long dump contributes its failure lines and its references rather than
-    everything after the head. Head and lines then run through the same cap and redaction
-    as every other kept text, so a flagged entry is bounded like any other.
+    happen to look like: the whole words within its first ``FLAG_HEAD_CHARS`` characters are
+    kept even when none of them matches a pattern (M2.3). Below the head the rule for an
+    unflagged output still holds, so a long dump contributes its failure lines and its
+    references rather than everything after the head. Head and lines then run through the
+    same cap and redaction as every other kept text, so a flagged entry is bounded like
+    any other.
     """
-    head = text[:FLAG_HEAD_CHARS]
-    below = [
-        line
-        for line in text[FLAG_HEAD_CHARS:].splitlines()
-        if _reports_a_break(line) or PATH_LINE.search(line)
-    ]
+    end = _word_end(text, FLAG_HEAD_CHARS)
+    head = text[:end] + (CAP_MARKER if end < len(text) else "")
+    below = _tool_lines(text[end:])
     if not head:
         return None
-    return "\n".join([head, *below]) if below else head
+    return "\n".join([head, below]) if below else head
 
 
 def _tool_lines(text: str) -> str | None:
-    """The lines of an unflagged output that survive the filter, or None when none of them do.
+    """The lines of a tool output that survive the filter, or None when none of them do.
 
     An output the agent did not flag, with nothing to say about a failure and no place to
     point at, adds nothing a future session could not re-run, so the entry goes rather than
@@ -219,13 +216,20 @@ def _reports_a_break(line: str) -> bool:
 
 
 def _cap(text: str) -> str:
-    """``text`` within the character budget, cut on a word boundary with the marker.
+    """``text`` within the character budget, cut on a word boundary with the marker."""
+    end = _word_end(text, MAX_CHARS)
+    return text if end == len(text) else text[:end] + CAP_MARKER
 
-    The last whitespace at or before the limit is the cut, so a word is never left half in
-    and half out; text with no such whitespace is a single run and is cut at the limit.
+
+def _word_end(text: str, limit: int) -> int:
+    """Where ``text`` ends once ``limit`` characters bound it on a word boundary.
+
+    Text already within the budget ends at its own end. The last whitespace at or before
+    the limit is the cut, so a word is never left half in and half out; text with no such
+    whitespace is a single run and is cut at the limit.
     """
-    if len(text) <= MAX_CHARS:
-        return text
-    head = text[:MAX_CHARS]
+    if len(text) <= limit:
+        return len(text)
+    head = text[:limit]
     cut = max(head.rfind(space) for space in " \t\n\v\f\r")
-    return (head if cut < 0 else head[:cut].rstrip()) + CAP_MARKER
+    return limit if cut < 0 else len(head[:cut].rstrip())
