@@ -1140,10 +1140,10 @@ def test_makes_one_commit_per_project_run(initialized, home, fake):
     res = schedule.run(cfg, now=NOW)
     after_log = run_git(["log", "--format=%s"], cfg.vault).splitlines()
 
-    # Exactly one new commit was made
-    assert len(after_log) == before_count + 1
-    assert after_log[0] == "aft: dream widget"
-    assert res.reports["widget"].commit == run_git(["rev-parse", "HEAD"], cfg.vault)
+    # Dream commit and report commit were made
+    assert len(after_log) == before_count + 2
+    assert after_log[:2] == ["aft: report widget", "aft: dream widget"]
+    assert res.reports["widget"].commit == run_git(["rev-parse", "HEAD~1"], cfg.vault)
 
 
 def test_refusal_r2_stated_not_yours(initialized, home, fake):
