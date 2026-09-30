@@ -17,7 +17,7 @@ from aft import cli, index, lint, page, vault
 from aft import config as configmod
 from aft.config import Config
 from aft.dream import schedule
-from aft.library import importing
+from aft.library import describe, importing
 from aft.library import manifest as manifest_mod
 from aft.registry import Registry
 
@@ -931,3 +931,170 @@ def test_an_unreadable_record_of_copied_files_stops_the_removals(
         importing.import_collection(manifest_file, config=initialized)
 
     assert (initialized.vault / "library" / "unread" / "a.md").is_file()
+
+
+# ------------------------------------------------- what a re-import carries over from describe
+
+GUIDE_TEXT = """# Guide
+
+The guide covers the mount, the bracket and the seal.
+
+Edition 4 is the one this vehicle was built to.
+
+Use it when fitting or re-torquing the mount: the torque figure is 9 Nm.
+"""
+
+NOTES_TEXT = """# Notes
+
+These notes record the wiring of the inverter panel.
+
+Panel revision C was rewired in March.
+
+Use them when tracing the AC panel wiring back to the breaker.
+"""
+
+# (path, text, claims): each claim quotes a line of its own document, which is what
+# `aft library describe` checks before it writes anything.
+DESCRIBED_DOCS = [
+    (
+        "guide.md",
+        GUIDE_TEXT,
+        [
+            ("what", "The mount reference.", "covers the mount, the bracket and the seal"),
+            ("version", "Edition 4.", "Edition 4 is the one this vehicle was built to"),
+            ("when_to_use", "For fitting the mount.", "when fitting or re-torquing the mount"),
+        ],
+    ),
+    (
+        "notes.md",
+        NOTES_TEXT,
+        [
+            ("what", "Panel wiring.", "record the wiring of the inverter panel"),
+            ("version", "Revision C.", "Panel revision C was rewired in March"),
+            ("when_to_use", "For tracing wiring.", "when tracing the AC panel wiring"),
+        ],
+    ),
+]
+
+
+def import_and_describe(cfg: Config, tmp_path: Path) -> tuple[Path, Path]:
+    """Import a two-document collection and describe both documents. Returns dir and manifest."""
+    col_dir = tmp_path / "carried"
+    col_dir.mkdir()
+    entries: list[dict] = []
+    for rel, text, claims in DESCRIBED_DOCS:
+        (col_dir / rel).write_text(text, encoding="utf-8")
+        entry: dict = {"file": rel}
+        for name, claim, quote in claims:
+            entry[name] = {"claim": claim, "quote": quote}
+        entries.append(entry)
+
+    manifest_file = collection_manifest(
+        tmp_path,
+        "carried",
+        {rel: ("original" if rel == "guide.md" else "notes") for rel, _, _ in DESCRIBED_DOCS},
+        col_dir,
+    )
+    importing.import_collection(manifest_file, config=cfg)
+
+    desc_file = tmp_path / "descriptions.yaml"
+    desc_file.write_text(yaml.dump(entries, sort_keys=False), encoding="utf-8")
+    result = describe.describe_collection(manifest_file, desc_file, config=cfg)
+    assert len(result.rejected_claims) == 0, result.rejected_claims
+    return col_dir, manifest_file
+
+
+def test_a_reimport_carries_a_verified_description_it_did_not_write(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """A document's `## Description` and its sources survive a re-import (M7 follow-up F17).
+
+    An import builds every reference page from nothing, so the verified lines `aft library
+    describe` wrote - and the `sources` each footnote cites - used to vanish on the next import,
+    leaving the collection reading as though nobody had described it, with nothing saying so.
+    Nothing the document says has changed, so the quotes still hold and the page comes back
+    exactly as it read.
+    """
+    _, manifest_file = import_and_describe(initialized, tmp_path)
+    ref_page = initialized.vault / "references" / "carried" / "guide.md"
+    described = ref_page.read_text(encoding="utf-8")
+    assert "## Description" in described
+
+    result = importing.import_collection(manifest_file, config=initialized)
+
+    assert ref_page.read_text(encoding="utf-8") == described, "the re-import rewrote the page"
+    fm, body, _, _ = page.split_frontmatter(ref_page.read_text(encoding="utf-8"))
+    assert fm is not None
+    assert [source["id"] for source in fm["sources"]] == ["s1", "s2", "s3"]
+    assert "- What: The mount reference. [^s1]" in body
+    assert "covers the mount, the bracket and the seal" in json.dumps(fm["sources"])
+    assert [source["resource"] for source in fm["sources"]] == [
+        "aft://library/carried/guide.md"
+    ] * 3
+    assert result.descriptions_dropped == ()
+    report = (initialized.vault / result.report_path).read_text(encoding="utf-8")
+    assert "Verified descriptions dropped" not in report
+    assert lint.lint_vault(initialized.vault) == []
+
+
+def test_a_reimport_drops_a_description_whose_document_changed(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """Changed text takes its verified description off the page, and the report says so.
+
+    The description claimed "Edition 4" and quoted the document saying it; the edition moved on,
+    so the quote no longer holds and the line cannot go on claiming a verification it no longer
+    has. The document is named in the report with both hashes, and the other document's
+    description - whose text did not move - stays where it is.
+    """
+    col_dir, manifest_file = import_and_describe(initialized, tmp_path)
+    ref_dir = initialized.vault / "references" / "carried"
+    changed = (
+        (col_dir / "guide.md")
+        .read_text(encoding="utf-8")
+        .replace("Edition 4 is the one", "Edition 5 is the one")
+    )
+    (col_dir / "guide.md").write_text(changed, encoding="utf-8")
+
+    result = importing.import_collection(manifest_file, config=initialized)
+
+    page_after = (ref_dir / "guide.md").read_text(encoding="utf-8")
+    assert "## Description" not in page_after
+    fm, _, _, _ = page.split_frontmatter(page_after)
+    assert "sources" not in fm, "sources were left behind with no description to cite them"
+
+    assert len(result.descriptions_dropped) == 1
+    assert result.descriptions_dropped[0].startswith("guide.md: ")
+    report = (initialized.vault / result.report_path).read_text(encoding="utf-8")
+    assert "### Verified descriptions dropped" in report
+    assert "- `guide.md`: the description was verified against" in report
+
+    untouched = (ref_dir / "notes.md").read_text(encoding="utf-8")
+    assert "## Description" in untouched, "an unchanged document lost its description too"
+    assert lint.lint_vault(initialized.vault) == []
+
+
+def test_a_description_that_cannot_be_carried_is_dropped_rather_than_refusing_the_import(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """A page missing the source its description cites is reported, not a stopped import.
+
+    Carrying those footnotes onto a page that does not define them would fail lint, and a lint
+    finding refuses the whole import: the collection could never be re-imported until somebody
+    edited the page by hand. So the description comes off and the report names it.
+    """
+    _, manifest_file = import_and_describe(initialized, tmp_path)
+    ref_page = initialized.vault / "references" / "carried" / "notes.md"
+    fm, body, _, _ = page.split_frontmatter(ref_page.read_text(encoding="utf-8"))
+    assert fm["sources"], "describe wrote no sources"
+    del fm["sources"]
+    damaged = f"---\n{yaml.dump(fm, sort_keys=False)}---\n{body}"
+    assert damaged != ref_page.read_text(encoding="utf-8")
+    ref_page.write_text(damaged, encoding="utf-8")
+
+    result = importing.import_collection(manifest_file, config=initialized)
+
+    assert len(result.descriptions_dropped) == 1
+    assert result.descriptions_dropped[0].startswith("notes.md: it cites source")
+    assert "## Description" not in (ref_page).read_text(encoding="utf-8")
+    assert lint.lint_vault(initialized.vault) == []

@@ -527,14 +527,14 @@ Nothing was left open.
 def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     """Resting lines under ``archive/`` are a collection apart (DESIGN 10): a query-time read of
     ``pages`` does not reach them, and a later update does not empty the collection that holds
-    them."""
+    them. What "resting" admits is the superseded line and not the withdrawn one - DESIGN 10
+    names the archive twice over as "superseded lines, and resolved notes with the fact they
+    belonged to", and a withdrawn line is memory `aft forget` took its evidence from (DESIGN 12),
+    so its words answer no query, ``--archive`` included."""
     write(initialized, "archive/widget.md", ARCHIVE)
     index.update(initialized)
 
-    assert keys_of(initialized, "archive") == [
-        "archive/widget.md#Decisions",
-        "archive/widget.md#Facts",
-    ]
+    assert keys_of(initialized, "archive") == ["archive/widget.md#Decisions"]
     assert (
         _column(row_for(initialized, "archive", "archive/widget.md#Decisions"), "body")
         == "Ship the widget in steel."
@@ -543,7 +543,8 @@ def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     index.update(initialized)  # nothing changed, and the archive's own rows have to stay
 
     assert search(initialized, "pages", "steel OR bronze OR prototype") == []
-    assert search(initialized, "archive", "bronze") == ["archive/widget.md#Facts"]
+    assert search(initialized, "archive", "steel") == ["archive/widget.md#Decisions"]
+    assert search(initialized, "archive", "bronze OR prototype") == []
 
 
 def test_content_changes_a_row_and_an_mtime_alone_does_not(initialized: Config) -> None:
@@ -847,8 +848,9 @@ def test_an_index_written_by_another_build_names_the_repair_rather_than_answerin
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
 
+    written = index.BUILD_STAMP
     monkeypatch.setattr(index, "BUILD_STAMP", "the-next-build")
-    with pytest.raises(index.SearchIndexError, match="written by build rows-1.*aft reindex"):
+    with pytest.raises(index.SearchIndexError, match=f"written by build {written}.*aft reindex"):
         index.update(initialized)
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
 
@@ -1162,7 +1164,10 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
 
     evidence_row = row_for(initialized, "evidence", "abc-123#e1")
     assert _column(evidence_row, "entry_id") == "e1"
-    assert _column(evidence_row, "path") == "aft://session/claude/abc-123"
+    # The path names the one entry this row is, the way a page row's path names its document and
+    # leaves the heading to carry the section: it is the form a page's footnote already uses, and
+    # it is what `aft trace` takes to open the entry's context.
+    assert _column(evidence_row, "path") == "aft://session/claude/abc-123#e1"
     assert _column(evidence_row, "project_id") == "p_widget"
     assert _column(evidence_row, "heading") == ""
     assert _column(evidence_row, "entry_hash") is not None

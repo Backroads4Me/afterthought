@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -443,21 +442,9 @@ def update_reference_page(
         sid = source_id_map[c.name]
         desc_lines.append(f"- {label}: {text_clean} [^{sid}]")
 
-    new_desc_section = "## Description\n\n" + "\n".join(desc_lines)
-
-    # Replace existing ## Description section if present
-    pattern = re.compile(r"^## Description\b.*?(?=\n## |\Z)", re.MULTILINE | re.DOTALL)
-    if pattern.search(body):
-        new_body = pattern.sub(new_desc_section + "\n", body)
-    else:
-        m = re.search(r"^## ", body, re.MULTILINE)
-        if m:
-            idx = m.start()
-            new_body = (
-                body[:idx].rstrip() + "\n\n" + new_desc_section + "\n\n" + body[idx:].lstrip()
-            )
-        else:
-            new_body = body.rstrip() + "\n\n" + new_desc_section + "\n"
+    new_body = importing.with_description(
+        body, f"{importing.DESCRIPTION_HEADING}\n\n" + "\n".join(desc_lines)
+    )
 
     fm["sources"] = existing_sources
     new_fm_yaml = yaml.dump(fm, sort_keys=False, allow_unicode=True)

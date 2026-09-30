@@ -16,7 +16,8 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -57,6 +58,10 @@ class ImportResult:
     # Vault-relative paths of library files and reference pages this (re-)import removed
     # because the collection no longer describes them (M7 review 6).
     retired: tuple[str, ...] = ()
+    # One line per document whose verified description this import could not carry, in the form
+    # ``"<path>: <reason>"``: its text changed since `aft library describe` checked the quotes
+    # (M7 follow-up F17).
+    descriptions_dropped: tuple[str, ...] = ()
 
 
 # Why a PDF gave up no text. The two reasons are told apart because they ask for different
@@ -494,11 +499,11 @@ def _retire_reference_pages(ref_dir: Path, keep: set[str]) -> list[Path]:
     retired: list[Path] = []
     if not ref_dir.is_dir():
         return retired
-    for doc_page in sorted(ref_dir.glob("*.md")):
-        if doc_page.stem in keep or doc_page.name == "collection.md":
+    for written in sorted(ref_dir.glob("*.md")):
+        if written.stem in keep or written.name == "collection.md":
             continue
-        doc_page.unlink()
-        retired.append(doc_page)
+        written.unlink()
+        retired.append(written)
     return retired
 
 
@@ -556,16 +561,108 @@ def compute_reference_slugs(file_paths) -> dict[str, str]:
     return slug_map
 
 
+# The `## Description` section `aft library describe` writes on a document page, and the two
+# things the import needs to do with it: read what a page already carries, and put a block back
+# in the one place a reference page keeps it (DESIGN 11 step 4).
+DESCRIPTION_HEADING = "## Description"
+_DESCRIPTION_IN_BODY = re.compile(r"^## Description\b.*?(?=\n## |\Z)", re.MULTILINE | re.DOTALL)
+_FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+
+
+def description_section(body: str) -> str:
+    """The `## Description` block of a reference page, heading first; '' when it has none."""
+    found = _DESCRIPTION_IN_BODY.search(body)
+    return found.group(0).rstrip("\n") if found else ""
+
+
+def with_description(body: str, section: str) -> str:
+    """`body` with `section` occupying the `## Description` section of a reference page.
+
+    One place decides where the section goes - ahead of the page's first other `## ` heading -
+    because the import rebuilds a page from nothing while `aft library describe` edits one in
+    place. Two answers to that question would mean a description that changes shape, or worse
+    disappears, on every re-import.
+    """
+    if not section.strip():
+        return body
+    existing = _DESCRIPTION_IN_BODY.search(body)
+    if existing:
+        start, end = existing.span()
+        return body[:start] + section + "\n" + body[end:]
+    first = re.search(r"^## ", body, re.MULTILINE)
+    if first:
+        at = first.start()
+        return f"{body[:at].rstrip()}\n\n{section}\n\n{body[at:].lstrip()}"
+    return f"{body.rstrip()}\n\n{section}\n"
+
+
+@dataclass(frozen=True)
+class CarriedDescription:
+    """What a re-import does with the description `aft library describe` verified earlier.
+
+    Exactly one of `section` and `dropped` says what happened: the block travels to the new page
+    with the `sources` its footnotes cite, or the reason it does not travel goes to the report.
+    """
+
+    section: str = ""
+    sources: list[dict] = field(default_factory=list)
+    dropped: str = ""
+
+
+def _carry_description(old_text: str, new_hash: str) -> CarriedDescription:
+    """What the page being replaced carries, and whether this import may keep it.
+
+    `aft library describe` checked each description line against the document's words and left
+    the document's hash on the page beside them, so the hash is what says whether those quotes
+    still stand where they were. Unchanged, the import rebuilt a page it must put them back on;
+    changed, the words they were verified against are gone and they come off, with the document
+    named in the report as the one to describe again (DESIGN 11 step 4, M7 follow-up F17).
+    """
+    fm, body, _, error = page.split_frontmatter(old_text)
+    if error or fm is None:
+        return CarriedDescription()
+    section = description_section(body)
+    if not section:
+        return CarriedDescription()
+    sources = [entry for entry in fm.get("sources") or [] if isinstance(entry, dict)]
+    cited = set(_FOOTNOTE.findall(section))
+    defined = {str(entry["id"]) for entry in sources if entry.get("id") is not None}
+    if not cited <= defined:
+        # Carrying a description whose citations the page cannot carry would fail lint once it
+        # is written, and a lint finding refuses the whole import. A dropped description the
+        # report names is the better outcome.
+        missing = ", ".join(sorted(cited - defined))
+        return CarriedDescription(
+            dropped=f"it cites source {missing}, which the page does not define"
+        )
+    recorded = str((fm.get("aft") or {}).get("hash") or "")
+    if recorded == new_hash:
+        return CarriedDescription(section=section, sources=list(sources))
+    return CarriedDescription(
+        dropped=(
+            f"the description was verified against `{recorded[:12]}`, this import copied "
+            f"`{new_hash[:12]}`; run `aft library describe` for this document again"
+        )
+    )
+
+
 def generate_reference_pages(
     vault_path: Path,
     manifest: Manifest,
     file_hashes: dict[str, str],
     file_chunks: dict[str, list[tuple[str, str]]],
-) -> list[str]:
-    """Generate collection.md and per-document reference pages under references/<name>/."""
+) -> tuple[list[str], list[str]]:
+    """Generate collection.md and per-document reference pages under references/<name>/.
+
+    Returns the pages written and the documents whose verified description this import could not
+    carry, as `"<path>: <reason>"` lines for the report. A page is rebuilt from nothing on every
+    import, so what `aft library describe` verified earlier has to travel over by hand - see
+    `_carry_description` (DESIGN 11 step 4, M7 follow-up F17).
+    """
     ref_dir = vault_path / "references" / manifest.name
     ref_dir.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
+    dropped_descriptions: list[str] = []
     slug_map = compute_reference_slugs(manifest.files.keys())
 
     # 1. collection.md
@@ -681,23 +778,31 @@ def generate_reference_pages(
 
         structure_text = "\n".join(structure_items)
 
-        doc_page_text = (
-            _frontmatter(
-                {
-                    "type": "Reference",
-                    "title": Path(rel_path).name,
-                    "description": (
-                        f"{entry.role} source file {rel_path} in collection {manifest.name}"
-                    ),
-                    "aft": {
-                        "collection": manifest.name,
-                        "source": f"library/{manifest.name}/{rel_path}",
-                        "role": entry.role,
-                        "hash": f_hash,
-                    },
-                }
-            )
-            + f"""
+        # A page is rebuilt from nothing on every import, so whatever `aft library describe`
+        # verified on this page last time is read off it here and carried over - or named for
+        # the report, with the reason it could not be.
+        doc_file = ref_dir / f"{slug}.md"
+        carried = CarriedDescription()
+        if doc_file.is_file():
+            carried = _carry_description(doc_file.read_text(encoding="utf-8"), f_hash)
+        if carried.dropped:
+            dropped_descriptions.append(f"{rel_path}: {carried.dropped}")
+
+        fields: dict[str, object] = {
+            "type": "Reference",
+            "title": Path(rel_path).name,
+            "description": f"{entry.role} source file {rel_path} in collection {manifest.name}",
+            "aft": {
+                "collection": manifest.name,
+                "source": f"library/{manifest.name}/{rel_path}",
+                "role": entry.role,
+                "hash": f_hash,
+            },
+        }
+        if carried.sources:
+            fields["sources"] = carried.sources
+
+        body = f"""
 
 # {Path(rel_path).name}
 
@@ -710,12 +815,16 @@ Role: `{entry.role}`{relations_text}
 
 {structure_text}
 """
+        # One blank line below the frontmatter, and no more: `aft library describe` rewrites this
+        # same page, and were the two of us to write it differently, the page would change on a
+        # re-import that changed nothing else.
+        doc_page_text = (
+            f"{_frontmatter(fields)}\n{with_description(body, carried.section).lstrip()}"
         )
-        doc_file = ref_dir / f"{slug}.md"
         doc_file.write_text(doc_page_text, encoding="utf-8")
         generated.append(f"references/{manifest.name}/{slug}.md")
 
-    return generated
+    return generated, dropped_descriptions
 
 
 def _frontmatter(fields: dict) -> str:
@@ -742,12 +851,15 @@ def write_import_report(
     now: datetime,
     map_summary: MapVerificationSummary | None = None,
     extraction_problems: dict[str, str] | None = None,
+    descriptions_dropped: Sequence[str] = (),
 ) -> str:
     """Append the import's section to `reports/<yyyy>/<mm>/<date>.md`.
 
     ``extraction_problems`` names each document whose text could not be extracted, with the
-    reason (M7 review 13). A document that came back with no words in it is as much a finding as
-    a rejected map claim is, and the report is where an import says what it could not do.
+    reason (M7 review 13), and ``descriptions_dropped`` each document whose verified description
+    this import could not carry (M7 follow-up F17). A document that came back with no words in it
+    is as much a finding as a rejected map claim is, and so is a description that no longer
+    matches what it was checked against: the report is where an import says what it could not do.
     """
     date_str = now.strftime("%Y-%m-%d")
     year_str = now.strftime("%Y")
@@ -797,6 +909,21 @@ def write_import_report(
 These documents were imported but hold no extracted text, so nothing of them is searchable:
 
 {problem_lines}
+"""
+
+    if descriptions_dropped:
+        dropped_lines = "\n".join(
+            f"- `{path}`: {reason}"
+            for path, _, reason in (line.partition(": ") for line in descriptions_dropped)
+        )
+        section_text += f"""
+### Verified descriptions dropped
+
+These documents changed since `aft library describe` checked the quotes their descriptions
+cite, so the `## Description` section and its sources came off the reference page rather than
+go on claiming a verification that no longer holds. Describe them again to put them back:
+
+{dropped_lines}
 """
 
     if map_summary is not None:
@@ -930,16 +1057,18 @@ def import_collection(
         # old one: a file that is excluded now, or that the new manifest simply does not name,
         # leaves the vault with its reference page, instead of staying readable, searchable and
         # tracked while `aft lint` calls it an unrecorded file (M7 review 6).
-        ref_pages = generate_reference_pages(cfg.vault, manifest, file_hashes, file_chunks)
+        ref_pages, dropped_descriptions = generate_reference_pages(
+            cfg.vault, manifest, file_hashes, file_chunks
+        )
         retired = [
             f"library/{manifest.name}/{rel}"
             for rel in _retire_library_files(target_lib_dir, set(imported_files), recorded)
         ]
         retired += [
-            f"references/{manifest.name}/{page.name}"
-            for page in _retire_reference_pages(
+            f"references/{manifest.name}/{written.name}"
+            for written in _retire_reference_pages(
                 cfg.vault / "references" / manifest.name,
-                {Path(page).stem for page in ref_pages},
+                {Path(written).stem for written in ref_pages},
             )
         ]
 
@@ -985,6 +1114,7 @@ def import_collection(
             now_dt,
             map_summary=map_summary,
             extraction_problems=extraction_problems,
+            descriptions_dropped=dropped_descriptions,
         )
 
         # 9. Make the vault's .gitignore tell the truth about `library.commit`. `aft init`
@@ -1021,6 +1151,7 @@ def import_collection(
             f"{rel}: {reason}" for rel, reason in sorted(extraction_problems.items())
         ),
         retired=tuple(retired),
+        descriptions_dropped=tuple(dropped_descriptions),
     )
 
 
@@ -1045,4 +1176,6 @@ def run(
         out.write(f"no text extracted: {problem}\n")
     if result.retired:
         out.write(f"retired {len(result.retired)} file(s) this collection no longer imports\n")
+    for dropped in result.descriptions_dropped:
+        out.write(f"verified description dropped: {dropped}\n")
     return 0

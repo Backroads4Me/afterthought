@@ -509,6 +509,14 @@ class PageDoc:
         A stale line can be withdrawn too, and its stale mark gives way to the strike, since
         a withdrawn line is out of memory whatever its anchor says. A line already withdrawn
         is left as it is, keeping the date it was first withdrawn on.
+
+        So is a superseded line whose evidence is being forgotten. Its strike already says a
+        newer line replaced it, and that is the truth the page keeps above it; what `aft forget`
+        is taking away is the evidence this line stood on, and DESIGN 12's answer to a line with
+        no evidence left is withdrawn, because no collection is defined to hold a superseded line
+        whose source a person ordered out of memory. The replacement line is untouched: it rests
+        on its own evidence, and this line's `withdrawn <date>` sits where its
+        `superseded <date> by [^id]` was, still struck, still in the same section.
         """
         found = self._resolve(fact)
         date = _check_date(date)
@@ -516,8 +524,6 @@ class PageDoc:
             raise WriteError("a candidate line cannot be struck through")
         if found.state == page.WITHDRAWN:
             return False
-        if found.state == page.SUPERSEDED:
-            raise WriteError("a superseded line is already out of memory")
         if found.callouts:
             raise WriteError("a line with an open note cannot be struck; close the note first")
         line = _fact_line(

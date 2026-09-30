@@ -6,10 +6,14 @@ its rows, deletes its digest files from the vault, and marks curated lines resti
 on that session as withdrawn, scrubs the quotes of sources citing that session, clears the
 session's rows, watermark and digest debt from the queue, and scrubs the session's words out
 of the dream reports and needs-you, so no later run files the words back or repeats them.
+A line already superseded is withdrawn too when nothing else evidences it, because DESIGN 10
+keeps superseded lines searchable under ``--archive`` and a forgotten session's sentence has no
+business being found there.
 
 ``aft forget pattern <regex>`` replaces matching text with [redacted] in the evidence archive
 and in every copy the vault holds - digest and page source quotes, fact statements and notes,
-superseded lines and reports - then rebuilds the search index to match.
+superseded lines and reports - then rebuilds the search index to match. The vault's half of
+that runs under the vault's lock, as every other writer of those pages does.
 
 The vault's git history still holds older commits; removing them requires rewriting history.
 """
@@ -27,6 +31,14 @@ from aft.digest import _is_session_digest, _is_session_resource
 from aft.library import propose
 
 FORGOTTEN_MARKER = "[forgotten]"
+
+#: The line states `aft forget session` withdraws when nothing but the forgotten session
+#: supports them. Active, stale, disputed and waiting lines are memory standing on that evidence.
+#: A superseded line is struck already, and its statement still reads as a claim the archive
+#: holds: DESIGN 10's ``archive`` collection is built of superseded lines, and DESIGN 12 says a
+#: forgotten session leaves everything afterthought controls, so a struck line resting on no
+#: evidence but the forgotten one goes out of memory the same way, as withdrawn.
+_WITHDRAWABLE = (page.ACTIVE, page.SUPERSEDED, page.STALE, page.CONFLICT, page.NEEDS_YOU)
 
 
 @dataclass(frozen=True)
@@ -149,8 +161,7 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                     for fact in doc.page.facts:
                         if (
                             fact.section in page.KIND_SECTIONS
-                            and fact.state
-                            in (page.ACTIVE, page.STALE, page.CONFLICT, page.NEEDS_YOU)
+                            and fact.state in _WITHDRAWABLE
                             and fact.refs
                             and all(ref in session_sources for ref in fact.refs)
                             and pagewrite.line_identity(fact) not in skipped_facts
@@ -301,14 +312,20 @@ def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
     """
     compiled = redact.compile_patterns([pattern])[0]
     count = evidence.redact_pattern(config, compiled)
-    pages, refused = _redact_pages(config, compiled)
-    quotes_redacted = propose.redact_verified_quotes(config.home, compiled)
-    index.update(config)
-    committed = False
-    if pages:
-        # A pattern is often the secret itself, so the commit says what happened and names
-        # nothing: a forgetting cannot rewrite git history, so it writes none of it either.
-        committed = vault.commit(config.vault, pages, "aft: forget pattern")
+    # The vault lock is what every other writer of these pages takes (DESIGN 12): this one
+    # rewrites a page only after checking its own redaction leaves it readable, and a page
+    # caught half-written by a dream run or a digest commit would answer that check as neither
+    # the old text nor the new. The commit and the index rebuild that follow it read the same
+    # pages, so they stay inside the lock with the writes.
+    with vault.locked(config):
+        pages, refused = _redact_pages(config, compiled)
+        quotes_redacted = propose.redact_verified_quotes(config.home, compiled)
+        index.update(config)
+        committed = False
+        if pages:
+            # A pattern is often the secret itself, so the commit says what happened and names
+            # nothing: a forgetting cannot rewrite git history, so it writes none of it either.
+            committed = vault.commit(config.vault, pages, "aft: forget pattern")
     return PatternForgetReport(count, tuple(pages), tuple(refused), committed, quotes_redacted)
 
 

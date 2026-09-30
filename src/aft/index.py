@@ -40,7 +40,10 @@ has no answer for are left empty rather than invented - a curated page is not on
 record, so its rows carry no agent or session, and an evidence entry sits under no heading. A
 row's project id comes from the page's own ``aft.project``, the projects a reference page
 lists, or the directory the file is filed under; a row with none is a page that is every
-project's memory (DESIGN 6), not a page whose project went missing.
+project's memory (DESIGN 6), not a page whose project went missing. Only ``pages`` is read that
+way: a digest filed under a slug no registry knows, or an evidence entry whose session resolved
+to no project (DESIGN 7 step 4), is text that was never filed rather than memory every project
+shares, and `aft search` keeps both out of a project's results.
 
 Two keys keep the index in step with what it is built from (BUILD-PLAN M3.1: "updated
 incrementally by file content hash and evidence row id"):
@@ -135,6 +138,18 @@ LIBRARY = "library"
 #: The collections this index maintains (DESIGN 10, BUILD-PLAN M3.1, M7.3).
 COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS, LIBRARY)
 
+#: The collections whose rows with no project id are every project's memory: DESIGN 6's global
+#: pages, a reference page that covers nothing yet. Whoever queries the index takes a row with
+#: no id from one of these as shared memory; from any other collection an id-less row is text
+#: that was never filed under a project at all - a session that resolved to none (DESIGN 7
+#: step 4), a digest under a slug no registry answers for - and is not that project's memory.
+GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES,)
+
+#: The collections whose rows name no project because they span them all: one dream report day
+#: consolidates every project (DESIGN 9). Such a row answers a query about any project, and
+#: DESIGN 10 has it searched only once ``--reports`` asks for reports at all.
+SPANNING_COLLECTIONS: tuple[str, ...] = (REPORTS,)
+
 # Which top-level vault directories feed each file collection. ``pages`` takes the
 # directories whose pages hold curated fact lines, which is `aft.lint`'s list, so the index
 # and the linter cannot disagree about what a curated page is. The archive, the digests and
@@ -156,12 +171,16 @@ PROJECT_DIRS = vault.PROJECT_DIRS
 # collection table in DESIGN 10. ``pages`` holds "active curated lines", which are the lines
 # `aft.inject` injects, so the index and the block a session starts with carry the same lines
 # by construction. A candidate is its own state and DESIGN 10 files candidate facts under
-# Digests, where the digest that raised it is searchable. Superseded, withdrawn and stale
-# lines are marked "Injected? No" and are not active memory; they rest in ``archive``, which
-# DESIGN 10 searches only when ``--archive`` asks for it.
+# Digests, where the digest that raised it is searchable. Superseded lines are "Injected? No"
+# and rest in ``archive``, which DESIGN 10 searches only when ``--archive`` asks for it, and
+# DESIGN 10 says what that collection holds twice over: "superseded lines, and resolved notes
+# with the fact they belonged to". A withdrawn line is in no collection at all: the line is out
+# of memory because `aft forget` took its evidence away (DESIGN 12), so its words answer no
+# query, with or without ``--archive``. A stale line is memory still standing, only doubted, so
+# it stays searchable wherever its page is.
 FACT_STATES: dict[str, tuple[str, ...]] = {
     PAGES: inject.INJECTED,
-    ARCHIVE: (page.SUPERSEDED, page.WITHDRAWN, page.STALE),
+    ARCHIVE: (page.SUPERSEDED, page.STALE),
 }
 
 # BM25 weights (BUILD-PLAN M3.1: "BM25 weights title and description above body", with the
@@ -212,8 +231,10 @@ PROJECTS_ORIGIN = "registry"
 #: it carries - is decided by this module rather than by any file, so rows written under another
 #: build answer a query looking exactly as trustworthy as fresh ones, and no query can tell.
 #: Bump the stamp whenever that changes; the repair for meeting another build's rows is
-#: DESIGN 14's `aft reindex` (`_require_current_build`).
-BUILD_STAMP = "rows-1"
+#: DESIGN 14's `aft reindex` (`_require_current_build`). ``rows-2`` is the build whose archive
+#: collection stopped admitting withdrawn lines and whose evidence rows began naming the entry
+#: they hold in their path.
+BUILD_STAMP = "rows-2"
 BUILD_TABLE = "build"
 
 #: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
@@ -311,7 +332,9 @@ _FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
-# an evidence hit is a session's text, and this is how a page already names one.
+# an evidence row is one entry, so its path carries the entry id the way a page row's does the
+# heading. This is how a page already names a session, and the whole resource is what
+# `aft trace` takes to open the entry's context (DESIGN 10).
 SESSION_RESOURCE = "aft://session/"
 
 #: The heading a digest's handoff note is indexed under. The note itself lives in the digest's
@@ -749,6 +772,9 @@ def _project_scopes(
 
     A row with no id is every project's memory - the global pages of DESIGN 6, a report day,
     or a reference page that covers nothing yet - and not a page whose project went missing.
+    A digest filed under a slug the registry does not answer for lands here too, so no id says
+    nothing about which of the two it is, and `aft search` reads an id-less row as shared memory
+    only for the collections where a page could not have a project to begin with.
     """
     aft = (frontmatter or {}).get("aft")
     if isinstance(aft, dict):
@@ -994,6 +1020,8 @@ def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
 
     The digest is of the payload as the archive holds it, not of the text, so a redaction
     that rewrote the words moved it whatever the compressed form measures (`_sync_evidence`).
+    Its path names the one entry it holds, entry id and all, which is what a hit has to carry
+    for `aft trace` to open the context around it (DESIGN 10).
     """
     session_id = record["session_id"]
     entry_id = record["entry_id"]
@@ -1006,7 +1034,7 @@ def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
         ) from exc
     return Row(
         body=text,
-        path=f"{SESSION_RESOURCE}{record['agent']}/{session_id}",
+        path=f"{SESSION_RESOURCE}{record['agent']}/{session_id}#{entry_id}",
         project_id=record["project_id"],
         agent=record["agent"],
         session_id=session_id,
