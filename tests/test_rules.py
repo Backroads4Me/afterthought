@@ -560,9 +560,8 @@ def test_an_explicit_correction_from_you_skips_the_gate():
 
 
 def test_a_suggested_fact_is_held_to_the_same_gate_as_an_inferred_one():
-    """R3 names the gate for ``[inferred]``; firstmate ruled on 2026-09-29 that the same bar
-    holds a ``[suggested]`` fact, so the weaker tag gets no easier path out of
-    Candidates."""
+    """R3 names the gate for ``[inferred]``; a ruling on R3 holds that the same bar holds a
+    ``[suggested]`` fact, so the weaker tag gets no easier path out of Candidates."""
     outcome = check(
         decide("add", line=None),
         new_fact(source="suggested"),

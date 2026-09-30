@@ -140,7 +140,7 @@ FACTS: tuple[SeedFact, ...] = (
         "One OpenAI-compatible endpoint, set in the home directory's config.toml, serves every "
         "model call.",
         "13. The model and its load",
-        "One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`.",
+        "One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`",
     ),
     SeedFact(
         "Facts",

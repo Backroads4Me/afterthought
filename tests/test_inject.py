@@ -223,7 +223,7 @@ A widget that turns water into widgets.
 
 ## References
 
-- For sizes use [[widget-spec]]. (waiting on Ted)
+- For sizes use [[widget-spec]]. (waiting on the user)
 
 ## Preferences
 

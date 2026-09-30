@@ -155,7 +155,7 @@ def test_an_unclosed_span_runs_to_the_end_of_the_entries_of_one_call(cfg):
 
 
 def test_only_a_prompt_carries_a_marker(cfg):
-    # A marker is Ted speaking for himself, so the assistant saying the words opens no
+    # A marker is the user speaking for themselves, so the assistant saying the words opens no
     # span; the design puts the markers on prompts (DESIGN 12).
     entries = [
         answered("aft off would be a name for that flag"),

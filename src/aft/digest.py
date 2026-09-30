@@ -3,7 +3,7 @@
 A job is one chunk of one session. The digest reads the entries past that session's
 watermark, hands what the filter keeps to the evidence archive and to the model, and keeps
 only what a script can check: a fact stands when its quote is the words of the entry it
-cites and, for ``stated``, when that entry is one of Ted's turns (DESIGN 8). The model
+cites and, for ``stated``, when that entry is one of the user's turns (DESIGN 8). The model
 decides what is worth remembering; the script decides what is allowed to become memory,
 and everything it refuses is written down with the reason, so a digest that says nothing
 was kept reads differently when the verifier was broken than when the session was empty.
@@ -67,7 +67,7 @@ MAX_OUTPUT_TOKENS = 4_000
 # A page's body is fact sections only (DESIGN 6), so a fact's kind is the heading it sits
 # under. A fact's scope is no part of that line, so it travels in the page's own record.
 SCOPES = frozenset({"project", "global"})
-# DESIGN 9 R6: why dreaming passes over a global fact Ted did not commit to himself. The
+# DESIGN 9 R6: why dreaming passes over a global fact the user did not commit to. The
 # digest records it beside the fact, so the skip is reported and the fact stays written.
 GLOBAL_NOT_STATED = "a global page changes only from [stated]"
 
@@ -178,7 +178,7 @@ def render(entries: Sequence[Entry]) -> str:
     """The chunk as the prompt is told to read it: ``[<id>] <ROLE> <time>`` and its text.
 
     The entry id leads each block because the schema asks the model to name the id each
-    quote came from, and the role and time because the prompt distinguishes Ted's own
+    quote came from, and the role and time because the prompt distinguishes the user's own
     commitments from the agent's, and dates a fact by when it was said.
     """
     return "\n\n".join(
@@ -425,7 +425,9 @@ def verify(
             continue
         if fact["source"] == "stated" and entry.role != USER:
             dropped.append(
-                _refused(fact, f"[stated] cites entry {entry.id}, which is not one of Ted's turns")
+                _refused(
+                    fact, f"[stated] cites entry {entry.id}, which is not one of the user's turns"
+                )
             )
             continue
         if fact["kind"] not in KIND_SECTIONS.values():
@@ -654,7 +656,7 @@ def _verified(fact: Fact) -> dict:
     """One fact the page carries, as the verifier verified it, scope and all.
 
     The fact line has no field for scope (DESIGN 6), so the page's own record names it, and
-    a global fact whose source is not one of Ted's own commitments carries the rule it will
+    a global fact whose source is not one of the user's own commitments carries the rule it will
     be skipped for (DESIGN 9 R6). Where such a fact is filed later is not this page's to say.
     """
     record = {
