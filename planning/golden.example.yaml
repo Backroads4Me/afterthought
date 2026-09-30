@@ -1,0 +1,65 @@
+# A golden set for `aft eval` (design section 15).
+#
+# Copy this to <vault>/golden.yaml - the vault's own directory, which is ~/afterthought by
+# default - and write the entries from your own two weeks of work: the questions you asked
+# an agent that you should not have had to ask twice, and the answers you know are already
+# in memory. `aft eval` reads that file with no path; `aft eval other.yaml` runs another
+# set, which is how a set can travel with a project instead of only living in the vault.
+#
+# Each entry asks one question of one registered project:
+#
+#   question      the words to search with, as an agent would type them
+#   project       the slug of the project the answer belongs to
+#   expect        text or page paths that must be found - in the block a session starts
+#                 with, or among the search results
+#   expect_not    text that must surface in neither, because nothing in recall should show
+#                 it at all
+#
+# Matching folds whitespace and case, so an entry can quote a fact the way it reads rather
+# than the way the index stores it. `--limit N` widens or narrows how many search results
+# count as found; the default is `aft search`'s own width.
+#
+# `expect_not` is the strict half of the set: it asks that text be nowhere in what recall
+# returns, so it belongs to what must never surface. A candidate that a digest raised is
+# searchable in that digest by design section 10, so whether a weak inference was promoted
+# is the dream fixture suite's question, not this one.
+#
+# `aft eval` exits 1 when any entry fails, which is what the milestone checklist acts on: a
+# passing run says memory answered, not merely that the check ran.
+
+# Expected memory is found, in the project that owns it.
+- question: what port does the daemon listen on
+  project: widget
+  expect:
+    - the daemon listens on 8123
+    - projects/widget/overview.md
+
+# A question can check only that irrelevant memory stays out: nothing is expected here, and
+# a fact belonging to the project next door must reach neither the block nor the results.
+- question: what port does the daemon listen on
+  project: widget
+  expect_not:
+    - the gasket ships in three sizes
+
+# Contradicting noise: the older claim was superseded, so it rests in the archive and
+# default recall shows only the line that replaced it.
+- question: what shape is the widget
+  project: widget
+  expect:
+    - the widget is round
+  expect_not:
+    - the widget is square
+
+# Something capture was never meant to keep: an off-the-record span and a planted secret
+# stay out of the archive, the index and the block alike (design section 8).
+- question: how is the deployment host reached
+  project: widget
+  expect_not:
+    - the deployment passphrase
+
+# Memory deeper than the block is still reachable: this line lives on a page the block only
+# points at, so it counts as found once the search reaches it.
+- question: how is widget storage implemented
+  project: widget
+  expect:
+    - storage is sqlite
