@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from aft import cli
+from aft.library import manifest as manifest_mod
 
 
 @pytest.fixture
@@ -312,3 +313,55 @@ def test_missing_required_fields_rejected(tmp_path: Path, capsys):
     assert "name must be a lowercase alphanumeric identifier" in captured.err
     assert "title must be a non-empty string" in captured.err
     assert "description must be a non-empty string" in captured.err
+
+
+def test_manifest_authority_defaults_to_reference(tmp_path: Path, valid_manifest_data: dict):
+    """A manifest without authority defaults to reference."""
+    if "authority" in valid_manifest_data:
+        del valid_manifest_data["authority"]
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    m = manifest_mod.validate(m_path)
+    assert m.authority == "reference"
+
+
+def test_manifest_authority_explicit_authoritative(tmp_path: Path, valid_manifest_data: dict):
+    """A manifest with authority: authoritative validates successfully."""
+    valid_manifest_data["authority"] = "authoritative"
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    m = manifest_mod.validate(m_path)
+    assert m.authority == "authoritative"
+
+
+def test_manifest_authority_explicit_reference(tmp_path: Path, valid_manifest_data: dict):
+    """A manifest with authority: reference validates successfully."""
+    valid_manifest_data["authority"] = "reference"
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    m = manifest_mod.validate(m_path)
+    assert m.authority == "reference"
+
+
+def test_manifest_invalid_authority_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """An invalid authority string fails validation."""
+    valid_manifest_data["authority"] = "official"
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "authority must be one of" in captured.err
+
+
+def test_manifest_non_string_authority_rejected(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """A non-string authority value fails validation."""
+    valid_manifest_data["authority"] = 123
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+
+    exit_code = cli.main(["library", "validate", str(m_path)])
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "authority must be a string" in captured.err

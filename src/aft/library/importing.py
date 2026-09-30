@@ -47,6 +47,7 @@ class ImportResult:
     report_path: str
     committed: bool
     map_summary: MapVerificationSummary | None = None
+    authority: str = "reference"
 
 
 def extract_pdf_pages(path: Path) -> list[tuple[str, str]]:
@@ -300,6 +301,7 @@ title: {manifest.title}
 description: {manifest.description}
 aft:
   collection: {manifest.name}
+  authority: {manifest.authority}
   projects:
 {projects_yaml}
   files:
@@ -413,6 +415,7 @@ def write_import_report(
 
 - Collection: `{manifest.name}`
 - Title: {manifest.title}
+- Authority: {manifest.authority}
 - Source directory: `{manifest.path}`
 - Projects: {projects_str}
 - Files imported: {len(imported_files)}
@@ -566,7 +569,7 @@ def import_collection(
         committed = vault.commit(
             cfg.vault,
             staged_paths,
-            f"aft library: import collection '{manifest.name}'",
+            f"aft library: import collection '{manifest.name}' ({manifest.authority})",
         )
 
     return ImportResult(
@@ -578,6 +581,7 @@ def import_collection(
         report_path=report_rel,
         committed=committed,
         map_summary=map_summary,
+        authority=manifest.authority,
     )
 
 

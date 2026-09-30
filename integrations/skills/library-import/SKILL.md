@@ -22,6 +22,9 @@ Nothing imported is trusted: existing indexes, tables of contents, and documenta
    - `name`: collection slug (lowercase, dashes/underscores)
    - `title`: human-readable title
    - `description`: collection summary
+   - `authority`: `authoritative` or `reference` (default `reference`). You **must ask the user** which authority this collection holds and record their answer in the manifest; never choose or assume it on your own.
+     - `authoritative`: The governing source for what it covers (such as an official standard or specification implemented by the project). Facts mined from its document files (`original`, `derived`, `errata`) enter memory as `[observed]`.
+     - `reference`: Useful reference material, but not settled truth (such as vendor notes or guides). Facts enter as `[inferred]` or `[suggested]` candidates.
    - `projects`: list of project slugs this collection applies to
    - `files`: mapping of every surveyed relative file path to its role and relations
 
@@ -60,8 +63,8 @@ Nothing imported is trusted: existing indexes, tables of contents, and documenta
    Review generated reference pages. Add descriptions explaining what each document is, its authority, and when to use or not use it. Every claim must carry a quote that appears in the extracted text.
 
 6. **Propose facts**:
-   Run `aft library propose <manifest> <facts-file>` to propose candidate facts mined from notes and excluded instruction files.
-   Each fact is quote-checked against its file and enters the dream as a candidate digest. Excluded files record that the quote was verified at import and the original was not retained.
+   Run `aft library propose <manifest> <facts-file>` to propose candidate facts mined from documents (`original`, `derived`, `errata`), notes, and excluded instruction files.
+   Each fact is quote-checked against its file. Document facts from an authoritative collection are tagged `[observed]` and can go active in memory in a single dream run if there are no conflicts. Document facts from a reference collection, as well as facts from notes and excluded instruction files, enter as `[inferred]` or `[suggested]` candidates. Facts cannot be proposed as `[stated]` from library files. Excluded files record that the quote was verified at import and the original was not retained.
 
 7. **Review report and commit**:
    Review the import report and vault commit to verify all files are accounted for and all claims verified.

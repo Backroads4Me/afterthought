@@ -79,6 +79,7 @@ DERIVED_EXTS = {".md", ".markdown", ".txt", ".json"}
 IMPORT_PROCEDURE = """\
 Import procedure:
 1. Write a manifest: create a YAML manifest file naming the collection, description,
+   authority (authoritative or reference; ask the user, never choose),
    projects it applies to, one role for every surveyed file, and relations between files.
    Roles:
    - original: authoritative source document
@@ -100,7 +101,7 @@ Import procedure:
    Document each major document's authority and purpose with verified quotes.
 5. Propose facts:
    Run `aft library propose <manifest> <facts-file>` to propose candidate facts
-   from notes and excluded instruction files.
+   from documents, notes, and excluded instruction files.
 6. Report and commit:
    Review the import report and commit to the vault.
 """
