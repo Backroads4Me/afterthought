@@ -713,6 +713,64 @@ def test_archived_resolved_notes_are_searchable_with_archive_flag(
     assert "archive/projects/widget/overview.md" not in out_default
 
 
+# A page whose superseded line is still on it. That is where a struck line sits from the day a
+# dream strikes it until `dream.maintain` moves the file at 90 days, so DESIGN 10's ``--archive``
+# has to reach it where it stands (BUILD-PLAN F20). Each line is searched below by a word none
+# other carries, so a hit says where that line was indexed rather than which page is wordy.
+PROTOTYPE_PAGE = """---
+type: Project
+title: Widget prototype
+description: The earlier prototype that was dropped.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Widget prototype
+
+## Decisions
+
+- The prototype runs on a nixie driver board. [stated] 2026-09-26 [^s1]
+- ~~The prototype ran on a valve board.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s1]
+- ~~The prototype ran on a mercury battery.~~ [stated] 2026-01-02 [^s1] withdrawn 2026-02-02
+"""
+
+
+def test_a_line_superseded_today_answers_the_archive_flag_from_its_own_page(
+    populated_vault: Config, monkeypatch, capsys
+) -> None:
+    """F20: a line superseded today, still on the page that carries it, is found with
+    `aft search --archive` and never by the default search (DESIGN 10) - and the hit names the page
+    it is on, so `aft read` opens the page that still holds the struck line. A withdrawn line
+    reaches neither, which is what DESIGN 12 says a withdrawal is for."""
+    (populated_vault.vault / "projects/widget/prototype.md").write_text(
+        PROTOTYPE_PAGE, encoding="utf-8"
+    )
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+
+    # One word each, alone in the vault: search terms answer on their own, so "driver" would come
+    # back from the live line of the same page and say nothing about the struck one.
+    assert [hit.path for hit in search.search(populated_vault, "nixie")] == [
+        "projects/widget/prototype.md"
+    ], "the live line is memory and answers on its own"
+
+    assert search.search(populated_vault, "valve") == [], "out of memory, not in a hit"
+
+    hits = search.search(populated_vault, "valve", archive=True)
+    assert [(hit.path, hit.collection, hit.heading) for hit in hits] == [
+        ("projects/widget/prototype.md", "archive", "Decisions")
+    ]
+
+    assert search.search(populated_vault, "mercury", archive=True) == []
+    assert search.search(populated_vault, "mercury") == []
+
+    monkeypatch.setenv("AFT_HOME", str(populated_vault.home))
+    assert main(["search", "valve", "--archive"]) == 0
+    assert "projects/widget/prototype.md\tarchive\tDecisions" in capsys.readouterr().out
+    assert main(["search", "valve"]) == 0
+    assert "prototype.md" not in capsys.readouterr().out
+
+
 # What a search asks SQLite for (the M3 performance review). A hit is a document and a row is a
 # section, so a limit cannot simply be asked for at the door - and without one asked for at all,
 # a search whose every line carries the queried word built, snippeted and carried back every

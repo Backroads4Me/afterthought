@@ -482,15 +482,21 @@ def test_the_pipeline_end_to_end(pipeline: Pipeline, capsys, monkeypatch) -> Non
     with_reports = json.loads(capsys.readouterr().out)
     assert f"reports/2026/10/{DREAM_DAY}.md" in [hit["path"] for hit in with_reports], with_reports
 
-    # A superseded line is memory's history rather than memory, so neither the default query
-    # nor the opened archive hands it back as a curated line. That it is in fact findable
-    # from neither - only from the digest that proposed it - is the one expectation this
-    # pipeline could not meet, and it is marked below rather than quietly left out of the walk.
+    # A superseded line is memory's history rather than memory, so the default query does not hand
+    # it back - and the opened archive does, from the page that still carries it, which is where a
+    # struck line sits until `dream.maintain` moves it at 90 days (DESIGN 10, BUILD-PLAN F20). The
+    # walk used to expect it from neither, only from the digest that proposed it; the ruling that
+    # opened F20 is the reason that expectation moved, and the test below holds the same promise.
     assert indexmod.ARCHIVE not in {hit["collection"] for hit in by_default}
     phrase = f'"{CLAUDE_STATEMENT.removesuffix(".")}"'
+    assert cli.main(["search", phrase, "--all", "--json"]) == 0
+    as_memory = json.loads(capsys.readouterr().out)
+    assert f"projects/{SLUG}/overview.md" not in [hit["path"] for hit in as_memory], as_memory
     assert cli.main(["search", phrase, "--all", "--archive", "--json"]) == 0
     history = json.loads(capsys.readouterr().out)
-    assert f"projects/{SLUG}/overview.md" not in [hit["path"] for hit in history], history
+    assert [
+        hit["collection"] for hit in history if hit["path"] == f"projects/{SLUG}/overview.md"
+    ] == [indexmod.ARCHIVE], history
     assert "digests" in {hit["collection"] for hit in history}, history
 
     # -- `aft forget session` on the Claude session, and nothing of it left afterwards.
@@ -565,23 +571,23 @@ def test_the_pipeline_end_to_end(pipeline: Pipeline, capsys, monkeypatch) -> Non
     assert CLAUDE_ONLY not in pipeline.vault_text()
 
 
-@pytest.mark.xfail(
-    reason=(
-        "DESIGN 10 files superseded lines in the archive, searched with --archive. The archive "
-        "collection is built from the archive/ directory alone, and dream.maintain moves a "
-        "superseded line there only once it is 90 days old, while the pages collection admits "
-        "the injected states alone. A line the dream superseded today is in neither: --archive "
-        "cannot find it, and its words answer only from the digest that proposed it."
-    )
-)
 def test_a_superseded_line_answers_under_the_archive_flag(pipeline: Pipeline) -> None:
-    """The line the dream superseded today is still memory's history, and findable as such."""
+    """The line the dream superseded today is still memory's history, and findable as such.
+
+    It is on its page rather than under ``archive/``, because ``dream.maintain`` does not move a
+    line until it has rested 90 days (DESIGN 9), and BUILD-PLAN F20 rules that the archive
+    collection reaches it where it stands: found with ``--archive``, never without it."""
     cfg = pipeline.cfg
     pipeline.dream()
 
     # The words only that line ever said, quoted so the query asks for the phrase and not for
     # any of its common words on their own.
     phrase = f'"{CLAUDE_STATEMENT.removesuffix(".")}"'
+    without = search.search(cfg, phrase, project=SLUG)
+    assert f"projects/{SLUG}/overview.md" not in {hit.path for hit in without}, [
+        (hit.path, hit.collection) for hit in without
+    ]
+
     hits = search.search(cfg, phrase, project=SLUG, archive=True)
     paths = {hit.path for hit in hits}
     assert f"projects/{SLUG}/overview.md" in paths or any(

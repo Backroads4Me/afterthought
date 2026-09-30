@@ -421,9 +421,10 @@ def test_dead_lines_are_not_in_pages(initialized: Config) -> None:
         assert all(statement not in body for body in bodies.values()), statement
 
 
-def test_a_page_with_no_live_line_contributes_no_rows(initialized: Config) -> None:
-    """``pages`` holds active curated lines, so a page with none contributes nothing: no empty
-    row for a search to return, and not its title or description either."""
+def test_a_page_with_no_live_line_contributes_no_pages_rows(initialized: Config) -> None:
+    """``pages`` holds active curated lines, so a page with none contributes nothing to it: no
+    empty row for a search to return, and not its title or description either. Where the dead
+    lines do go is another test's promise - and only the struck one has anywhere to go."""
     write(initialized, "projects/widget/resting.md", _ALL_DEAD)
     index.update(initialized)
 
@@ -589,6 +590,54 @@ def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     assert search(initialized, "pages", "steel OR bronze OR prototype") == []
     assert search(initialized, "archive", "steel") == ["archive/widget.md#Decisions"]
     assert search(initialized, "archive", "bronze OR prototype") == []
+
+
+def test_a_line_at_rest_on_its_page_is_indexed_in_the_archive(initialized: Config) -> None:
+    """A struck line reaches the archive without ever leaving the page it was struck on (DESIGN 10,
+    BUILD-PLAN F20). ``dream.maintain`` does not move the line for 90 days, so a line a dream
+    superseded today is on its page and in no collection at all unless the page's out-of-memory
+    lines are indexed somewhere: ``pages`` still holds the live lines alone, the superseded and
+    stale lines of the same file reach ``archive`` under the page's own path, and the withdrawn
+    line reaches neither - DESIGN 12 took its evidence away, so its words answer nothing."""
+    write(initialized, REL, PAGE)
+    index.update(initialized)
+
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert _column(row_for(initialized, "archive", f"{REL}#Decisions"), "body") == SUPERSEDED[1]
+    assert _column(row_for(initialized, "archive", f"{REL}#State"), "body") == STALE[1]
+    assert _column(row_for(initialized, "archive", f"{REL}#Decisions"), "project_id") == "p_widget"
+
+    assert search(initialized, "pages", "summary") == []
+    assert search(initialized, "archive", "summary") == [f"{REL}#Decisions"]
+    assert search(initialized, "archive", "ms") == [f"{REL}#State"]
+    # The withdrawn line's words answer neither collection, which is the point of withdrawing it.
+    assert search(initialized, "archive", "directly") == []
+    assert search(initialized, "pages", "directly") == []
+
+    # Nothing moved, and the run that says so must still leave the page's archive rows alone.
+    index.update(initialized)
+
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
+
+
+def test_a_line_a_page_stops_carrying_leaves_the_archive_too(initialized: Config) -> None:
+    """A live page feeds two collections, so re-reading it clears it out of both. Take only the
+    directory's own collection and the struck words go on answering `--archive` from a row no file
+    holds any more - the row `aft forget` withdrew and M3 review 3 found still searchable."""
+    rel = write(initialized, REL, PAGE)
+    index.update(initialized)
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
+
+    text = (initialized.vault / rel).read_text()
+    struck = next(line for line in text.split("\n") if SUPERSEDED[1] in line)
+    (initialized.vault / rel).write_text(text.replace(f"{struck}\n", ""))
+
+    index.update(initialized)
+
+    assert keys_of(initialized, "archive") == [f"{REL}#State"]
+    assert search(initialized, "archive", "summary") == []
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"], "its live lines"
 
 
 def test_content_changes_a_row_and_an_mtime_alone_does_not(initialized: Config) -> None:
