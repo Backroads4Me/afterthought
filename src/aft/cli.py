@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sqlite3
 import sys
-from collections.abc import Iterator
+import tempfile
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 from aft import __version__
-from aft.config import Config, ConfigError, load, resolve_home
+from aft.config import HOME_ENV, Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.registry import Registry, RegistryError, path_key, slugify
@@ -95,6 +98,11 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("path", nargs="?", default=".")
     q.add_argument("--slug", help="defaults to the directory name")
     q.add_argument("--title")
+    q.add_argument(
+        "--allow-temp",
+        action="store_true",
+        help="register a path under the system temporary directory in the default home",
+    )
     q.set_defaults(handler=cmd_project_add)
     q = psub.add_parser("rename", help="change a project's slug")
     q.add_argument("old")
@@ -396,6 +404,8 @@ def cmd_project_add(args) -> int:
     vault.require(config)
     info = gitutil.repo_info(Path(args.path).resolve())
     root = info.main if info else Path(args.path).resolve()
+    if not args.allow_temp:
+        _refuse_temporary_project(root)
     slug = args.slug or slugify(root.name)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
@@ -407,6 +417,25 @@ def cmd_project_add(args) -> int:
         vault.commit(config.vault, ["registry.yaml"], f"aft: register {slug}")
     print(f"registered {slug} ({project.id}) at {config.host}:{root}")
     return 0
+
+
+def _refuse_temporary_project(root: Path) -> None:
+    """Refuse to register a temporary directory in the default home (BUILD-PLAN F25).
+
+    With ``AFT_HOME`` unset the command is using the default home and so the user's real
+    vault, where a project under the system temporary directory is a scratch run that lost
+    its way: the directory will be gone and the registry will keep naming it. A run that set
+    ``AFT_HOME`` chose its home, so it registers whatever it likes.
+    """
+    if os.environ.get(HOME_ENV):
+        return
+    temporary = Path(tempfile.gettempdir()).resolve()
+    if root == temporary or temporary in root.parents:
+        raise UsageError(
+            f"{root} is under the temporary directory {temporary}, and {HOME_ENV} is not set, "
+            f"so this would register it in the vault of the default home. Set {HOME_ENV} to a "
+            "scratch home for a test or benchmark run, or pass --allow-temp to register it here."
+        )
 
 
 def cmd_project_rename(args) -> int:
@@ -862,6 +891,9 @@ def cmd_library_propose(args) -> int:
 # can hang and the hook as a whole never holds a session past the bound.
 HOOK_TIMEOUT_SECONDS = 2
 HOOK_LOG_TIMEOUT_SECONDS = 0.5
+# Recording a starting session's project is skipped when less than this is left of the
+# hook's working share: the block is already out, and the record is not worth the budget.
+HOOK_RECORD_MIN_SECONDS = 0.05
 
 
 def cmd_hook(args) -> int:
@@ -871,16 +903,31 @@ def cmd_hook(args) -> int:
     never prints on a failure, and always exits 0. The one line it leaves in the hook
     log is the whole record of what went wrong (BUILD-PLAN M1.1).
     """
+    remember = None
+    deadline = time.monotonic() + HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS
     try:
         with _hook_time_limit(HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS):
             payload = json.load(sys.stdin)
-            block = _dispatch(_hook_event(args, payload))
+            event = _hook_event(args, payload)
+            if event.kind == SESSION_START:
+                block, remember = _session_start(event)
+            else:
+                block = _dispatch(event)
         # Printed once the block is whole and the time limit is behind it, so an expiry
         # never leaves an agent holding the first half of a block.
         if block:
-            print(block)
+            print(block, flush=True)
     except (Exception, HookTimeoutError) as exc:
         _log_hook_failure(args.agent, args.event, exc)
+    remaining = deadline - time.monotonic()
+    if remember is not None and remaining > HOOK_RECORD_MIN_SECONDS:
+        # After the block is out, so a busy queue never costs a session its memory, and
+        # inside what is left of the same share of the budget the block was built in.
+        try:
+            with _hook_time_limit(remaining):
+                remember()
+        except (Exception, HookTimeoutError) as exc:
+            _log_hook_failure(args.agent, args.event, exc)
     return 0
 
 
@@ -908,18 +955,16 @@ def _dispatch(event: SessionEvent) -> str:
     every source including ``compact`` (hooks reference, "SessionStart"), and pi's extension
     reads the same text and adds it as a system prompt section. Injection only reads, so
     ``capture.exclude_paths`` and ``capture.exclude_projects`` do not apply to it. A vault
-    that is not initialized has no memory to give and returns nothing.
+    that is not initialized has no memory to give and returns nothing. `cmd_hook` also
+    records the project a captured session started in, once the block is printed
+    (`_session_start`).
 
     ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
     returns nothing to print: no model call, no transcript read, no project resolution
     (DESIGN 8, BUILD-PLAN M2.2).
     """
     if event.kind == SESSION_START:
-        from aft import vault
-
-        if not vault.is_initialized(load().vault):
-            return ""
-        return _injection_block(event.cwd)
+        return _session_start(event)[0]
     if event.kind in (COMPACTION, SESSION_END):
         from aft import queue
         from aft.config import is_excluded
@@ -931,6 +976,39 @@ def _dispatch(event: SessionEvent) -> str:
         queue.enqueue(cfg, event)
         systemd_install.trigger_early(cfg)
     return ""
+
+
+def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]:
+    """The block a starting session is given, and the step that records its project.
+
+    The directory is resolved once, for both. Recording is returned rather than done, so the
+    hook prints the block first: the record is what files this session's words if its
+    directory is gone by the time they are digested (DESIGN 7), and it is capture's, so a
+    session in an excluded path or project records nothing, and neither does a directory
+    that resolves to no project.
+    """
+    from aft import inject, keys, vault
+    from aft.config import is_excluded
+
+    config = load()
+    if not vault.is_initialized(config.vault):
+        return "", None
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(event.cwd, registry, config.host)
+    block = inject.build(config, result)
+    if result.slug is None or is_excluded(event.cwd, config):
+        return block, None
+    project_id = result.project.id if result.project is not None else None
+    slug = result.slug
+
+    def remember() -> None:
+        # Imported here: the queue is not needed to print the block, and the block is what
+        # the hook's time is for.
+        from aft import queue
+
+        queue.record_project(config, event.agent, event.session_id, project_id, slug)
+
+    return block, remember
 
 
 class HookTimeoutError(BaseException):

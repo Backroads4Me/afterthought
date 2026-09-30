@@ -4,6 +4,7 @@ import dataclasses
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import inject, keys
+from aft import inject, keys, queue
 from aft.cli import HOOK_TIMEOUT_SECONDS, main
 from aft.config import Config, InjectConfig
 from aft.gitutil import normalize_remote
@@ -865,6 +866,83 @@ def test_a_session_start_hook_injects_into_a_path_capture_excludes(
 
     out = run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, cwd)
     assert out == EXPECTED + "\n"
+
+
+def recorded_projects(config: Config) -> list[tuple[str, str | None, str]]:
+    """Every ``(agent, project id, slug)`` the queue recorded at a session start."""
+    path = config.home / "queue.sqlite"
+    if not path.exists():
+        return []
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(
+            "SELECT agent, project_id, slug FROM session_projects ORDER BY agent"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
+def test_a_session_start_records_the_project_the_session_started_in(
+    name, agent, event, widget, tmp_path, capsys, monkeypatch
+):
+    """The directory is resolved while it exists, and the queue keeps the answer, so a
+    session whose worktree is later removed is still filed under its project (DESIGN 7)."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    project = Registry.load(widget.registry_path).by_slug("widget")
+
+    out = run_session_start(monkeypatch, capsys, name, agent, event, tmp_path / "widget")
+    assert out == EXPECTED + "\n"
+    assert recorded_projects(widget) == [(agent, project.id, "widget")]
+    assert hook_log(widget) == []
+
+
+def test_a_session_start_outside_every_project_records_nothing(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """A directory that resolves to no project has no project to record."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, plain)
+    assert recorded_projects(widget) == []
+
+
+def test_a_session_start_in_an_excluded_path_records_nothing(widget, tmp_path, capsys, monkeypatch):
+    """The record is capture's, and an excluded session leaves no trace in the queue. The
+    session still gets its memory."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    cwd = tmp_path / "widget"
+    config = widget.home / "config.toml"
+    config.write_text(config.read_text() + f'[capture]\nexclude_paths = ["{cwd}"]\n')
+
+    out = run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, cwd)
+    assert out == EXPECTED + "\n"
+    assert recorded_projects(widget) == []
+
+
+def test_a_busy_queue_costs_a_starting_session_nothing_it_can_see(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """Recording runs after the block is printed and gives up quickly, so a queue another
+    process holds does not cost the session its memory or the hook its budget."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    queue.recorded_project(widget, "claude", "warm-up")  # creates the queue file
+    holder = sqlite3.connect(widget.home / "queue.sqlite", isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        out = run_session_start(
+            monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, tmp_path / "widget"
+        )
+        took = time.monotonic() - started
+    finally:
+        holder.rollback()
+        holder.close()
+    assert out == EXPECTED + "\n"
+    assert took < 2, f"the hook took {took:.2f} s against its 2 second budget"
+    assert recorded_projects(widget) == []
+    assert len(hook_log(widget)) == 1
 
 
 @pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
