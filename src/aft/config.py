@@ -285,6 +285,9 @@ daily_token_budget = 200000
 max_chars = 8000
 
 [library]
-# Commit library files to the vault's git repository.
+# Commit library files to the vault's git repository. Every import brings the vault's
+# .gitignore in line with this setting, so switching it off at any time keeps the files on
+# disk and out of git rather than leaving them untracked, unignored and collectable as
+# human edits.
 commit = true
 """
