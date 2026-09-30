@@ -111,8 +111,10 @@ Import procedure:
 3. Import the collection:
    Run `aft library import <manifest>` to copy files, extract text, index documents,
    and generate reference page structure.
-4. Add descriptions:
-   Document each major document's authority and purpose with verified quotes.
+4. Add verified descriptions:
+   Run `aft library describe <manifest> <descriptions-file>` to add verified
+   descriptions (what, version, when to use) with quotes checked against
+   extracted text and recorded hashes. The agent never edits reference pages directly.
 5. Propose facts:
    Run `aft library propose <manifest> <facts-file>` to propose candidate facts
    from documents, notes, and excluded instruction files.
