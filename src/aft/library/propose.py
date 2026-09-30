@@ -16,6 +16,7 @@ both in candidate digests and on curated pages.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -25,7 +26,7 @@ from typing import TextIO
 
 import yaml
 
-from aft import evidence, pagewrite, vault
+from aft import evidence, pagewrite, redact, vault
 from aft.config import Config, load
 from aft.library import manifest as manifest_mod
 from aft.library.importing import extract_document_chunks
@@ -144,6 +145,43 @@ def is_verified_import_quote(home: Path, resource: str, quote: str) -> bool:
         if isinstance(e, dict) and e.get("quote_norm") == q_norm:
             return True
     return False
+
+
+def redact_verified_quotes(home: Path, pattern: re.Pattern[str]) -> int:
+    """Replace one pattern's matches in the verified-quote record, and count the entries.
+
+    ``aft forget pattern`` redacts the vault's pages, and an imported quote is checked against
+    the page that cites it, so a record still holding the words as first written would stop
+    matching the redacted quote it stands for and the line resting on it would read as
+    unverifiable. Both sides take the same replacement: the record proves a quote was checked
+    against a file, and says nothing about what the words were (DESIGN 12).
+    """
+    vf_path = home / "library" / VERIFIED_QUOTES_FILE
+    if not vf_path.is_file():
+        return 0
+    try:
+        data = json.loads(vf_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+
+    changed = 0
+    for entries in data.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("quote"), str):
+                continue
+            redacted = pattern.sub(redact.REDACTED, entry["quote"])
+            if redacted == entry["quote"]:
+                continue
+            entry["quote"] = redacted
+            entry["quote_norm"] = evidence._spaced(redacted)
+            changed += 1
+    if changed:
+        vf_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return changed
 
 
 def load_proposals(source: str | Path | TextIO | Sequence[dict]) -> list[ProposedFact]:

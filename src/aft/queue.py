@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     digest_due  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent, session_id)
 );
+CREATE TABLE IF NOT EXISTS forgotten (
+    session_id     TEXT PRIMARY KEY,
+    forgotten_time TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs (status, created_time, id);
 CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
@@ -140,6 +144,9 @@ class SessionState:
     job was claimed, or, for a worker row the archive stored without digesting, when it was
     stored. A transcript untouched since then holds nothing unread. ``failed_at``
     is when the session's newest job failed, or None when that job did not fail.
+    ``forgotten`` is whether ``aft forget session`` removed this session, which is the
+    queue's way of knowing that a transcript still on disk holds words that were asked to
+    be gone (DESIGN 12).
     """
 
     watermark: str | None
@@ -148,6 +155,7 @@ class SessionState:
     digest_due: bool
     read_at: datetime | None = None
     failed_at: datetime | None = None
+    forgotten: bool = False
 
 
 def enqueue(config: Config, event: SessionEvent) -> None:
@@ -157,11 +165,17 @@ def enqueue(config: Config, event: SessionEvent) -> None:
     concurrent writers from both agents serialize on the write lock (DESIGN 8). An excluded
     session writes no row and leaves no trace. Nothing here opens the transcript, resolves
     a project, or touches a watermark.
+    A session ``aft forget session`` removed files no row, whatever its hook says: the
+    transcript is still on disk, and a row for it would put the forgotten words back.
     """
     if is_excluded(event.cwd, config):
         return
     now = _now()
     with _writing(config) as conn:
+        if conn.execute(
+            "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (event.session_id,)
+        ).fetchone():
+            return
         conn.execute(
             "INSERT INTO jobs (id, agent, session_id, cwd, transcript_path, kind,"
             " event_time, status, created_time, updated_time)"
@@ -204,6 +218,36 @@ def drop_job(config: Config, job: Job | str) -> None:
     job_id = job.id if isinstance(job, Job) else job
     with _writing(config) as conn:
         conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
+def forget_session(config: Config, session_id: str) -> int:
+    """Remove one session's whole place in the queue, and say so to capture (DESIGN 12).
+
+    Its job rows go, at every status: a row names the session's transcript and the directory
+    it ran in, and a failed row keeps up to 200 characters of the model's own answer in
+    ``error``. Its session row goes too, so its watermark and its ``digest_due`` debt go with
+    it. A debt is what turns stored words back into a job (:func:`redeem_digest_debts`), so a
+    debt left owed hands the forgotten chunk to the next run as if nothing was asked.
+
+    What stays is one row naming the session and the moment it was forgotten, because the
+    sweep measures a session against its own progress: with no rows left the session looks
+    unread, and a transcript the agent still holds would be captured, digested and indexed
+    again, putting the words straight back. ``enqueue`` refuses a session with that row, so
+    neither a hook nor a sweep files work for it again. A session the queue never saw gets
+    the row too, so a hook still to come for it files nothing.
+
+    Returns how many job rows were removed.
+    """
+    moment = _text(_now())
+    with _writing(config) as conn:
+        removed = conn.execute("DELETE FROM jobs WHERE session_id = ?", (session_id,)).rowcount
+        conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        conn.execute(
+            "INSERT INTO forgotten (session_id, forgotten_time) VALUES (?, ?)"
+            " ON CONFLICT (session_id) DO UPDATE SET forgotten_time = excluded.forgotten_time",
+            (session_id, moment),
+        )
+    return removed
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:
@@ -519,6 +563,9 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
             " ORDER BY created_time DESC, id DESC LIMIT 1",
             (agent, session_id),
         ).fetchone()
+        forgotten = conn.execute(
+            "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (session_id,)
+        ).fetchone()
     return SessionState(
         watermark=row[0] if row else None,
         off_record=bool(row[1]) if row else False,
@@ -526,6 +573,7 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
         digest_due=bool(row[2]) if row else False,
         read_at=_moment(read[0]),
         failed_at=_moment(newest[1]) if newest and newest[0] == FAILED else None,
+        forgotten=forgotten is not None,
     )
 
 

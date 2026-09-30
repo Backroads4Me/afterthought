@@ -113,6 +113,10 @@ def _candidate(
         return None
     session_id = _session_id(agent, path)
     state = session_state(config, agent, session_id)
+    if state.forgotten:
+        # The person asked for these words to be gone and the agent still holds the
+        # transcript, so the forgetting has to outlive the file (DESIGN 12).
+        return None
     if state.has_open_job:
         return None
     # A digest reads the transcript after it claims its job, so a file that has not moved
