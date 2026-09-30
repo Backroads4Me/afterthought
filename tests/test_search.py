@@ -767,8 +767,7 @@ def test_one_document_with_many_rows_does_not_take_the_whole_limit(
     comes back is documents: the busy page shares a limit of two with an archived entry rather than
     filling it with its own sections."""
     facts = "\n\n".join(
-        f"## {section}\n\n"
-        f"- The shim behind plate {number} is obsidian. [observed] 2026-09-20 [^s1]"
+        f"## {section}\n\n- The shim behind plate {number} is obsidian. [observed] 2026-09-20 [^s1]"
         for number, section in enumerate(
             ("Facts", "State", "Decisions", "Preferences", "Lessons", "Procedures", "References")
         )

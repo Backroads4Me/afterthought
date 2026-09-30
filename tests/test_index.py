@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from aft import evidence, index, page, pagewrite
+from aft import evidence, forget, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
@@ -1590,6 +1590,36 @@ def test_an_update_that_found_nothing_moved_never_asks_for_the_write_lock(
 
     assert index.update(initialized) == []
     assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
+
+
+def test_a_forget_is_a_change_the_shortcut_cannot_call_unchanged(initialized: Config) -> None:
+    """DESIGN 12 reaches "everything afterthought controls", and a run that decides nothing moved
+    is one step away from deciding that a forget moved nothing.
+
+    Both forgets rebuild the index themselves, so the proof is what the index answers afterwards:
+    a run that had just found nothing to do, followed by ``aft forget session`` and by
+    ``aft forget pattern``, has to have watched the archive change under it and let the rows go -
+    not keep them because the files they were derived from are all still on disk with the bytes
+    they had. The session neither forget names is checked in the same breath, because an update
+    that answered a forget by rebuilding everything would pass this test while destroying that
+    session. This one passes on the old path too, where there was no shortcut to be fooled: it is
+    the guard that keeps the shortcut honest rather than the test that proves it was missing."""
+    evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
+    evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
+    assert index.update(initialized) == []
+    assert index.update(initialized) == []
+    assert sorted(search(initialized, "evidence", "flange")) == ["abc#e1", "def#e1"]
+
+    forget.forget_session(initialized, "abc")
+    assert search(initialized, "evidence", "bronze") == []
+    assert [tuple(row) for row in rows(initialized, "evidence")] == [
+        tuple(row_for(initialized, "evidence", "def#e1"))
+    ]
+
+    forget.forget_pattern(initialized, "nickel")
+    assert search(initialized, "evidence", "nickel") == []
+    assert len(rows(initialized, "evidence")) == 1
+    assert index.update(initialized) == []
 
 
 def test_a_touched_file_leaves_a_rebuild_and_an_index_kept_up_to_date_agreeing(
