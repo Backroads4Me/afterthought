@@ -100,6 +100,25 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                 rep = apply.run_project(config, slug, result.waiting[slug], now=now)
             if rep is not None:
                 result.reports[slug] = rep
+                if hasattr(rep, "project"):
+                    from aft.dream import report as reportmod
+
+                    if reportmod.has_changes(rep):
+                        report_path = reportmod.write_report(
+                            config,
+                            rep,
+                            now=now,
+                            checkpoint=result.checkpoint,
+                            backlog=len(waiting_digests(config.vault).get(slug, [])),
+                        )
+                        needs_you_path = reportmod.regenerate_needs_you(config.vault)
+                        rel_report = report_path.relative_to(config.vault).as_posix()
+                        rel_ny = needs_you_path.relative_to(config.vault).as_posix()
+                        vault.commit(
+                            config.vault,
+                            [rel_report, rel_ny],
+                            f"aft: report {slug}",
+                        )
             result.ran.append(slug)
         return result
 
