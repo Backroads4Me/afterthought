@@ -467,21 +467,15 @@ def test_propose_duplicate_yaml_keys_rejected(library_env, tmp_path):
 def test_propose_multiple_projects(library_env, tmp_path):
     cfg, manifest_file, col_dir = library_env
 
-    manifest_data = {
-        "name": "rvc",
-        "title": "RV-C Standard",
-        "description": "RV-C specifications and notes",
-        "projects": ["rv-project", "widget"],
-        "path": str(col_dir),
-        "files": {
-            "notes.md": "notes",
-            "AGENTS.md": "exclude",
-            "rvc_spec.txt": "original",
-            "tools/build.sh": "exclude",
-        },
-    }
-    m_file = tmp_path / "multi.yaml"
-    m_file.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+    # A collection aims its facts at the projects it was imported for, so the run that
+    # writes two digests imports the collection for both of them.
+    m_file = import_collection_as(
+        cfg,
+        col_dir,
+        name="rvcmulti",
+        roles=SAMPLE_ROLES,
+        projects=("rv-project", "widget"),
+    )
 
     proposals = [
         {

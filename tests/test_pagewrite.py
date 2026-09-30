@@ -1645,3 +1645,36 @@ def test_archive_slug_uses_vault_path_slug():
     assert _archive_slug(Path("archive/widget.md")) == "widget"
     assert _archive_slug(Path("global/preferences.md")) == "preferences"
     assert _archive_slug(Path("random/custom.md")) == "custom"
+
+
+LIBRARY_CITED = """\
+---
+type: Project
+title: widget
+description: A page whose evidence includes a word from an imported document.
+sources:
+  - id: s1
+    resource: aft://session/claude/abc#entry-1
+    quote: "the controller runs at 250 kbps"
+  - id: s2
+    resource: aft://library/specimen/rvc_spec.md#entry-1
+    quote: "the controller runs at 250 kbps"
+aft:
+  project: {project_id}
+---
+
+## Facts
+"""
+
+
+def test_the_counts_on_a_candidate_count_sessions_and_not_imported_copies(initialized):
+    """The counts printed on a candidate are the gate's own numbers, so a quote taken from an
+    imported document - a sentence no session spoke - shows on the page as the nothing R3 counts
+    it toward (design 11 step 5)."""
+    doc = make(initialized, LIBRARY_CITED)
+    doc.add_candidate("The controller runs at 250 kbps.", "inferred", "2026-10-05", ("s1", "s2"))
+    assert (
+        "- The controller runs at 250 kbps. [inferred] 2026-10-05 [^s1] [^s2]"
+        " (signals 1/3, sessions 1/2)"
+    ) in doc.render()
+    written(initialized, doc)

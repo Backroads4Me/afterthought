@@ -41,7 +41,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import page, vault
+from aft import evidence, page, vault
 
 SIGNALS_GATE = 3
 SESSIONS_GATE = 2
@@ -70,12 +70,22 @@ def counts_for(refs: Sequence[str], sources: dict[str, dict]) -> tuple[int, int]
     come from the source entries it cites. Each source is one signal; sources written
     by the same session count once toward sessions, where a session is the part of the
     resource URI before the entry fragment (design 6, sources). A footnote with no
-    source behind it is a lint error, and here one signal with no session.
+    source behind it is a lint error, and here one signal with no session. A footnote to
+    an imported document is neither number: no session spoke those words, so the gate
+    counts it toward recurrence nothing and the counts a person reads say the same
+    (design 11 step 5).
     """
     unique = list(dict.fromkeys(refs))
-    resources = [sources[ref].get("resource") for ref in unique if ref in sources]
-    sessions = {_session_of(str(resource)) for resource in resources if resource}
-    return len(unique), len(sessions)
+    resources = [str(sources[ref].get("resource", "")) for ref in unique if ref in sources]
+    # A footnote whose source names no resource is a lint error: it is one signal with no session.
+    unresourced = (len(unique) - len(resources)) + sum(1 for resource in resources if not resource)
+    spoken = [
+        resource
+        for resource in resources
+        if resource and not evidence.is_library_resource(resource)
+    ]
+    sessions = {_session_of(resource) for resource in spoken}
+    return len(spoken) + unresourced, len(sessions)
 
 
 def _session_of(resource: str) -> str:

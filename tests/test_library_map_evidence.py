@@ -573,3 +573,40 @@ def test_a_bare_link_in_a_list_claims_only_that_a_document_exists(collection_tre
     assert len(summary.verified) == 1
     assert summary.verified[0].quote == "Nominal voltage is 12V DC."
     assert "says nothing of it" in summary.rejected[0].reason
+
+
+def test_a_wikilink_row_is_verified_cell_by_cell_like_a_link_row(collection_tree: Path) -> None:
+    """A map written with wikilinks claims the same thing as one written with markdown links, so
+    it is read the same way: one claim per cell, and the invented cell is examined rather than
+    skipped (F12 review 3)."""
+    (collection_tree / "WIKIS.md").write_text(
+        "# Index\n\n"
+        "| Signal | Document | What it says |\n"
+        "|---|---|---|\n"
+        "| Voltage | [[spec.md#Signal Levels|Spec]] | Nominal voltage is 12V DC. |\n",
+        encoding="utf-8",
+    )
+
+    claims = parse_claims_from_markdown(collection_tree / "WIKIS.md")
+    assert [c.quote for c in claims] == ["Voltage", "Nominal voltage is 12V DC."]
+
+    summary = verify_map_files([collection_tree / "WIKIS.md"], collection_tree)
+    assert [c.quote for c in summary.verified] == ["Nominal voltage is 12V DC."]
+    assert {r.claim.quote for r in summary.rejected} == {"Voltage"}
+
+
+def test_a_wikilink_alone_still_claims_its_own_label(collection_tree: Path) -> None:
+    """Outside a table nothing but the link stands, and a wikilink's label is the sentence the map
+    offers for the document - which is why a labelled link verifies and a bare one says too
+    little."""
+    (collection_tree / "WIKI1.md").write_text(
+        "# Index\n\n- [[spec.md#Signal Levels|12V DC]]\n- [[spec.md]]\n",
+        encoding="utf-8",
+    )
+
+    claims = parse_claims_from_markdown(collection_tree / "WIKI1.md")
+    assert [c.quote for c in claims] == ["12V DC", None]
+
+    summary = verify_map_files([collection_tree / "WIKI1.md"], collection_tree)
+    assert [c.quote for c in summary.verified] == ["12V DC"]
+    assert "says nothing of it" in summary.rejected[0].reason

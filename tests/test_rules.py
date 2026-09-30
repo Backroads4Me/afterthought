@@ -716,14 +716,69 @@ def test_an_authoritative_documents_own_word_earns_its_line():
 
 def test_an_imported_quote_releases_no_worker_held_line():
     """Confirming is recurrence by itself, and a collection has none to give: the copy in the
-    vault adds no source and no date to a standing line."""
+    vault releases neither a candidate the worker rule holds nor any other standing line."""
     outcome = check(
         decide("confirm"),
         new_fact(source="observed"),
-        line(VLLM),
+        line(SESSION_END),
         ctx(sig("col1", NEWER, origin=rules.LIBRARY, yours=False)),
     )
-    assert outcome == reject("design 8 worker sessions")
+    assert outcome == reject("design 11 library evidence")
+
+
+def test_an_imported_documents_word_supersedes_like_any_observed_fact():
+    """DESIGN 11 sends a collection's facts through R4 "like any [observed] fact", so a newer
+    verified quote from an authoritative document replaces the line the table gives ``[observed]``
+    to - exactly the call a primary session's newer quote wins (DESIGN 11 step 5)."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date=NEWER),
+        line(RVC),
+        ctx(sig("col1", NEWER, origin=rules.LIBRARY, yours=False)),
+    )
+    assert outcome == apply("supersede")
+
+
+def test_a_stated_line_still_needs_your_own_words_against_an_imported_document():
+    """A document's word carries ``[observed]`` authority and never yours: R2 keeps a ``[stated]``
+    fact refused unless the quote behind it is your own from a primary session, so no imported
+    file rewrites a fact recorded as your word (design 9 R2)."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="stated", date=NEWER, explicit_correction=True),
+        line(SESSION_END),
+        ctx(sig("col1", NEWER, origin=rules.LIBRARY, yours=False)),
+    )
+    assert outcome == reject("R2")
+
+
+def test_an_imported_document_too_old_to_outdate_the_line_replaces_nothing():
+    """The other half of R4: the newer quote has to be newer. A collection sentence older than the
+    line leaves the line standing and the pair comes to a conflict note (design 9 R4)."""
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date=OLDER),
+        line(RVC),
+        ctx(sig("col1", OLDER, origin=rules.LIBRARY, yours=False)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_a_library_footnote_adds_nothing_to_a_line_the_sessions_carry():
+    """The gate counts the footnotes a line ends up citing, so a library footnote among them is
+    the case where the page's counts and the gate must still agree: the primary sessions carry
+    the line over the gate and the imported quote adds neither signal nor session."""
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="observed"),
+        line(SWEEP),
+        ctx(
+            sig("a", "2026-10-04"),
+            sig("b", "2026-10-03"),
+            sig("col1", NEWER, source="s9", origin=rules.LIBRARY, yours=False),
+        ),
+    )
+    assert outcome == apply("confirm")
 
 
 def test_one_primary_session_corroborating_a_worker_fact_lifts_the_lower_rank():

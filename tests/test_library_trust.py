@@ -17,6 +17,7 @@ differently it imports it that way, since a manifest edited afterwards is the by
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -288,14 +289,16 @@ def test_propose_and_the_dream_read_a_page_break_the_same_way(
     pdf = source / "spec.pdf"
     pdf.write_bytes(b"%PDF-1.4 not a real pdf, the extractor stands in\n")
 
-    def pages(path: Path) -> list[tuple[str, str]]:
+    def pages(path: Path) -> importing.PdfExtraction:
         assert path.suffix == ".pdf"  # both commands read the copy, never the source
-        return [
-            ("Page 1", "The lunar landing\nprotocol runs at 250 kbps."),
-            ("Page 2", "It is verified by its checksum."),
-        ]
+        return importing.PdfExtraction(
+            [
+                ("page 1", "The lunar landing\nprotocol runs at 250 kbps."),
+                ("page 2", "It is verified by its checksum."),
+            ]
+        )
 
-    monkeypatch.setattr(importing, "extract_pdf_pages", pages)
+    monkeypatch.setattr(importing, "extract_pdf", pages)
     imported = import_collection(cfg, source, name="specpdf", roles={"spec.pdf": "original"})
 
     across = proposed(
@@ -336,3 +339,232 @@ def test_propose_and_the_dream_read_a_page_break_the_same_way(
     )
     assert rebuilt is True
     assert (cached / f"{hash_of_copy}.json").is_file()
+
+
+def test_a_re_import_is_the_only_thing_that_says_what_a_file_is(vault: Config) -> None:
+    """A per-document page describes the import that wrote it, and a re-import renames and retires
+    those pages, so the roles a collection is read under come from its own record, which every
+    import rewrites whole (F12 review 2)."""
+    cfg = vault
+    source = cfg.home.parent / "guide-col"
+    source.mkdir()
+    (source / "guide.md").write_text("The guide opens with a warning.\n", encoding="utf-8")
+    import_collection(
+        cfg,
+        source,
+        name="guidea",
+        roles={"guide.md": "original"},
+        authority="authoritative",
+    )
+
+    # The same words arrive again, now judged notes, in a second file sharing the first's stem -
+    # which is how a document's reference page gets renamed out from under itself.
+    (source / "guide.txt").write_text("The guide opens with a warning.\n", encoding="utf-8")
+    again = cfg.home.parent / "guidea-v2.yaml"
+    again.write_text(
+        yaml.safe_dump(
+            {
+                "name": "guidea",
+                "title": "guidea collection",
+                "description": "The same words, with the person's new judgment of them.",
+                "projects": ["rv-project"],
+                "path": str(source),
+                "authority": "authoritative",
+                "files": {"guide.md": "notes", "guide.txt": "notes"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    importing.import_collection(again, config=cfg)
+
+    record = importing.read_import_record(cfg.vault, "guidea")
+    assert record is not None
+    assert record.roles == {"guide.md": "notes", "guide.txt": "notes"}
+
+    # A page an earlier import wrote, still lying about the role of a file that is still there.
+    stale = cfg.vault / "references" / "guidea" / "guide-legacy.md"
+    stale.write_text(
+        "---\n"
+        "type: Reference\n"
+        "title: Guide\n"
+        "description: Guide\n"
+        "sources: []\n"
+        "aft:\n"
+        "  source: library/guidea/guide.md\n"
+        "  role: original\n"
+        "---\n\n## Notes\n",
+        encoding="utf-8",
+    )
+
+    honest = proposed(again, cfg, quote="The guide opens with a warning.", file="guide.md")
+    assert len(honest.verified_facts) == 1
+    assert honest.verified_facts[0].fact.source == "inferred"
+
+    relabelled = cfg.home.parent / "guidea-oldpaper.yaml"
+    relabelled.write_text(
+        yaml.safe_dump(
+            {
+                **yaml.safe_load(again.read_text(encoding="utf-8")),
+                "files": {"guide.md": "original", "guide.txt": "notes"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    handed = proposed(relabelled, cfg, quote="The guide opens with a warning.", file="guide.md")
+    assert handed.verified_facts == []
+    assert "the import record says 'notes'" in handed.dropped_facts[0].reason
+
+
+def test_a_document_nothing_can_extract_lends_no_words_to_a_quote(vault: Config) -> None:
+    """Extraction is what turns bytes into something a reader was shown. A file whose kind no
+    extractor knows has no such text, and the bytes behind it verify nothing (F12 review 4)."""
+    cfg = vault
+    stray = cfg.vault / "library" / "unknown-kind" / "notes.wgt"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("The lunar landing protocol runs at 250 kbps.\n", encoding="utf-8")
+
+    assert importing.extracted_text(stray, cfg.home) == ""
+
+
+def test_words_in_a_comment_or_a_script_verify_nothing(vault: Config) -> None:
+    """A comment and a script tag are in the file and are not something the document says, and a
+    heading tag inside one of them is markup no reader saw (F12.8)."""
+    cfg = vault
+    source = cfg.home.parent / "htmlspec"
+    source.mkdir()
+    (source / "spec.html").write_text(
+        "<!DOCTYPE html><html><head><title>Spec</title>"
+        "<!-- old draft <h2>Withdrawn baud rate</h2>"
+        " TODO: the controller was bought at a garage sale. -->"
+        "<script>var heading = '<h2>Injected heading</h2>';"
+        " var note = 'the controller was bought at a garage sale';</script>"
+        "</head><body><h1>Specification</h1>"
+        "<p>The protocol runs at 250 kbps.</p></body></html>",
+        encoding="utf-8",
+    )
+    imported = import_collection(cfg, source, name="htmlspec", roles={"spec.html": "original"})
+
+    hidden = proposed(
+        imported,
+        cfg,
+        statement="The controller was bought at a garage sale.",
+        quote="the controller was bought at a garage sale",
+        file="spec.html",
+    )
+    assert hidden.verified_facts == []
+    assert "not found in 'spec.html'" in hidden.dropped_facts[0].reason
+
+    read = proposed(
+        imported,
+        cfg,
+        statement="The protocol runs at 250 kbps.",
+        quote="The protocol runs at 250 kbps.",
+        file="spec.html",
+    )
+    assert len(read.verified_facts) == 1
+
+    reference = "\n".join(
+        text.read_text(encoding="utf-8")
+        for text in (cfg.vault / "references" / "htmlspec").glob("*.md")
+    )
+    assert "Withdrawn baud rate" not in reference
+    assert "Injected heading" not in reference
+
+
+def test_a_manifest_naming_a_project_the_import_never_recorded_writes_nothing(
+    vault: Config,
+) -> None:
+    """Which projects a collection speaks to was part of what a person approved at import, so a
+    manifest widened afterwards aims verified words at a page nobody approved (F12 review 8)."""
+    cfg = vault
+    reg = Registry.load(cfg.vault / "registry.yaml")
+    reg.add("widget", "Widget")
+    reg.save()
+    source = cfg.home.parent / "widecol"
+    source.mkdir()
+    (source / "notes.md").write_text(GROUNDING, encoding="utf-8")
+    imported = import_collection(cfg, source, name="widecol", roles={"notes.md": "notes"})
+
+    widened = cfg.home.parent / "widecol-widened.yaml"
+    widened.write_text(
+        yaml.safe_dump(
+            {
+                **yaml.safe_load(imported.read_text(encoding="utf-8")),
+                "projects": ["rv-project", "widget"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(propose.ProposeError, match="was imported for"):
+        proposed(
+            widened,
+            cfg,
+            quote="Always connect ground before positive terminal.",
+            file="notes.md",
+            project="widget",
+        )
+    assert not (cfg.vault / "digests" / "widget").exists()
+
+
+def test_a_project_name_that_is_a_path_is_refused_before_anything_is_written(
+    vault: Config,
+) -> None:
+    """A project name is a directory as much as a name, so a manifest naming a path outside the
+    vault is refused before a digest, a report or a page is written (F12)."""
+    cfg = vault
+    source = cfg.home.parent / "pathcol"
+    source.mkdir()
+    (source / "notes.md").write_text(GROUNDING, encoding="utf-8")
+    imported = import_collection(cfg, source, name="pathcol", roles={"notes.md": "notes"})
+
+    escaped = cfg.home.parent / "pathcol-escaped.yaml"
+    escaped.write_text(
+        yaml.safe_dump(
+            {
+                **yaml.safe_load(imported.read_text(encoding="utf-8")),
+                "projects": ["../../../escaped"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(propose.ProposeError, match="escaped"):
+        proposed(
+            escaped,
+            cfg,
+            quote="Always connect ground before positive terminal.",
+            file="notes.md",
+        )
+    assert not (cfg.vault.parent / "escaped").exists()
+
+
+def test_a_verified_quote_record_that_does_not_parse_is_refused_and_left_as_written(
+    vault: Config,
+) -> None:
+    """The record is the only proof that a quote from a file kept out of the vault was ever
+    checked. Read as empty it would be saved back holding only this run's quotes, and every other
+    imported quote would stop verifying with no copy left to check against (M7 review 16)."""
+    cfg = vault
+    source = cfg.home.parent / "instcol"
+    source.mkdir()
+    (source / "AGENTS.md").write_text(
+        "You are a helpful assistant. Cite every claim.\n", encoding="utf-8"
+    )
+    imported = import_collection(cfg, source, name="instcol", roles={"AGENTS.md": "exclude"})
+
+    (cfg.home / "library").mkdir(parents=True, exist_ok=True)
+    record = cfg.home / "library" / "verified_quotes.json"
+    record.write_text('{"aft://library/earlier/spec.md": [{"quote": "A sentence', encoding="utf-8")
+    before = record.read_bytes()
+
+    with pytest.raises(propose.ProposeError, match="does not parse"):
+        proposed(
+            imported,
+            cfg,
+            statement="The assistant cites every claim.",
+            quote="You are a helpful assistant. Cite every claim.",
+            file="AGENTS.md",
+        )
+    assert record.read_bytes() == before
+
+    with pytest.raises(propose.ProposeError, match="does not parse"):
+        propose.redact_verified_quotes(cfg.home, re.compile("helpful"))

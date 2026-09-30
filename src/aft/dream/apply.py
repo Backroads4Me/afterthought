@@ -722,7 +722,7 @@ def _lookup_library_evidence(
     stands = True, rules.LIBRARY, fallback_date, False
     refused = False, rules.LIBRARY, fallback_date, False
 
-    rel = resource.removeprefix("aft://library/").strip()
+    rel = resource.removeprefix(evidence.LIBRARY_RESOURCE).strip()
     collection, _, within = rel.partition("/")
     if not collection or not within:
         return refused
@@ -759,7 +759,7 @@ def _lookup_evidence(
     if not quote or not resource:
         return False, rules.PRIMARY, fallback_date, False
 
-    if resource.startswith("aft://library/"):
+    if evidence.is_library_resource(resource):
         return _lookup_library_evidence(config, resource, quote, fallback_date)
 
     if resource.startswith("aft://session/"):
@@ -842,7 +842,7 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
 
 
 def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
-    if resource.startswith("aft://library/"):
+    if evidence.is_library_resource(resource):
         return False
     if resource.startswith("aft://edit/"):
         return True

@@ -47,6 +47,40 @@ class ProposeError(Exception):
     """Raised when fact proposal fails or proposals file is invalid."""
 
 
+class VerifiedRecordError(ProposeError):
+    """The verified-quote record cannot be read, so it is never rewritten over or skipped."""
+
+
+def _read_verified_quotes(vf_path: Path) -> dict:
+    """The verified-quote record as written, or the reason it cannot be trusted.
+
+    This record is the only proof that a quote from a file the person chose not to keep was
+    checked against that file at the hash it had then. A record that does not parse is refused
+    where it is about to be written or redacted: read as empty it would be saved back holding
+    nothing but this run's quotes, and every other imported quote would stop verifying with no
+    copy left to check against (M7 review 16).
+    """
+    try:
+        text = vf_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise VerifiedRecordError(
+            f"library/{VERIFIED_QUOTES_FILE} cannot be read: {exc}; repair or remove it first"
+        ) from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise VerifiedRecordError(
+            f"library/{VERIFIED_QUOTES_FILE} does not parse ({exc}); repair or remove it first. "
+            "It is the only proof that a quote from a file kept out of the vault was checked"
+        ) from exc
+    if not isinstance(data, dict):
+        raise VerifiedRecordError(
+            f"library/{VERIFIED_QUOTES_FILE} holds a {type(data).__name__}, not the map of "
+            f"resource to verified quotes that 'aft library propose' writes; repair or remove it"
+        )
+    return data
+
+
 @dataclass(frozen=True)
 class ProposedFact:
     """One fact proposed by an agent from a library file."""
@@ -100,12 +134,7 @@ def record_verified_quote(
     vf_path = lib_dir / VERIFIED_QUOTES_FILE
     data: dict[str, list[dict]] = {}
     if vf_path.is_file():
-        try:
-            loaded = json.loads(vf_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except Exception:
-            data = {}
+        data = _read_verified_quotes(vf_path)
 
     entries = data.setdefault(resource, [])
     q_norm = evidence._spaced(quote)
@@ -125,7 +154,11 @@ def record_verified_quote(
 
 
 def is_verified_import_quote(home: Path, resource: str, quote: str) -> bool:
-    """Check whether a quote from an excluded library file was verified at import."""
+    """Whether a quote from a file the person kept out of the vault was verified when proposed.
+
+    A record that does not parse verifies nothing, and is left as it is: the commands that would
+    write to it or redact it refuse and say so rather than replacing it (M7 review 16).
+    """
     vf_path = home / "library" / VERIFIED_QUOTES_FILE
     if not vf_path.is_file():
         return False
@@ -159,12 +192,7 @@ def redact_verified_quotes(home: Path, pattern: re.Pattern[str]) -> int:
     vf_path = home / "library" / VERIFIED_QUOTES_FILE
     if not vf_path.is_file():
         return 0
-    try:
-        data = json.loads(vf_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 0
-    if not isinstance(data, dict):
-        return 0
+    data = _read_verified_quotes(vf_path)
 
     changed = 0
     for entries in data.values():
@@ -394,6 +422,18 @@ def verify_fact(
                 f"references/{manifest.name}/: run 'aft library import' before proposing facts"
             ),
         )
+
+    if record.hashes and not record.roles:
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=(
+                f"the import record under references/{manifest.name}/collection.md carries no "
+                "file roles, which is a collection imported before an import recorded them: run "
+                "'aft library import' again on this manifest"
+            ),
+        )
+
     if manifest.authority != record.authority:
         return FactVerificationResult(
             fact=fact,
@@ -566,6 +606,33 @@ def _demand_registered(
         )
 
 
+def _demand_recorded_projects(
+    manifest: Manifest, reg: Registry | None, record: importing.ImportRecord | None
+) -> None:
+    """Refuse a manifest naming a project the import did not record, before anything is written.
+
+    The collection's projects are part of what a person approved at import, and a digest lands
+    under the slug it names, so a manifest widened afterwards aims the same verified quotes at a
+    project nobody approved them for. The registry says a project exists; the import record says
+    this collection was imported for it, and both are checked (DESIGN 11 step 2).
+    """
+    if record is None or not record.projects or not manifest.projects:
+        return
+    ids: set[str] = set()
+    for slug in manifest.projects:
+        project = None if reg is None else (reg.by_slug(slug) or reg.by_id(slug))
+        ids.add(project.id if project is not None else slug)
+    unrecorded = sorted(ids - set(record.projects))
+    if unrecorded:
+        raise ProposeError(
+            f"collection {manifest.name!r} was imported for "
+            + ", ".join(sorted(record.projects))
+            + "; this manifest also names "
+            + ", ".join(repr(name) for name in unrecorded)
+            + "; import the collection again for that project, or fix the manifest"
+        )
+
+
 def propose_facts(
     manifest_path: str | Path,
     facts_source: str | Path | TextIO | Sequence[dict],
@@ -589,6 +656,7 @@ def propose_facts(
     reg = Registry.load(reg_path) if reg_path.is_file() else None
     _demand_registered(manifest, proposed, reg)
     record = importing.read_import_record(cfg.vault, manifest.name)
+    _demand_recorded_projects(manifest, reg, record)
 
     verified_list: list[FactVerificationResult] = []
     dropped_list: list[FactVerificationResult] = []

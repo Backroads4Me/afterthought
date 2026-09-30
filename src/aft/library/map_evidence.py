@@ -23,6 +23,8 @@ from aft.library.importing import extract_document_chunks
 
 MAP_EXTENSIONS = {".json", ".jsonl", ".md", ".markdown", ".txt"}
 MAP_NAME_KEYWORDS = {"index", "toc", "map", "table_of_contents", "catalog", "manifest"}
+LINK_MASK = "\ue000link"
+"""A link's place in a line while the line is read for what it says besides its links."""
 
 
 def is_map_file(rel_path: str | Path) -> bool:
@@ -367,21 +369,24 @@ def _line_descriptions(line: str, link_snippets: list[str]) -> list[str]:
     while an invented description went unexamined. In a list the words after the link are the
     claim: ``- [Spec](spec.md): defines the lunar landing protocol`` says that sentence of the
     document, and it is the sentence a verification has to find (DESIGN 11 step 4).
+
+    Each link is masked before the line is read, because a wikilink carries a pipe of its own
+    (``[[spec.md#Signal Levels|Spec]]``): counting pipes, or splitting on them, would see a table
+    row where a list item stands, and would cut the link into fragments that read like cells. A
+    cell left with nothing but a mask, or repeating a link's own label or target, says nothing
+    further about the document and claims nothing.
     """
-    if "|" in line:
-        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
-        kept = []
-        for cell in cells:
-            # A cell that only repeats the link, as label or as target, says nothing further.
-            if any(snippet in cell or cell in snippet for snippet in link_snippets):
-                continue
-            kept.append(cell)
-        return kept
-    said = line
+    masked = line
     for snippet in link_snippets:
-        said = said.replace(snippet, "")
-    said = said.strip().lstrip("#->*+ \t").strip().strip(":-").strip()
-    return [said] if said else []
+        masked = masked.replace(snippet, LINK_MASK)
+    cells = masked.split("|") if masked.count("|") >= 2 else [masked]
+    kept: list[str] = []
+    for cell in cells:
+        words = cell.replace(LINK_MASK, " ").strip()
+        if not words or any(words in snippet for snippet in link_snippets):
+            continue
+        kept.append(words.lstrip("#->*+ \t").strip().strip(":-").strip())
+    return [words for words in kept if words]
 
 
 def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) -> list[Claim]:
@@ -391,6 +396,9 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
     claims: list[Claim] = []
 
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    # A wikilink's target may carry a heading (`[[spec.md#Signal Levels|Spec]]`), and `]]` ends
+    # the target or the label; neither may contain another `]`, or a label ending in `]]` would
+    # lose its last bracket to the terminator and the link would not read back as itself.
     wikilink_re = re.compile(r"\[\[([^|\]]+)(?:\|([^\]]+))?\]\]")
 
     lines = text.splitlines()
@@ -457,17 +465,20 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
             descriptions = _line_descriptions(
                 line, [f"[[{target}|{label}]]" if label else f"[[{target}]]"]
             )
-            # Outside a table, a wikilink's own label is the sentence the map offers for it.
-            quote = descriptions[0] if descriptions else (label or None)
-            claims.append(
-                Claim(
-                    target_path=path,
-                    heading=heading,
-                    quote=quote,
-                    source_map=src,
-                    line=line_num,
+            # One claim per cell, exactly as a markdown-link row is read: a row stating a
+            # version and a description has both found, not the first one only. Outside a table,
+            # where nothing but the link stands, the link's own label is the sentence the map
+            # offers for the document (DESIGN 11 step 4).
+            for description in descriptions or [label or None]:
+                claims.append(
+                    Claim(
+                        target_path=path,
+                        heading=heading,
+                        quote=description,
+                        source_map=src,
+                        line=line_num,
+                    )
                 )
-            )
 
     return claims
 

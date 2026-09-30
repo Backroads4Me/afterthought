@@ -318,6 +318,18 @@ def _entry(row: tuple) -> Entry:
     )
 
 
+LIBRARY_RESOURCE = "aft://library/"
+"""The ``aft://`` entry a quote from an imported document is cited under, with the collection's
+name and the file's path within it (design 11). No session stands behind such an entry, so it
+verifies a fact and carries no recurrence: the gate counts it nothing, and so do the counts a
+person reads on a candidate."""
+
+
+def is_library_resource(resource: str) -> bool:
+    """Whether this ``aft://`` entry quotes an imported document, not a session or an edit."""
+    return resource.startswith(LIBRARY_RESOURCE)
+
+
 def _spaced(text: str) -> str:
     """``text`` with every run of whitespace, wrapping included, become one space."""
     return _WHITESPACE.sub(" ", text).strip()
