@@ -730,6 +730,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   archive collection indexes resolved notes with the fact they belonged to. Test: after a
   note is resolved, `aft search --archive <words of the answer>` finds it, and default
   search does not.
+- **F20 `--archive` reaches lines still on their page** (ruling 2026-09-30; M3 review 11).
+  DESIGN 10. The archive collection also indexes superseded and stale lines that sit on live
+  pages, so a line superseded today is found with `aft search --archive` and never by
+  default search. Withdrawn lines stay out of every collection. Tests: a line superseded in
+  this run and a stale line are found with `--archive` and not without it; a withdrawn line
+  is found by neither; the F18 pipeline test's xfail becomes a passing case.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

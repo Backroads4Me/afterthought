@@ -548,9 +548,10 @@ turned it off by default. The cap is a starting point; M5 tunes it by usefulness
 | Evidence | Filtered conversation from the evidence archive |
 | Library | Text extracted from library files, chunked by page or section |
 
-The archive (superseded lines, and resolved notes with the fact they belonged to) is
-searched only with `--archive`, and dream reports only
-with `--reports`, so old history and records about memory do not crowd out memory itself.
+Lines that are out of memory (superseded and stale lines, whether still on their page or
+moved to `archive/`, and resolved notes with the fact they belonged to) are searched only
+with `--archive`, and dream reports only with `--reports`, so old history and records about
+memory do not crowd out memory itself. Withdrawn lines are never searched.
 Results come back as paths with their collection and section (a library result names its
 page or section), a one-line description and the matching snippet. `aft read <path> --level outline|abstract|full` opens a result at the
 depth a task needs, and `aft trace <source>` shows a fact's quote and the evidence around
