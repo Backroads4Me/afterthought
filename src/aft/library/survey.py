@@ -82,7 +82,7 @@ Import procedure:
    authority (authoritative or reference; ask the user, never choose),
    projects it applies to, one role for every surveyed file, and relations between files.
    Roles:
-   - original: authoritative source document
+   - original: a source document (weight comes from the collection's authority, not the role)
    - derived: version made from another file (record derived-from relation)
    - errata: corrections to another file (record errata-for relation)
    - notes: working notes kept as sources and mined for facts
