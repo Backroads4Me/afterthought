@@ -165,14 +165,28 @@ def test_instruction_file_not_excluded_rejected(tmp_path: Path, valid_manifest_d
     assert "instruction file 'AGENTS.md' must have role 'exclude'" in captured.err
 
 
-def test_tooling_allowed_non_exclude_role(tmp_path: Path, valid_manifest_data: dict, capsys):
-    """Tooling files (.gitignore, tools/) can be assigned non-exclude roles by author."""
+def test_tooling_must_be_excluded(tmp_path: Path, valid_manifest_data: dict, capsys):
+    """Tooling has to be `exclude`, whatever its author meant by it (DESIGN 11 step 3).
+
+    A build script or a dotfile given `original` would be imported as a document and, in an
+    authoritative collection, have its claims enter as `[observed]` - from a file nobody chose
+    to read, and which says it exists to build or configure something else."""
     valid_manifest_data["files"][".gitignore"] = {"role": "notes"}
     valid_manifest_data["files"]["tools/generate.py"] = {"role": "original"}
     m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
 
     exit_code = cli.main(["library", "validate", str(m_path)])
-    assert exit_code == 0
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "tooling '.gitignore' must have role 'exclude', got 'notes'" in captured.err
+    assert "tooling 'tools/generate.py' must have role 'exclude', got 'original'" in captured.err
+
+    # Given `exclude`, the same two files are accounted for and the manifest validates.
+    valid_manifest_data["files"][".gitignore"] = "exclude"
+    valid_manifest_data["files"]["tools/generate.py"] = "exclude"
+    m_path = write_manifest(tmp_path / "manifest.yaml", valid_manifest_data)
+    assert cli.main(["library", "validate", str(m_path)]) == 0
 
 
 def test_derived_from_requires_derived_role(tmp_path: Path, valid_manifest_data: dict, capsys):
