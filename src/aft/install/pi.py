@@ -34,6 +34,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from aft.install import skill as skill_install
+
 AGENT = "pi"
 
 # afterthought's own directory under pi's extensions, and the entry point pi reads inside it.
@@ -338,3 +340,32 @@ def _write(target: Path, text: str) -> None:
     except OSError:
         os.unlink(temporary)
         raise
+
+
+def skills_dir(extensions: Path | None = None) -> Path:
+    """The skills directory pi reads for the current user."""
+    if extensions is not None:
+        return extensions.parent / "skills"
+    agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    base = Path(agent_dir).expanduser() if agent_dir else Path.home() / ".pi" / "agent"
+    return base / "skills"
+
+
+def skill_target(skills: Path) -> Path:
+    """The one skill file afterthought installs in pi's skills directory."""
+    return skill_install.target_path(skills)
+
+
+def install_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
+    """Install the library-import skill into pi's skills directory."""
+    return skill_install.install(skills, dry_run=dry_run)
+
+
+def check_skill_target(skills: Path) -> Path:
+    """Validate that the skill target path and container are valid and readable."""
+    return skill_install.check_target(skills)
+
+
+def uninstall_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
+    """Remove the library-import skill from pi's skills directory."""
+    return skill_install.uninstall(skills, dry_run=dry_run)

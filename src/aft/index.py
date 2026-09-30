@@ -110,7 +110,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import inject, lint, page
+from aft import inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError
@@ -150,7 +150,7 @@ FILE_COLLECTIONS: dict[str, tuple[str, ...]] = {
 # path component: ``projects/<slug>/``, ``digests/<slug>/`` and ``archive/<slug>.md``. The
 # rest name no project: ``global/`` is every project's memory, ``references/`` lists the
 # projects a page covers, and a report day spans them all.
-PROJECT_DIRS = ("projects", DIGESTS, ARCHIVE)
+PROJECT_DIRS = vault.PROJECT_DIRS
 
 # Which fact states a collection admits, read off the state table in DESIGN 6 and the
 # collection table in DESIGN 10. ``pages`` holds "active curated lines", which are the lines
@@ -762,14 +762,8 @@ def _project_scopes(
 
 def _path_slug(rel: str) -> str | None:
     """The slug of the project a file is filed under (DESIGN 6's vault tree), or None where
-    its directory names no project. ``archive/`` files one page per project, so its slug is
-    the page's name."""
-    parts = Path(rel).parts
-    if len(parts) < 2 or parts[0] not in PROJECT_DIRS:
-        return None
-    if parts[0] != ARCHIVE:
-        return parts[1]
-    return Path(parts[1]).stem if len(parts) == 2 else None
+    its directory names no project."""
+    return vault.path_slug(rel)
 
 
 def _session_of(rel: str) -> tuple[str | None, str | None]:
@@ -884,9 +878,11 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
             doc_desc = col_desc
             project_ids = list(projects) if projects else [None]
 
+            occurrences: dict[str, int] = {}
             for heading, text in chunks:
                 if not text:
                     continue
+                occurrences[heading] = seen = occurrences.get(heading, 0) + 1
                 for pid in project_ids:
                     row = Row(
                         title=doc_title,
@@ -903,7 +899,7 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
                             if src_file.exists()
                             else ""
                         ),
-                        row_key=_row_key(indexed_path, heading, pid, 1),
+                        row_key=_row_key(indexed_path, heading, pid, seen),
                         entry_hash=f_hash,
                     )
                     _insert(conn, LIBRARY, row)

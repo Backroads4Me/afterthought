@@ -41,7 +41,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import page
+from aft import page, vault
 
 SIGNALS_GATE = 3
 SESSIONS_GATE = 2
@@ -160,6 +160,22 @@ def line_identity(fact: page.Fact) -> tuple[str, str, str, tuple[str, ...], bool
 _line_identity = line_identity
 
 
+def _archive_slug(rel: Path) -> str:
+    slug = vault.path_slug(rel)
+    return slug if slug is not None else rel.stem
+
+
+def _archive_header(rel: Path) -> list[str]:
+    slug = _archive_slug(rel)
+    return [
+        "---",
+        "type: Archive",
+        f"title: {_scalar(f'{slug} archive')}",
+        f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
+        "---",
+    ]
+
+
 class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
@@ -177,14 +193,21 @@ class PageDoc:
     text changed, so a run can tell an edit from a no-op.
     """
 
-    def __init__(self, text: str, path: Path | str = "page.md") -> None:
+    def __init__(
+        self,
+        text: str,
+        path: Path | str = "page.md",
+        *,
+        vault: Path | str | None = None,
+    ) -> None:
         self.path = Path(path)
+        self.vault = Path(vault) if vault is not None else None
         self.lines: list[str] = text.split("\n")
         self._page = page.parse(text, self.path)
 
     @classmethod
-    def read(cls, path: Path) -> PageDoc:
-        return cls(path.read_text(), path)
+    def read(cls, path: Path, *, vault: Path | None = None) -> PageDoc:
+        return cls(path.read_text(encoding="utf-8"), path, vault=vault)
 
     def render(self) -> str:
         return "\n".join(self.lines)
@@ -561,6 +584,16 @@ class PageDoc:
             at = self._append_line(section, line)
             return self._fact_written(at, found.statement)
 
+    def archive_superseded(self, fact: page.Fact) -> str:
+        """Remove an expired superseded line from the page, returning its text (design 9)."""
+        found = self._resolve(fact)
+        if found.state != page.SUPERSEDED:
+            raise WriteError(f"only a superseded line can be archived; this one is {found.state}")
+        line_content = self.lines[found.line - 1]
+        with self._atomic():
+            self._apply(found.line - 1, found.line, [])
+        return line_content
+
     def remove_candidate(self, fact: page.Fact) -> bool:
         """Remove a candidate line resting on forgotten evidence (design 12, M2.8)."""
         found = self._resolve(fact)
@@ -575,6 +608,144 @@ class PageDoc:
         with self._atomic():
             self._apply(at, at + 1, [])
         return True
+
+    def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
+        """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).
+
+        The note is what makes a line a conflict or a question, so the line keeps its
+        bytes. A line that is not active alone is refused: a struck, stale or candidate
+        line already carries a state, and so does a line under an open note.
+
+        Text already sitting under the line is refused too. A note inserted above it
+        would make what a person typed read as the text of ours, which design 6 then
+        injects beside the line.
+
+        The note is set off by a blank line, the way design 6 writes one, so it renders as
+        its own block rather than folded into the line above. Its citations resolve like
+        the line's: a note is read next to its fact, so ``aft lint`` checks every ``[^id]``
+        in it (design 6).
+        """
+        found = self._resolve(fact)
+        if found.state != page.ACTIVE:
+            raise WriteError(f"cannot add a callout to a {found.state} line")
+        below = self.lines[found.line].rstrip() if found.line < len(self.lines) else ""
+        if below.startswith(">"):
+            raise WriteError(f"cannot add a callout here; {below} is already quote text")
+        if type not in page.CALLOUTS:
+            raise WriteError(f"unknown callout [{type}]; expected {' '.join(page.CALLOUTS)}")
+        rows = [row.strip() for row in text.strip().split("\n")]
+        if not all(rows):
+            raise WriteError("a callout needs text and no blank lines in it")
+        if any("\r" in row for row in rows):
+            raise WriteError("a callout row is one line")
+        self._check_citations(text)
+        note = ["", f"> [!{type}] {_check_date(date)}", *[f"> {row}" for row in rows]]
+        if below.strip():
+            note.append("")
+        self._apply(found.line, found.line, note)
+        return True
+
+    def resolve_callout(self, fact: page.Fact) -> bool:
+        """Move the note under a line to the archive: the dispute it records is closed.
+
+        Design 6 never deletes a note, so the whole block the parse read as this line's
+        note travels as it was read - the header and every row, including a row a person
+        typed under the header - with the line it was about written above them. The line
+        itself keeps its bytes and its place on the page, which is active again once its
+        note is off it.
+
+        The blank line that set the note apart goes with it, so closing a note leaves no
+        stack of blank lines behind. Text below the block stays on the page: it belongs to
+        the note only while the parse reads it as a note row. Every line the cut takes is
+        a line the archive is carrying off, so what this edit can still get wrong is a page
+        that reads worse afterwards. A page that reads better - an answer someone typed
+        under the note only reads as their answer once the note is off the line - is the
+        close working, not a refusal.
+        """
+        found = self._resolve(fact)
+        if not found.callouts:
+            raise WriteError("the line has no callout to resolve")
+        callout = found.callouts[0]
+        start = callout.line - 1
+        stop = callout.line + len(callout.text)
+        cut = start - 1 if not self.lines[start - 1].strip() else start
+        block = [f"> {self.lines[found.line - 1]}", *self.lines[start:stop]]
+        archive = self._archive_edit(block)
+        with self._atomic():
+            self._apply(cut, stop, [], carried_off=True)
+            self._write_archive(*archive)
+        return True
+
+    def _archive_file(self) -> Path:
+        """The file this page's resolved notes go to: ``archive/<page path>`` (design 6).
+
+        The archive target mirrors the page's own path inside the vault - a project page's
+        overview to ``archive/projects/<slug>/overview.md``, ``global/preferences.md`` to
+        ``archive/global/preferences.md``, a reference page the same way.
+        """
+        if self.vault is None:
+            raise WriteError(
+                f"cannot archive note from {self.path}: PageDoc has no vault configured"
+            )
+        try:
+            rel = self.path.resolve().relative_to(self.vault.resolve())
+        except ValueError:
+            try:
+                rel = self.path.relative_to(self.vault)
+            except ValueError:
+                raise WriteError(
+                    f"{self.path} lies outside vault {self.vault}: design 6 names no archive"
+                    " for such a page, so its note stays on the page"
+                ) from None
+        return self.vault / "archive" / rel
+
+    def _archive_edit(self, block: Sequence[str]) -> tuple[Path, bytes | None, bytes]:
+        """The archive file, the bytes it holds now (``None`` when it does not exist yet),
+        and the bytes the block turns them into.
+
+        The rows go in as they were read, and everything that can refuse refuses here,
+        before a byte is written. An archive file this writer did not make - one a person
+        named by hand, or one the maintenance pass filed - keeps its text and is given the
+        frontmatter every page in the vault needs to lint. A file that cannot be read is
+        refused with its path rather than appended into.
+        """
+        path = self._archive_file()
+        was = path.read_bytes() if path.exists() else None
+        text = self._archive_text(path, was)
+        lines = [*text.rstrip("\n").split("\n"), "", *block]
+        return path, was, ("\n".join(lines) + "\n").encode()
+
+    def _archive_text(self, path: Path, raw: bytes | None) -> str:
+        """The text a block gets appended to: a header on its own for a file not written yet,
+        an existing file's text, or that text with a header ahead of it when the file has
+        none of its own."""
+        rel = path.relative_to(self.vault / "archive") if self.vault else Path(path.name)
+        header = "\n".join(_archive_header(rel))
+        if raw is None:
+            return header
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise WriteError(f"the archive {path} is not text") from None
+        frontmatter, _, _, error = page.split_frontmatter(text)
+        if error:
+            raise WriteError(f"the archive {path} cannot be read: {error}")
+        if frontmatter is not None:
+            return text
+        return header + "\n" + text
+
+    def _write_archive(self, path: Path, was: bytes | None, now: bytes) -> None:
+        """Write the archive atomically, never truncating existing content (F1 fix)."""
+        import os
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+        try:
+            tmp.write_bytes(now)
+            os.replace(tmp, path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     # Lines and frontmatter
 
@@ -687,7 +858,9 @@ class PageDoc:
             self._page = was_page
             raise
 
-    def _apply(self, start: int, stop: int, new: Sequence[str]) -> None:
+    def _apply(
+        self, start: int, stop: int, new: Sequence[str], *, carried_off: bool = False
+    ) -> None:
         """Replace lines ``start`` to ``stop`` (0-based) with ``new``, or refuse.
 
         The text the edit would produce is parsed before any of it is written, and the
@@ -705,19 +878,22 @@ class PageDoc:
         added = errors - known
         if added:
             raise WriteError("; ".join(sorted(added)))
-        gone = known - errors
-        if gone:
-            still = dict(gone)
-            flagged = []
-            lost = sorted(
-                [(line, message) for line, message in self._page.errors if message in still],
-                key=lambda hit: not (start + 1 <= hit[0] <= stop),
+        remaining_now = list(now.errors)
+        flagged = []
+        for line, message in self._page.errors:
+            is_exempt = carried_off and (
+                (start + 1 <= line <= stop) or message.startswith("a callout cannot follow a ")
             )
-            for line, message in lost:
-                if still[message]:
-                    still[message] -= 1
-                    flagged.append(f"line {line}: {message}")
-            detail = "; ".join(flagged)
+            if is_exempt:
+                continue
+            expected_line = line if line <= start else line - (stop - start) + len(new)
+            candidate = (expected_line, message)
+            if candidate in remaining_now:
+                remaining_now.remove(candidate)
+            else:
+                flagged.append(f"line {line}: {message}")
+        if flagged:
+            detail = "; ".join(flagged) if flagged else f"line {start + 1}"
             raise WriteError(f"this edit would drop text outside the grammar: {detail}")
         self.lines[:] = lines
         self._page = now

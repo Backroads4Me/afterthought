@@ -35,8 +35,9 @@ from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
+from aft.install import skill as skill_install
 from aft.install import systemd as systemd_install
-from aft.library import importing, manifest, survey
+from aft.library import importing, manifest, map_evidence, propose, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         ConfigError,
         claude_install.InstallError,
         pi_install.InstallError,
+        skill_install.InstallError,
         systemd_install.InstallError,
         RegistryError,
         vault.VaultError,
@@ -70,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         digest.DigestError,
         evidence.EvidenceError,
         importing.ImportError,
+        propose.ProposeError,
         redact.BadPattern,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
@@ -223,6 +226,30 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("manifest", help="path to manifest YAML file")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_import)
+
+    q = lsub.add_parser("check-map", help="verify claims in an imported index or map file")
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument("map_files", nargs="*", help="path to index or map file(s) to check")
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.set_defaults(handler=cmd_library_check_map)
+
+    q = lsub.add_parser(
+        "propose",
+        aliases=["propose-facts"],
+        help="propose candidate facts from notes and instruction files",
+    )
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument(
+        "facts_file",
+        help="path to YAML file containing proposed facts (or '-' for stdin)",
+    )
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="verify quotes and roles without writing to vault",
+    )
+    q.set_defaults(handler=cmd_library_propose)
     return parser
 
 
@@ -328,14 +355,28 @@ def cmd_project_rename(args) -> int:
         registry.rename(args.old, args.new)
         registry.save()
         changed = ["registry.yaml"]
-        for old, new in (
-            (f"projects/{args.old}", f"projects/{args.new}"),
-            (f"digests/{args.old}", f"digests/{args.new}"),
-            (f"archive/{args.old}.md", f"archive/{args.new}.md"),
-        ):
-            if (config.vault / old).exists():
-                (config.vault / old).rename(config.vault / new)
-                changed += [old, new]
+        renamed: list[tuple[str, str]] = []
+        try:
+            for old, new in (
+                (f"projects/{args.old}", f"projects/{args.new}"),
+                (f"digests/{args.old}", f"digests/{args.new}"),
+                (f"archive/projects/{args.old}", f"archive/projects/{args.new}"),
+                (f"archive/{args.old}.md", f"archive/{args.new}.md"),
+            ):
+                if (config.vault / old).exists():
+                    (config.vault / new).parent.mkdir(parents=True, exist_ok=True)
+                    (config.vault / old).rename(config.vault / new)
+                    renamed.append((old, new))
+                    changed += [old, new]
+        except OSError as exc:
+            for old, new in reversed(renamed):
+                try:
+                    (config.vault / new).rename(config.vault / old)
+                except OSError:
+                    pass
+            registry.rename(args.new, args.old)
+            registry.save()
+            raise vault.VaultError(f"cannot rename project directories: {exc}") from exc
         vault.commit(config.vault, changed, f"aft: rename {args.old} to {args.new}")
     print(f"renamed {args.old} to {args.new}")
     return 0
@@ -487,62 +528,121 @@ def cmd_trace(args) -> int:
 
 
 def cmd_install_claude(args) -> int:
-    """Add or remove afterthought's hook entries in Claude Code's own settings file."""
+    """Add or remove afterthought's hook entries and skill in Claude Code's configuration."""
     settings = claude_install.settings_path()
+    skills = claude_install.skills_dir(settings)
+    try:
+        if settings.exists():
+            _ = settings.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise claude_install.InstallError(f"cannot read {settings}: {exc}") from exc
+    skill_install.check_target(skills)
     change = (
         claude_install.uninstall(settings, dry_run=args.dry_run)
         if args.uninstall
         else claude_install.install(settings, dry_run=args.dry_run)
     )
+    skill_change = (
+        claude_install.uninstall_skill(skills, dry_run=args.dry_run)
+        if args.uninstall
+        else claude_install.install_skill(skills, dry_run=args.dry_run)
+    )
     if args.dry_run:
-        print(change.preview or f"no changes to {settings}")
+        preview_lines = []
+        if change.preview:
+            preview_lines.append(change.preview)
+        if skill_change.changed:
+            verb = "would remove" if args.uninstall else "would write"
+            preview_lines.append(f"{verb} skill {skill_change.target}")
+            if skill_change.diff:
+                preview_lines.append(skill_change.diff)
+        if skill_change.backup is not None:
+            preview_lines.append(
+                f"would back up {skill_change.target.name} to {skill_change.backup}"
+            )
+        if not preview_lines:
+            print(f"no changes to {settings}")
+        else:
+            print("\n".join(preview_lines))
         return 0
     if change.backup is not None:
         print(f"backed up {settings} to {change.backup}")
+    if skill_change.backup is not None:
+        print(f"backed up {skill_change.target.name} to {skill_change.backup}")
     if args.uninstall:
         print(
             f"removed afterthought's hooks from {settings}"
             if change.changed
             else f"no afterthought hooks to remove in {settings}"
         )
+        if skill_change.changed:
+            print(f"removed skill {skill_change.target}")
+        else:
+            print(f"no afterthought skill to remove in {skills}")
     else:
         print(
             f"installed afterthought's hooks in {settings}"
             if change.changed
             else f"afterthought's hooks are already in {settings}"
         )
+        if skill_change.changed:
+            print(f"installed skill {skill_change.target}")
+        else:
+            print(f"afterthought skill is already in {skills}")
     return 0
 
 
 def cmd_install_pi(args) -> int:
-    """Copy or remove afterthought's extension in the directory pi loads extensions from."""
+    """Copy or remove afterthought's extension and skill in pi's configuration."""
     extensions = pi_install.extensions_dir()
+    skills = pi_install.skills_dir(extensions)
+    skill_install.check_target(skills)
     change = (
         pi_install.uninstall(extensions, dry_run=args.dry_run)
         if args.uninstall
         else pi_install.install(extensions, dry_run=args.dry_run)
     )
+    skill_change = (
+        pi_install.uninstall_skill(skills, dry_run=args.dry_run)
+        if args.uninstall
+        else pi_install.install_skill(skills, dry_run=args.dry_run)
+    )
     target = pi_install.target_path(extensions)
-    if not change.changed:
+    if not change.changed and not skill_change.changed:
         if args.uninstall:
             print(f"no afterthought extension in {extensions}")
+            print(f"no afterthought skill in {skills}")
         else:
             print(f"{target} is already up to date")
+            print(f"{skill_change.target} is already up to date")
         return 0
-    # Every line of a preview says what the run itself would say, so the preview cannot
-    # promise less than the command does: the text as a diff when there is one, the copy a
-    # change makes of the text it replaces, and the paths it writes or takes away.
-    if args.dry_run and change.diff:
-        print(change.diff)
+    if args.dry_run:
+        if change.diff:
+            print(change.diff)
+        if skill_change.diff:
+            print(skill_change.diff)
     if change.backup is not None:
         verb = "would back up" if args.dry_run else "backed up"
         print(f"{verb} the previous {target.name} to {change.backup}")
+    if skill_change.backup is not None:
+        verb = "would back up" if args.dry_run else "backed up"
+        print(f"{verb} the previous {skill_change.target.name} to {skill_change.backup}")
     if args.uninstall:
         verb = "would remove" if args.dry_run else "removed"
-        print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+        if change.changed:
+            print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+        if skill_change.changed:
+            print(f"{verb} {', '.join(str(path) for path in skill_change.removed)}")
     else:
         verb = "would write" if args.dry_run else "installed"
-        print(f"{verb} {target}")
+        if change.changed:
+            print(f"{verb} {target}")
+        else:
+            print(f"{target} is already up to date")
+        if skill_change.changed:
+            print(f"{verb} {skill_change.target}")
+        else:
+            print(f"{skill_change.target} is already up to date")
     return 0
 
 
@@ -581,6 +681,19 @@ def cmd_library_validate(args) -> int:
 
 def cmd_library_import(args) -> int:
     return importing.run(args.manifest, path_override=args.path)
+
+
+def cmd_library_check_map(args) -> int:
+    return map_evidence.run(args.manifest, map_files=args.map_files, path_override=args.path)
+
+
+def cmd_library_propose(args) -> int:
+    return propose.run(
+        args.manifest,
+        args.facts_file,
+        path_override=args.path,
+        dry_run=args.dry_run,
+    )
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget

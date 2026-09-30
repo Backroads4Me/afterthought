@@ -148,3 +148,30 @@ def locked(config: Config) -> Iterator[None]:
 def require(config: Config) -> None:
     if not is_initialized(config.vault):
         raise VaultError(f"no vault at {config.vault}; run `aft init` first")
+
+
+PROJECT_DIRS: tuple[str, ...] = ("projects", "digests", "archive")
+
+
+def path_slug(rel: str | Path) -> str | None:
+    """The project slug for a vault-relative path, or None for pages outside projects.
+
+    Handles:
+    - projects/<slug>/...
+    - digests/<slug>/...
+    - archive/projects/<slug>/... (ruling 7943f9a layout)
+    - archive/digests/<slug>/...
+    - archive/<slug>.md (legacy archive layout)
+    """
+    parts = Path(rel).parts
+    if not parts:
+        return None
+    if parts[0] in ("projects", "digests"):
+        return parts[1] if len(parts) > 1 else None
+    if parts[0] == "archive":
+        if len(parts) >= 3 and parts[1] in ("projects", "digests"):
+            return parts[2]
+        if len(parts) == 2 and parts[1].endswith(".md"):
+            stem = Path(parts[1]).stem
+            return stem if stem != "index" else None
+    return None
