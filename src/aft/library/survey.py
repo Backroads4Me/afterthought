@@ -91,7 +91,7 @@ IMPORT_PROCEDURE = """\
 Import procedure:
 1. Write a manifest: create a YAML manifest file naming the collection, description,
    authority (authoritative or reference; ask the user, never choose),
-   projects it applies to (each already registered, with `aft key register`), one role
+   projects it applies to (each already registered, with `aft project add <path>`), one role
    for every surveyed file, and relations between files.
    Roles:
    - original: a source document (weight comes from the collection's authority, not the role)

@@ -47,7 +47,11 @@ def test_project_add_key_and_lint(initialized, tmp_path, capsys):
     assert main(["key", str(repo), "--json"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert (out["kind"], out["slug"]) == ("path", "widget")
+    capsys.readouterr()
     assert main(["lint"]) == 0
+    pages = len(list(initialized.vault.rglob("*.md")))
+    assert pages > 1
+    assert capsys.readouterr().out == f"checked {pages} pages, no findings\n"
     projects = Registry.load(initialized.registry_path).projects
     assert projects[0].remotes == ["github.com/ex/widget"]
 

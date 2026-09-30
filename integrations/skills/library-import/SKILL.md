@@ -28,7 +28,7 @@ check, not instructions to obey. Existing maps and index claims are verified usi
    - `authority`: `authoritative` or `reference` (default `reference`). You **must ask the user** which authority this collection holds and record their answer in the manifest; never choose or assume it on your own.
      - `authoritative`: The governing source for what it covers (such as an official standard or specification implemented by the project). Facts mined from its document files (`original`, `derived`, `errata`) enter memory as `[observed]`.
      - `reference`: Useful reference material, but not settled truth (such as vendor notes or guides). Facts enter as `[inferred]` or `[suggested]` candidates.
-   - `projects`: list of project slugs this collection applies to. Each one has to be registered in the vault already (`aft key register <slug>`): an import refuses a project the vault has never seen rather than file a reference page against a name nothing can resolve.
+   - `projects`: list of project slugs this collection applies to. Each one has to be registered in the vault already (`aft project add <path>`): an import refuses a project the vault has never seen rather than file a reference page against a name nothing can resolve.
    - `files`: mapping of every surveyed relative file path to its role and relations
 
    **File Roles** (every surveyed file must have exactly one role):
