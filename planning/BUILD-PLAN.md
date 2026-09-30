@@ -766,6 +766,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   so tests and benchmarks that use a temporary home are unaffected. Tests: the refusal and
   its message; `--allow-temp` registers; a run with `AFT_HOME` set registers a temporary path
   without the flag.
+- **F26 A session is filed under the project it started in** (ruling 2026-09-30; tester
+  finding T8). DESIGN 7. The session-start hook records `(agent, session, project id, slug)`
+  in the queue after printing the block, skipping excluded sessions and directories that
+  resolve to no project. At digest time a directory that no longer resolves takes the
+  recorded project; with no record the session is archived and indexed under no project and
+  the job closes without a model call; with `capture.exclude_projects` set and no record the
+  job is dropped. `aft forget session` removes the record. Tests: each of those cases, and a
+  busy queue costing a starting session neither its block nor its budget.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

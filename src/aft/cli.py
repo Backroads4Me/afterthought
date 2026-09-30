@@ -9,7 +9,8 @@ import signal
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -855,6 +856,9 @@ def cmd_library_propose(args) -> int:
 # can hang and the hook as a whole never holds a session past the bound.
 HOOK_TIMEOUT_SECONDS = 2
 HOOK_LOG_TIMEOUT_SECONDS = 0.5
+# Recording a starting session's project is skipped when less than this is left of the
+# hook's working share: the block is already out, and the record is not worth the budget.
+HOOK_RECORD_MIN_SECONDS = 0.05
 
 
 def cmd_hook(args) -> int:
@@ -864,16 +868,31 @@ def cmd_hook(args) -> int:
     never prints on a failure, and always exits 0. The one line it leaves in the hook
     log is the whole record of what went wrong (BUILD-PLAN M1.1).
     """
+    remember = None
+    deadline = time.monotonic() + HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS
     try:
         with _hook_time_limit(HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS):
             payload = json.load(sys.stdin)
-            block = _dispatch(_hook_event(args, payload))
+            event = _hook_event(args, payload)
+            if event.kind == SESSION_START:
+                block, remember = _session_start(event)
+            else:
+                block = _dispatch(event)
         # Printed once the block is whole and the time limit is behind it, so an expiry
         # never leaves an agent holding the first half of a block.
         if block:
-            print(block)
+            print(block, flush=True)
     except (Exception, HookTimeoutError) as exc:
         _log_hook_failure(args.agent, args.event, exc)
+    remaining = deadline - time.monotonic()
+    if remember is not None and remaining > HOOK_RECORD_MIN_SECONDS:
+        # After the block is out, so a busy queue never costs a session its memory, and
+        # inside what is left of the same share of the budget the block was built in.
+        try:
+            with _hook_time_limit(remaining):
+                remember()
+        except (Exception, HookTimeoutError) as exc:
+            _log_hook_failure(args.agent, args.event, exc)
     return 0
 
 
@@ -899,16 +918,16 @@ def _dispatch(event: SessionEvent) -> str:
     every source including ``compact`` (hooks reference, "SessionStart"), and pi's extension
     reads the same text and adds it as a system prompt section. Injection only reads, so
     ``capture.exclude_paths`` and ``capture.exclude_projects`` do not apply to it. A vault
-    that is not initialized has no memory to give and returns nothing.
+    that is not initialized has no memory to give and returns nothing. `cmd_hook` also
+    records the project a captured session started in, once the block is printed
+    (`_session_start`).
 
     ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
     returns nothing to print: no model call, no transcript read, no project resolution
     (DESIGN 8, BUILD-PLAN M2.2).
     """
     if event.kind == SESSION_START:
-        if not vault.is_initialized(load().vault):
-            return ""
-        return _injection_block(event.cwd)
+        return _session_start(event)[0]
     if event.kind in (COMPACTION, SESSION_END):
         cfg = load()
         if is_excluded(event.cwd, cfg):
@@ -916,6 +935,32 @@ def _dispatch(event: SessionEvent) -> str:
         queue.enqueue(cfg, event)
         systemd_install.trigger_early(cfg)
     return ""
+
+
+def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]:
+    """The block a starting session is given, and the step that records its project.
+
+    The directory is resolved once, for both. Recording is returned rather than done, so the
+    hook prints the block first: the record is what files this session's words if its
+    directory is gone by the time they are digested (DESIGN 7), and it is capture's, so a
+    session in an excluded path or project records nothing, and neither does a directory
+    that resolves to no project.
+    """
+    config = load()
+    if not vault.is_initialized(config.vault):
+        return "", None
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(event.cwd, registry, config.host)
+    block = inject.build(config, result)
+    if result.slug is None or is_excluded(event.cwd, config):
+        return block, None
+    project_id = result.project.id if result.project is not None else None
+    slug = result.slug
+
+    def remember() -> None:
+        queue.record_project(config, event.agent, event.session_id, project_id, slug)
+
+    return block, remember
 
 
 class HookTimeoutError(BaseException):

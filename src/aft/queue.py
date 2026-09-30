@@ -98,6 +98,13 @@ CREATE TABLE IF NOT EXISTS forgotten (
     session_id     TEXT PRIMARY KEY,
     forgotten_time TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS session_projects (
+    agent       TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    project_id  TEXT,
+    slug        TEXT NOT NULL,
+    PRIMARY KEY (agent, session_id)
+);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_by_status ON jobs (status, created_time, id);
 CREATE INDEX IF NOT EXISTS jobs_by_session ON jobs (agent, session_id, status);
@@ -242,12 +249,56 @@ def forget_session(config: Config, session_id: str) -> int:
     with _writing(config) as conn:
         removed = conn.execute("DELETE FROM jobs WHERE session_id = ?", (session_id,)).rowcount
         conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM session_projects WHERE session_id = ?", (session_id,))
         conn.execute(
             "INSERT INTO forgotten (session_id, forgotten_time) VALUES (?, ?)"
             " ON CONFLICT (session_id) DO UPDATE SET forgotten_time = excluded.forgotten_time",
             (session_id, moment),
         )
     return removed
+
+
+# How long recording a session's project waits for the queue's write lock. It runs on the
+# session-start hook after the memory block is printed, so a busy queue costs the session
+# nothing it can see, and the wait is kept well inside the hook's budget.
+RECORD_BUSY_TIMEOUT_MS = 200
+
+
+def record_project(
+    config: Config, agent: str, session_id: str, project_id: str | None, slug: str
+) -> bool:
+    """Remember which project a session started in (DESIGN 7).
+
+    A session's directory can be gone by the time its words are digested: a worktree is made,
+    worked in and removed. The project is decided while the directory still exists, at
+    session start, and the digest reads it from here when the directory no longer answers.
+    ``project_id`` is None for a project the registry does not hold yet, which is named by its
+    slug alone. A session `aft forget` removed is not recorded again. Returns whether a row
+    was written.
+    """
+    with _writing(config, busy_timeout_ms=RECORD_BUSY_TIMEOUT_MS) as conn:
+        if conn.execute(
+            "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (session_id,)
+        ).fetchone():
+            return False
+        conn.execute(
+            "INSERT INTO session_projects (agent, session_id, project_id, slug)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (agent, session_id) DO UPDATE SET"
+            " project_id = excluded.project_id, slug = excluded.slug",
+            (agent, session_id, project_id, slug),
+        )
+    return True
+
+
+def recorded_project(config: Config, agent: str, session_id: str) -> tuple[str | None, str] | None:
+    """The ``(project id, slug)`` a session started in, or None when none was recorded."""
+    with _reading(config) as conn:
+        row = conn.execute(
+            "SELECT project_id, slug FROM session_projects WHERE agent = ? AND session_id = ?",
+            (agent, session_id),
+        ).fetchone()
+    return (row[0], row[1]) if row else None
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:
@@ -661,15 +712,18 @@ def _reading(config: Config):
 
 
 @contextmanager
-def _writing(config: Config):
+def _writing(config: Config, *, busy_timeout_ms: int | None = None):
     """One connection held for one transaction, taken immediately.
 
     ``BEGIN IMMEDIATE`` takes the write lock before the first row is written, so two
     writers coming from the two agents take their rows in turn instead of one of them
-    losing its row to a busy database (DESIGN 8).
+    losing its row to a busy database (DESIGN 8). ``busy_timeout_ms`` shortens how long this
+    writer waits for that lock, for a caller with less time than the queue's own default.
     """
     conn = _connect(config)
     try:
+        if busy_timeout_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
         conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()

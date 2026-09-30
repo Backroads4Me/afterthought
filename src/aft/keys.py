@@ -19,7 +19,8 @@ NONE = "none"
 @dataclass(frozen=True)
 class Resolution:
     kind: str
-    """How the directory resolved: path, remote, unregistered or none."""
+    """How the directory resolved: path, remote, unregistered or none, or recorded when the
+    directory is gone and the project is the one its session start recorded."""
 
     cwd: Path
     """The directory after resolving symlinks and mapping a worktree onto its main checkout."""

@@ -316,6 +316,14 @@ A working directory resolves to one project:
    its directory. It is added to the registry only when its first curated fact is written,
    so a throwaway directory creates nothing.
 
+A session's project is decided when the session starts, while its directory exists: the
+session-start hook resolves the directory to build the memory block, and records the answer
+beside the capture queue. A worktree is often removed before its session is digested, and
+the digest then files the session under the recorded project. A session with no record whose
+directory is gone is kept in the archive and the index under no project, with no digest
+page. When `capture.exclude_projects` names any project, such a session is dropped instead,
+because it cannot be shown to be outside the exclusion.
+
 Each project has a stable id separate from its slug, so a rename rewrites nothing else.
 `aft project list`, `aft project rename` and `aft project forget` manage the registry.
 Global facts apply in every project. The digest keeps every verified fact with its scope.
