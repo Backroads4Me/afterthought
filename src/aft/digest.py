@@ -30,7 +30,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from importlib.resources import files
 from pathlib import Path
@@ -307,6 +307,8 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # left open at the end of this chunk holds over the next (DESIGN 12, M2.3). The parts
     # below are cut from what this one pass kept, so they share its state in order.
     kept, off_record = filtermod.filter_entries(read, config, job.off_record)
+    if resolution is not None:
+        kept = without_memory_echo(kept, memory_lines(config, resolution))
     if not kept:
         # Nothing the filter left to digest: the entries were read and decided, so the
         # mark moves and the job closes. A page of nothing would stand as the session's
@@ -388,6 +390,62 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # away has been decided, and reading it again would decide it again (DESIGN 8).
     queue.complete(config, job, read[-1].id, off_record=off_record)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
+
+
+# A line of the memory block this short is a heading or a bare label, which a session may
+# write for reasons of its own; only a longer line is taken to be memory repeated.
+MIN_ECHO_CHARS = 20
+
+
+def _echo_key(line: str) -> str:
+    """A line reduced to what makes it the same line: no list or quote marker, and
+    whitespace folded, so a block quoted as a list or re-wrapped still matches."""
+    text = line.strip()
+    while text[:2] in ("- ", "* ", "> "):
+        text = text[2:].lstrip()
+    return " ".join(text.split())
+
+
+def memory_lines(config: Config, resolution: keys.Resolution) -> frozenset[str]:
+    """The lines of the memory block a session in this project is given (DESIGN 10).
+
+    A session sees its memory at start and often repeats it: asked what it knows, or
+    restating a decision before acting on it. Those words are memory reflected back, not
+    new evidence, and a digest built on them would confirm memory with its own echo and
+    count that as recurrence (R3). The block is built now, the same way the hook builds it.
+    """
+    from aft import inject
+
+    try:
+        block = inject.build(config, resolution)
+    except Exception:
+        # Reading memory is not what a digest is for; a block that cannot be built this
+        # moment only means no line of the chunk is taken to be an echo.
+        return frozenset()
+    keys_ = (_echo_key(line) for line in block.splitlines())
+    return frozenset(key for key in keys_ if len(key) >= MIN_ECHO_CHARS)
+
+
+def without_memory_echo(entries: list[Entry], memory: frozenset[str]) -> list[Entry]:
+    """The entries with every line that repeats a memory line taken out.
+
+    An entry left with nothing is dropped. The archive stores what is left, so a quote a
+    digest cites is always found in the words the session added, never in memory it was
+    handed.
+    """
+    if not memory:
+        return entries
+    kept: list[Entry] = []
+    for entry in entries:
+        lines = entry.text.splitlines()
+        remaining = [line for line in lines if _echo_key(line) not in memory]
+        if len(remaining) == len(lines):
+            kept.append(entry)
+            continue
+        text = "\n".join(remaining).strip()
+        if text:
+            kept.append(replace(entry, text=text))
+    return kept
 
 
 def _recorded_resolution(
@@ -1004,6 +1062,12 @@ def redigest(
     prompt = prompt_text()
     schema = digest_schema()
 
+    entries = without_memory_echo(entries, memory_lines(config, resolution))
+    if not entries:
+        raise DigestError(
+            f"session {session_id!r} holds nothing but the memory it was given, so it has no"
+            " digest to rebuild"
+        )
     for part in parts(entries):
         answer = _model_answer(config, prompt, render(part), schema)
         part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)

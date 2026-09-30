@@ -386,6 +386,11 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
+The session began with a block of long-term memory, and the agent may repeat it. A fact
+whose only support is that memory being restated is already known: skip it. Extract a fact
+from memory's subject only when the session adds something new, such as a change, a
+correction, or fresh evidence.
+
 For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
@@ -785,6 +790,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   with no content and `finish_reason: length` fails once, without the retry, with an error
   that names the setting. Tests: the fields reach the endpoint; the reserved names are
   refused; the lost-to-reasoning error and its single call.
+- **F29 Memory reflected back is not evidence** (ruling 2026-09-30; finding T14). DESIGN 8.
+  Before a chunk is archived or sent to the model, every line that repeats a line of the
+  project's memory block (list and quote markers and wrapping ignored, lines of 20
+  characters or more) is taken out, and an entry left empty is dropped; `aft redigest` does
+  the same. The digest prompt tells the model a fact supported only by restated memory is
+  already known. Tests: the echo reaches neither the model nor the archive, the rest of the
+  entry does, and the prompt says so.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

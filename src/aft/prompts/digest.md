@@ -8,6 +8,11 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
+The session began with a block of long-term memory, and the agent may repeat it. A fact
+whose only support is that memory being restated is already known: skip it. Extract a fact
+from memory's subject only when the session adds something new, such as a change, a
+correction, or fresh evidence.
+
 For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
