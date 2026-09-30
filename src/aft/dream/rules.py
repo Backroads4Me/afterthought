@@ -89,8 +89,8 @@ check runs beside this table in ``_supersede``."""
 
 NEEDS_THE_GATE = ("inferred", "suggested")
 """The tags whose facts are the model's own output rather than something you said or a run
-observed. R3's gate holds them in Candidates, and the bar holds a ``[suggested]`` fact
-exactly as it holds an ``[inferred]`` one."""
+observed. R3's gate holds them in Candidates, and a ruling on R3 holds a ``[suggested]``
+fact exactly as it holds an ``[inferred]`` one."""
 
 NO_LONGER_MEMORY = (page.SUPERSEDED, page.WITHDRAWN, page.STALE)
 """Lines that stand no longer (design 6's fact state): the authority table has rows for

@@ -3,7 +3,7 @@
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and the block as a whole stays
 within ``inject.max_chars``: a fact is either in the block or left out, never cut short.
-``_block`` gives the allocation M1.2 sets, so no section can
+``_block`` gives the one allocation of that budget, so no section can
 grow into what a cold session needs to find the rest of memory; a budget with no room for
 a layer's first line leaves that layer out and says so plainly under ``Cut``.
 """
@@ -315,7 +315,7 @@ def _block(
     global preferences layer, which the plan gives no limit of its own, takes whatever
     those two leave. When the budget leaves no room for a layer's first line, the block
     keeps its title and says under ``Cut`` that the rest was cut: a short block is
-    acceptable, a layer missing without a word is the defect (design 10, M1.2).
+    acceptable, a layer missing without a word is the defect (design 10).
     """
     closing: list[Part] = [("", [HOW_TO])]
     head = _trim(title, max_chars)  # the title, as far as the budget can show it

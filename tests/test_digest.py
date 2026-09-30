@@ -368,7 +368,7 @@ def test_a_quote_taken_from_another_entry_is_dropped(session: Session):
 
 
 def test_stated_on_an_assistants_own_entry_is_dropped(session: Session):
-    """R2: what the agent declared is not a commitment by Ted, however decisive it reads."""
+    """R2: what the agent declared is not a commitment by the user, however decisive it reads."""
     wrote = digest_once(
         session,
         answer(
@@ -388,7 +388,7 @@ def test_stated_on_an_assistants_own_entry_is_dropped(session: Session):
 
 
 def test_stated_on_a_users_own_entry_is_kept(session: Session):
-    """The other half of R2: Ted's own commitment stands, or the rule empties memory."""
+    """The other half of R2: the user's own commitment stands, or the rule empties memory."""
     wrote = digest_once(session, answer(said()))
     assert [fact.statement for fact in wrote.facts] == [
         "Capture runs at session end, not per turn."

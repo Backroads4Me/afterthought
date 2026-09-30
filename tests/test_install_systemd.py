@@ -59,6 +59,7 @@ def test_unit_file_contents(tmp_path: Path, cfg: Config) -> None:
     timer_text = timer_file.read_text(encoding="utf-8")
     assert "[Unit]" in timer_text
     assert "Description=Afterthought background work timer" in timer_text
+    assert "Documentation=" not in timer_text
     assert "[Timer]" in timer_text
     assert "OnBootSec=5min" in timer_text
     assert "OnUnitActiveSec=30min" in timer_text
