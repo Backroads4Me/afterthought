@@ -35,6 +35,7 @@ Three rules hold the user's own configuration safe:
 
 from __future__ import annotations
 
+import difflib
 import itertools
 import json
 import os
@@ -45,6 +46,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from aft.install import skill as skill_install
+from aft.redact import redact
 
 AGENT = "claude"
 
@@ -73,12 +75,14 @@ class Change:
     ``changed`` is False when the file already held exactly what was asked for, in which
     case nothing was written and no backup was taken. ``preview`` names the entries of ours
     the change adds or removes, each by its event and its own command line, and is empty
-    when nothing changed.
+    when nothing changed. ``diff`` is the unified diff of the settings file's lines before
+    and after, as `_diff` draws it, and is empty when nothing changed.
     """
 
     changed: bool
     backup: Path | None
     preview: str
+    diff: str = ""
 
 
 def settings_path() -> Path:
@@ -328,10 +332,11 @@ def _commit(
     keeps a hand-written settings file hand-written. What is written goes to the file the
     settings path points at, so a symbolic link the user made there keeps working.
 
-    The preview ``--dry-run`` prints is built from ``entries``, the events this change
-    adds or removes, and never from the file's text: settings files routinely hold API
-    keys, so a preview of afterthought's own edit does not repeat the configuration the
-    user happened to leave beside it.
+    ``--dry-run`` prints two things. The preview is built from ``entries``, the events this
+    change adds or removes, and never from the file's text. The diff is drawn from the text
+    the file holds and the text a write would put there, so it shows where the entries land
+    and every other line the write would touch; `_diff` says what keeps the configuration
+    the user left beside them out of it.
     """
     if not entries:
         return Change(changed=False, backup=None, preview="")
@@ -341,10 +346,37 @@ def _commit(
     lines = [f"{len(entries)} entries to {verb} {where} {target}{timeout}:"]
     lines += [f"  {event}: {hook_command(event)}" for event in entries]
     preview = "\n".join(lines)
-    if dry_run:
-        return Change(changed=True, backup=None, preview=preview)
     after = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
-    return Change(changed=True, backup=_write(target, after, original), preview=preview)
+    diff = _diff(target, original, after)
+    if dry_run:
+        return Change(changed=True, backup=None, preview=preview, diff=diff)
+    backup = _write(target, after, original)
+    return Change(changed=True, backup=backup, preview=preview, diff=diff)
+
+
+def _diff(target: Path, before: str | None, after: str) -> str:
+    """What a write does to the settings file's lines, for ``--dry-run`` to print.
+
+    The diff is between the text the file holds and the text the write would put there, so
+    it shows a reformatting of the file as faithfully as it shows afterthought's own
+    entries. A file that does not exist yet goes in as one block of additions.
+
+    Settings files routinely hold API keys, so the diff carries no context lines: a line
+    appears only when the write changes it, and each hunk header says where it sits. A line
+    of the user's own can still change - the last line before a new key gains a comma, and a
+    file not laid out the way ``json.dumps`` lays it out is rewritten whole - so every line
+    also goes through `aft.redact.redact` and a secret of a shape it knows prints as its
+    marker.
+    """
+    lines = difflib.unified_diff(
+        (before or "").splitlines(),
+        after.splitlines(),
+        fromfile=f"{target} (before)",
+        tofile=f"{target} (after)",
+        lineterm="",
+        n=0,
+    )
+    return "\n".join(redact(line) for line in lines)
 
 
 def _backup(settings: Path, original: str | None) -> Path | None:

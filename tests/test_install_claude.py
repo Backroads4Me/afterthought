@@ -25,6 +25,7 @@ from aft.adapters.claude import EVENTS as CLAUDE_EVENTS
 from aft.cli import main
 from aft.install import claude as claude_install
 from aft.install.claude import InstallError
+from aft.redact import REDACTED
 
 FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
 
@@ -602,13 +603,118 @@ def test_the_removal_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch,
     assert "ANTHROPIC_API_KEY" not in printed
     assert "echo status" not in printed
     assert "claude-opus" not in printed
-    head, *entries = printed.splitlines()
+    head, *rest = printed.splitlines()
     assert head.startswith(f"3 entries to remove from {settings}")
-    assert entries == [
+    assert rest[:3] == [
         f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
     ]
+    assert rest[3:5] == [f"--- {settings} (before)", f"+++ {settings} (after)"]
     assert settings.read_text(encoding="utf-8") == text
     assert sorted(settings.parent.glob("*.bak")) == backups
+
+
+def settings_diff(printed: str, settings: Path) -> list[str]:
+    """The lines of the settings file's diff in what a dry run printed, headers included."""
+    lines = printed.splitlines()
+    start = lines.index(f"--- {settings} (before)")
+    assert lines[start + 1] == f"+++ {settings} (after)"
+    end = start + 2
+    while end < len(lines) and lines[end][:1] in ("@", "+", "-") and lines[end][:3] != "---":
+        end += 1
+    return lines[start:end]
+
+
+def apply_diff(before: str, diff: list[str]) -> str:
+    """``before`` with a context-free unified diff applied, the way ``patch`` would."""
+    lines = before.splitlines()
+    out: list[str] = []
+    at = 0
+    for line in diff[2:]:
+        if line.startswith("@@"):
+            old = line.split()[1][1:]
+            start, _, count = old.partition(",")
+            first = int(start) - 1 if count != "0" else int(start)
+            out += lines[at:first]
+            at = first
+        elif line.startswith("-"):
+            assert lines[at] == line[1:]
+            at += 1
+        else:
+            out.append(line[1:])
+    return "\n".join(out + lines[at:]) + "\n"
+
+
+def test_the_add_dry_run_prints_the_diff_the_install_then_makes(tmp_path, monkeypatch, capsys):
+    """The diff a dry run prints is the edit itself: applied to the file as it stands, it
+    gives the file the install writes, and printing it moves no byte."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    assert settings == settings_in(tmp_path)
+    text = write_settings(settings, PEOPLE)
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+
+    diff = settings_diff(capsys.readouterr().out, settings)
+    assert settings.read_text(encoding="utf-8") == text
+    assert list(settings.parent.glob("settings.json.aft-*")) == []
+    added = [line[1:].strip() for line in diff[2:] if line.startswith("+")]
+    for event in claude_install.HOOK_EVENTS:
+        assert f'"command": "aft hook claude {event}",' in added
+
+    claude_install.install(settings)
+    assert apply_diff(text, diff) == settings.read_text(encoding="utf-8")
+
+
+def test_the_removal_dry_run_prints_the_diff_the_uninstall_then_makes(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    write_settings(settings, PEOPLE)
+    claude_install.install(settings)
+    text = settings.read_text(encoding="utf-8")
+
+    assert main(["install", "claude", "--uninstall", "--dry-run"]) == 0
+
+    diff = settings_diff(capsys.readouterr().out, settings)
+    assert settings.read_text(encoding="utf-8") == text
+    removed = [line[1:].strip() for line in diff[2:] if line.startswith("-")]
+    for event in claude_install.HOOK_EVENTS:
+        assert f'"command": "aft hook claude {event}",' in removed
+
+    claude_install.uninstall(settings)
+    assert apply_diff(text, diff) == settings.read_text(encoding="utf-8")
+
+
+def test_the_dry_run_diff_of_a_new_settings_file_is_all_additions(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+
+    diff = settings_diff(capsys.readouterr().out, settings)
+    assert all(line.startswith("+") for line in diff[3:])
+    assert not settings.exists()
+
+
+def test_the_dry_run_diff_redacts_a_secret_on_a_line_the_install_changes(
+    tmp_path, monkeypatch, capsys
+):
+    """With no hooks key in the file, the key goes in last and the line before it gains a
+    comma. That line is the user's own, so it is in the diff, and its secret is not."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    settings = claude_install.settings_path()
+    text = write_settings(settings, {"model": "claude-opus", "apiKey": SECRET})
+
+    assert main(["install", "claude", "--dry-run"]) == 0
+
+    printed = capsys.readouterr().out
+    diff = settings_diff(printed, settings)
+    changed = [line for line in diff[2:] if line.startswith("-")]
+    assert len(changed) == 1 and REDACTED in changed[0]
+    assert SECRET not in printed
+    assert "claude-opus" not in printed
+    assert settings.read_text(encoding="utf-8") == text
 
 
 def test_dry_run_of_an_installed_file_says_so(tmp_path, monkeypatch, capsys):

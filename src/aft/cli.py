@@ -466,6 +466,8 @@ def cmd_lint(args) -> int:
     if findings:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
+    pages = len(lint.vault_pages(config.vault))
+    print(f"checked {pages} page{'' if pages == 1 else 's'}, no findings")
     return 0
 
 
@@ -645,6 +647,8 @@ def cmd_install_claude(args) -> int:
         preview_lines = []
         if change.preview:
             preview_lines.append(change.preview)
+        if change.diff:
+            preview_lines.append(change.diff)
         if skill_change.changed:
             verb = "would remove" if args.uninstall else "would write"
             preview_lines.append(f"{verb} skill {skill_change.target}")

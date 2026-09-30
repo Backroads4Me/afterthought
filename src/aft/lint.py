@@ -38,13 +38,21 @@ def lint_vault(vault: Path) -> list[Finding]:
         registry = Registry.load(vault / "registry.yaml")
     except RegistryError as exc:
         findings.append(Finding("registry.yaml", 1, str(exc)))
+    for rel in vault_pages(vault):
+        findings.extend(lint_file(vault, rel, registry))
+    findings.extend(lint_library(vault))
+    return findings
+
+
+def vault_pages(vault: Path) -> list[Path]:
+    """Every page `lint_vault` checks, relative to the vault, in the order it checks them."""
+    pages = []
     for path in sorted(vault.rglob("*.md")):
         rel = path.relative_to(vault)
         if SKIP_DIRS.intersection(rel.parts[:-1]) or rel.parts[0] in SKIP_DIRS:
             continue
-        findings.extend(lint_file(vault, rel, registry))
-    findings.extend(lint_library(vault))
-    return findings
+        pages.append(rel)
+    return pages
 
 
 def lint_pages(
