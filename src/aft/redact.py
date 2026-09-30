@@ -1,7 +1,7 @@
 """Redaction: the secret shapes that must not reach the archive, the index or a model.
 
 Design section 12 makes redaction a rule of capture rather than a cleanup: built-in
-secret patterns plus Ted's own, applied before anything is archived. The list of shapes
+secret patterns plus the user's own, applied before anything is archived. The list of shapes
 is the one BUILD-PLAN 5 (M2.3) names - private key blocks, the ``sk-``, ``ghp_``,
 ``github_pat_``, ``xox*`` and AWS access key id tokens, ``Authorization:`` headers,
 password-style assignments, and credentials in URLs - and patterns from
