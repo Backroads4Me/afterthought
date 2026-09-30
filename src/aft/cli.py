@@ -29,6 +29,9 @@ from aft import (
     vault,
     work,
 )
+from aft import (
+    eval as evalmod,
+)
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, is_excluded, load, resolve_home
 from aft.dream import schedule
 from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
@@ -65,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         index.SearchIndexError,
         search.SearchError,
         UsageError,
+        evalmod.EvalError,
         survey.SurveyError,
         manifest.ManifestError,
         queue.QueueError,
@@ -166,6 +170,16 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("page", help="path to the page")
     p.add_argument("source_id", nargs="?", default=None, help="source id, e.g. s1 or [^s1]")
     p.set_defaults(handler=cmd_trace)
+
+    p = sub.add_parser("eval", help="check memory against a golden set of known answers")
+    p.add_argument("golden", nargs="?", help="the golden set; defaults to <vault>/golden.yaml")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=evalmod.DEFAULT_LIMIT,
+        help="how many search results a line must be found in",
+    )
+    p.set_defaults(handler=cmd_eval)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
     p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
@@ -408,6 +422,13 @@ def cmd_lint(args) -> int:
         print(f"{len(findings)} problem(s)", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_eval(args) -> int:
+    """Run the golden set. No vault lock and no model: eval only ever reads."""
+    config = load()
+    vault.require(config)
+    return evalmod.run(config, args.golden, limit=args.limit)
 
 
 def cmd_work(args) -> int:
