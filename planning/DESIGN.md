@@ -593,10 +593,10 @@ Each file in a collection has one role:
 | `exclude` | Not imported | Build scripts, generated indexes, git history, `AGENTS.md`, `CLAUDE.md` |
 
 Relations between files are recorded explicitly: `derived-from`, `errata-for`, and
-`supersedes` (a newer edition replacing an older one). They drive authority (errata win
-over the document they correct; a newer edition wins over the one it supersedes) and
-search (derived text is indexed in place of its original, so one passage is not returned
-twice).
+`supersedes` (a newer edition replacing an older one). They are shown on the reference
+pages and drive search: derived text is indexed in place of its original, so one passage
+is not returned twice. After v1 they will also drive authority (errata winning over the
+document they correct, a newer edition over the one it supersedes).
 
 ### Authority
 
@@ -638,8 +638,11 @@ commands check and carry out its plan. The agent never writes into the library i
    collection, and no instruction file or tooling is kept. It then copies the files,
    extracts their text into the home directory keyed by content hash, indexes it, and
    generates the structure of the reference pages from the files themselves.
-4. **The agent adds descriptions**: what each document is, its authority, and when to use
-   it and when not to. Every claim carries a quote that must appear in the extracted text.
+4. **The agent adds descriptions** with `aft library describe <manifest> <descriptions>`:
+   what each document is, its version or date, and when to use it and when not to. Every
+   claim carries a quote, which the command checks against the document's extracted text
+   before it writes the description onto the reference page. A claim that fails is listed in
+   the report and not written. The agent never edits a reference page itself.
 5. **The agent proposes facts** from the collection's documents, notes and excluded
    instruction files. Each is quote-checked against its file and enters the dream as a
    digest, tagged by the collection's authority (above), under the same rules as facts
@@ -666,8 +669,9 @@ for directory listings, so the collection's own page is `collection.md`:
 
 - `collection.md` (`type: Reference`): what the collection covers, its main documents, the
   projects it applies to (in `aft.projects`), and the generated contents map
-- one page for each major document: what it is, its version or date, its authority, its
-  relations, a map of its sections with page numbers, and when to use it
+- one page for each major document: its relations and a generated map of its sections with
+  page numbers, plus the verified descriptions from step 4 (what it is, its version or date,
+  when to use it). A fixed template for these pages comes after v1.
 
 Obsidian opens PDFs, so a reference page can link straight to a page of the source, such
 as `[[protocol-spec-2023.pdf#page=112]]`. Injection shows one line per collection in the

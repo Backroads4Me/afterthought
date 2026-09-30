@@ -734,6 +734,23 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
   and one test per store checks WAL mode and lock serialization through the shared module.
+- **F12 Library trust** and **F13 Library import safety** (after M7; M7 milestone review).
+  The findings and their fixes are listed in the review and on the build board: a library
+  quote is never a primary-session signal for R3; `propose` takes authority and roles from
+  the import record; project names are registered slugs; map descriptions are checked;
+  quotes are checked against extracted text and the recorded hash; symlinks are refused;
+  tooling is `exclude`; re-import removes what is excluded; slugs never take `collection` or
+  `index`; frontmatter is written with a YAML dumper and linted before the commit.
+- **F14 Verified descriptions** (after F12). DESIGN 11 step 4. `aft library describe
+  <manifest> <descriptions-file>`: each description names a document of an imported
+  collection and carries `what`, `version` and `when_to_use` claims, each with a quote. The
+  command checks every quote against the document's extracted text and its recorded hash,
+  writes the verified claims into the document's reference page under a `## Description`
+  section with their sources, lists failures in the import report, and commits. The skill
+  and the survey's procedure name this command and drop the instruction to edit pages by
+  hand. Tests: a verified description lands on the page with its quote; a claim whose quote
+  is not in the document is refused and reported; a description for a file outside the
+  collection is refused; a rerun with the same file changes nothing.
 - **F5 Collection authority** (after M7.6). DESIGN 11, Authority. The manifest gains
   `authority: authoritative | reference` (default `reference`), validated by M7.2's
   validator. The import skill asks the user for it and records the answer; the agent never
