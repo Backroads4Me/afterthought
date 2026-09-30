@@ -50,6 +50,7 @@ from aft.gitutil import GitError
 from aft.model import ModelError
 from aft.readers import CLAUDE, PI, Entry
 from aft.readers.claude import SYNTHETIC_MODEL
+from aft.redact import REDACTED
 from conftest import make_repo
 from fakes.model_server import FakeEndpoint
 
@@ -65,6 +66,14 @@ SESSION = "s-1"
 # them, which is what makes one fact honest and the next one invented.
 USER_PROMPT = "Store the digest at session end, not per turn. Capture runs at session end."
 ASSISTANT_ANSWER = "Done: the hook writes one row and returns without calling a model."
+# The second exchange. DESIGN 8 skips a session that never got past one prompt, so a
+# transcript standing for a session worth capturing holds this pair beside the first.
+SECOND_PROMPT = "Give the retry its own setting, so a slow endpoint is not retried forever."
+SECOND_ANSWER = "Done: the retry is read from config, and the endpoint's own hint wins there."
+# A worker session's second exchange, for the same reason: DESIGN 8's floor asks two prompts
+# of a worker session as of any other.
+WORKER_AGAIN = "Worker note: the retry is what took the time."
+WORKER_REPLY = "Noted: the retry is reported with the run."
 # A prompt said after an off-the-record span has opened and never closed: work the rest of
 # the session is not supposed to remember (DESIGN 12).
 POST_SPAN = "The archive is worth its size in quotes."
@@ -113,7 +122,7 @@ def append_records(path: Path, *records: dict) -> Path:
 
 
 def write_transcript(path: Path, cwd: Path, *extra: dict) -> Path:
-    """A Claude Code session file: a prompt, an answer, and a tool result in the prompt."""
+    """A Claude Code session file: two exchanges and a tool result between them."""
     return write_records(
         path,
         {"cwd": str(cwd)},
@@ -127,6 +136,8 @@ def write_transcript(path: Path, cwd: Path, *extra: dict) -> Path:
                 "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "written"}]
             },
         },
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
         *extra,
     )
 
@@ -550,6 +561,8 @@ def test_an_emptied_chunk_leaves_the_day_open_for_the_work_that_follows(
         with routine.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record("e2", "user", USER_PROMPT)) + "\n")
             handle.write(json.dumps(record("e3", "assistant", ASSISTANT_ANSWER)) + "\n")
+            handle.write(json.dumps(record("e4", "user", SECOND_PROMPT)) + "\n")
+            handle.write(json.dumps(record("e5", "assistant", SECOND_ANSWER)) + "\n")
         # The next scheduled run, after the session has gone quiet for its idle period.
         second = work.run(cfg, datetime.now(UTC) + capture.IDLE_AFTER)
         written = body(cfg, page_path())
@@ -578,6 +591,9 @@ def test_an_unclosed_span_runs_to_the_end_of_the_session(session: Session):
         session.transcript.with_name("unclosed.jsonl"),
         {"cwd": str(session.cwd)},
         record("e1", "user", USER_PROMPT),
+        # A second prompt on the record, so the session is one the design captures and the
+        # span, not the floor, is what keeps the rest of it out (DESIGN 8, DESIGN 12).
+        record("p2", "user", SECOND_PROMPT),
         record("e2", "user", "off the record: the quarter's numbers"),
     )
     fake, cfg = serve(session.cfg, answer(said(entry="e1")), answer(said(entry="e3")))
@@ -911,6 +927,8 @@ def test_a_temporary_a_killed_run_leaves_is_no_page(session: Session, monkeypatc
         {"cwd": str(session.cwd)},
         record("e1", "user", USER_PROMPT, when=month_on),
         record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real", when=month_on),
+        record("e3", "user", SECOND_PROMPT, when=month_on),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real", when=month_on),
     )
 
     class Killed(BaseException):
@@ -969,7 +987,7 @@ def test_the_watermark_moves_only_with_the_page_and_its_commit(session: Session)
     assert committed[-1] == wrote.path
     # The last entry read, tool result included, not the last one kept: what the filter
     # threw away has been decided already and must not be decided again.
-    assert wrote.watermark == watermark(session.cfg) == "e3#t1"
+    assert wrote.watermark == watermark(session.cfg) == "e5"
     assert rows(session.cfg, queue.DONE) == [SESSION]
 
 
@@ -1005,7 +1023,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
             said(
                 statement=grown,
                 quote="one row per session",
-                entry="e4",
+                entry="e6",
                 kind="state",
                 source="observed",
             )
@@ -1014,7 +1032,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
             said(
                 statement=ended,
                 quote="without a model call",
-                entry="e5",
+                entry="e7",
                 kind="state",
                 source="observed",
             )
@@ -1023,10 +1041,10 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
     try:
         first = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         filed_first = (cfg.vault / page_path()).read_bytes()
-        append_records(session.transcript, record("e4", "user", grown))
+        append_records(session.transcript, record("e6", "user", grown))
         second = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         filed_second = (cfg.vault / f"{stem}-2.md").read_bytes()
-        append_records(session.transcript, record("e5", "user", ended))
+        append_records(session.transcript, record("e7", "user", ended))
         third = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         asked = len(fake.requests)
         filed = pages(cfg)
@@ -1045,7 +1063,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
     assert "Capture runs at session end, not per turn. [stated]" in body(cfg, first.path)
     assert f"{grown} [observed]" in body(cfg, second.path)
     assert f"{ended} [observed]" in body(cfg, third.path)
-    assert watermark(cfg) == "e5"
+    assert watermark(cfg) == "e7"
 
 
 def test_a_part_filed_while_the_model_answered_is_left_standing(
@@ -1396,7 +1414,7 @@ def test_the_daily_budget_stops_the_work_and_leaves_the_rest_queued(session: Ses
     assert first.digested == 1
     assert len(reached) == 1
     assert sorted(waiting) == ["s-1", "s-2"]
-    assert marks == {"s-0": "e3#t1", "s-1": None, "s-2": None}
+    assert marks == {"s-0": "e5", "s-1": None, "s-2": None}
     assert second.stopped == ""
     assert second.digested == 2
     assert len(pages(cfg)) == 3
@@ -1657,6 +1675,7 @@ def with_capture(
     *,
     worker_paths: Sequence[str] = (),
     exclude_paths: Sequence[str] = (),
+    exclude_projects: Sequence[str] = (),
     budget: int | None = None,
 ) -> Config:
     """Rewrite config.toml with capture paths and optional token budget."""
@@ -1664,9 +1683,12 @@ def with_capture(
     text = path.read_text(encoding="utf-8")
     wp = json.dumps(list(worker_paths))
     ep = json.dumps(list(exclude_paths))
+    xp = json.dumps(list(exclude_projects))
     text = re.sub(r"\n\[capture\][\s\S]*?(?=\n\[|\Z)", "", text)
     text = re.sub(r"\n\[work\][\s\S]*?(?=\n\[|\Z)", "", text)
     text += f"\n[capture]\nworker_paths = {wp}\nexclude_paths = {ep}\n"
+    if exclude_projects:
+        text += f"exclude_projects = {xp}\n"
     if budget is not None:
         text += f"\n[work]\ndaily_token_budget = {budget}\n"
     path.write_text(text, encoding="utf-8")
@@ -1812,6 +1834,8 @@ def test_worker_session_is_archived_and_indexed_but_not_digested_when_budget_is_
             record(
                 "e2", "assistant", "Understood, investigating the failure.", model="claude-real"
             ),
+            record("e3", "user", WORKER_AGAIN),
+            record("e4", "assistant", WORKER_REPLY, model="claude-real"),
         )
         queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-s1"))
         assert rows(cfg, queue.PENDING) == ["worker-s1"]
@@ -1873,6 +1897,8 @@ def test_worker_session_digested_with_budget_left_after_primary(session: Session
             {"cwd": str(worker_dir)},
             record("w1", "user", "Worker ran tests: all green."),
             record("w2", "assistant", "Recorded test results.", model="claude-real"),
+            record("w3", "user", WORKER_AGAIN),
+            record("w4", "assistant", WORKER_REPLY, model="claude-real"),
         )
         queue.enqueue(cfg, event(worker_transcript, worker_dir, session_id="worker-1"))
 
@@ -1922,6 +1948,8 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
             {"cwd": str(worker_dir)},
             record("w1", "user", "Worker ran tests: failed with error."),
             record("w2", "assistant", "Recorded failure.", model="claude-real"),
+            record("w3", "user", WORKER_AGAIN),
+            record("w4", "assistant", WORKER_REPLY, model="claude-real"),
         )
         queue.enqueue(cfg, event(worker_transcript, worker_dir, session_id="worker-1"))
 
@@ -1966,6 +1994,7 @@ def _two_waiting_workers(session: Session, tmp_path) -> tuple[Config, FakeEndpoi
             tmp_path / f"worker-{name}.jsonl",
             {"cwd": str(directory)},
             record("w1", "user", f"Worker {name} prompt: the suite is red."),
+            record("w2", "user", WORKER_AGAIN),
         )
         queue.enqueue(cfg, event(transcript, directory, session_id=f"worker-{name}"))
     return cfg, fake
@@ -2031,6 +2060,7 @@ def _one_waiting_worker(session: Session, tmp_path) -> tuple[Config, FakeEndpoin
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},
         record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+        record("w2", "user", WORKER_AGAIN),
     )
     queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
     return cfg, fake
@@ -2077,6 +2107,7 @@ def test_archiving_without_a_vault_stops_rather_than_indexing_nothing(session: S
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},
         record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+        record("w2", "user", WORKER_AGAIN),
     )
     job = queue.Job(
         id="job_v",
@@ -2140,6 +2171,8 @@ def test_redigesting_a_worker_session_keeps_its_role(session: Session, tmp_path)
             {"cwd": str(worker_dir)},
             record("w1", "user", "Worker ran tests: all green."),
             record("w2", "assistant", "Recorded test results.", model="claude-real"),
+            record("w3", "user", WORKER_AGAIN),
+            record("w4", "assistant", WORKER_REPLY, model="claude-real"),
         )
         queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
         assert work.run(with_budget(cfg, 100_000)).digested == 1
@@ -2199,6 +2232,7 @@ def test_a_run_whose_endpoint_is_down_still_archives_its_workers(session: Sessio
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},
         record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+        record("w2", "user", WORKER_AGAIN),
     )
     queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
 
@@ -2256,6 +2290,7 @@ def test_capture_follows_a_worker_session_the_archive_stored(
             sessions / "dev-worker" / "worker-1.jsonl",
             {"cwd": str(worker_dir)},
             record("w1", "user", "Worker prompt: the suite is red."),
+            record("w2", "user", WORKER_AGAIN),
         )
         quiet = NOW - timedelta(minutes=40)
         os.utime(transcript, (quiet.timestamp(), quiet.timestamp()))
@@ -2268,7 +2303,7 @@ def test_capture_follows_a_worker_session_the_archive_stored(
         assert capture.sweep(cfg, NOW + timedelta(hours=2)) == []
 
         spoke = NOW + timedelta(hours=1)
-        append_records(transcript, record("w2", "user", "Worker says the fix landed."))
+        append_records(transcript, record("w3", "user", "Worker says the fix landed."))
         os.utime(transcript, (spoke.timestamp(), spoke.timestamp()))
 
         found = capture.sweep(cfg, NOW + timedelta(hours=2))
@@ -2301,6 +2336,8 @@ def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Ses
             {"cwd": str(worker_dir)},
             record("w1", "user", "Worker ran tests: all green."),
             record("w2", "assistant", "Recorded test results.", model="claude-real"),
+            record("w3", "user", WORKER_AGAIN),
+            record("w4", "assistant", WORKER_REPLY, model="claude-real"),
         )
         queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
 
@@ -2377,3 +2414,255 @@ def test_a_debt_for_a_session_excluded_after_it_was_stored_is_dropped(session: S
         assert pages(cfg) == []
     finally:
         fake.stop()
+
+
+# ---------------------------------------------------------------- the floor and the window
+
+
+def one_prompt_transcript(session: Session, name: str) -> Path:
+    """A session that never got past one prompt, which is what DESIGN 8 keeps out."""
+    return write_records(
+        session.transcript.with_name(name),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+    )
+
+
+def test_a_session_with_one_prompt_is_neither_archived_nor_asked(session: Session):
+    """DESIGN 8 skips a session with fewer than two prompts, before anything is archived.
+
+    Below the floor the session reaches no model, no archive, no index and no page: an
+    archived session is searchable and dreamable, which is more than a single question
+    earned. Its row still closes, because a row left waiting would stop capture following
+    the session at all.
+    """
+    thin = one_prompt_transcript(session, "one-prompt.jsonl")
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(thin, session.cwd, session_id="thin-1"))
+        report = work.run(cfg)
+        asked = json.dumps(fake.requests)
+        indexmod.update(cfg)
+    finally:
+        fake.stop()
+    assert report.digested == 0
+    assert asked == "[]", "a session below the two-prompt floor was asked of the model"
+    assert evidence.entries(cfg, "thin-1") == [], "a thin session was archived"
+    assert rows(cfg, queue.DONE) == ["thin-1"], "the thin session's row waited instead of closing"
+    assert owed_digest(cfg, "thin-1") is False, "a digest is owed for words the floor kept out"
+    assert pages(cfg) == []
+    assert indexed_words(cfg, "per turn") == dict.fromkeys(indexmod.COLLECTIONS, 0)
+
+
+def test_a_session_that_grows_past_the_floor_is_captured_from_its_start(session: Session):
+    """The floor holds a thin session back; it does not consume it.
+
+    The same session, reported again once it grew, is read from its first entry: the prompt
+    it had while it was thin is archived with the rest. That is what a watermark the floor
+    left alone buys - a session is never judged on the chunk that found it thin.
+    """
+    thin = one_prompt_transcript(session, "grew.jsonl")
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(thin, session.cwd, session_id="thin-1"))
+        first = work.run(cfg)
+        append_records(
+            thin,
+            record("e3", "user", SECOND_PROMPT),
+            record("e4", "assistant", SECOND_ANSWER, model="claude-real"),
+        )
+        queue.enqueue(cfg, event(thin, session.cwd, session_id="thin-1"))
+        second = work.run(cfg)
+        archived = [entry.id for entry in evidence.entries(cfg, "thin-1")]
+        standing = pages(cfg)
+    finally:
+        fake.stop()
+    assert first.digested == 0
+    assert second.digested == 1, "the session that grew was never read from its start"
+    assert archived == ["e1", "e2", "e3", "e4"], "the floor's first prompt was lost"
+    assert standing == [below("thin-1")]
+
+
+def test_a_worker_session_with_one_prompt_is_not_archived(session: Session, tmp_path):
+    """The same floor for a worker session, whose whole point is being archived anyway.
+
+    A worker's words are stored without a model call, so the floor has to be enforced on the
+    archiving path too. Its row still closes and no digest is owed for text no archive holds
+    (BUILD-PLAN M2.7).
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    fake, cfg = serve(session.cfg)
+    cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+    transcript = write_records(
+        tmp_path / "worker.jsonl",
+        {"cwd": str(worker_dir)},
+        record("w1", "user", "Worker prompt: the fixture needs a nitrile gasket."),
+    )
+    queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+    try:
+        report = work.run(cfg)
+        archived = evidence.entries(cfg, "worker-1")
+        debt = owed_digest(cfg, "worker-1")
+        closed = rows(cfg, queue.DONE)
+    finally:
+        fake.stop()
+    assert report.stopped == work.STOP_BUDGET
+    assert archived == [], "a worker below the two-prompt floor was archived"
+    assert debt is False, "a digest is owed for words the floor kept out"
+    assert closed == ["worker-1"], "the thin worker's row waited instead of closing"
+
+
+def test_a_run_purges_the_archive_past_its_window_and_the_index_forgets_it(session: Session):
+    """The retention window is enforced by the run, not by a command nobody runs.
+
+    `evidence.purge` arrived with M2.4 and no caller, so archived text outlived
+    `evidence.retention_days` and stayed searchable beside it. A run now opens with the
+    window, and the index update at its end drops the rows of whatever left, so no search
+    finds a session the archive has forgotten (DESIGN 8).
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        first = work.run(cfg)
+        archived = len(evidence.entries(cfg, SESSION))
+        before = indexed_words(cfg, "retry")
+        later = work.run(cfg, NOW + timedelta(days=120))
+        after = indexed_words(cfg, "retry")
+    finally:
+        fake.stop()
+    assert first.digested == 1
+    assert first.purged == 0, "a run purged text that was still inside its window"
+    assert archived == 4
+    assert before[indexmod.EVIDENCE] == 2, "the archive's own words are not searchable"
+    assert later.purged == archived, "a run let past its window stay in the archive"
+    assert evidence.entries(cfg, SESSION) == []
+    assert later.digested == 0
+    assert after == dict.fromkeys(indexmod.COLLECTIONS, 0), "the index kept what the purge left"
+
+
+def test_a_run_says_the_archive_refused_its_window_and_still_digests(session: Session):
+    """An archive that refuses the window it was configured with is reported, not obeyed.
+
+    A negative window is not a window at all, and `evidence.purge` refuses it rather than
+    emptying the archive. That refusal belongs on the run's lines; the day's digests are
+    other work and stand on their own (DESIGN 14).
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    written = (cfg.home / configmod.CONFIG_NAME).read_text(encoding="utf-8")
+    (cfg.home / configmod.CONFIG_NAME).write_text(
+        written + "\n[evidence]\nretention_days = -1\n", encoding="utf-8"
+    )
+    cfg = configmod.load()
+    try:
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.digested == 1, "an unusable retention window stopped the day's digests"
+    assert report.purged == 0
+    assert any("the archive:" in line for line in report.failures), report.failures
+
+
+def test_a_project_named_in_capture_exclude_projects_is_never_captured(
+    session: Session, tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """`capture.exclude_projects` keeps a project's sessions out at the sweep and the hook.
+
+    The project is the registered one of the `session` fixture, named by its slug, and the
+    session is the path a missed hook arrives by: a file in the agent's own directory, quiet
+    long enough to sweep. With the name taken away the same session is captured, which is
+    what says the setting and not the fixture kept it out (DESIGN 12).
+    """
+    sessions = tmp_path / "agent-sessions"
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+    transcript = write_records(
+        sessions / SLUG / f"{SESSION}.jsonl",
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    quiet = datetime.now(UTC) - timedelta(minutes=40)
+    os.utime(transcript, (quiet.timestamp(), quiet.timestamp()))
+    moment = datetime.now(UTC)
+    fake, cfg = serve(session.cfg, answer(said()), answer(said()))
+    try:
+        excluded = with_capture(cfg, exclude_projects=[SLUG])
+        queue.watching_since(excluded, quiet - timedelta(hours=6))
+        assert capture.sweep(excluded, moment) == [], "a named project was swept"
+
+        queue.enqueue(excluded, event(transcript, session.cwd))
+        assert rows(excluded, queue.PENDING) == [], "the hook's own report was queued"
+        assert rows(excluded, queue.DONE) == []
+
+        held = work.run(excluded)
+        assert held.swept == 0 and held.digested == 0
+        assert evidence.entries(excluded, SESSION) == []
+
+        captured = with_capture(cfg)
+        assert [e.session_id for e in capture.sweep(captured, moment)] == [SESSION]
+        report = work.run(captured)
+        archived = evidence.entries(captured, SESSION)
+        standing = pages(captured)
+    finally:
+        fake.stop()
+    assert report.digested == 1, "the session was kept out by something but the setting"
+    assert len(archived) == 4
+    assert standing == [below()]
+
+
+def test_a_planted_secret_reaches_neither_model_archive_nor_index(session: Session):
+    """One end-to-end check of DESIGN 8 and DESIGN 12: a secret stays where it was said.
+
+    A token, a JSON password and a Google API key sit beside ordinary work in one prompt.
+    After a whole `aft work` each is looked for in every place it could have landed: the
+    body the endpoint was sent, the archive's own file, and the search index with its
+    write-ahead log. The ordinary words of the same session are found in the archive and
+    indexed, so each absence above is redaction and not a capture that never happened.
+    """
+    token = "ghp_NotARealGitHubToken0123456789"
+    password = "hunter2notreal"
+    google = "AIzaSyNotARealGoogleApiKey0123456789012345"
+    # The session's ordinary work carries the prompt the digest will quote, so the fact it
+    # files is a verified one and the page is the normal size.
+    secret_prompt = (
+        USER_PROMPT
+        + " Wire it with token "
+        + token
+        + ', then {"password": "'
+        + password
+        + '"} and the map key " + google + " for the tiles."'
+    )
+    transcript = write_records(
+        session.transcript.with_name("secrets.jsonl"),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", secret_prompt),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(transcript, session.cwd))
+        report = work.run(cfg)
+        asked = json.dumps(fake.requests)
+        archived = " ".join(entry.text for entry in evidence.entries(cfg, SESSION))
+        on_disk = b"".join(
+            one.read_bytes()
+            for name in (evidence.EVIDENCE_NAME, indexmod.INDEX_NAME)
+            for one in sorted((cfg.home).glob(f"{name}*"))
+        )
+        written = body(cfg, page_path())
+        indexed = indexed_words(cfg, "retry")
+    finally:
+        fake.stop()
+    assert report.digested == 1
+    assert indexed[indexmod.EVIDENCE] > 0, "the session's own words are not searchable"
+    for secret in (token, password, google):
+        assert secret not in asked, f"{secret} reached the model"
+        assert secret not in archived, f"{secret} reached the archive"
+        assert secret.encode() not in on_disk, f"{secret} reached the files on disk"
+        assert secret not in written, f"{secret} reached the page"
+    assert REDACTED in archived, "nothing was redacted, so the zeros prove nothing"

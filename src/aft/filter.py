@@ -7,21 +7,24 @@ Four steps, and the order is the behavior:
    tool entry the agent flagged as an error its head of 500 characters plus the lines
    below it that report something breaking or name a ``path:line``, or from any other tool
    entry only the lines that report something breaking or name a ``path:line``;
-3. cap what is left at 1,500 characters on a word boundary;
-4. redact.
+3. redact;
+4. cap what is left at 1,500 characters on a word boundary.
 
-Span-dropping reads an entry before the cap has cut it, and redaction runs on the text
-that is actually going out. Both are one pass over the entries with a single emit point,
-so every path that returns kept text - a prompt, an answer, extracted tool lines, the
-remnant of a cap - is capped and redacted the same way. There is no path that hands back
-kept text and misses them.
+Span-dropping reads an entry before anything else touches it, and the cap cuts text that has
+already been redacted: a secret run that reaches the limit is cut from the marker, never from
+the secret, so no fragment is left for the patterns to miss. Both steps are one pass over the
+entries with a single emit point, so every path that returns kept text - a prompt, an answer,
+extracted tool lines, the remnant of a cap - is redacted and capped the same way. There is no
+path that hands back kept text and misses them.
 
 A flagged head is redacted before its 500-character budget cuts it, so a cut can never
 leave half a secret behind for the patterns to miss.
 
-Two things the design asks of capture are not here because an entry stream cannot answer
-them: session exclusions and the two-prompt floor both need the session a stream came
-from, which is the queue's and the digest's to know (M2.2, M2.6, M2.7).
+Two things the design asks of capture are not decided on one chunk of an entry stream.
+Session exclusion needs the directory the stream came from, which is the queue's to know
+(M2.2, M2.7). The two-prompt floor needs a session rather than a chunk of one, which is why
+`prompt_count` counts over entries read from a session's start and the digest (M2.6) is the
+one that applies it.
 
 Whether an off-the-record span is open when a call's entries begin is a fact from outside
 the stream as well, so `filter_entries` takes it and gives back the state at the end of
@@ -117,7 +120,7 @@ def filter_entries(
     began; the second element says whether one is still open where they ended, which is
     what the next chunk of the same session starts with (M2.2, M2.3).
 
-    Off-the-record spans go first, then the keep, then the cap, then redaction - see the
+    Off-the-record spans go first, then the keep, then redaction, then the cap - see the
     module docstring for why that order is the behavior. Entries keep their id, time, role
     and error flag; only their text changes.
 
@@ -132,7 +135,7 @@ def filter_entries(
         text = _kept_text(entry, patterns)
         if text is None:
             continue
-        kept.append(replace(entry, text=redact(_cap(text), patterns)))
+        kept.append(replace(entry, text=_cap(redact(text, patterns))))
     return kept, off_record
 
 
@@ -165,6 +168,27 @@ def _outside_spans(entries: Iterable[Entry], off_record: bool) -> tuple[list[Ent
         if not off_record:
             outside.append(entry)
     return outside, off_record
+
+
+# DESIGN 8's floor: a session that never got past one prompt holds nothing a later session
+# would thank it for, so it is asked of no model and kept in no archive. Two is the number.
+MIN_SESSION_PROMPTS = 2
+
+
+def prompt_count(entries: Iterable[Entry]) -> int:
+    """How many user prompts a session's entries hold on the record.
+
+    An off-the-record prompt is not counted, because the design drops that span whole: a
+    session that said one thing on the record and three off it holds one prompt. A marker
+    prompt is dropped by the same pass, and an answer is never a prompt.
+
+    The caller gives a whole session rather than the chunk one job read, because the floor is
+    about the session (DESIGN 8) and one chunk of a long conversation can carry a single
+    exchange. A prompt's text is never dropped by the keep, the redaction or the cap, so this
+    count is the number of user entries the filter would archive.
+    """
+    outside, _ = _outside_spans(entries, False)
+    return sum(1 for entry in outside if entry.role == USER)
 
 
 def _kept_text(entry: Entry, patterns: tuple[re.Pattern[str], ...]) -> str | None:

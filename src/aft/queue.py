@@ -399,6 +399,27 @@ def owe_digest(config: Config, job: Job) -> None:
         )
 
 
+def close_waiting(config: Config, job: Job) -> None:
+    """Close a waiting row that read nothing worth keeping, and owe nothing for it.
+
+    The archiving path claims nothing, so this closes on the row's state alone, the way
+    :func:`owe_digest` does. What it leaves is a closed row and a session whose watermark,
+    span and debt are exactly as they were: the transcript was read and its text filed
+    nowhere, and a session that goes on to say more is captured from its start (DESIGN 8).
+    A row left waiting instead would be capture work in flight, and capture stops following
+    a session that has one.
+    """
+    now = _now()
+    with _writing(config) as conn:
+        closed = conn.execute(
+            "UPDATE jobs SET status = ?, claimed_pid = NULL, error = NULL, updated_time = ?"
+            " WHERE id = ? AND status = ?",
+            (DONE, _text(now), job.id, PENDING),
+        ).rowcount
+        if not closed:
+            raise QueueError(f"job {job.id} is no longer waiting in the queue")
+
+
 def redeem_digest_debts(config: Config) -> int:
     """File one waiting job for every session the archive owes a digest to, and count them.
 

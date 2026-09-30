@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 
 from aft import config as configmod
+from aft.gitutil import normalize_remote
+from aft.registry import Registry, path_key
+from conftest import make_repo
 
 
 def test_defaults_when_file_missing(tmp_path, monkeypatch):
@@ -78,6 +81,53 @@ def test_path_matching_and_roles(home, tmp_path):
     assert configmod.is_worker(second_worker, cfg) is True
     assert configmod.is_worker(primary_dir, cfg) is False
     assert configmod.is_worker(secret_dir, cfg) is False
+
+
+@pytest.mark.parametrize("named", ["slug", "id"])
+def test_a_project_named_in_exclude_projects_is_excluded_wherever_it_ran(
+    home, initialized, tmp_path, named
+):
+    """`capture.exclude_projects` answers by project, so a second clone is excluded too.
+
+    The project is named by its slug or by its id, either of which is what a person reads out
+    of `aft key list`. Only the first repository is registered and both carry the same origin
+    remote, which is how a re-clone or a worktree of one project arrives at a directory nobody
+    listed (DESIGN 12).
+    """
+    origin = "git@github.com:Example/Widget.git"
+    registered = make_repo(tmp_path / "dev" / "widget", origin=origin)
+    (registered / "src").mkdir()  # a session ran in a directory of the project
+    clone = make_repo(tmp_path / "clones" / "widget", origin=origin)
+    elsewhere = make_repo(tmp_path / "dev" / "gadget")
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.add("widget", "Widget")
+    registry.add_path(project, path_key(initialized.host, registered))
+    registry.add_remote(project, normalize_remote(origin))
+    registry.save()
+    name = project.slug if named == "slug" else project.id
+
+    written = (home / "config.toml").read_text()
+    (home / "config.toml").write_text(written + f'[capture]\nexclude_projects = ["{name}"]\n')
+    cfg = configmod.load()
+
+    assert configmod.is_excluded(registered / "src", cfg) is True
+    assert configmod.is_excluded(clone, cfg) is True, "a second clone is the same project"
+    assert configmod.is_excluded(elsewhere, cfg) is False
+    # A directory git will not read resolves to no project, which is what a run with nothing
+    # named does too: its own resolve fails the job rather than archiving the session.
+    assert configmod.is_excluded(tmp_path / "gone", cfg) is False
+
+
+def test_the_registry_is_not_read_when_no_project_is_named(home, monkeypatch):
+    """Naming no project costs the hook nothing: the registry stays shut (DESIGN 8's budget)."""
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("the registry was read for a config that names no project")
+
+    monkeypatch.setattr("aft.keys.resolve", never)
+    cfg = configmod.load()
+    assert configmod.is_excluded(home / "dev" / "widget", cfg) is False
 
 
 def test_a_tilde_in_a_path_list_names_the_home_directory(home):

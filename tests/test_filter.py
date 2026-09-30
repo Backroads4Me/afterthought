@@ -13,7 +13,14 @@ from datetime import UTC, datetime
 import pytest
 
 from aft import config as configmod
-from aft.filter import CAP_MARKER, FLAG_HEAD_CHARS, MAX_CHARS, filter_entries
+from aft.filter import (
+    CAP_MARKER,
+    FLAG_HEAD_CHARS,
+    MAX_CHARS,
+    MIN_SESSION_PROMPTS,
+    filter_entries,
+    prompt_count,
+)
 from aft.readers import Entry
 from aft.redact import REDACTED, BadPattern
 
@@ -284,6 +291,60 @@ SECRET_FORMS = [
         ("and moved on",),
         id="xoxp- user token",
     ),
+    pytest.param(
+        # JSON writes a credential with the quotes around the name, which is how tool output
+        # and a pasted config say it.
+        '{"password": "hunter2notreal"}',
+        "hunter2notreal",
+        ("and moved on",),
+        id="quoted JSON key",
+    ),
+    pytest.param(
+        '{"api_key":"notrealapikeyvalue0123"}',
+        "notrealapikeyvalue",
+        ("and moved on",),
+        id="quoted JSON api_key",
+    ),
+    pytest.param(
+        "AIzaSyNotARealGoogleApiKey0123456789012345",
+        "NotARealGoogle",
+        ("and moved on",),
+        id="Google AIza key",
+    ),
+    pytest.param(
+        "glpat-NotARealGitlabToken01",
+        "NotARealGitlab",
+        ("and moved on",),
+        id="glpat- token",
+    ),
+    pytest.param(
+        "npm_NotARealNpmToken0123456",
+        "NotARealNpm",
+        ("and moved on",),
+        id="npm_ token",
+    ),
+    pytest.param(
+        # The token alone, with no header word before it: a pasted curl line or a library's
+        # own error says "bearer" and the run of the token, nothing else.
+        "bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abcDEF",
+        "eyJhbGciOiJIUzI1NiI",
+        ("and moved on",),
+        id="bearer token on its own",
+    ),
+    pytest.param(
+        "X-Api-Key: NotARealKeyValue12345",
+        "NotARealKeyValue",
+        ("and moved on",),
+        id="X-Api-Key header",
+    ),
+    pytest.param(
+        # mysql glues the password to the option, so the invocation goes with it and the
+        # database named after it stays.
+        "mysql -uroot -pNotRealPw7 widgetdb",
+        "NotRealPw7",
+        ("widgetdb", "and moved on"),
+        id="mysql -p password",
+    ),
     pytest.param("AKIANOTAREALKEY01234", "NOTAREALKEY", ("and moved on",), id="AWS key id"),
     pytest.param(
         # The value of the header runs to the end of the line, so the sentence around it
@@ -429,6 +490,55 @@ def test_a_cut_that_would_land_inside_a_key_run_redacts_what_remains(cfg):
     assert result == "the deploy log said: [redacted]"
     assert "PRIVATE KEY" not in result
     assert body not in result
+
+
+def test_the_cap_cuts_the_marker_rather_than_a_secret_in_two(cfg):
+    # A single run of text that straddles the 1,500-character limit has no word boundary to
+    # stop at, so a cap that ran first would cut the key in the middle and leave its front
+    # half archived - too short for the patterns to recognize as a token. Redaction runs
+    # first, so it is the marker the cut falls on.
+    text = "x" * 1486 + "ghp_notarealgithutpat0123456789 tail"
+    assert len(text) > MAX_CHARS
+    [result] = kept([said(text)], cfg)
+    assert "ghp_" not in result, "half a key was archived"
+    assert "notareal" not in result
+    assert REDACTED in result
+    assert result.endswith(CAP_MARKER)
+
+
+def test_the_prompt_count_counts_prompts_the_session_said():
+    """DESIGN 8's floor counts user prompts, on the record: an answer is not one, and a
+    prompt the session took off the record is not one either."""
+    assert MIN_SESSION_PROMPTS == 2, "DESIGN 8 names two prompts as the floor"
+
+    assert prompt_count([said("one prompt", "e1")]) == 1
+    assert prompt_count([said("one prompt", "e1"), answered("one answer", "e2")]) == 1
+    assert prompt_count([said("a prompt", "e1"), said("a second prompt", "e2")]) == 2
+    # A span swallows what follows it until a prompt closes it (DESIGN 12), so the prompt
+    # inside it earns nothing and the one after the marker does.
+    assert (
+        prompt_count(
+            [
+                said("a prompt", "e1"),
+                said("off the record: the quarter's numbers", "e2"),
+                said("still inside the span", "e3"),
+                said("on the record: back to work", "e4"),
+                said("a second prompt", "e5"),
+            ]
+        )
+        == 2
+    )
+    # With no marker to close it, the span runs to the end of the session.
+    assert (
+        prompt_count(
+            [
+                said("a prompt", "e1"),
+                said("off the record: the quarter's numbers", "e2"),
+                said("inside the open span", "e3"),
+            ]
+        )
+        == 1
+    )
 
 
 ERROR_LINES = [
