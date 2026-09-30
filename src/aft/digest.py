@@ -398,8 +398,9 @@ MIN_ECHO_CHARS = 20
 
 
 def _echo_key(line: str) -> str:
-    """A line reduced to what makes it the same line: no list or quote marker, and
-    whitespace folded, so a block quoted as a list or re-wrapped still matches."""
+    """A line reduced to what makes it the same line: no list or quote marker, and the
+    whitespace inside the line folded. A memory line an agent wraps across two lines is not
+    matched; the digest prompt covers that restatement."""
     text = line.strip()
     while text[:2] in ("- ", "* ", "> "):
         text = text[2:].lstrip()
@@ -523,9 +524,14 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
                 queue.drop_job(config, job)
                 return False
         project_id = resolution.project.id if resolution and resolution.project else None
-        evidence.store(config, job.agent, job.session_id, project_id, kept)
-        index.update(config)
-        archived = True
+        if resolution is not None:
+            # A worker repeats its memory as a primary session does, and its archive rows
+            # are what search reads, so the echo is taken out before they are written.
+            kept = without_memory_echo(kept, memory_lines(config, resolution))
+        if kept:
+            evidence.store(config, job.agent, job.session_id, project_id, kept)
+            index.update(config)
+            archived = True
     queue.owe_digest(config, job)
     return archived
 

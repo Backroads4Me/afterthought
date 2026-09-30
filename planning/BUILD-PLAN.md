@@ -792,9 +792,9 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   refused; the lost-to-reasoning error and its single call.
 - **F29 Memory reflected back is not evidence** (ruling 2026-09-30; finding T14). DESIGN 8.
   Before a chunk is archived or sent to the model, every line that repeats a line of the
-  project's memory block (list and quote markers and wrapping ignored, lines of 20
-  characters or more) is taken out, and an entry left empty is dropped; `aft redigest` does
-  the same. The digest prompt tells the model a fact supported only by restated memory is
+  project's memory block (list and quote markers and whitespace within the line ignored,
+  lines of 20 characters or more) is taken out, and an entry left empty is dropped;
+  worker archiving and `aft redigest` do the same. The digest prompt tells the model a fact supported only by restated memory is
   already known. Tests: the echo reaches neither the model nor the archive, the rest of the
   entry does, and the prompt says so.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
