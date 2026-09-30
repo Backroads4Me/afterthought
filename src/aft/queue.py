@@ -48,10 +48,14 @@ class QueueError(Exception):
 WAL_MODE = "wal"
 
 # A writer gives up on the lock only after a long wait, because a row the queue refuses
-# is capture work no hook will hand over again. The hook process cannot wait this long:
-# its own share of the hook budget ends the wait (cli.HOOK_TIMEOUT_SECONDS), which is why
-# the queue can afford to be the patient one.
+# is capture work no hook will hand over again.
 BUSY_TIMEOUT_MS = 5_000
+
+# How long enqueue waits for the queue's write lock on the hook path. The hook must
+# return within its 2-second budget even when another process holds the write lock,
+# and SIGALRM cannot interrupt a blocking SQLite C call, so the SQLite busy timeout
+# itself must sit inside the budget (BUILD-PLAN F23, M1 review 6).
+HOOK_BUSY_TIMEOUT_MS = 1_000
 
 # Row states. A claimed row belongs to whoever claimed it until it completes, fails,
 # or its claim goes stale.
@@ -165,7 +169,9 @@ class SessionState:
     forgotten: bool = False
 
 
-def enqueue(config: Config, event: SessionEvent) -> None:
+def enqueue(
+    config: Config, event: SessionEvent, *, busy_timeout_ms: int = HOOK_BUSY_TIMEOUT_MS
+) -> None:
     """Record one session event as capture work, in one transaction.
 
     One INSERT and one commit, so the hook that calls it stays inside its budget and
@@ -178,7 +184,7 @@ def enqueue(config: Config, event: SessionEvent) -> None:
     if is_excluded(event.cwd, config):
         return
     now = _now()
-    with _writing(config) as conn:
+    with _writing(config, busy_timeout_ms=busy_timeout_ms) as conn:
         if conn.execute(
             "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (event.session_id,)
         ).fetchone():
@@ -720,10 +726,8 @@ def _writing(config: Config, *, busy_timeout_ms: int | None = None):
     losing its row to a busy database (DESIGN 8). ``busy_timeout_ms`` shortens how long this
     writer waits for that lock, for a caller with less time than the queue's own default.
     """
-    conn = _connect(config)
+    conn = _connect(config, busy_timeout_ms=busy_timeout_ms)
     try:
-        if busy_timeout_ms is not None:
-            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
         conn.execute("BEGIN IMMEDIATE")
         yield conn
         conn.commit()
@@ -734,7 +738,7 @@ def _writing(config: Config, *, busy_timeout_ms: int | None = None):
         conn.close()
 
 
-def _connect(config: Config) -> sqlite3.Connection:
+def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.Connection:
     """Open the queue, creating it on first use.
 
     Autocommit is left on so the transactions in this module are only the ones written
@@ -744,11 +748,12 @@ def _connect(config: Config) -> sqlite3.Connection:
     """
     path = config.home / QUEUE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
+    timeout = BUSY_TIMEOUT_MS if busy_timeout_ms is None else int(busy_timeout_ms)
     conn = sqlite3.connect(path, isolation_level=None)
-    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute(f"PRAGMA busy_timeout = {timeout}")
     conn.execute("PRAGMA synchronous = NORMAL")
     if _journal_mode(conn) != WAL_MODE:
-        _enter_wal(conn)
+        _enter_wal(conn, timeout_ms=timeout)
     conn.executescript(_SCHEMA)
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
@@ -765,7 +770,7 @@ def _journal_mode(conn: sqlite3.Connection) -> str:
     return conn.execute("PRAGMA journal_mode").fetchone()[0]
 
 
-def _enter_wal(conn: sqlite3.Connection) -> None:
+def _enter_wal(conn: sqlite3.Connection, *, timeout_ms: int = BUSY_TIMEOUT_MS) -> None:
     """Put the queue into WAL mode, once, without losing a race to create it.
 
     Changing the journal mode wants the database to itself and reports ``database is
@@ -776,7 +781,7 @@ def _enter_wal(conn: sqlite3.Connection) -> None:
     A mode that never arrives inside the busy timeout is a queue no writer can count
     on, so it is reported rather than waited on without end.
     """
-    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    deadline = time.monotonic() + timeout_ms / 1000
     while _journal_mode(conn) != WAL_MODE and time.monotonic() < deadline:
         try:
             conn.execute(f"PRAGMA journal_mode = {WAL_MODE}")

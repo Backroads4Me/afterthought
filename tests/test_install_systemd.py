@@ -365,3 +365,32 @@ def test_cli_install_timer_says_what_it_did_about_the_timer(
     err = capsys.readouterr().err
     assert "Failed to connect to bus" in err
     assert f"systemctl --user enable --now {TIMER_NAME}" in err
+
+
+def test_a_run_with_isolated_home_never_calls_systemd(home: Path, monkeypatch) -> None:
+    """A run with AFT_HOME set to a directory that is not the default never calls the user's
+    systemd (BUILD-PLAN F23, M1 review 8)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr("aft.install.systemd._default_runner", lambda cmd: calls.append(cmd))
+    cfg = load()
+    assert cfg.home == home
+
+    started = trigger_early(cfg)
+    assert started is False
+    assert calls == []
+    assert not (cfg.home / systemd_install.RATE_LIMIT_FILE).exists()
+
+
+def test_a_run_with_default_home_triggers_systemd(cfg: Config, tmp_path: Path, monkeypatch) -> None:
+    """When running in the default home, trigger_early starts the service via systemd."""
+    fake_default = tmp_path / ".afterthought"
+    monkeypatch.setattr("aft.install.systemd.DEFAULT_HOME", str(fake_default))
+    calls: list[list[str]] = []
+    monkeypatch.setattr("aft.install.systemd._default_runner", lambda cmd: calls.append(cmd))
+    from dataclasses import replace
+
+    cfg_default = replace(cfg, home=fake_default)
+    started = trigger_early(cfg_default)
+    assert started is True
+    assert calls == [["systemctl", "--user", "start", "--no-block", SERVICE_NAME]]
+    assert (cfg_default.home / systemd_install.RATE_LIMIT_FILE).exists()
