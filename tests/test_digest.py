@@ -1534,6 +1534,31 @@ def test_an_endpoint_that_is_down_stops_the_run_and_keeps_the_work_queued(sessio
     assert rows(cfg, queue.FAILED) == []
 
 
+def test_an_index_written_by_another_build_stops_the_run_naming_the_index(
+    session: Session, monkeypatch
+):
+    """DESIGN 14, lead's ruling on #39: an index that refuses is not an endpoint that is down.
+
+    The digest step indexes before it spends a token, so the index's refusal arrives as one of
+    the failures that end a run. Told as the endpoint's word it sends whoever reads the timer's
+    line to a model that is fine, when the repair is `aft reindex` and no model at all.
+    """
+    fake, cfg = serve(session.cfg, answer(said()))
+    queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="stale-1"))
+    assert indexmod.update(cfg) == []
+    monkeypatch.setattr(indexmod, "BUILD_STAMP", "the-next-build")
+    try:
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.stopped == work.STOP_INDEX
+    assert any("written by build rows" in line for line in report.failures), report.failures
+    assert report.digested == 0
+    assert pages(cfg) == [], "the refusal came after the page stood"
+    assert watermark(cfg, "stale-1") is None
+    assert rows(cfg, queue.FAILED) == []
+
+
 def test_the_command_runs_the_work_and_says_what_it_did(session: Session, capsys):
     """`aft work` is a command a person and a timer can run, not only a library call."""
     fake, cfg = serve(session.cfg, answer(said()))
@@ -2286,7 +2311,11 @@ def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Ses
         report = work.run(with_budget(cfg, 100_000))
 
         assert report.digested == 1, "the run found nothing, though it owed this session"
-        assert any("worker-1" in p for p in pages(cfg))
+        worker_pages = [p for p in pages(cfg) if "worker-1" in p]
+        assert len(worker_pages) == 1
+        fm_worker = frontmatter(cfg, f"digests/{worker_pages[0]}")
+        assert fm_worker["aft"]["role"] == "worker", "the debt's digest filed a primary page"
+        assert fm_worker["aft"]["facts"][0]["role"] == "worker"
         assert owed_digest(cfg, "worker-1") is False, "the digest left the debt owed"
         assert rows(cfg, queue.PENDING) == []
         assert watermark(cfg, "worker-1") is not None

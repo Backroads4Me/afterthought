@@ -36,19 +36,22 @@ from aft.vault import VaultError
 STOP_BUDGET = "the day's token budget is spent"
 STOP_UNREACHABLE = "the model or the vault could not be reached"
 STOP_QUEUE = "the queue could not be used"
+STOP_INDEX = "the search index refused to be written"
 
 # The queue's own failures: a row this process no longer holds, or a database another
 # worker keeps locked. Both are ordinary the moment two runs overlap, and while they last
 # no job can be opened or closed at all, so they belong to the run rather than to a session.
 QUEUE_LOST = (queue.QueueError, sqlite3.Error)
 
-# The failures that belong to the endpoint or the vault rather than to a session: every job
-# left in the queue would meet the same one, so the run ends on the first of them and what is
-# left stays queued, claimed only by a lease that the next run reclaims. An index that will
-# not be written - another build's rows, or a file that is not an index at all - is a fourth
-# of these: the digest is the worker's job and the index is the host's state, and DESIGN 14
-# says the host's state ends the run with its own words rather than stamping job after job
-# failed for something no session caused.
+# The failures that belong to the endpoint, the vault, or the host's own state rather than to
+# a session: every job left in the queue would meet the same one, so the run ends on the first
+# of them and what is left stays queued, claimed only by a lease that the next run reclaims.
+# An index that will not be written - another build's rows, or a file that is not an index at
+# all - is one of these: the digest is the worker's job and the index is the host's state, and
+# DESIGN 14 says the host's state ends the run with its own words rather than stamping job
+# after job failed for something no session caused. Its words are its own word in
+# ``STOP_INDEX``, not the endpoint's, because a person who reads the timer's line cannot tell
+# a model that is down from a stale index file otherwise.
 STOPS_RUN = (ModelError, VaultError, GitError, RegistryError, SearchIndexError, *QUEUE_LOST)
 
 # The failures that belong to one session: the job is marked failed with its reason and the
@@ -80,6 +83,22 @@ class Report:
         return ", ".join(said)
 
 
+def _stop_for(exc: BaseException) -> str:
+    """Which of the run's reasons this failure is told as.
+
+    Three of them are distinct happenings and the timer's line is the only place anyone reads
+    them: a queue that cannot be used, an index that refuses to be written, and an endpoint or
+    vault that did not answer. The index gets its own word rather than borrowing the
+    endpoint's, because "the model or the vault could not be reached" sends whoever sees it
+    looking at the wrong machine (BUILD-PLAN M3.1, lead's ruling on #39).
+    """
+    if isinstance(exc, QUEUE_LOST):
+        return STOP_QUEUE
+    if isinstance(exc, SearchIndexError):
+        return STOP_INDEX
+    return STOP_UNREACHABLE
+
+
 def _archive_worker(config: Config, job: queue.Job, failures: list[str]) -> str:
     """Park one worker session in the evidence archive and the index.
 
@@ -92,7 +111,7 @@ def _archive_worker(config: Config, job: queue.Job, failures: list[str]) -> str:
         failures.append(f"job {job.id} ({job.session_id}): {exc}")
     except STOPS_RUN as exc:
         failures.append(f"job {job.id} ({job.session_id}): {exc}")
-        return STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+        return _stop_for(exc)
     return ""
 
 
@@ -145,9 +164,9 @@ def run(config: Config, now: datetime | None = None) -> Report:
                     digested += 1
             except STOPS_RUN as exc:
                 # The job stays claimed only by a lease: its session's watermark has not moved,
-                # so the next run reads the same chunk again once the endpoint answers.
+                # so the next run reads the same chunk again once the host works again.
                 failures.append(f"job {job.id} ({job.session_id}): {exc}")
-                stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+                stopped = _stop_for(exc)
                 break
             except FAILS_JOB as exc:
                 failures.append(f"job {job.id} ({job.session_id}): {exc}")
@@ -189,7 +208,7 @@ def run(config: Config, now: datetime | None = None) -> Report:
                             digested += 1
                     except STOPS_RUN as exc:
                         failures.append(f"job {job.id} ({job.session_id}): {exc}")
-                        stopped = STOP_QUEUE if isinstance(exc, QUEUE_LOST) else STOP_UNREACHABLE
+                        stopped = _stop_for(exc)
                         if stopped != STOP_QUEUE:
                             # A model that will not answer is no reason to leave a worker's
                             # words out of the archive: storing them spends no token, and this
