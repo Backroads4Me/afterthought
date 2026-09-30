@@ -12,41 +12,37 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import (
-    __version__,
-    adapters,
-    claude_memory,
-    digest,
-    evidence,
-    forget,
-    gitutil,
-    index,
-    inject,
-    keys,
-    lint,
-    queue,
-    redact,
-    search,
-    vault,
-    work,
-)
-from aft import (
-    eval as evalmod,
-)
-from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, is_excluded, load, resolve_home
-from aft.dream import schedule
+from aft import __version__
+from aft.config import Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
-from aft.install import claude as claude_install
-from aft.install import pi as pi_install
-from aft.install import skill as skill_install
-from aft.install import systemd as systemd_install
-from aft.library import describe, importing, manifest, map_evidence, propose, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
 class UsageError(Exception):
     pass
+
+
+_CLI_ERROR_NAMES = {
+    "ConfigError",
+    "InstallError",
+    "RegistryError",
+    "VaultError",
+    "GitError",
+    "SearchIndexError",
+    "SearchError",
+    "UsageError",
+    "EvalError",
+    "ImportMemoryError",
+    "SurveyError",
+    "ManifestError",
+    "QueueError",
+    "DigestError",
+    "EvidenceError",
+    "ImportError",
+    "ProposeError",
+    "BadPattern",
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,30 +55,18 @@ def main(argv: list[str] | None = None) -> int:
         return args.handler(args)
     except (
         ConfigError,
-        claude_install.InstallError,
-        pi_install.InstallError,
-        skill_install.InstallError,
-        systemd_install.InstallError,
         RegistryError,
-        vault.VaultError,
         GitError,
-        index.SearchIndexError,
-        search.SearchError,
         UsageError,
-        evalmod.EvalError,
-        claude_memory.ImportMemoryError,
-        survey.SurveyError,
-        manifest.ManifestError,
-        queue.QueueError,
         sqlite3.Error,
-        digest.DigestError,
-        evidence.EvidenceError,
-        importing.ImportError,
-        propose.ProposeError,
-        redact.BadPattern,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        if any(cls.__name__ in _CLI_ERROR_NAMES for cls in type(exc).__mro__):
+            print(f"aft: {exc}", file=sys.stderr)
+            return 2
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -186,13 +170,13 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--limit",
         type=int,
-        default=evalmod.DEFAULT_LIMIT,
+        default=8,
         help="how many search results a line must be found in",
     )
     p.set_defaults(handler=cmd_eval)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
-    p.add_argument("agent", help="the agent that fired the event: " + " or ".join(adapters.PARSERS))
+    p.add_argument("agent", help="the agent that fired the event: claude or pi")
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
 
@@ -313,6 +297,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def cmd_init(args) -> int:
+    from aft import vault
+    from aft.config import DEFAULT_CONFIG_TEXT
+
     config = load()
     config.home.mkdir(parents=True, exist_ok=True)
     if not config.config_path.exists():
@@ -330,6 +317,8 @@ def cmd_init(args) -> int:
 def cmd_key(args) -> int:
     config = load()
     registry = Registry.load(config.registry_path)
+    from aft import keys
+
     result = keys.resolve(Path(args.path), registry, config.host, on_alias=_alias_writer(config))
     if args.json:
         print(
@@ -363,6 +352,8 @@ def _injection_block(path: Path) -> str:
     `aft inject` and the session-start hook both print what this returns, so an agent's
     session starts with exactly the text `aft inject` shows for its directory.
     """
+    from aft import inject, keys
+
     config = load()
     registry = Registry.load(config.registry_path)
     result = keys.resolve(path, registry, config.host)
@@ -371,6 +362,7 @@ def _injection_block(path: Path) -> str:
 
 def _alias_writer(config: Config):
     """Record a path found by remote, if the vault exists. Never fails the lookup."""
+    from aft import vault
 
     def write(project, key: str) -> None:
         if not vault.is_initialized(config.vault):
@@ -398,6 +390,8 @@ def cmd_project_list(args) -> int:
 
 
 def cmd_project_add(args) -> int:
+    from aft import gitutil, vault
+
     config = load()
     vault.require(config)
     info = gitutil.repo_info(Path(args.path).resolve())
@@ -416,6 +410,8 @@ def cmd_project_add(args) -> int:
 
 
 def cmd_project_rename(args) -> int:
+    from aft import vault
+
     config = load()
     vault.require(config)
     with vault.locked(config):
@@ -451,6 +447,8 @@ def cmd_project_rename(args) -> int:
 
 
 def cmd_project_forget(args) -> int:
+    from aft import vault
+
     config = load()
     vault.require(config)
     with vault.locked(config):
@@ -467,6 +465,8 @@ def cmd_project_forget(args) -> int:
 
 
 def cmd_lint(args) -> int:
+    from aft import lint, vault
+
     config = load()
     vault.require(config)
     findings = lint.lint_vault(config.vault)
@@ -482,6 +482,9 @@ def cmd_lint(args) -> int:
 
 def cmd_eval(args) -> int:
     """Run the golden set. No vault lock and no model: eval only ever reads."""
+    from aft import eval as evalmod
+    from aft import vault
+
     config = load()
     vault.require(config)
     return evalmod.run(config, args.golden, limit=args.limit)
@@ -489,6 +492,8 @@ def cmd_eval(args) -> int:
 
 def cmd_import_claude_memory(args) -> int:
     """Import memory files as digests. What survives them is the dream's, not this call's."""
+    from aft import claude_memory, vault
+
     config = load()
     vault.require(config)
     return claude_memory.run(config, args.source, project=args.project, dry_run=args.dry_run)
@@ -501,6 +506,8 @@ def cmd_work(args) -> int:
     the run's own log holds; the work it could not do stays queued either way (DESIGN 14).
     """
     config = load()
+    from aft import work
+
     report = work.run(config)
     print(f"aft work: {report.line()}")
     for failure in report.failures:
@@ -512,6 +519,8 @@ def cmd_work(args) -> int:
 def cmd_reindex(args) -> int:
     """Rebuild the search index. Everything it does is `aft.index`'s; this names the file it
     wrote and repeats the pages it could not read."""
+    from aft import index, vault
+
     config = load()
     vault.require(config)
     report = index.reindex(config)
@@ -529,6 +538,8 @@ def cmd_dream(args) -> int:
 
 def _dream(config: Config) -> None:
     """Run the dream and say what it did with each project that has digests waiting."""
+    from aft.dream import schedule
+
     result = schedule.run(config)
     if not result.waiting:
         print("aft dream: no digests waiting")
@@ -547,6 +558,8 @@ def _dream(config: Config) -> None:
 
 
 def cmd_forget_session(args) -> int:
+    from aft import forget, vault
+
     config = load()
     vault.require(config)
     report = forget.forget_session(config, args.session_id)
@@ -570,6 +583,8 @@ def cmd_forget_session(args) -> int:
 
 
 def cmd_forget_pattern(args) -> int:
+    from aft import forget, vault
+
     config = load()
     vault.require(config)
     report = forget.forget_pattern(config, args.pattern)
@@ -601,6 +616,8 @@ def cmd_forget_pattern(args) -> int:
 
 
 def cmd_redigest(args) -> int:
+    from aft import digest, vault
+
     config = load()
     vault.require(config)
     result = digest.redigest(config, args.session_id)
@@ -609,6 +626,8 @@ def cmd_redigest(args) -> int:
 
 
 def cmd_search(args) -> int:
+    from aft import search
+
     config = load()
     return search.search_command(
         config,
@@ -623,17 +642,24 @@ def cmd_search(args) -> int:
 
 
 def cmd_read(args) -> int:
+    from aft import search
+
     config = load()
     return search.read_command(config, args.path, level=args.level)
 
 
 def cmd_trace(args) -> int:
+    from aft import search
+
     config = load()
     return search.trace_command(config, args.page, args.source_id)
 
 
 def cmd_install_claude(args) -> int:
     """Add or remove afterthought's hook entries and skill in Claude Code's configuration."""
+    from aft.install import claude as claude_install
+    from aft.install import skill as skill_install
+
     settings = claude_install.settings_path()
     skills = claude_install.skills_dir(settings)
     try:
@@ -701,6 +727,9 @@ def cmd_install_claude(args) -> int:
 
 def cmd_install_pi(args) -> int:
     """Copy or remove afterthought's extension and skill in pi's configuration."""
+    from aft.install import pi as pi_install
+    from aft.install import skill as skill_install
+
     extensions = pi_install.extensions_dir()
     skills = pi_install.skills_dir(extensions)
     skill_install.check_target(skills)
@@ -755,6 +784,8 @@ def cmd_install_pi(args) -> int:
 
 def cmd_install_timer(args) -> int:
     """Install or remove afterthought's systemd user service and timer units."""
+    from aft.install import systemd as systemd_install
+
     unit_dir = systemd_install.unit_dir()
     cfg = load()
     change = (
@@ -779,22 +810,32 @@ def cmd_install_timer(args) -> int:
 
 
 def cmd_library_survey(args) -> int:
+    from aft.library import survey
+
     return survey.run(args.path, as_json=args.json)
 
 
 def cmd_library_validate(args) -> int:
+    from aft.library import manifest
+
     return manifest.run(args.manifest, path_override=args.path)
 
 
 def cmd_library_import(args) -> int:
+    from aft.library import importing
+
     return importing.run(args.manifest, path_override=args.path)
 
 
 def cmd_library_check_map(args) -> int:
+    from aft.library import map_evidence
+
     return map_evidence.run(args.manifest, map_files=args.map_files, path_override=args.path)
 
 
 def cmd_library_describe(args) -> int:
+    from aft.library import describe
+
     return describe.run(
         args.manifest,
         args.descriptions_file,
@@ -804,6 +845,8 @@ def cmd_library_describe(args) -> int:
 
 
 def cmd_library_propose(args) -> int:
+    from aft.library import propose
+
     return propose.run(
         args.manifest,
         args.facts_file,
@@ -843,6 +886,8 @@ def cmd_hook(args) -> int:
 
 def _hook_event(args, payload: object) -> SessionEvent:
     """The event named on the command line, built from the payload read off stdin."""
+    from aft import adapters
+
     parse = adapters.PARSERS.get(args.agent)
     if parse is None:
         raise AdapterError(
@@ -870,10 +915,16 @@ def _dispatch(event: SessionEvent) -> str:
     (DESIGN 8, BUILD-PLAN M2.2).
     """
     if event.kind == SESSION_START:
+        from aft import vault
+
         if not vault.is_initialized(load().vault):
             return ""
         return _injection_block(event.cwd)
     if event.kind in (COMPACTION, SESSION_END):
+        from aft import queue
+        from aft.config import is_excluded
+        from aft.install import systemd as systemd_install
+
         cfg = load()
         if is_excluded(event.cwd, cfg):
             return ""

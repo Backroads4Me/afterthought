@@ -126,7 +126,35 @@ class Page:
     """
 
 
-def split_frontmatter(text: str) -> tuple[dict | None, str, int, str | None]:
+def strip_sources(raw: str) -> str:
+    """Strip the `sources:` list from raw frontmatter YAML text so it can be parsed fast."""
+    lines = []
+    in_sources = False
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if line.startswith("sources:"):
+            lines.append("sources: []")
+            if stripped == "sources:" or stripped.startswith("sources: #"):
+                in_sources = True
+            continue
+        if in_sources:
+            if (
+                line
+                and not line[0].isspace()
+                and not line.startswith("-")
+                and not line.startswith("#")
+                and ":" in line
+            ):
+                in_sources = False
+            else:
+                continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def split_frontmatter(
+    text: str, strip_sources_list: bool = False
+) -> tuple[dict | None, str, int, str | None]:
     """Return (frontmatter, body, body start line, error)."""
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
@@ -135,8 +163,9 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, int, str | None]:
         if lines[index].strip() == "---":
             raw = "\n".join(lines[1:index])
             body = "\n".join(lines[index + 1 :])
+            raw_yaml = strip_sources(raw) if strip_sources_list else raw
             try:
-                data = yaml.safe_load(raw) if raw.strip() else {}
+                data = yaml.safe_load(raw_yaml) if raw_yaml.strip() else {}
             except yaml.YAMLError as exc:
                 return None, body, index + 2, f"frontmatter is not valid YAML: {exc}"
             if not isinstance(data, dict):
@@ -145,9 +174,9 @@ def split_frontmatter(text: str) -> tuple[dict | None, str, int, str | None]:
     return None, text, 1, "frontmatter has no closing ---"
 
 
-def parse(text: str, path: Path) -> Page:
+def parse(text: str, path: Path, strip_sources_list: bool = False) -> Page:
     """Parse a fact page."""
-    frontmatter, body, start, error = split_frontmatter(text)
+    frontmatter, body, start, error = split_frontmatter(text, strip_sources_list=strip_sources_list)
     page = Page(path=path, frontmatter=frontmatter, body_start=start)
     if error:
         page.errors.append((1, error))
