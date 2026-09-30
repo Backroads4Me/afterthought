@@ -32,6 +32,7 @@ CANDIDATES = "Candidates"
 # Sections of generated prose rather than facts, allowed only on the page types listed.
 PROSE_SECTIONS = {
     "Contents": {"Reference"},
+    "Description": {"Reference"},
     "Resolved notes": {"Archive"},
     "Notes": {"Archive"},
 }

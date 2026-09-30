@@ -41,7 +41,7 @@ from aft.install import claude as claude_install
 from aft.install import pi as pi_install
 from aft.install import skill as skill_install
 from aft.install import systemd as systemd_install
-from aft.library import importing, manifest, map_evidence, propose, survey
+from aft.library import describe, importing, manifest, map_evidence, propose, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -248,6 +248,23 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("map_files", nargs="*", help="path to index or map file(s) to check")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_check_map)
+
+    q = lsub.add_parser(
+        "describe",
+        help="verify and add document descriptions to reference pages",
+    )
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument(
+        "descriptions_file",
+        help="path to YAML file containing document descriptions (or '-' for stdin)",
+    )
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="verify descriptions without writing to vault",
+    )
+    q.set_defaults(handler=cmd_library_describe)
 
     q = lsub.add_parser(
         "propose",
@@ -754,6 +771,15 @@ def cmd_library_import(args) -> int:
 
 def cmd_library_check_map(args) -> int:
     return map_evidence.run(args.manifest, map_files=args.map_files, path_override=args.path)
+
+
+def cmd_library_describe(args) -> int:
+    return describe.run(
+        args.manifest,
+        args.descriptions_file,
+        path_override=args.path,
+        dry_run=args.dry_run,
+    )
 
 
 def cmd_library_propose(args) -> int:
