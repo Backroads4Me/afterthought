@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from aft import cli, index, lint, vault
+from aft import cli, index, lint, page, vault
 from aft.config import Config
 from aft.library import importing
 from aft.library import manifest as manifest_mod
@@ -355,3 +355,83 @@ def test_import_verifies_exclude_map_files_with_planted_false_claim(
     assert "does not exist in collection" in report_text
     assert "outside_secret.txt" in report_text
     assert "escapes collection root" in report_text
+
+
+def test_import_manifest_without_authority_defaults_to_reference(
+    initialized: Config, sample_collection: tuple[Path, Path]
+) -> None:
+    """A manifest without authority imports as reference (BUILD-PLAN F5)."""
+    col_dir, manifest_file = sample_collection
+    now = datetime(2026, 9, 29, 15, 0, tzinfo=UTC)
+    result = importing.import_collection(manifest_file, config=initialized, now=now)
+
+    assert result.authority == "reference"
+
+    # 1. references/<name>/collection.md records authority: reference in frontmatter under aft:
+    col_md = initialized.vault / "references" / "rvc" / "collection.md"
+    assert col_md.is_file()
+    text = col_md.read_text(encoding="utf-8")
+    fm, _, _, _ = page.split_frontmatter(text)
+    assert fm["aft"]["authority"] == "reference"
+
+    # 2. Import report records Authority: reference
+    rep_file = initialized.vault / result.report_path
+    assert rep_file.is_file()
+    assert "- Authority: reference" in rep_file.read_text(encoding="utf-8")
+
+    # 3. Commit message records authority
+    res = subprocess.run(
+        ["git", "log", "-n", "1", "--oneline"],
+        cwd=initialized.vault,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "aft library: import collection 'rvc' (reference)" in res.stdout
+
+
+def test_import_authoritative_manifest(initialized: Config, tmp_path: Path) -> None:
+    """An authoritative manifest records authority across pages, report, and commit."""
+    col_dir = tmp_path / "auth_col"
+    col_dir.mkdir()
+    (col_dir / "standard.md").write_text(
+        "# Standard\nOfficial protocol standard.\n", encoding="utf-8"
+    )
+
+    manifest_data = {
+        "name": "standard-spec",
+        "title": "Protocol Standard",
+        "description": "Authoritative protocol specification",
+        "authority": "authoritative",
+        "projects": [],
+        "path": str(col_dir),
+        "files": {
+            "standard.md": "original",
+        },
+    }
+    m_file = tmp_path / "manifest.yaml"
+    m_file.write_text(yaml.dump(manifest_data), encoding="utf-8")
+
+    now = datetime(2026, 9, 29, 15, 30, tzinfo=UTC)
+    result = importing.import_collection(m_file, config=initialized, now=now)
+    assert result.authority == "authoritative"
+
+    # 1. references/<name>/collection.md records authority in frontmatter
+    col_md = initialized.vault / "references" / "standard-spec" / "collection.md"
+    assert col_md.is_file()
+    fm, _, _, _ = page.split_frontmatter(col_md.read_text(encoding="utf-8"))
+    assert fm["aft"]["authority"] == "authoritative"
+
+    # 2. Report records Authority: authoritative
+    rep_file = initialized.vault / result.report_path
+    assert "- Authority: authoritative" in rep_file.read_text(encoding="utf-8")
+
+    # 3. Commit message names authority
+    res = subprocess.run(
+        ["git", "log", "-n", "1", "--oneline"],
+        cwd=initialized.vault,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "aft library: import collection 'standard-spec' (authoritative)" in res.stdout
