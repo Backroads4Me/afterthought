@@ -91,6 +91,14 @@ def test_output_that_is_not_json_counts_as_invalid(serve):
     assert len(fake.requests) == 2
 
 
+def test_a_raw_newline_inside_a_string_is_still_an_answer(serve):
+    """A model under a JSON schema writes a raw newline or tab inside a long string often
+    enough. The value is unambiguous, so it is read rather than failed and asked for again."""
+    fake, cfg = serve(Reply(content='{"answer": "one\ntwo\tthree"}'))
+    assert call(cfg) == {"answer": "one\ntwo\tthree"}
+    assert len(fake.requests) == 1
+
+
 def test_two_invalid_answers_raise_after_one_retry(serve):
     fake, cfg = serve({"answer": "x" * 40}, {"answer": 7})
     with pytest.raises(model.ModelError) as answer:

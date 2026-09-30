@@ -265,7 +265,10 @@ def _quoted(config: Config, said: str) -> str:
 def _checked(content: str, schema: dict) -> dict:
     """Parse and validate the model's own answer, the output that can be retried."""
     try:
-        answer = json.loads(content)
+        # strict=False lets a string hold a raw newline or tab. A model under a JSON schema
+        # writes those inside a long quote often enough, the value is unambiguous, and every
+        # quote is checked against its source afterwards with whitespace folded.
+        answer = json.loads(content, strict=False)
     except json.JSONDecodeError as exc:
         raise schemamod.SchemaError(f"the model did not answer with JSON: {exc}") from exc
     if not isinstance(answer, dict):
