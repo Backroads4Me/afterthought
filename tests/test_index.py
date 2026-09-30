@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from aft import evidence, index, page, pagewrite
+from aft import evidence, forget, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
@@ -119,6 +119,22 @@ sources: []
 ## Preferences
 
 - No RGB lighting. [stated] 2026-09-20 [^s1]
+"""
+
+# A library collection's map (BUILD-PLAN M7.2): the documents it indexes, by the digest their
+# extracted chunks were cached under, and the one library file the vault itself holds.
+LIBRARY_MAP = """---
+type: Reference
+title: Widget Library
+description: Reference materials for widget
+aft:
+  collection: widget
+  projects:
+    - p_widget
+  files:
+    notes.txt: 44fe67898e8cca3b8252ddb6234814147b5dca7f1ea020a3baf7f032ec7dcff4
+---
+# Widget Library
 """
 
 # A digest that carries the same heading twice, as a day's notes written over themselves
@@ -228,6 +244,34 @@ def hashes(cfg: Config) -> dict[str, str]:
     """The content hash the index recorded for every file it has read."""
     with _open(cfg) as conn:
         return dict(conn.execute(f"SELECT path, digest FROM {index.FILES_TABLE}"))
+
+
+def shape(cfg: Config, collection: str) -> tuple[int, int, int]:
+    """How many rows a collection holds and where in the file they sit.
+
+    Rows written again land at new places: a run that re-tokenized and re-inserted what it
+    already held reads correctly and costs a rebuild, which is the failure the incremental path
+    is not allowed to make, and no comparison of row *contents* can see it."""
+    with _open(cfg) as conn:
+        return conn.execute(f"SELECT count(*), min(rowid), max(rowid) FROM {collection}").fetchone()
+
+
+def watch(monkeypatch: pytest.MonkeyPatch, prefix: str) -> list[str]:
+    """Every statement a run sends to SQLite whose text starts with ``prefix``.
+
+    What a run asks for is its cost, and the rows it leaves behind cannot show it: an update that
+    rewrote every row it already held answers with exactly the rows it should not have touched.
+    The statements are what the incremental path promises not to issue twice."""
+    seen: list[str] = []
+    real = index._connect
+
+    def traced(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
+        conn = real(config, rebuild=rebuild)
+        conn.set_trace_callback(lambda sql: seen.append(sql) if sql.startswith(prefix) else None)
+        return conn
+
+    monkeypatch.setattr(index, "_connect", traced)
+    return seen
 
 
 def pin(path: Path, moment: int) -> None:
@@ -1132,8 +1176,9 @@ def _a_digest(
 def test_rows_carry_their_identity(initialized: Config) -> None:
     """Every row says where its text came from: path, project id, agent, session, time, and a
     heading or an entry id (BUILD-PLAN M3.1). Where a collection has no answer the field is
-    empty rather than invented: a curated page is not one agent's record, and an evidence entry
-    sits under no heading."""
+    empty rather than invented: a curated page is not one agent's record, an evidence entry
+    sits under no heading, and a row built from a file carries no time - when a file was last
+    written is this host's history rather than the text's, and a rebuild cannot answer with it."""
     write(initialized, REL, PAGE)
     write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc-123.md", DIGEST)
     write(initialized, "reports/2026-09-28.md", REPORT)
@@ -1150,7 +1195,7 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
     )
     assert _column(page_row, "agent") is None
     assert _column(page_row, "session_id") is None
-    assert datetime.fromisoformat(_column(page_row, "time")).tzinfo is UTC
+    assert _column(page_row, "time") == ""
 
     digest_row = row_for(
         initialized, "digests", "digests/widget/2026/09/2026-09-28-claude-abc-123.md#Summary"
@@ -1171,6 +1216,7 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
     assert _column(evidence_row, "project_id") == "p_widget"
     assert _column(evidence_row, "heading") == ""
     assert _column(evidence_row, "entry_hash") is not None
+    assert datetime.fromisoformat(_column(evidence_row, "time")).tzinfo is UTC
 
 
 def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
@@ -1454,3 +1500,204 @@ description: Notes and lines resolved out of widget.
         "body",
     )
     assert "Yes, plain SQLite is fast and simple." in notes_body
+
+
+# What an update costs. The M3 review found the incremental path costing the same whether the
+# vault moved or not, and removals costing the whole collection once per row: a search asks the
+# index to catch up before it reads, so every one of those paid for the write lock, the archive
+# scan, or the minute it took to name 9,000 rows one at a time.
+
+
+def test_a_run_that_finished_with_rows_names_them_in_one_statement(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing rows cannot cost one read of the collection per row.
+
+    FTS5 keeps an evidence row's key beside its text unindexed, so a delete naming that key
+    scans everything the collection holds however it filters - which is what an update that
+    forgot three sessions of six entries each turned into. The set this run is finished with
+    is therefore named once, and one statement is what does it: the rows still have to be gone,
+    because a run that named nothing would issue nothing and pass this for the wrong reason."""
+    removals = watch(monkeypatch, "DELETE FROM evidence")
+    texts = tuple(f"note {number} on the flange" for number in range(6))
+    for number in range(4):
+        evidence.store(initialized, "claude", f"s{number}", "p_widget", entries(*texts))
+    assert index.update(initialized) == []
+    assert len(keys_of(initialized, "evidence")) == 24
+    removals.clear()
+
+    for number in range(3):
+        evidence.forget(initialized, f"s{number}")
+    assert index.update(initialized) == []
+
+    assert keys_of(initialized, "evidence") == [f"s3#e{number}" for number in range(1, 7)]
+    assert len(removals) == 1, f"18 rows left the index in {len(removals)} statements"
+
+
+def test_an_update_that_changed_nothing_leaves_the_library_rows_where_they_are(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An indexed library document is not a vault file, so it is not one that went missing.
+
+    The hash of a library document is recorded in the same table as the hash of a page, and a
+    run that reads that table for files it can no longer find finds the library's paths in it
+    every time. Dropping their hash costs the run the re-reading of every chunk cache and the
+    rewriting of every row of every document, to write down what it already held - which is what
+    every search then waited behind. Something else has to move in this run for the difference to
+    be visible at all: an update that does no work rewrites nothing whatever it thinks of the
+    library."""
+    write(initialized, "library/widget/notes.txt", "Library notes for widget\n")
+    write(initialized, "references/widget/collection.md", LIBRARY_MAP)
+    assert index.update(initialized) == []
+    before = shape(initialized, index.LIBRARY)
+    assert before[0] > 0, "the library document indexed nothing"
+
+    removals = watch(monkeypatch, "DELETE FROM library")
+    evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
+
+    assert index.update(initialized) == []
+
+    assert removals == [], [sql.split(" WHERE ")[0] for sql in removals]
+    assert keys_of(initialized, "evidence") == ["abc#e1"]
+    assert shape(initialized, index.LIBRARY) == before
+
+
+def test_an_update_that_found_nothing_moved_never_asks_for_the_write_lock(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A search checks the index before it reads it, so checking cannot be a rebuild.
+
+    With the write lock held by another run, an update that finds nothing to do returns what it
+    found - no report, no rows touched - where an update that has to look takes the lock and
+    waits for it. Both halves are needed: without the first, every search queues behind a dream
+    run; without the second, the first would only prove the update stopped looking."""
+    monkeypatch.setattr(index, "BUSY_TIMEOUT_SECONDS", 0.2)
+    write(initialized, REL, PAGE)
+    evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
+    assert index.update(initialized) == []
+
+    held = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    held.execute("BEGIN IMMEDIATE")
+    try:
+        assert index.update(initialized) == []
+
+        write(initialized, "global/preferences.md", PREFERENCES)
+        with pytest.raises(index.SearchIndexError, match="cannot write the index"):
+            index.update(initialized)
+    finally:
+        held.rollback()
+        held.close()
+
+    assert index.update(initialized) == []
+    assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
+
+
+def test_a_forget_is_a_change_the_shortcut_cannot_call_unchanged(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DESIGN 12 reaches "everything afterthought controls", and a run that decides nothing moved
+    is one step away from deciding that a forget moved nothing.
+
+    Both halves of the promise are read here, because either can hold while the other fails. What
+    the run was told: the probe is wrapped and the verdicts it gave are recorded - `True` for the
+    first run, which had both sessions to read, `False` for the run after it, and `True` again for
+    the run each forget drives. What came of it: the forgotten rows are out of the index and the
+    session neither forget named is still there field for field, because an update that answered a
+    forget by rebuilding everything would pass this test while destroying that session. Making
+    `_moved` answer unchanged always fails this test at the recorded verdicts - the shortcut calling
+    the very first run unchanged is the same lie one step earlier, before any row was indexed."""
+    verdicts: list[bool] = []
+    asked = index._moved
+
+    def noting(conn: sqlite3.Connection, config: Config) -> bool:
+        moved = asked(conn, config)
+        verdicts.append(moved)
+        return moved
+
+    monkeypatch.setattr(index, "_moved", noting)
+
+    evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
+    evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
+    assert index.update(initialized) == []
+    assert index.update(initialized) == []
+    assert verdicts == [True, False], "the shortcut never got live, so the test proved nothing"
+    assert sorted(search(initialized, "evidence", "flange")) == ["abc#e1", "def#e1"]
+
+    seen = len(verdicts)
+    forget.forget_session(initialized, "abc")
+    assert True in verdicts[seen:], "forget ran an update the probe called unchanged"
+    assert search(initialized, "evidence", "bronze") == []
+    assert [tuple(row) for row in rows(initialized, "evidence")] == [
+        tuple(row_for(initialized, "evidence", "def#e1"))
+    ]
+
+    seen = len(verdicts)
+    forget.forget_pattern(initialized, "nickel")
+    assert True in verdicts[seen:], "the pattern forget ran an update the probe called unchanged"
+    assert search(initialized, "evidence", "nickel") == []
+    assert len(rows(initialized, "evidence")) == 1
+    assert index.update(initialized) == []
+
+
+def test_a_touched_file_leaves_a_rebuild_and_an_index_kept_up_to_date_agreeing(
+    initialized: Config,
+) -> None:
+    """DESIGN 14 promises the rebuild answers with what an index kept in step holds, field for
+    field, and a modification time is where that promise broke.
+
+    A file whose text did not change keeps its rows - the content hash is the key - so it kept
+    the moment the earlier run happened to notice it, while a rebuild reads the file again and
+    writes down the moment it carries now. Two answers to the same question about the same text,
+    differing in the one field no one can reproduce: a checkout, a sync, a copy to another host,
+    and every row of the vault says something else."""
+    rel = write(initialized, REL, PAGE)
+    write(initialized, "archive/widget.md", ARCHIVE)
+    digest = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
+    report = write(initialized, "reports/2026-09-28.md", REPORT)
+    write(initialized, "library/widget/notes.txt", "Library notes for widget\n")
+    write(initialized, "references/widget/collection.md", LIBRARY_MAP)
+    evidence.store(initialized, "claude", "abc", "p_widget", entries("a flange"))
+    assert index.update(initialized) == []
+
+    for rel_path in (rel, digest, report):
+        pin(initialized.vault / rel_path, 1_700_000_000)
+    assert index.update(initialized) == []
+
+    built = {name: rows(initialized, name) for name in index.COLLECTIONS}
+    assert all(built[name] for name in index.COLLECTIONS), {
+        name: len(built[name]) for name in index.COLLECTIONS
+    }
+
+    assert index.reindex(initialized) == []
+
+    assert {name: rows(initialized, name) for name in index.COLLECTIONS} == built
+
+
+def test_a_log_a_reader_will_not_let_finish_is_reported(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkpoint that could not run answers with a row and sets no error, and a log another
+    process is reading cannot run.
+
+    The pages a run moved are still outside the index file then, holding the text a forget
+    reached into the index for (DESIGN 12), so silence says what did not happen. `aft.evidence`
+    raises for exactly this on exactly its own file; the index holds a copy of the same
+    conversation and says the same thing now that it can."""
+    monkeypatch.setattr(index, "BUSY_TIMEOUT_SECONDS", 0.2)
+    write(initialized, REL, PAGE)
+    evidence.store(initialized, "claude", "abc", "p_widget", entries("the passkey is cedar"))
+    assert index.update(initialized) == []
+
+    reader = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM evidence").fetchone()  # a snapshot the writer cannot move
+    try:
+        evidence.forget(initialized, "abc")
+        with pytest.raises(index.SearchIndexError, match="held open by another reader"):
+            index.update(initialized)
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert index.update(initialized) == []
+    assert keys_of(initialized, "evidence") == []

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -709,6 +711,108 @@ def test_archived_resolved_notes_are_searchable_with_archive_flag(
     assert main(["search", "offline portability"]) == 0
     out_default = capsys.readouterr().out
     assert "archive/projects/widget/overview.md" not in out_default
+
+
+# What a search asks SQLite for (the M3 performance review). A hit is a document and a row is a
+# section, so a limit cannot simply be asked for at the door - and without one asked for at all,
+# a search whose every line carries the queried word built, snippeted and carried back every
+# match in the vault to keep eight of them.
+
+
+def test_a_search_asks_sqlite_for_the_rows_it_keeps(
+    populated_vault: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit belongs in the statement, not in the loop that reads the answer.
+
+    Every statement the search sends to SQLite is caught on its way out and read. Each one that
+    ranks a collection has to name how many rows it wants, and each one that cuts a snippet has
+    to name the rows it is cutting for: a snippet is only correct when it is cut by a scan of
+    that collection's matches, so the rows kept by the ranking statement come back by rowid and
+    are snippeted by a second statement that scans exactly them. A search that asked for none and
+    then stopped counting at eight still returned the right eight hits, which is exactly how the
+    cost stayed invisible, and a search that snippeted its way through every match to get a
+    correct snippet paid for all of them."""
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(search.sqlite3, "connect", traced_connect)
+
+    hits = search.search(populated_vault, "SQLite", project="widget", limit=3)
+    assert hits, "the search found nothing, so it proved nothing"
+
+    ranked = [sql for sql in statements if "MATCH" in sql and "bm25" in sql]
+    assert ranked, f"no ranking statement reached SQLite: {statements}"
+    assert all("LIMIT" in sql for sql in ranked), ranked
+
+    snippeted = [sql for sql in statements if "MATCH" in sql and "snippet(" in sql]
+    assert snippeted, f"no snippet statement reached SQLite: {statements}"
+    assert all("rowid IN (" in sql for sql in snippeted), snippeted
+    assert any("SQLite" in hit.snippet for hit in hits), [hit.snippet for hit in hits]
+
+
+def test_one_document_with_many_rows_does_not_take_the_whole_limit(
+    populated_vault: Config,
+) -> None:
+    """The room a collection is asked for is documents, not rows.
+
+    A page whose every line carries the queried word is one row per section and one hit, and a
+    limit asked for before the rows are collapsed to documents hands back that page's sections and
+    calls the search over. Each collection is narrowed to one row per document - the best-ranked
+    one, the only row of it a search could have kept - inside the statement that limits it, so what
+    comes back is documents: the busy page shares a limit of two with an archived entry rather than
+    filling it with its own sections."""
+    facts = "\n\n".join(
+        f"## {section}\n\n- The shim behind plate {number} is obsidian. [observed] 2026-09-20 [^s1]"
+        for number, section in enumerate(
+            ("Facts", "State", "Decisions", "Preferences", "Lessons", "Procedures", "References")
+        )
+    )
+    (populated_vault.vault / "projects/widget/shims.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Widget Shims\n"
+        "description: Every shim in the widget.\n"
+        "sources: []\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Widget Shims\n\n"
+        f"{facts}\n",
+        encoding="utf-8",
+    )
+    evidence.store(
+        populated_vault,
+        "pi",
+        "s-shim",
+        "p_widget",
+        [
+            Entry(
+                "e-0",
+                datetime(2026, 9, 28, 12, 0, tzinfo=UTC),
+                "user",
+                "the shim is obsidian",
+                False,
+            )
+        ],
+    )
+
+    hits = search.search(populated_vault, "obsidian", project="widget", limit=2)
+    paths = [hit.path for hit in hits]
+
+    with sqlite3.connect(populated_vault.home / index.INDEX_NAME) as conn:
+        sections = conn.execute(
+            "SELECT count(*) FROM pages WHERE path = 'projects/widget/shims.md'"
+        ).fetchone()[0]
+    assert sections >= 6, f"the page indexed {sections} rows, so the test proved nothing"
+
+    assert len(paths) == 2, f"only {len(paths)} documents answered: {paths}"
+    assert len(set(paths)) == 2, paths
+    assert "projects/widget/shims.md" in paths, paths
+    assert any(path.startswith("aft://session/pi/s-shim") for path in paths), paths
 
 
 # ------------------------------------------- scoping: an unfiled row is no project's memory

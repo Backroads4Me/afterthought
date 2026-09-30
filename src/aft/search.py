@@ -62,6 +62,84 @@ class Hit:
         }
 
 
+def _ask(
+    conn: sqlite3.Connection,
+    collections: list[str],
+    fts5_query: str,
+    target_project_id: str | None,
+    filter_global_only: bool,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Ask each collection for its ``limit`` best-ranked documents, best row first.
+
+    A collection `_scope` rules out entirely is not asked at all, so a project's search never
+    sends a statement against memory that was never filed under it.
+
+    The limit belongs in SQL. Without it a search builds every match - the snippet, the row, the
+    Python object - to keep eight of them, which is what a vault whose every line carries the
+    queried word pays for every search.
+
+    It cannot be a bare limit of rows, because a hit is a document while a row is a section: a
+    page with twelve matching sections is twelve rows and one hit, and a limit asked for at the
+    door would hand back one document's twelve sections and call the search over. So each
+    collection is asked to narrow itself to one row per document - the best-ranked one, which is
+    the only row of it any search could have kept - and the limit goes after that. That is what
+    makes the limit mean what it says, and it is done in SQL over the whole collection rather
+    than after the rows arrive, because a search that reads every row to discover the eight it
+    wanted has already paid for the ones it threw away.
+
+    Which rows survived comes back before what they say, because a snippet is cut by the match
+    scan it is written into: a statement that joins back to its table by rowid snippets whatever
+    the join happened to read, which is the row's first words rather than the matched ones, and
+    a statement that scans the matches to snippet them correctly pays for every match rather
+    than for the kept few. So the kept rowids are asked for by name in their own collection,
+    which is a seek measured at 0.1 ms where snippet-izing all 11 000 matches costs 50 ms.
+    """
+    rows: list[dict[str, Any]] = []
+    for col in collections:
+        scope = _scope(col, target_project_id, filter_global_only)
+        if scope is None:
+            continue  # this collection holds no memory the query is allowed to reach
+        clause, extra = scope
+        args: list[Any] = [fts5_query, *extra]
+
+        keep = conn.execute(
+            f"SELECT rid, path, description, heading, score FROM (SELECT rid, path,"
+            f" description, heading, score,"
+            f" row_number() OVER (PARTITION BY path ORDER BY score) AS best"
+            f" FROM (SELECT rowid AS rid, path, description, heading,"
+            f" {index.rank_expression(col)} AS score"
+            f" FROM {col} WHERE {col} MATCH ?{clause})) WHERE best = 1"
+            " ORDER BY score ASC LIMIT ?",
+            (*args, limit),
+        ).fetchall()
+        if not keep:
+            continue
+
+        rowids = ", ".join("?" for _ in keep)
+        snippets = dict(
+            conn.execute(
+                f"SELECT rowid, snippet({col}, -1, '', '', '...', 16) FROM {col}"
+                f" WHERE {col} MATCH ?{clause} AND rowid IN ({rowids})",
+                (fts5_query, *extra, *(row["rid"] for row in keep)),
+            ).fetchall()
+        )
+        rows.extend(
+            {
+                "collection": col,
+                "path": row["path"],
+                "description": row["description"],
+                "heading": row["heading"],
+                "snippet": snippets.get(row["rid"], ""),
+                "rank": row["score"],
+            }
+            for row in keep
+        )
+
+    rows.sort(key=lambda row: row["rank"])
+    return rows
+
+
 def search(
     config: Config,
     query: str,
@@ -126,32 +204,14 @@ def search(
         if not active_collections:
             return []
 
-        selects: list[str] = []
-        params: list[Any] = []
-
-        for col in active_collections:
-            scope = _scope(col, target_project_id, filter_global_only)
-            if scope is None:
-                continue  # this collection holds no memory this query reaches
-            clause, extra = scope
-            rank_expr = index.rank_expression(col)
-            params.append(fts5_query)
-            params.extend(extra)
-            where_sql = f"{col} MATCH ?{clause}"
-            selects.append(
-                f"SELECT '{col}' AS collection, path, description, heading, "
-                f"snippet({col}, -1, '', '', '...', 16) AS snippet, "
-                f"{rank_expr} AS rank "
-                f"FROM {col} WHERE {where_sql}"
-            )
-
-        full_sql = " UNION ALL ".join(selects) + " ORDER BY rank ASC"
-        cursor = conn.execute(full_sql, params)
+        rows = _ask(
+            conn, active_collections, fts5_query, target_project_id, filter_global_only, limit
+        )
 
         seen_paths: set[str] = set()
         hits: list[Hit] = []
 
-        for row in cursor.fetchall():
+        for row in rows:
             path_val = row["path"]
             if path_val in seen_paths:
                 continue
