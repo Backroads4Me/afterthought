@@ -771,6 +771,49 @@ def test_a_line_superseded_today_answers_the_archive_flag_from_its_own_page(
     assert "prototype.md" not in capsys.readouterr().out
 
 
+GLOBAL_ENVIRONMENT_WITH_A_STRUCK_LINE = """---
+type: Environment
+title: Environment
+description: Developer machine configuration.
+sources: []
+---
+
+# Environment
+
+## State
+
+- The workstation runs a tiling compositor. [stated] 2026-09-26 [^s1]
+- ~~The workstation ran a zeppelin.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s1]
+"""
+
+
+def test_a_global_pages_struck_line_answers_the_archive_flag_as_shared_history(
+    populated_vault: Config, monkeypatch, tmp_path
+) -> None:
+    """The archive mirrors the pages: a global page's line is every project's memory while it is
+    active, so once struck it answers every project's `--archive`, and `--archive` from a
+    directory in no project. Another project's archived line still answers neither."""
+    (populated_vault.vault / "global/environment.md").write_text(
+        GLOBAL_ENVIRONMENT_WITH_A_STRUCK_LINE, encoding="utf-8"
+    )
+
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+    assert search.search(populated_vault, "zeppelin") == [], "out of memory, not in a hit"
+    hits = search.search(populated_vault, "zeppelin", archive=True)
+    assert [(hit.path, hit.collection) for hit in hits] == [("global/environment.md", "archive")]
+    assert search.search(populated_vault, "Bluetooth", archive=True) == [], (
+        "the gadget project's archived line is not the widget project's history"
+    )
+
+    outside = tmp_path / "nowhere"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    assert search.search(populated_vault, "zeppelin") == []
+    hits = search.search(populated_vault, "zeppelin", archive=True)
+    assert [(hit.path, hit.collection) for hit in hits] == [("global/environment.md", "archive")]
+    assert search.search(populated_vault, "Bluetooth", archive=True) == []
+
+
 # What a search asks SQLite for (the M3 performance review). A hit is a document and a row is a
 # section, so a limit cannot simply be asked for at the door - and without one asked for at all,
 # a search whose every line carries the queried word built, snippeted and carried back every

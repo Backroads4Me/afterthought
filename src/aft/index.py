@@ -155,11 +155,13 @@ LIBRARY = "library"
 COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS, LIBRARY)
 
 #: The collections whose rows with no project id are every project's memory: DESIGN 6's global
-#: pages, a reference page that covers nothing yet. Whoever queries the index takes a row with
-#: no id from one of these as shared memory; from any other collection an id-less row is text
-#: that was never filed under a project at all - a session that resolved to none (DESIGN 7
-#: step 4), a digest under a slug no registry answers for - and is not that project's memory.
-GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES,)
+#: pages, a reference page that covers nothing yet, and the archive, which mirrors the pages: a
+#: global page's line that left memory is shared history exactly as the line was shared memory.
+#: Whoever queries the index takes a row with no id from one of these as shared; from any other
+#: collection an id-less row is text that was never filed under a project at all - a session
+#: that resolved to none (DESIGN 7 step 4), a digest under a slug no registry answers for - and
+#: is not that project's memory.
+GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES, ARCHIVE)
 
 #: The collections whose rows name no project because they span them all: one dream report day
 #: consolidates every project (DESIGN 9). Such a row answers a query about any project, and
