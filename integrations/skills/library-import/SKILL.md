@@ -1,6 +1,6 @@
 ---
 name: library-import
-description: Import reference documentation and collections into the afterthought library. Use when asked to import or add reference documents, specifications, or documentation collections into afterthought (e.g. "add my RV-C documentation to the library"). Drives aft library survey, validate, check-map, and import commands.
+description: Import reference documentation and collections into the afterthought library. Use when asked to import or add reference documents, specifications, or documentation collections into afterthought (e.g. "add my RV-C documentation to the library"). Drives aft library survey, validate, check-map, import, and propose commands.
 ---
 
 # Library Import
@@ -59,5 +59,9 @@ Nothing imported is trusted: existing indexes, tables of contents, and documenta
 5. **Add descriptions**:
    Review generated reference pages. Add descriptions explaining what each document is, its authority, and when to use or not use it. Every claim must carry a quote that appears in the extracted text.
 
-6. **Review report and commit**:
+6. **Propose facts**:
+   Run `aft library propose <manifest> <facts-file>` to propose candidate facts mined from notes and excluded instruction files.
+   Each fact is quote-checked against its file and enters the dream as a candidate digest. Excluded files record that the quote was verified at import and the original was not retained.
+
+7. **Review report and commit**:
    Review the import report and vault commit to verify all files are accounted for and all claims verified.
