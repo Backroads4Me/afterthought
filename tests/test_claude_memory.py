@@ -22,6 +22,7 @@ from aft.config import Config
 from aft.dream.apply import _lookup_evidence
 from aft.dream.schedule import waiting_digests
 from aft.registry import Registry, path_key
+from conftest import make_repo
 
 HOST = "testhost"
 
@@ -90,7 +91,10 @@ def memory(initialized: Config, tmp_path: Path, monkeypatch) -> Config:
     """A registered project with memory, an unregistered one with memory, and no real HOME."""
     registry = Registry.load(initialized.registry_path)
     widget = registry.add("widget", "Widget")
-    registry.add_path(widget, path_key(HOST, (tmp_path / "widget").resolve()))
+    # A registered path that exists and is a repository, because capture's exclusion asks the
+    # resolver which project a directory belongs to, and a directory git will not read is not
+    # a project any setting can name.
+    registry.add_path(widget, path_key(HOST, make_repo(tmp_path / "widget")))
     registry.save()
 
     home = tmp_path / "fakehome"
@@ -315,10 +319,20 @@ def test_the_dream_finds_the_imported_digests_waiting(memory: Config):
     assert len(waiting["widget"]) == 2
 
 
-def with_capture(config: Config, exclude: tuple[str, ...] = (), patterns: tuple[str, ...] = ()):
+def with_capture(
+    config: Config,
+    exclude: tuple[str, ...] = (),
+    patterns: tuple[str, ...] = (),
+    projects: tuple[str, ...] = (),
+):
     """The config again with capture settings written into it, the way an operator sets them."""
     lines = [f'vault = "{config.vault}"', 'host = "testhost"', "[capture]"]
-    for name, values in (("exclude_paths", exclude), ("redact_patterns", patterns)):
+    settings = (
+        ("exclude_paths", exclude),
+        ("exclude_projects", projects),
+        ("redact_patterns", patterns),
+    )
+    for name, values in settings:
         listed = ", ".join(f'"{value}"' for value in values)
         lines.append(f"{name} = [{listed}]")
     (config.home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -368,6 +382,14 @@ def test_a_secret_in_a_memory_file_reaches_neither_the_vault_nor_the_record(
 def test_a_project_under_capture_exclude_paths_is_never_read(memory: Config):
     """A project whose sessions capture must not read has memory capture must not import."""
     config = with_capture(memory, exclude=(str(memory_path_project(memory)),))
+
+    assert claude_memory.run(config) == 1
+    assert digests(config) == []
+
+
+def test_a_project_named_in_capture_exclude_projects_is_never_read(memory: Config):
+    """Naming the project rather than a directory also covers its other clones and worktrees."""
+    config = with_capture(memory, projects=("widget",))
 
     assert claude_memory.run(config) == 1
     assert digests(config) == []

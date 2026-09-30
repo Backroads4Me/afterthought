@@ -26,8 +26,9 @@ own words would hand it an authority it does not have (design 11: nothing import
 A memory file is text an agent wrote with nobody reviewing it, so a line can hold a token or a
 password. Every line is therefore redacted with the configured ``capture.redact_patterns``
 before it becomes a statement, a quote, or a record - the same thing capture does before
-archiving (design 8) - and a project under ``capture.exclude_paths`` is skipped outright,
-because capture is told never to read that project and an import is not an exemption.
+archiving (design 8) - and a project capture excludes is skipped outright, by either
+``capture.exclude_paths`` or ``capture.exclude_projects``: capture is told never to read that
+work, and an import is not an exemption from it.
 """
 
 from __future__ import annotations
@@ -124,9 +125,11 @@ def plans(
     directory, because that direction is exact while decoding is not. A directory that
     matches nothing is reported instead of guessed at: registering a project is `aft key`'s
     and `aft project add`'s job, and an import that minted projects from a directory name
-    would invent memory's owners. A project under ``capture.exclude_paths`` is skipped:
-    capture is told never to read that project, and an import that read it anyway would open
-    the hole the setting exists to keep shut.
+    would invent memory's owners. A project capture excludes is skipped, by either
+    ``capture.exclude_paths`` or ``capture.exclude_projects`` (the check is
+    ``config.is_excluded``, the same one capture applies): capture is told never to read that
+    work, and an import that read it anyway would open the hole those settings exist to keep
+    shut.
     """
     root = memory_home(source)
     registry = Registry.load(config.registry_path)
@@ -296,10 +299,10 @@ def run(
     for name in unclaimed:
         print(f"skipped {name}: it names no project in the registry; run `aft project add` first")
     for name in excluded:
-        print(f"skipped {name}: capture.exclude_paths says its memory is never read")
+        print(f"skipped {name}: capture excludes this project's memory")
     if not candidates:
         if excluded:
-            print("no Claude Code memory outside capture.exclude_paths", file=sys.stderr)
+            print("no Claude Code memory outside what capture excludes", file=sys.stderr)
         else:
             print("no Claude Code memory for a registered project", file=sys.stderr)
         return 1
