@@ -45,6 +45,8 @@ def test_values_and_sections(home):
         ("dream = 3\n", "[dream] must be a table"),
         ("vault = 'relative/path'\n", "vault must be an absolute path"),
         ("vault = \n", "config.toml"),
+        ("[model]\nextra_body = 'x'\n", "model.extra_body must be a table"),
+        ("[model]\nextra_body = { max_tokens = 10 }\n", "model.extra_body may not set max_tokens"),
     ],
 )
 def test_invalid_config(home, text, message):
@@ -143,3 +145,12 @@ def test_a_tilde_in_a_path_list_names_the_home_directory(home):
 
     assert configmod.is_excluded(Path.home() / "secret" / "project", cfg) is True
     assert configmod.is_excluded(Path.home().parent / "secret", cfg) is False
+
+
+def test_model_extra_body_is_read_as_a_table(home):
+    (home / "config.toml").write_text(
+        "[model]\nextra_body = { chat_template_kwargs = { enable_thinking = false } }\n"
+    )
+    assert configmod.load().settings.model.extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }

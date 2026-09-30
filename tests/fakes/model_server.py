@@ -55,6 +55,9 @@ class Reply:
     delay: float = 0.0
     usage: tuple[int, int] | None = (200, 50)
     raw: bytes | None = None
+    finish_reason: str = "stop"
+    null_content: bool = False
+    """Answer with ``"content": null``, as a reasoning model that ran out of tokens does."""
 
 
 class FakeEndpoint:
@@ -148,7 +151,10 @@ def _json_or_empty(body: bytes) -> dict:
 def _payload(call: int, reply: Reply) -> dict:
     if reply.status >= 400:
         return {"error": {"message": f"fake endpoint refused call {call} with {reply.status}"}}
-    content = reply.content if isinstance(reply.content, str) else json.dumps(reply.content)
+    if reply.null_content:
+        content = None
+    else:
+        content = reply.content if isinstance(reply.content, str) else json.dumps(reply.content)
     payload = {
         "id": f"chatcmpl-fake-{call}",
         "object": "chat.completion",
@@ -157,7 +163,7 @@ def _payload(call: int, reply: Reply) -> dict:
             {
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
-                "finish_reason": "stop",
+                "finish_reason": reply.finish_reason,
             }
         ],
     }
