@@ -414,8 +414,14 @@ then:
 - drops `[stated]` unless the cited entry is one of your turns
 - writes the digest as an OKF file (`type: Session Digest`) under `digests/`: one page
   per job. The first job for a session on a day writes `<date>-<agent>-<session>.md`, and
-  later jobs that day add `-2`, `-3` before `.md`. A digest's content never changes once
-  written; dreaming only marks it consumed, so each page is dreamed once, in session order.
+  later jobs that day add `-2`, `-3` before `.md`. A digest's content changes only when
+  you ask: `aft redigest <session>` replaces a session's digest pages with ones rebuilt from
+  the archive (applying the current redaction patterns and counting against the daily
+  budget), and `aft forget` scrubs them. Otherwise dreaming only marks a digest consumed, so
+  each page is dreamed once, in session order. The consumed mark holds the dream run's id,
+  which the run's commit message also names, so `git log --grep <run id>` finds the commit. A rebuilt digest is unconsumed and is dreamed
+  again; a fact it repeats confirms rather than duplicates. The replaced pages stay in the
+  vault's git history.
 
 ## 9. Dreaming
 
@@ -458,7 +464,7 @@ so later evidence is applied after earlier evidence.
 |---|---|---|
 | **R1 Provenance** | Every fact line carries one source tag and at least one source with a verified quote. | Script |
 | **R2 Stated means you committed to it** | `[stated]` requires a quote from one of your turns (or your own edit), and the digest must not have judged it tentative. | Script, model |
-| **R3 Recurrence gate** | An `[inferred]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
+| **R3 Recurrence gate** | An `[inferred]` or `[suggested]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
 | **R4 Authority by kind** | Replacing a line needs a verified quote newer than the line's latest evidence, and the authority the table below gives. Without it the result is a conflict, and the old line stands. | Script |
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
 | **R6 One project per unit of work** | A run never edits another project's pages. Global pages change only from `[stated]` facts. | Script |
@@ -542,7 +548,8 @@ turned it off by default. The cap is a starting point; M5 tunes it by usefulness
 | Evidence | Filtered conversation from the evidence archive |
 | Library | Text extracted from library files, chunked by page or section |
 
-The archive of superseded lines is searched only with `--archive`, and dream reports only
+The archive (superseded lines, and resolved notes with the fact they belonged to) is
+searched only with `--archive`, and dream reports only
 with `--reports`, so old history and records about memory do not crowd out memory itself.
 Results come back as paths with a one-line description and the matching snippet, and a
 library result also names its page or section. `aft read <path> --level outline|abstract|full` opens a result at the
@@ -709,10 +716,14 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
 - **Exclusions.** Paths and projects listed in `~/.afterthought/config.toml` are never
   captured.
 - **Redaction.** Built-in secret patterns plus your own patterns, applied before archiving.
-- **`aft forget session <id>`** removes the session from the evidence archive, the index
-  and the digests, and withdraws curated lines that rested only on it.
-- **`aft forget pattern <regex>`** redacts matching text from the archive and index and adds
-  the pattern to future redaction.
+- **`aft forget session <id>`** removes the session from the evidence archive, the capture
+  queue, the index and the digests, withdraws curated lines that rested only on it, and
+  scrubs its quotes wherever afterthought copied them: page sources, reports and
+  `needs-you.md`.
+- **`aft forget pattern <regex>`** replaces matching text with `[redacted]` in the archive
+  and everywhere afterthought copied it (digest quotes, page sources and statements, reports),
+  updates the index to match, and prints the line that adds the pattern to future redaction.
+  Quotes stay verifiable because the archive holds the same redaction.
 
 Forgetting removes content from everything afterthought controls. The vault's git history
 still holds older commits; removing them means rewriting history, which `aft forget`
@@ -766,8 +777,8 @@ behavior, and this document changes only when a design decision changes.
 | **M6 Switch-over** | Import Claude Code's `MEMORY.md` files as `[inferred]` digests; turn off Claude Code's automatic memory; add a short memory section to `~/AGENTS.md` | Afterthought is the only memory the agents use. |
 | **M7 Library** | `aft library survey` and `aft library import`, the manifest validator, file roles and relations, text extraction, the generated map with verification of imported maps, reference pages, the import skill, the Library search collection, the `library.commit` setting, collection authority; import two real documentation collections | Both collections import with every file accounted for, every reference quote verified, and no instruction file, tooling or git history retained. A claim planted in an imported index that does not match its document is rejected. Facts from an authoritative collection enter as `[observed]` and from a reference collection as candidates. Known-answer queries about a specification return the right document and page. |
 
-The size budget is about 5,000 non-blank lines of Python through M4; M0 is about 1,160.
-Going over it is a signal to cut scope.
+Performance and accuracy come before line count: the size of `src/` is measured and reported,
+not a target.
 
 **After v1, only when M5 shows the need:** link suggestions and aliases written by the
 dream; condensing and splitting pages over their cap; an HTML rendering of reports and a
