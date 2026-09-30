@@ -486,6 +486,7 @@ def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path
     assert parts["## Last session"] == uncapped["## Last session"]
     assert parts["## Preferences"]
     assert parts["## Preferences"] == uncapped["## Preferences"][: len(parts["## Preferences"])]
+    assert len(parts["## Preferences"]) > len(parts["## Pages"])
     assert parts[inject.HOW_TO] == [inject.HOW_TO]
     for heading in ("## Pages", "## Facts"):
         assert len(parts[heading]) < len(uncapped[heading])
@@ -967,17 +968,19 @@ def test_a_failing_injection_exits_zero_and_prints_nothing(
     assert "RuntimeError: the vault is unreadable" in lines[0]
 
 
-def test_a_session_start_in_a_directory_that_is_gone_prints_nothing(
+def test_a_session_start_in_a_directory_that_is_gone_prints_global_preferences(
     widget, tmp_path, capsys, monkeypatch
 ):
     monkeypatch.setenv("AFT_HOME", str(widget.home))
     gone = tmp_path / "gone"
 
-    assert (
-        run_session_start(monkeypatch, capsys, "pi-session-start.json", "pi", "session_start", gone)
-        == ""
+    out = run_session_start(
+        monkeypatch, capsys, "pi-session-start.json", "pi", "session_start", gone
     )
-    assert len(hook_log(widget)) == 1
+    assert "- Prefer short commits." in out
+    assert inject.HOW_TO in out
+    assert "# Memory:" not in out
+    assert hook_log(widget) == []
 
 
 def test_a_session_start_before_the_vault_exists_prints_nothing(cfg, tmp_path, capsys, monkeypatch):
@@ -1047,3 +1050,88 @@ def test_a_stalled_git_ends_the_session_start_inside_the_budget(
     lines = hook_log(widget)
     assert len(lines) == 1
     assert "HookTimeoutError" in lines[0]
+
+
+def test_stripped_frontmatter_fallback_when_strip_fails(widget):
+    raw = (
+        "---\ntype: Project\ntitle: Flow Title\n"
+        "sources: [{\n  id: s1,\n  quote: q1\n}]\n"
+        "---\n\n## Facts\n\n- Fact 1 [observed] 2026-09-30 [^s1]\n"
+    )
+    p = widget.vault / "projects/widget/flow.md"
+    write(p, raw)
+    page = inject._read_page(p)
+    assert page is not None
+    assert page.frontmatter["title"] == "Flow Title"
+    assert len(page.facts) == 1
+    assert page.facts[0].statement == "Fact 1"
+
+
+def test_last_session_takes_newest_primary_session_with_handoff(widget, tmp_path):
+    repo = (tmp_path / "widget").resolve()
+    # Primary digest on 2026-10-06 with a handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-06-claude-s01.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-06T10:00:00Z\n"
+        "aft:\n  handoff:\n    in_flight: Primary task 1\n"
+        "sources: []\n---\n\n## Summary\n\nSession 1\n",
+    )
+    # Primary digest on 2026-10-07 with a handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-claude-s02.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:00:00Z\n"
+        "aft:\n  handoff:\n    in_flight: Primary task 2\n"
+        "sources: []\n---\n\n## Summary\n\nSession 2\n",
+    )
+    # Worker digest on 2026-10-07 at 10:05 with handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-claude-worker.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:05:00Z\n"
+        "aft:\n  role: worker\n  handoff:\n    in_flight: Worker task\n"
+        "sources: []\n---\n\n## Summary\n\nWorker session\n",
+    )
+    # Library digest on 2026-10-07 at 10:10 with no handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-library-docs.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:10:00Z\n"
+        "sources: []\n---\n\n## Summary\n\nLibrary import\n",
+    )
+    # Import digest on 2026-10-07 at 10:15 with no handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-import-memory-12345678.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:15:00Z\n"
+        "sources: []\n---\n\n## Summary\n\nClaude memory import\n",
+    )
+    # Primary digest on 2026-10-07 at 10:20 with no handoff
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-claude-s03.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:20:00Z\n"
+        "sources: []\n---\n\n## Summary\n\nSession 3\n",
+    )
+    resolution = resolve(widget, repo)
+    block = inject.build(widget, resolution)
+    parts = parts_of(block)
+    assert parts["## Last session"] == ["- In flight: Primary task 2"]
+
+
+def test_missing_cwd_gets_global_preferences_and_how_to(widget, capsys):
+    nonexistent = widget.home / "nonexistent" / "worktree"
+    code = main(["inject", str(nonexistent)])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "- Prefer short commits." in captured.out
+    assert inject.HOW_TO in captured.out
+    assert "# Memory:" not in captured.out
+
+
+def test_session_start_hook_without_transcript_path_still_injects(widget, capsys, monkeypatch):
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    payload = json.dumps(
+        {"session_id": "s-notranscript", "cwd": str(widget.vault / "projects/widget")}
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+    code = main(["hook", "claude", "SessionStart"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "- Prefer short commits." in captured.out
+    assert inject.HOW_TO in captured.out
