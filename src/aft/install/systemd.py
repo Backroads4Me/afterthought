@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aft.config import Config, load
+from aft.config import DEFAULT_HOME, Config, load
 
 SERVICE_NAME = "aft-work.service"
 TIMER_NAME = "aft-work.timer"
@@ -316,13 +316,29 @@ def _default_runner(cmd: list[str]) -> None:
         pass
 
 
+def is_default_home(home: Path) -> bool:
+    """Whether this home is the user's default (~/.afterthought), not an isolated run."""
+    default = Path(DEFAULT_HOME).expanduser()
+    try:
+        return home.resolve() == default.resolve()
+    except OSError:
+        return home == default
+
+
 def trigger_early(
     config: Config,
     *,
     now: datetime | None = None,
     runner: Callable[[list[str]], Any] | None = None,
 ) -> bool:
-    """Start aft-work.service early if at least 5 minutes have elapsed since the last trigger."""
+    """Start aft-work.service early if at least 5 minutes have elapsed since the last trigger.
+
+    A run with AFT_HOME set to a directory that is not the default never calls the user's
+    systemd (BUILD-PLAN F23, M1 review 8).
+    """
+    if runner is None and not is_default_home(config.home):
+        return False
+
     current_time = now if now is not None else datetime.now(UTC)
     trigger_file = config.home / RATE_LIMIT_FILE
 

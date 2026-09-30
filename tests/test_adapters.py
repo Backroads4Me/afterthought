@@ -345,9 +345,32 @@ def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, m
 
     assert (code, captured.out, captured.err) == (0, "", "")
     assert elapsed < HOOK_TIMEOUT_SECONDS + HOOK_TIMING_SLACK_SECONDS
+
+
+def test_a_busy_queue_on_session_end_returns_inside_the_budget(home, monkeypatch, capsys):
+    """When another process holds the queue write lock, the hook returns within its 2-second
+    budget, and logs the database locked failure (BUILD-PLAN F23, M1 review 6)."""
+    from aft.queue import _connect
+
+    conn = _connect(configmod.load())
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        code, out, err = run_hook(
+            monkeypatch, capsys, "claude", "SessionEnd", payload_text("claude-session-end.json")
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert (code, out, err) == (0, "", "")
+    assert elapsed < HOOK_TIMEOUT_SECONDS, (
+        f"took {elapsed:.2f} s against budget of {HOOK_TIMEOUT_SECONDS} s"
+    )
     lines = hook_log(home)
     assert len(lines) == 1
-    assert "TimeoutError" in lines[0]
+    assert "OperationalError: database is locked" in lines[0]
 
 
 def test_a_stalled_stdin_and_a_blocked_write_share_one_budget(home, monkeypatch, capsys):
@@ -402,3 +425,15 @@ def test_a_session_start_prints_the_block_and_writes_no_queue_row(
     assert run_hook(monkeypatch, capsys, "claude", "SessionStart", text) == (0, block, "")
     assert not (home / "queue.sqlite").exists()
     assert hook_log(home) == []
+
+
+def test_session_end_hook_never_calls_systemd_with_isolated_home(home, monkeypatch, capsys):
+    """When running a hook with an isolated AFT_HOME, SessionEnd never calls systemd
+    (BUILD-PLAN F23)."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr("aft.install.systemd._default_runner", lambda cmd: calls.append(cmd))
+    assert run_hook(
+        monkeypatch, capsys, "claude", "SessionEnd", payload_text("claude-session-end.json")
+    ) == (0, "", "")
+    assert calls == []
+    assert not (home / "last-work-trigger").exists()
