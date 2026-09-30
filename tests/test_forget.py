@@ -7,6 +7,7 @@ the search index, their write-ahead logs, or the vault working tree.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sqlite3
@@ -1072,6 +1073,19 @@ def search_hits(cfg: Config, phrase: str) -> list[str]:
     )
 
 
+def archive_hits(cfg: Config, phrase: str) -> list[str]:
+    """What ``--archive`` answers to ``phrase``: the collection of resting lines, which is the
+    only place a superseded line is searchable at all (DESIGN 10)."""
+    return sorted(
+        {
+            hit.path
+            for hit in search.search(
+                cfg, phrase, all_projects=True, archive=True, reports=True, limit=20
+            )
+        }
+    )
+
+
 def report_page(cfg: Config, rel: str, text: str) -> Path:
     """A report page committed to the vault, as a finished dream run left it."""
     target = cfg.vault / rel
@@ -1245,7 +1259,7 @@ def test_forget_session_leaves_the_reports_collection_nothing_to_find(initialize
     cfg = initialized
     plant_forgotten_words(cfg)
     assert search_hits(cfg, "whispering cedar ledger") == [
-        "aft://session/claude/s-forget",
+        "aft://session/claude/s-forget#e1",
         "reports/2026/10/2026-10-01.md",
         "reports/needs-you.md",
     ]
@@ -1257,6 +1271,58 @@ def test_forget_session_leaves_the_reports_collection_nothing_to_find(initialize
         "reports/2026/10/2026-10-01.md",
         "reports/needs-you.md",
     ]
+
+
+def superseded_archive(project_id: str) -> str:
+    """An archived page holding one line that was superseded, struck, and rests entirely on the
+    session being forgotten."""
+    return (
+        "---\n"
+        "type: Archive\n"
+        "title: widget archive\n"
+        "description: Lines that rested out of widget.\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-old#e1\n"
+        '    quote: "Ship in molybdenum."\n'
+        "aft:\n"
+        f"  project: {project_id}\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- ~~Ship in molybdenum.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s1]\n"
+    )
+
+
+def test_forgetting_a_session_withdraws_a_superseded_line_so_the_archive_lets_it_go(
+    initialized: Config,
+) -> None:
+    """A superseded line is struck but still reads as a claim, and DESIGN 10 keeps superseded
+    lines searchable under ``--archive``. Forgetting the only session that ever evidenced the line
+    has to reach it, or the sentence goes on answering searches after its evidence, digests and
+    quotes are gone (DESIGN 12) - the leak this rules out."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg, CLAUDE, "s-old", project_id, [Entry("e1", NOW, "user", "Ship in molybdenum.", False)]
+    )
+    create_curated_page(
+        cfg.vault, "archive/projects/widget/overview.md", superseded_archive(project_id)
+    )
+    index.update(cfg)
+    assert archive_hits(cfg, "molybdenum") == [
+        "aft://session/claude/s-old#e1",
+        "archive/projects/widget/overview.md",
+    ]
+
+    report = forget.forget_session(cfg, "s-old")
+
+    assert "Ship in molybdenum." in report.lines_withdrawn
+    assert archive_hits(cfg, "molybdenum") == []
+    assert search_hits(cfg, "molybdenum") == []
+    page_text = (cfg.vault / "archive/projects/widget/overview.md").read_text(encoding="utf-8")
+    assert "~~Ship in molybdenum.~~" in page_text, "the line stays on the page, struck"
+    assert "withdrawn" in page_text and "superseded" not in page_text
+    assert f'quote: "{FORGOTTEN_MARKER}"' in page_text
 
 
 # ------------------------------------------- a pattern's copies, and a rebuild of a digest
@@ -1392,7 +1458,7 @@ def test_forget_pattern_reaches_every_copy_the_vault_holds(initialized: Config, 
     # it indexes no row of its own and is checked on disk instead, below.
 
     planted = {
-        "aft://session/claude/s-pat",
+        "aft://session/claude/s-pat#e1",
         "digests/widget/2026/10/2026-10-01-claude-s-pat.md",
         "projects/widget/overview.md",
         "reports/2026/10/2026-10-01.md",
@@ -1631,3 +1697,43 @@ def test_forget_pattern_redacts_the_imported_quote_record_that_still_verifies(
     assert not propose.is_verified_import_quote(cfg.home, IMPORT_RESOURCE, IMPORT_QUOTE), (
         "the unredacted words are still accepted as a verified quote"
     )
+
+
+def vault_lock_held(config: Config) -> bool:
+    """Whether the vault's lock is taken, probed from a second descriptor of the lock file: a
+    non-blocking grab that fails says somebody holds it, and `vault.locked` holds it on its own
+    descriptor, which is exactly what a writer inside the same process does."""
+    with open(config.lock_path, "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return False
+
+
+def test_forget_pattern_rewrites_the_vault_under_the_vault_lock(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every writer of the vault takes its lock. `aft forget pattern` decides whether to rewrite a
+    page by parsing the page as it would read afterwards, and commits and re-indexes over those
+    same files, so it holds the lock across that work: a page caught half-written by a dream run
+    or a digest commit would answer the check as neither the page it was nor the page it is."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg, CLAUDE, "s-lock", project_id, [Entry("e1", NOW, "user", PATTERN_SENTENCE, False)]
+    )
+    create_curated_page(cfg.vault, "projects/widget/overview.md", pattern_page(project_id))
+    index.update(cfg)
+
+    held: list[bool] = []
+    rewrite = forget._redact_pages
+
+    def probe(config: Config, compiled: object) -> tuple[list[str], list[str]]:
+        held.append(vault_lock_held(config))
+        return rewrite(config, compiled)
+
+    monkeypatch.setattr(forget, "_redact_pages", probe)
+    assert cli.main(["forget", "pattern", SECRET_PATTERN]) == 0
+    assert held == [True], "the pattern redaction rewrote the vault's pages without its lock"

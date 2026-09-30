@@ -4,6 +4,15 @@ The search index is queried with BM25 ranking over active memory (pages, digests
 and evidence) by default. The archive is searched only with --archive, and dream
 reports only with --reports. Reading opens pages at outline, abstract, or full depth.
 Tracing links a curated fact's source quote to its session context in the evidence archive.
+
+A hit says where it came from as well as what matched: its document, its collection and its
+section (`search_command`). An evidence hit names the one archived entry it holds, so the path
+printed by a search is the path `aft trace` takes to open that entry's context - otherwise a
+hit from the archive of conversation leads nowhere, since no page holds it.
+
+Scoping is `_scope`'s: a project's search takes the project's own memory plus the global pages,
+and a row with no project counts as global memory only in the collection where a page could not
+have had a project at all.
 """
 
 from __future__ import annotations
@@ -22,6 +31,10 @@ from aft.registry import Registry
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
 _HEADING = re.compile(r"^#{1,6}\s")
 _FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
+#: What a trace says when the archive no longer holds the session a quote rested on, which is
+#: also what it says once `aft forget` took that session away (DESIGN 10, DESIGN 12).
+EXPIRED = "The full context has expired."
 
 
 class SearchError(Exception):
@@ -42,6 +55,8 @@ class Hit:
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
+            "collection": self.collection,
+            "heading": self.heading,
             "description": self.description,
             "snippet": self.snippet,
         }
@@ -56,6 +71,9 @@ def _ask(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Ask each collection for its ``limit`` best-ranked documents, best row first.
+
+    A collection `_scope` rules out entirely is not asked at all, so a project's search never
+    sends a statement against memory that was never filed under it.
 
     The limit belongs in SQL. Without it a search builds every match - the snippet, the row, the
     Python object - to keep eight of them, which is what a vault whose every line carries the
@@ -79,13 +97,11 @@ def _ask(
     """
     rows: list[dict[str, Any]] = []
     for col in collections:
-        where = [f"{col} MATCH ?"]
-        args: list[Any] = [fts5_query]
-        if target_project_id is not None:
-            where.append("(project_id = ? OR project_id IS NULL)")
-            args.append(target_project_id)
-        elif filter_global_only:
-            where.append("project_id IS NULL")
+        scope = _scope(col, target_project_id, filter_global_only)
+        if scope is None:
+            continue  # this collection holds no memory the query is allowed to reach
+        clause, extra = scope
+        args: list[Any] = [fts5_query, *extra]
 
         keep = conn.execute(
             f"SELECT rid, path, description, heading, score FROM (SELECT rid, path,"
@@ -93,7 +109,7 @@ def _ask(
             f" row_number() OVER (PARTITION BY path ORDER BY score) AS best"
             f" FROM (SELECT rowid AS rid, path, description, heading,"
             f" {index.rank_expression(col)} AS score"
-            f" FROM {col} WHERE {' AND '.join(where)})) WHERE best = 1"
+            f" FROM {col} WHERE {col} MATCH ?{clause})) WHERE best = 1"
             " ORDER BY score ASC LIMIT ?",
             (*args, limit),
         ).fetchall()
@@ -104,8 +120,8 @@ def _ask(
         snippets = dict(
             conn.execute(
                 f"SELECT rowid, snippet({col}, -1, '', '', '...', 16) FROM {col}"
-                f" WHERE {col} MATCH ? AND rowid IN ({rowids})",
-                (fts5_query, *(row["rid"] for row in keep)),
+                f" WHERE {col} MATCH ?{clause} AND rowid IN ({rowids})",
+                (fts5_query, *extra, *(row["rid"] for row in keep)),
             ).fetchall()
         )
         rows.extend(
@@ -134,7 +150,12 @@ def search(
     reports: bool = False,
     limit: int = 8,
 ) -> list[Hit]:
-    """Query the search index with BM25 ranking across active collections."""
+    """Query the search index with BM25 ranking across active collections.
+
+    Without ``all_projects`` the query is scoped to one project, and what that admits per
+    collection is `_scope`'s call: the project's own memory plus, for pages alone, the global
+    pages of DESIGN 6.
+    """
     vault.require(config)
     index.update(config)
 
@@ -219,6 +240,32 @@ def search(
         conn.close()
 
 
+def _scope(
+    collection: str, project_id: str | None, outside_every_project: bool
+) -> tuple[str, list[Any]] | None:
+    """The project clause one collection contributes to a scoped query, or None for no rows.
+
+    BUILD-PLAN M3.2 scopes the default to "the current directory's project plus global pages",
+    and only a page row's empty project means global (`index.GLOBAL_COLLECTIONS`). A digest
+    filed under a slug no registry answers for, and an archived entry whose session resolved to
+    no project (DESIGN 7 step 4), are text that was never filed rather than memory every project
+    shares, so neither answers a project's query. A report day names no project because it spans
+    them all, and DESIGN 10 reaches it only through ``--reports``, which is the request for it.
+    From a working directory inside no project, only the shared pages answer at all.
+    """
+    if collection in index.SPANNING_COLLECTIONS:
+        return "", []
+    if project_id is not None:
+        if collection in index.GLOBAL_COLLECTIONS:
+            return " AND (project_id = ? OR project_id IS NULL)", [project_id]
+        return " AND project_id = ?", [project_id]
+    if outside_every_project:
+        if collection in index.GLOBAL_COLLECTIONS:
+            return " AND project_id IS NULL", []
+        return None
+    return "", []
+
+
 def search_command(
     config: Config,
     query: str,
@@ -230,7 +277,13 @@ def search_command(
     as_json: bool = False,
     limit: int = 8,
 ) -> int:
-    """Run search and print formatted hits."""
+    """Run search and print one tab-separated line per hit.
+
+    The line names the document, the collection it came from and the section it sits in before
+    the description and the snippet: DESIGN 10 requires a result to name its document and its
+    section, and a hit from the archive or the library reads differently once it says so. An
+    evidence hit's path carries the entry id, which is what makes `aft trace <path>` open it.
+    """
     hits = search(
         config,
         query,
@@ -244,8 +297,12 @@ def search_command(
         print(json.dumps([h.to_dict() for h in hits], indent=2))
     else:
         for hit in hits:
-            desc = hit.description or "-"
-            print(f"{hit.path}\t{desc}\t{hit.snippet}")
+            print(
+                "\t".join(
+                    (hit.path, hit.collection or "-", hit.heading or "-", hit.description or "-")
+                )
+                + f"\t{hit.snippet}"
+            )
     return 0
 
 
@@ -278,7 +335,20 @@ def read_command(config: Config, path: str, level: str = "full") -> int:
 
 
 def trace(config: Config, page_path_str: str, source_id: str) -> str:
-    """Trace a source quote from a page back to its session evidence context."""
+    """Trace a fact's quote back to the session context that evidences it.
+
+    ``page_path_str`` is a page in the vault and ``source_id`` one of its source ids. It is also
+    allowed to be an evidence resource straight out of a search hit -
+    ``aft://session/<agent>/<id>#<entry>`` - which is the other way a hit names itself, and then
+    ``source_id`` is that entry id: the hit already carries no quote of a page's to print, only
+    the archived entry, so the context window is the whole answer (DESIGN 10).
+    """
+    clean_id = source_id.strip().removeprefix("[").removesuffix("]").removeprefix("^")
+    if page_path_str.startswith(index.SESSION_RESOURCE):
+        base, _, fragment = page_path_str.partition("#")
+        entries_text = _find_trace_context(config, f"{base}#{fragment or clean_id}", "")
+        return entries_text if entries_text is not None else EXPIRED
+
     path = _resolve_page_path(config, page_path_str)
     try:
         text = path.read_text(encoding="utf-8")
@@ -293,7 +363,6 @@ def trace(config: Config, page_path_str: str, source_id: str) -> str:
             f"cannot parse frontmatter of {page_path_str}: {err or 'missing frontmatter'}"
         )
 
-    clean_id = source_id.strip().removeprefix("[").removesuffix("]").removeprefix("^")
     sources = frontmatter.get("sources")
     if not isinstance(sources, list):
         raise SearchError(f"no sources found in {page_path_str}")
@@ -312,16 +381,16 @@ def trace(config: Config, page_path_str: str, source_id: str) -> str:
 
     entries_text = _find_trace_context(config, resource, quote)
     if entries_text is None:
-        return (
-            f"{quote}\n\nThe full context has expired."
-            if quote
-            else "The full context has expired."
-        )
+        return f"{quote}\n\n{EXPIRED}" if quote else EXPIRED
     return f"{quote}\n\n{entries_text}" if quote else entries_text
 
 
 def trace_command(config: Config, page: str, source_id: str | None = None) -> int:
-    """Run trace and print the quote and evidence context."""
+    """Run trace and print the quote and evidence context.
+
+    One argument is enough for an evidence hit: its path already names the entry, so
+    ``aft trace <path>`` prints that entry and the entries around it.
+    """
     if source_id is None:
         if "#" in page:
             page, _, source_id = page.partition("#")
@@ -408,21 +477,29 @@ def _extract_outline(text: str) -> str:
 
 
 def _extract_abstract(text: str, path: Path) -> str:
-    """Extract page description plus active facts."""
+    """Extract page description plus the lines the page is currently standing on.
+
+    That is the same set `aft.inject` injects and the index indexes as ``pages``
+    (``inject.INJECTED``): DESIGN 6 makes a conflict and a question an active line with a note
+    beside it rather than a line that has left memory, and a summary that dropped them would
+    hide exactly the two lines a person most needs to see before acting on the page. Each keeps
+    the mark the block gives it, so a disputed line still reads as disputed.
+    """
     frontmatter, _, _, _ = page.split_frontmatter(text)
     description = ""
     if isinstance(frontmatter, dict):
         description = inject.one_line(frontmatter.get("description")) or ""
     parsed = page.parse(text, path)
-    active_facts = [f for f in parsed.facts if f.state == page.ACTIVE]
+    standing = [f for f in parsed.facts if f.state in inject.INJECTED]
     lines: list[str] = []
     if description:
         lines.append(description)
-    if active_facts:
+    if standing:
         if lines:
             lines.append("")
-        for fact in active_facts:
-            lines.append(f"- {fact.statement}")
+        for fact in standing:
+            mark = inject.MARKS.get(fact.state)
+            lines.append(f"- {fact.statement} {mark}" if mark else f"- {fact.statement}")
     return "\n".join(lines)
 
 

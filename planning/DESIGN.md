@@ -551,8 +551,8 @@ turned it off by default. The cap is a starting point; M5 tunes it by usefulness
 The archive (superseded lines, and resolved notes with the fact they belonged to) is
 searched only with `--archive`, and dream reports only
 with `--reports`, so old history and records about memory do not crowd out memory itself.
-Results come back as paths with a one-line description and the matching snippet, and a
-library result also names its page or section. `aft read <path> --level outline|abstract|full` opens a result at the
+Results come back as paths with their collection and section (a library result names its
+page or section), a one-line description and the matching snippet. `aft read <path> --level outline|abstract|full` opens a result at the
 depth a task needs, and `aft trace <source>` shows a fact's quote and the evidence around
 it. `aft reindex` rebuilds the index from files, and a test proves the rebuild matches.
 
