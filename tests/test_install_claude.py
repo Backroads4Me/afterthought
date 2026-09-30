@@ -11,6 +11,7 @@ data: what the file runs, in what order, and whether bytes moved.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shlex
@@ -544,10 +545,17 @@ def test_the_installed_commands_are_the_hook_command_that_exists(tmp_path, monke
         assert event in CLAUDE_EVENTS
 
     monkeypatch.setenv("AFT_HOME", str(tmp_path / "aft-home"))
-    payload = (FIXTURES / "claude-session-start.json").open(encoding="utf-8")
-    monkeypatch.setattr(sys, "stdin", payload)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    assert main(["inject", str(tmp_path)]) == 0
+    block = capsys.readouterr().out
+    assert block
+
+    payload = json.loads((FIXTURES / "claude-session-start.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload | {"cwd": str(tmp_path)})))
     assert main(["hook", "claude", "SessionStart"]) == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out == block
 
 
 SECRET = "sk-ant-api03-NotForSomeonesTerminal"

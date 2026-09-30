@@ -5,8 +5,9 @@
 //
 // Thin on purpose, like pi's own rtk extension: every memory decision lives in `aft`. This
 // file runs one command per event, keeps the one block that command printed, and adds that
-// block as a system prompt section of its own. It has no queue, no retries, no cache and no
-// settings of its own.
+// block as a system prompt section of its own. `aft hook pi session_start` prints the block
+// `aft inject` prints for the session's directory; the other two events are capture's and
+// print nothing. It has no queue, no retries, no cache and no settings of its own.
 //
 // The payload is the shape src/aft/adapters/pi.py parses, and the event names are that
 // module's own table: `session_start`, `session_before_compact`, `session_shutdown`.

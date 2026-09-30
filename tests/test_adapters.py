@@ -272,6 +272,9 @@ def test_the_hook_needs_no_config_and_no_vault(tmp_path, monkeypatch, capsys):
     """A hook can fire before `aft init` has run anywhere on the machine."""
     home = tmp_path / "never-initialized"
     monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    # With no config the vault defaults to ~/afterthought, so HOME moves too: the vault this
+    # hook looks for is one under tmp_path that nobody created.
+    monkeypatch.setenv("HOME", str(tmp_path))
     text = payload_text("pi-session-start.json")
     assert run_hook(monkeypatch, capsys, "pi", "session_start", text) == (0, "", "")
     assert not (home / "logs").exists()
@@ -379,7 +382,18 @@ def test_a_capture_event_writes_one_queue_row(home, monkeypatch, capsys, name, a
     assert rows == [(agent, "pending")]
 
 
-def test_a_session_start_writes_no_queue_row(home, monkeypatch, capsys):
-    text = payload_text("claude-session-start.json")
-    assert run_hook(monkeypatch, capsys, "claude", "SessionStart", text) == (0, "", "")
+def test_a_session_start_prints_the_block_and_writes_no_queue_row(
+    initialized, home, tmp_path, monkeypatch, capsys
+):
+    """A session start is injection's: it prints what `aft inject` prints for the event's
+    directory, and capture hears nothing of it."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    assert main(["inject", str(cwd)]) == 0
+    block = capsys.readouterr().out
+    assert block
+
+    text = json.dumps(payload("claude-session-start.json") | {"cwd": str(cwd)})
+    assert run_hook(monkeypatch, capsys, "claude", "SessionStart", text) == (0, block, "")
     assert not (home / "queue.sqlite").exists()
+    assert hook_log(home) == []
