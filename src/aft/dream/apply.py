@@ -665,7 +665,7 @@ def _lookup_evidence(
             try:
                 content = lib_path.read_text(encoding="utf-8", errors="replace")
                 if evidence._spaced(quote) in evidence._spaced(content):
-                    return True, rules.PRIMARY, fallback_date, True
+                    return True, rules.PRIMARY, fallback_date, False
             except Exception:
                 pass
             try:
@@ -680,14 +680,16 @@ def _lookup_evidence(
                         for chunk in data["chunks"]:
                             chunk_text = chunk.get("text", "")
                             if evidence._spaced(quote) in evidence._spaced(chunk_text):
-                                return True, rules.PRIMARY, fallback_date, True
+                                return True, rules.PRIMARY, fallback_date, False
             except Exception:
                 pass
-        # DESIGN 11: An excluded file is not kept, so its facts record that the quote was
-        # verified at import and that the original was not retained.
-        if source_entry and source_entry.get("verified_at_import"):
-            if not source_entry.get("original_retained", True):
-                return True, rules.PRIMARY, fallback_date, True
+
+        # Check tamper-proof verified quotes record written by propose (for excluded files)
+        from aft.library.propose import is_verified_import_quote
+
+        if is_verified_import_quote(config.home, resource, quote):
+            return True, rules.PRIMARY, fallback_date, False
+
         return False, rules.PRIMARY, fallback_date, False
 
     if resource.startswith("aft://session/"):
@@ -760,7 +762,9 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
 
 
 def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
-    if resource.startswith("aft://edit/") or resource.startswith("aft://library/"):
+    if resource.startswith("aft://library/"):
+        return False
+    if resource.startswith("aft://edit/"):
         return True
     if resource.startswith("aft://session/"):
         uri = resource.removeprefix("aft://session/")

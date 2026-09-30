@@ -1,17 +1,20 @@
 """Propose candidate facts from notes and excluded instruction files (BUILD-PLAN M7.6, DESIGN 11).
 
 The agent proposes facts with quotes mined from:
-- Files with role `notes` in the collection manifest (kept in `library/<name>/`).
+- Files with role `notes` in the collection manifest (verified against `library/<name>/`).
 - Excluded instruction files (e.g. `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, etc.).
 
 Each proposed fact is quote-checked against its file and enters the dream as a
 candidate digest under `digests/<project>/<yyyy>/<mm>/<date>-library-<collection>.md`.
-An excluded file is not kept in the vault, so its facts and sources record that the
-quote was verified at import and that the original was not retained.
+A library quote is never yours; all proposed facts must enter as candidates (`inferred`
+or `suggested`). An excluded file is not kept in the vault, so its verified quotes are
+recorded in `~/.afterthought/library/verified_quotes.json` so they remain verifiable
+both in candidate digests and on curated pages.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,13 +29,15 @@ from aft.config import Config, load
 from aft.library import manifest as manifest_mod
 from aft.library.importing import extract_document_chunks
 from aft.library.manifest import Manifest, UniqueKeyLoader
-from aft.library.survey import is_instruction_file
+from aft.library.survey import file_sha256, is_instruction_file
 from aft.registry import Registry
 
 try:
     from aft import __version__
 except ImportError:
     __version__ = "0.1.0"
+
+VERIFIED_QUOTES_FILE = "verified_quotes.json"
 
 
 class ProposeError(Exception):
@@ -73,6 +78,70 @@ class ProposeResult:
     digests_written: list[str]
     report_path: str | None = None
     committed: bool = False
+
+
+def record_verified_quote(
+    home: Path,
+    resource: str,
+    quote: str,
+    file_hash: str,
+    timestamp: str,
+) -> None:
+    """Record a verified quote from an excluded library file in ~/.afterthought/library/.
+
+    Written only by `aft library propose` to provide an untamperable proof of verification
+    that survives into curated memory without retaining the excluded source file.
+    """
+    lib_dir = home / "library"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    vf_path = lib_dir / VERIFIED_QUOTES_FILE
+    data: dict[str, list[dict]] = {}
+    if vf_path.is_file():
+        try:
+            loaded = json.loads(vf_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except Exception:
+            data = {}
+
+    entries = data.setdefault(resource, [])
+    q_norm = evidence._spaced(quote)
+    if not any(
+        isinstance(e, dict) and e.get("quote_norm") == q_norm and e.get("file_hash") == file_hash
+        for e in entries
+    ):
+        entries.append(
+            {
+                "quote": quote,
+                "quote_norm": q_norm,
+                "file_hash": file_hash,
+                "verified_at": timestamp,
+            }
+        )
+    vf_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def is_verified_import_quote(home: Path, resource: str, quote: str) -> bool:
+    """Check whether a quote from an excluded library file was verified at import."""
+    vf_path = home / "library" / VERIFIED_QUOTES_FILE
+    if not vf_path.is_file():
+        return False
+    try:
+        data = json.loads(vf_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+    except Exception:
+        return False
+
+    entries = data.get(resource)
+    if not isinstance(entries, list):
+        return False
+
+    q_norm = evidence._spaced(quote)
+    for e in entries:
+        if isinstance(e, dict) and e.get("quote_norm") == q_norm:
+            return True
+    return False
 
 
 def load_proposals(source: str | Path | TextIO | Sequence[dict]) -> list[ProposedFact]:
@@ -188,12 +257,25 @@ def verify_fact(
             fact=fact, verified=False, reason="a fact statement cannot contain ~~"
         )
 
-    # 2. Source tag validation
-    if fact.source not in ("stated", "inferred", "observed"):
+    # 2. Source tag validation (DESIGN 11 step 5: imported facts enter as candidates)
+    if fact.source not in ("inferred", "suggested"):
+        if fact.source == "stated":
+            return FactVerificationResult(
+                fact=fact,
+                verified=False,
+                reason=(
+                    "stated facts cannot be proposed from library files; "
+                    "facts from notes and instruction files must enter as candidates "
+                    "(use 'inferred' or 'suggested')"
+                ),
+            )
         return FactVerificationResult(
             fact=fact,
             verified=False,
-            reason=f"unknown source tag {fact.source!r}; expected stated, inferred, or observed",
+            reason=(
+                f"unsupported source tag {fact.source!r} for library facts; "
+                "expected 'inferred' or 'suggested'"
+            ),
         )
 
     # 3. Kind validation
@@ -205,15 +287,30 @@ def verify_fact(
             reason=f"unknown fact kind {fact.kind!r}; expected one of: {valid_kinds}",
         )
 
-    # 4. Scope validation
-    if fact.scope not in ("project", "global"):
+    # 4. Scope validation: library facts are project-scoped
+    if fact.scope != "project":
         return FactVerificationResult(
             fact=fact,
             verified=False,
-            reason=f"unknown fact scope {fact.scope!r}; expected 'project' or 'global'",
+            reason=(
+                f"library facts cannot have scope {fact.scope!r}; "
+                "library facts must be project-scoped (scope: 'project')"
+            ),
         )
 
-    # 5. Path containment check
+    # 5. Project validation: fact.project must be in manifest.projects
+    if fact.project is not None and manifest.projects and fact.project not in manifest.projects:
+        valid_projects = ", ".join(repr(p) for p in manifest.projects)
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=(
+                f"project {fact.project!r} is not in collection manifest projects "
+                f"({valid_projects})"
+            ),
+        )
+
+    # 6. Path containment check
     target_p = Path(fact.file)
     if target_p.is_absolute():
         return FactVerificationResult(
@@ -231,7 +328,7 @@ def verify_fact(
             reason=f"file {fact.file!r} steps outside collection root",
         )
 
-    # 6. Manifest containment
+    # 7. Manifest containment
     if fact.file not in manifest.files:
         return FactVerificationResult(
             fact=fact,
@@ -243,12 +340,38 @@ def verify_fact(
     role = entry.role
     is_inst = is_instruction_file(Path(fact.file))
 
-    # 7. Role check: only notes and excluded instruction files
+    # 8. Role check: only notes and excluded instruction files
     if role == "notes":
         original_retained = True
+        # Notes must be checked against the imported copy that the resource names
+        # (library/<name>/<file>) and requires that import has already run.
+        if vault_path is None:
+            lib_file = None
+        else:
+            lib_root = (vault_path / "library" / manifest.name).resolve()
+            lib_file = (lib_root / fact.file).resolve()
+            if not (lib_file.is_relative_to(lib_root) and lib_file.is_file()):
+                lib_file = None
+
+        if lib_file is None:
+            return FactVerificationResult(
+                fact=fact,
+                verified=False,
+                reason=(
+                    f"collection has not been imported yet: 'library/{manifest.name}/{fact.file}' "
+                    "not found in vault; run 'aft library import' before proposing facts from notes"
+                ),
+            )
+        target_file = lib_file
     elif role == "exclude":
         if is_inst:
             original_retained = False
+            if not target_file.is_file():
+                return FactVerificationResult(
+                    fact=fact,
+                    verified=False,
+                    reason=f"instruction file {fact.file!r} not found on disk",
+                )
         else:
             return FactVerificationResult(
                 fact=fact,
@@ -267,21 +390,6 @@ def verify_fact(
                 "facts may only be proposed from notes and excluded instruction files"
             ),
         )
-
-    # 8. Locate file on disk
-    if not target_file.is_file():
-        # Check if already imported in vault/library/<name>/<file>
-        if vault_path is not None:
-            lib_root = (vault_path / "library" / manifest.name).resolve()
-            lib_file = (lib_root / fact.file).resolve()
-            if lib_file.is_relative_to(lib_root) and lib_file.is_file():
-                target_file = lib_file
-        if not target_file.is_file():
-            return FactVerificationResult(
-                fact=fact,
-                verified=False,
-                reason=f"file {fact.file!r} not found on disk",
-            )
 
     quote_norm = evidence._spaced(fact.quote)
 
@@ -384,6 +492,19 @@ def propose_facts(
     written_digests: list[str] = []
 
     with vault.locked(cfg):
+        # Record tamper-proof verification for excluded files in ~/.afterthought/library/
+        for vf in verified_list:
+            if not vf.original_retained:
+                inst_path = collection_root / vf.fact.file
+                f_hash = file_sha256(inst_path) if inst_path.is_file() else ""
+                record_verified_quote(
+                    cfg.home,
+                    f"aft://library/{manifest.name}/{vf.fact.file}",
+                    vf.fact.quote,
+                    f_hash,
+                    stamp_iso,
+                )
+
         for raw_slug, v_facts in sorted(by_project.items()):
             proj_id = f"p_{raw_slug}"
             canonical_slug = raw_slug
@@ -415,8 +536,6 @@ def propose_facts(
                         "resource": f"aft://library/{manifest.name}/{vf.fact.file}",
                         "title": f"{manifest.name}/{vf.fact.file}",
                         "quote": vf.fact.quote,
-                        "verified_at_import": True,
-                        "original_retained": vf.original_retained,
                     }
                 )
                 aft_facts_list.append(
@@ -425,8 +544,6 @@ def propose_facts(
                         "kind": vf.fact.kind,
                         "source": vf.fact.source,
                         "scope": vf.fact.scope,
-                        "quote_verified_at_import": True,
-                        "original_retained": vf.original_retained,
                     }
                 )
 
@@ -483,13 +600,11 @@ def propose_facts(
         )
 
         staged = [*written_digests, report_rel]
-        committed = False
-        if cfg.settings.library.commit:
-            committed = vault.commit(
-                cfg.vault,
-                staged,
-                f"aft library: propose candidate facts for {manifest.name!r}",
-            )
+        committed = vault.commit(
+            cfg.vault,
+            staged,
+            f"aft library: propose candidate facts for {manifest.name!r}",
+        )
 
     return ProposeResult(
         collection=manifest.name,
