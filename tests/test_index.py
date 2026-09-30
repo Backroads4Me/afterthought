@@ -1373,3 +1373,79 @@ def test_path_slug_handles_all_vault_layouts():
     assert vault.path_slug("reports/needs-you.md") is None
     assert vault.path_slug("references/col/ref.md") is None
     assert vault.path_slug("") is None
+
+
+def test_archived_resolved_notes_are_indexed_with_their_fact(initialized: Config) -> None:
+    """F10: the archive collection indexes resolved notes with the fact they belonged to."""
+    archive_text = """---
+type: Archive
+title: widget archive
+description: Notes and lines resolved out of widget.
+---
+
+## Resolved notes
+
+> - The GPU host runs vLLM. [stated] 2026-09-20 [^s1]
+> [!question] 2026-10-01
+> Is plain SQLite still the plan?
+> Yes, plain SQLite is fast and simple.
+"""
+    write(initialized, "archive/projects/widget/overview.md", archive_text)
+    index.update(initialized)
+
+    assert "archive/projects/widget/overview.md#Resolved notes" in keys_of(initialized, "archive")
+    body = _column(
+        row_for(initialized, "archive", "archive/projects/widget/overview.md#Resolved notes"),
+        "body",
+    )
+    assert "The GPU host runs vLLM." in body
+    assert "Is plain SQLite still the plan?" in body
+    assert "Yes, plain SQLite is fast and simple." in body
+
+    # Search in archive matches answer, question, and fact
+    assert search(initialized, "archive", "simple") == [
+        "archive/projects/widget/overview.md#Resolved notes"
+    ]
+    assert search(initialized, "archive", "vLLM") == [
+        "archive/projects/widget/overview.md#Resolved notes"
+    ]
+    assert search(initialized, "archive", "plan") == [
+        "archive/projects/widget/overview.md#Resolved notes"
+    ]
+
+
+def test_archive_indexes_both_superseded_facts_and_resolved_notes(initialized: Config) -> None:
+    """F10: an archive file with both resting fact lines and resolved notes indexes both."""
+    archive_text = """---
+type: Archive
+title: widget archive
+description: Notes and lines resolved out of widget.
+---
+
+## Decisions
+
+- ~~Ship the widget in steel.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s1]
+
+## Resolved notes
+
+> - The GPU host runs vLLM. [stated] 2026-09-20 [^s1]
+> [!question] 2026-10-01
+> Is plain SQLite still the plan?
+> Yes, plain SQLite is fast and simple.
+"""
+    write(initialized, "archive/projects/widget/overview.md", archive_text)
+    index.update(initialized)
+
+    assert keys_of(initialized, "archive") == [
+        "archive/projects/widget/overview.md#Decisions",
+        "archive/projects/widget/overview.md#Resolved notes",
+    ]
+    decisions_body = _column(
+        row_for(initialized, "archive", "archive/projects/widget/overview.md#Decisions"), "body"
+    )
+    assert "Ship the widget in steel." in decisions_body
+    notes_body = _column(
+        row_for(initialized, "archive", "archive/projects/widget/overview.md#Resolved notes"),
+        "body",
+    )
+    assert "Yes, plain SQLite is fast and simple." in notes_body

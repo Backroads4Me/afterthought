@@ -593,6 +593,17 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
         chunks = _prose_chunks(body)
         if current.collection == DIGESTS:
             chunks = [*chunks, *_handoff_chunks(frontmatter)]
+    elif current.collection == ARCHIVE:
+        parsed = page.parse(current.text, Path(rel))
+        fact_chunks = _fact_chunks(parsed, admitted)
+        fact_sections = {h for h, _ in fact_chunks}
+        archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
+        prose_chunks = [
+            (heading, text)
+            for heading, text in _prose_chunks(body)
+            if heading not in fact_sections and heading in archive_prose
+        ]
+        chunks = [*fact_chunks, *prose_chunks]
     else:
         chunks = _fact_chunks(page.parse(current.text, Path(rel)), admitted)
     rows: list[Row] = []

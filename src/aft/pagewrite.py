@@ -173,6 +173,8 @@ def _archive_header(rel: Path) -> list[str]:
         f"title: {_scalar(f'{slug} archive')}",
         f"description: {_scalar(f'Notes and lines resolved out of {slug}.')}",
         "---",
+        "",
+        "## Resolved notes",
     ]
 
 
@@ -712,7 +714,10 @@ class PageDoc:
         path = self._archive_file()
         was = path.read_bytes() if path.exists() else None
         text = self._archive_text(path, was)
-        lines = [*text.rstrip("\n").split("\n"), "", *block]
+        lines = [*text.rstrip("\n").split("\n")]
+        if "## Resolved notes" not in text and "## Notes" not in text:
+            lines.extend(["", "## Resolved notes"])
+        lines.extend(["", *block])
         return path, was, ("\n".join(lines) + "\n").encode()
 
     def _archive_text(self, path: Path, raw: bytes | None) -> str:

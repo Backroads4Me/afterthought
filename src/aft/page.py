@@ -30,7 +30,11 @@ KIND_SECTIONS = {
 }
 CANDIDATES = "Candidates"
 # Sections of generated prose rather than facts, allowed only on the page types listed.
-PROSE_SECTIONS = {"Contents": {"Reference"}}
+PROSE_SECTIONS = {
+    "Contents": {"Reference"},
+    "Resolved notes": {"Archive"},
+    "Notes": {"Archive"},
+}
 
 CANDIDATE = "candidate"
 ACTIVE = "active"
