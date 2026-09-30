@@ -239,7 +239,7 @@ def test_second_run_on_a_day_appends(initialized: Config):
 
     assert path1.exists()
     content1 = path1.read_text(encoding="utf-8")
-    assert content1.startswith("---\ntype: Dream Report\ntitle: 2026-10-04\n---")
+    assert content1.startswith('---\ntype: Dream Report\ntitle: "2026-10-04"\n---')
     assert "# widget 10:00:00Z" in content1
 
     # Second run later on the same day
@@ -502,3 +502,212 @@ def test_dream_run_wires_report_and_needs_you(initialized: Config, monkeypatch):
     # Working tree is clean
     status = git(["status", "--porcelain=v1"], cwd=cfg.vault).stdout.strip()
     assert status == ""
+
+
+def test_has_changes_detection():
+    """has_changes returns False for an empty report and True when modifications occur."""
+    empty = apply.ProjectRunReport(project="widget")
+    assert not report.has_changes(empty)
+
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            added=[
+                apply.AddedFact(
+                    statement="s",
+                    kind="decision",
+                    source="stated",
+                    date=TODAY,
+                    refs=("s1",),
+                    path="p",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            confirmed=[
+                apply.ConfirmedFact(
+                    statement="s",
+                    source="s1",
+                    date=TODAY,
+                    refs=("s1",),
+                    path="p",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            superseded=[
+                apply.SupersededFact(
+                    old_statement="o",
+                    new_statement="n",
+                    source="stated",
+                    date=TODAY,
+                    refs=("s1",),
+                    by="s1",
+                    path="p",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            promoted=[
+                apply.PromotedFact(
+                    statement="s",
+                    kind="fact",
+                    source="inferred",
+                    date=TODAY,
+                    refs=("s1",),
+                    path="p",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            candidates=[
+                apply.CandidateFact(
+                    statement="s",
+                    tag="inferred",
+                    date=TODAY,
+                    refs=("s1",),
+                    path="p",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            conflicts=[
+                apply.ConflictFact(
+                    new_statement="n",
+                    target_statement="t",
+                    reason="r",
+                    rule="R4",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            questions=[
+                apply.QuestionFact(
+                    new_statement="n",
+                    target_statement="t",
+                    reason="r",
+                    rule="R4",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            broken_anchors=[
+                maintain.BrokenAnchor(
+                    page="p",
+                    statement="s",
+                    sid="s1",
+                    reason="r",
+                )
+            ],
+        )
+    )
+    assert report.has_changes(
+        apply.ProjectRunReport(
+            project="widget",
+            cleared_anchors=[
+                maintain.ClearedAnchor(
+                    page="p",
+                    statement="s",
+                    sid="s1",
+                )
+            ],
+        )
+    )
+
+
+def test_dream_run_with_no_changes_does_not_append_report(initialized: Config):
+    """schedule.run does not append a report section when the run makes no changes."""
+    cfg = initialized
+
+    reg = Registry.load(cfg.registry_path)
+    reg.add("widget", "Widget")
+    reg.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    digest = cfg.vault / "digests" / "widget" / "2026" / "10" / "d1.md"
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text(
+        "---\n"
+        "type: Session Digest\n"
+        "generated: {at: 2026-10-04T12:00:00Z}\n"
+        "aft: {role: primary}\n"
+        "---\n\n"
+        "## Facts\n\n- Fact.\n",
+        encoding="utf-8",
+    )
+
+    empty_report = apply.ProjectRunReport(project="widget")
+
+    def fake_process_no_changes(c, s, digs):
+        return empty_report
+
+    res = schedule.run(cfg, process=fake_process_no_changes, now=NOW)
+    assert "widget" in res.reports
+
+    rep_path = cfg.vault / "reports" / "2026" / "10" / "2026-10-04.md"
+    assert not rep_path.exists()
+
+
+def test_candidate_gate_progress_in_report(initialized: Config):
+    """Section 8 of the report renders candidate gate progress from the page."""
+    overview = initialized.vault / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "description: Widget project\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/c/1#e1\n"
+        "    quote: verifiable source quote\n"
+        "  - id: s2\n"
+        "    resource: aft://session/c/2#e1\n"
+        "    quote: second session quote\n"
+        "---\n\n"
+        "## Candidates\n\n"
+        "- Long sessions need checkpoint capture. [inferred] 2026-10-04 [^s1] [^s2] "
+        "(signals 2/3, sessions 2/2)\n",
+        encoding="utf-8",
+    )
+
+    rep = _make_dummy_report(
+        slug="widget",
+        candidates=[
+            apply.CandidateFact(
+                statement="Long sessions need checkpoint capture.",
+                tag="inferred",
+                date=TODAY,
+                refs=("s1", "s2"),
+                path="projects/widget/overview.md",
+            )
+        ],
+    )
+
+    path = report.write_report(initialized, rep, now=NOW)
+    text = path.read_text(encoding="utf-8")
+    assert (
+        "Long sessions need checkpoint capture. [inferred] (2026-10-04) (signals 2/3, sessions 2/2)"
+        in text
+    )

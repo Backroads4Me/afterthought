@@ -40,12 +40,34 @@ def _lookup_quote(vault_path: Path, page_rel_path: str, source_id: str) -> str:
     try:
         text = target_file.read_text(encoding="utf-8")
         fm = page.split_frontmatter(text)[0] or {}
+        clean_sid = source_id.lstrip("^")
         sources = {
-            str(s.get("id")): s
+            str(s.get("id")).lstrip("^"): s
             for s in fm.get("sources") or []
             if isinstance(s, dict) and s.get("id") is not None
         }
-        return str(sources.get(source_id, {}).get("quote", "")).strip()
+        return str(sources.get(clean_sid, {}).get("quote", "")).strip()
+    except OSError:
+        return ""
+
+
+def _lookup_candidate_progress(vault_path: Path, page_rel_path: str, statement: str) -> str:
+    """Look up gate progress suffix for a candidate line from its page."""
+    if not page_rel_path or not statement:
+        return ""
+    target_file = vault_path / page_rel_path
+    if not target_file.exists():
+        return ""
+    try:
+        text = target_file.read_text(encoding="utf-8")
+        parsed = page.parse(text, target_file)
+        for fact in parsed.facts:
+            if fact.statement == statement and fact.signals and fact.sessions:
+                return (
+                    f" (signals {fact.signals[0]}/{fact.signals[1]}, "
+                    f"sessions {fact.sessions[0]}/{fact.sessions[1]})"
+                )
+        return ""
     except OSError:
         return ""
 
@@ -176,7 +198,8 @@ def format_run_section(
     lines.append("## Candidates")
     if report.candidates or report.promoted:
         for cand in report.candidates:
-            lines.append(f"- {cand.statement} [{cand.tag}] ({cand.date})")
+            progress = _lookup_candidate_progress(vault_path, cand.path, cand.statement)
+            lines.append(f"- {cand.statement} [{cand.tag}] ({cand.date}){progress}")
         for p in report.promoted:
             lines.append(f'- Promoted to {p.kind}: "{p.statement}"')
     else:
@@ -230,7 +253,7 @@ def write_report(
     report_dir.mkdir(parents=True, exist_ok=True)
 
     if not report_path.exists():
-        header = f"---\ntype: Dream Report\ntitle: {date_str}\n---\n\n"
+        header = f'---\ntype: Dream Report\ntitle: "{date_str}"\n---\n\n'
         report_path.write_text(header + section_text, encoding="utf-8")
     else:
         existing = report_path.read_text(encoding="utf-8")
