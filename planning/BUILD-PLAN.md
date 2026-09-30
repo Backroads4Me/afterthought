@@ -759,6 +759,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   the adapter match the installed pi's payloads. The wheel ships `integrations/`, so
   `aft install claude` and `aft install pi` work from an installed package; a test builds the
   wheel and installs from it into a temporary directory.
+- **F25 The real vault refuses a temporary project** (ruling 2026-09-30). When `AFT_HOME` is
+  not set, so the command is using the default home and the user's real vault,
+  `aft project add` refuses a path under the system temporary directory, and says to set
+  `AFT_HOME` for a scratch run or pass `--allow-temp`. With `AFT_HOME` set, nothing changes,
+  so tests and benchmarks that use a temporary home are unaffected. Tests: the refusal and
+  its message; `--allow-temp` registers; a run with `AFT_HOME` set registers a temporary path
+  without the flag.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
