@@ -7,18 +7,20 @@ on that session as withdrawn, scrubs the quotes of sources citing that session, 
 session's rows, watermark and digest debt from the queue, and scrubs the session's words out
 of the dream reports and needs-you, so no later run files the words back or repeats them.
 
-``aft forget pattern <regex>`` redacts matching text across the evidence archive and
-updates the search index to reflect the redactions.
+``aft forget pattern <regex>`` replaces matching text with [redacted] in the evidence archive
+and in every copy the vault holds - digest and page source quotes, fact statements and notes,
+superseded lines and reports - then rebuilds the search index to match.
 
 The vault's git history still holds older commits; removing them requires rewriting history.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from aft import evidence, index, lint, page, pagewrite, queue, vault
+from aft import evidence, index, lint, page, pagewrite, queue, redact, vault
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
 
@@ -42,6 +44,22 @@ class SessionForgetReport:
     @property
     def unwithdrawn_lines(self) -> tuple[str, ...]:
         return self.lines_unwithdrawn
+
+
+@dataclass(frozen=True)
+class PatternForgetReport:
+    """What a pattern redaction reached, and the pages it would have broken (DESIGN 12).
+
+    ``entries_redacted`` counts the archive rows rewritten, ``pages_redacted`` names the vault
+    pages that now read ``[redacted]`` where the pattern matched, and ``pages_refused`` names
+    the pages left untouched because the redaction would have left them unreadable - a person
+    has to hear about those, because the words in them are still there.
+    """
+
+    entries_redacted: int
+    pages_redacted: tuple[str, ...] = ()
+    pages_refused: tuple[str, ...] = ()
+    vault_committed: bool = False
 
 
 def forget_session(config: Config, session_id: str) -> SessionForgetReport:
@@ -224,13 +242,57 @@ def _scrub_report_pages(config: Config, words: list[str]) -> list[str]:
     return changed
 
 
-def forget_pattern(config: Config, pattern: str) -> int:
-    """Redact matches of ``pattern`` across the archive and index (DESIGN 12, M2.8).
+def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
+    """Replace one pattern's matches with ``[redacted]`` in every copy aft made (DESIGN 12).
 
-    Rewrites matching archive entries in place with [redacted], cleans freed pages
-    and log, and updates the search index to reflect the redactions.
-    Returns the number of archive entries redacted.
+    The archive goes first and the vault follows it. A page's quote is checked against the
+    archived entry behind it (DESIGN 8), and the same replacement applied to both leaves the
+    quote verifiable while leaving neither of them searchable. The copies are the digest's
+    source quotes, the memory pages' sources, statements and notes, the superseded lines
+    under ``archive/`` and the dream reports, so a redaction that stopped at the archive
+    would leave the words sitting in every page the digest wrote them into, and ``aft search``
+    would keep answering to them.
+
+    The archive's own rewrite cleans its freed pages and log; the vault's pages are committed
+    so the working tree holds nothing either, and the index is rebuilt over both. The vault's
+    git history is beyond this, as it is for a forgotten session.
     """
-    count = evidence.redact_pattern(config, pattern)
+    compiled = redact.compile_patterns([pattern])[0]
+    count = evidence.redact_pattern(config, compiled)
+    pages, refused = _redact_pages(config, compiled)
     index.update(config)
-    return count
+    committed = False
+    if pages:
+        committed = vault.commit(config.vault, pages, f"aft: forget pattern {pattern}")
+    return PatternForgetReport(count, tuple(pages), tuple(refused), committed)
+
+
+def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str], list[str]]:
+    """Redact the pattern in every page of the vault; return what changed and what refused.
+
+    A page is rewritten only when the result still reads as the page it was: the parse of a
+    redacted page may find no more problems than the parse of the page as written. That is
+    the guard against a regex that would swallow a fact line's citation or a page's
+    frontmatter, which would otherwise leave the person with a lint failure they cannot read
+    back to the pattern they typed. A refused page is named on the command's report and left
+    exactly as it stands.
+    """
+    changed: list[str] = []
+    refused: list[str] = []
+    for path in sorted(config.vault.rglob("*.md")):
+        if ".git" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        redacted = compiled.sub(redact.REDACTED, text)
+        if redacted == text:
+            continue
+        rel = path.relative_to(config.vault).as_posix()
+        if len(page.parse(redacted, path).errors) > len(page.parse(text, path).errors):
+            refused.append(rel)
+            continue
+        path.write_text(redacted, encoding="utf-8")
+        changed.append(rel)
+    return changed, refused

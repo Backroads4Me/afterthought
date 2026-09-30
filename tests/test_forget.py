@@ -19,10 +19,12 @@ import pytest
 from aft import (
     capture,
     cli,
+    digest,
     evidence,
     forget,
     index,
     lint,
+    model,
     pagewrite,
     queue,
     registry,
@@ -1254,3 +1256,231 @@ def test_forget_session_leaves_the_reports_collection_nothing_to_find(initialize
         "reports/2026/10/2026-10-01.md",
         "reports/needs-you.md",
     ]
+
+
+# ------------------------------------------- a pattern's copies, and a rebuild of a digest
+
+SECRET = "secret-token-4815162342"
+SECRET_PATTERN = "secret-token-[0-9]+"
+SECRET_WORD = "4815162342"
+PATTERN_SENTENCE = f"rotate the vault key {SECRET} before friday"
+
+PATTERN_ARCHIVE = f"""---
+type: Archive
+title: widget archive
+description: Notes and lines resolved out of widget.
+---
+
+## Superseded
+
+An older note said to rotate the vault key {SECRET} on sight.
+"""
+
+PATTERN_REPORT = f"""---
+type: Dream Report
+title: "2026-10-01"
+---
+
+# widget 12:00:00Z
+
+## Added and Confirmed
+
+### Added
+
+- Rotate the vault key before friday. [stated] (2026-10-01)
+  Quote: "{PATTERN_SENTENCE}"
+"""
+
+
+def pattern_digest(project_id: str) -> str:
+    """A digest page holding the secret in its description and its source quote."""
+    return (
+        "---\n"
+        "type: Session Digest\n"
+        "title: Widget session 2026-10-01\n"
+        f"description: How to rotate the widget key {SECRET}.\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-pat#e1\n"
+        f'    quote: "{PATTERN_SENTENCE}"\n'
+        "aft:\n"
+        f"  project: {project_id}\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- Rotate the vault key before friday. [stated] 2026-10-01 [^s1]\n"
+    )
+
+
+def pattern_page(project_id: str) -> str:
+    """A memory page holding the secret in a source quote, a statement and a note."""
+    return (
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "description: The widget project.\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/claude/s-pat#e1\n"
+        '    title: "Key rotation session"\n'
+        f'    quote: "{PATTERN_SENTENCE}"\n'
+        "aft:\n"
+        f"  project: {project_id}\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        f"- Rotate the vault key {SECRET} before friday. [stated] 2026-10-01 [^s1]\n"
+        "\n"
+        "> [!conflict] 2026-10-01\n"
+        f"> Rotate {SECRET} only after the release window closes.\n"
+    )
+
+
+def widget_project(cfg: Config) -> str:
+    """A registered widget project, committed as a finished run would leave it."""
+    registered = registry.Registry.load(cfg.registry_path)
+    project = registered.add("widget", "Widget")
+    registered.save()
+    run_git(["add", "registry.yaml"], cfg.vault)
+    run_git(["commit", "-q", "-m", "register widget"], cfg.vault)
+    return project.id
+
+
+def pattern_hits(cfg: Config, words: str) -> set[str]:
+    """Every page the index answers to ``words`` with, the hidden collections included."""
+    return {
+        hit.path
+        for hit in search.search(
+            cfg, words, all_projects=True, archive=True, reports=True, limit=50
+        )
+    }
+
+
+def point_at(cfg: Config, fake: FakeEndpoint, *, patterns: tuple[str, ...] = ()) -> Config:
+    """A config.toml naming this endpoint, these redaction patterns, and this vault."""
+    capture_block = (
+        f"[capture]\nredact_patterns = {json.dumps(list(patterns))}\n" if patterns else ""
+    )
+    (cfg.home / configmod.CONFIG_NAME).write_text(
+        f'vault = "{cfg.vault}"\nhost = "{cfg.host}"\n'
+        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+        f"{capture_block}",
+        encoding="utf-8",
+    )
+    return configmod.load()
+
+
+def test_forget_pattern_reaches_every_copy_the_vault_holds(initialized: Config, capsys):
+    """The vault holds the archive's words in digest quotes and descriptions, in page sources,
+    statements and notes, in superseded lines and in reports, and a pattern redaction reaches
+    every one of them: `aft search` then answers to those words nowhere (DESIGN 12)."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg, CLAUDE, "s-pat", project_id, [Entry("e1", NOW, "user", PATTERN_SENTENCE, False)]
+    )
+    create_curated_page(
+        cfg.vault,
+        "digests/widget/2026/10/2026-10-01-claude-s-pat.md",
+        pattern_digest(project_id),
+    )
+    create_curated_page(cfg.vault, "projects/widget/overview.md", pattern_page(project_id))
+    create_curated_page(cfg.vault, "archive/projects/widget/overview.md", PATTERN_ARCHIVE)
+    report_page(cfg, "reports/2026/10/2026-10-01.md", PATTERN_REPORT)
+    index.update(cfg)
+
+    # The searchable copies. The archive page holds prose rather than superseded fact lines, so
+    # it indexes no row of its own and is checked on disk instead, below.
+
+    planted = {
+        "aft://session/claude/s-pat",
+        "digests/widget/2026/10/2026-10-01-claude-s-pat.md",
+        "projects/widget/overview.md",
+        "reports/2026/10/2026-10-01.md",
+    }
+
+    assert pattern_hits(cfg, SECRET_WORD) == planted, "the planted copies are not searchable"
+
+    code = cli.main(["forget", "pattern", SECRET_PATTERN])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    assert pattern_hits(cfg, SECRET_WORD) == set(), "the redacted words are still searchable"
+    for path in cfg.vault.rglob("*.md"):
+        if ".git" in path.parts:
+            continue
+        assert SECRET not in path.read_text(encoding="utf-8"), path
+    for stored in evidence.entries(cfg, "s-pat"):
+        assert SECRET not in stored.text
+    assert lint.lint_vault(cfg.vault) == []
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+    assert "aft: forget pattern" in run_git(["log", "-1", "--format=%s"], cfg.vault)
+    assert "vault page(s)" in out, "the command counted the archive only"
+
+
+def test_forget_pattern_leaves_a_page_it_would_break_alone_and_says_so(initialized: Config, capsys):
+    """A pattern that would swallow a fact line's citation is refused on that page and named,
+    rather than leaving the person a page `aft lint` refuses."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    create_curated_page(cfg.vault, "projects/widget/overview.md", pattern_page(project_id))
+    untouched = (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8")
+
+    code = cli.main(["forget", "pattern", r"\[\^\w+\]|\[stated\]"])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    assert "1 page(s) would not read as itself redacted" in out
+    assert "projects/widget/overview.md" in out
+    assert (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8") == untouched
+    assert lint.lint_vault(cfg.vault) == []
+
+
+def test_a_redigest_sends_none_of_what_a_later_pattern_marks_secret(initialized: Config):
+    """A pattern added after the archive was written says that text is not to leave this host,
+    so a rebuild reads the archive through today's patterns and none of the marked text reaches
+    the model, while the rebuild is still charged to the day's budget (DESIGN 12, DESIGN 13)."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg, CLAUDE, "s-pat", project_id, [Entry("e1", NOW, "user", PATTERN_SENTENCE, False)]
+    )
+
+    fake = FakeEndpoint([digest_answer("rotate the vault key")])
+    fake.start()
+    try:
+        cfg = point_at(cfg, fake, patterns=(SECRET_PATTERN,))
+        result = digest.redigest(cfg, "s-pat")
+        sent = json.dumps(fake.requests)
+        charged = model.tokens_used_today(cfg)
+    finally:
+        fake.stop()
+
+    assert SECRET not in sent, "the rebuild sent the marked text to the model"
+    assert "[redacted]" in sent, "the model was shown the archive's text unredacted"
+    page_text = (cfg.vault / result.path).read_text(encoding="utf-8")
+    assert SECRET not in page_text
+    assert charged > 0, "a rebuild spent nothing of the day's token budget"
+
+
+def test_a_redigest_after_the_day_s_budget_is_spent_asks_nothing_of_the_model(
+    initialized: Config,
+):
+    """Rebuilding a digest is digest work, so a day with no token budget left refuses it and the
+    endpoint hears nothing (DESIGN 13)."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg, CLAUDE, "s-pat", project_id, [Entry("e1", NOW, "user", PATTERN_SENTENCE, False)]
+    )
+
+    fake = FakeEndpoint([digest_answer("rotate the vault key")])
+    fake.start()
+    try:
+        cfg = with_budget(point_at(cfg, fake), 0)
+        with pytest.raises(digest.DigestError):
+            digest.redigest(cfg, "s-pat")
+        asked = len(fake.requests)
+    finally:
+        fake.stop()
+
+    assert asked == 0, "a rebuild spent past the day's token budget"
+    assert digest_pages(cfg) == []

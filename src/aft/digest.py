@@ -37,7 +37,19 @@ from pathlib import Path
 
 import yaml
 
-from aft import __version__, evidence, index, keys, model, page, pagewrite, queue, readers, vault
+from aft import (
+    __version__,
+    evidence,
+    index,
+    keys,
+    model,
+    page,
+    pagewrite,
+    queue,
+    readers,
+    redact,
+    vault,
+)
 from aft import filter as filtermod
 from aft import registry as registrymod
 from aft.config import Config, is_excluded, is_worker
@@ -801,6 +813,21 @@ def _is_session_digest(path: Path, session_id: str) -> bool:
     return is_exact
 
 
+def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
+    """The archived entries as a rebuild may read them: with today's redaction on them.
+
+    The archive holds what the patterns known at capture time let through, and a pattern added
+    since then is the person saying that text is not to leave this host. Sending the archived
+    words to a model unchanged would hand over exactly what they marked secret, so the same
+    replacement runs over each entry before any of it is rendered into a prompt (DESIGN 12).
+    """
+    patterns = config.settings.capture.redact_patterns
+    return [
+        Entry(entry.id, entry.time, entry.role, redact.redact(entry.text, patterns), entry.is_error)
+        for entry in entries
+    ]
+
+
 def redigest(
     config: Config,
     session_id: str,
@@ -818,9 +845,25 @@ def redigest(
     against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
     outright - exclusion says its words are not the vault's, and a rebuild of an archive
     written before that decision was added does not change the answer.
+
+    Two costs the rebuild owns. Its calls are charged to the day's token budget as any
+    digest's are, and a rebuild asked for after that budget is spent refuses rather than
+    spending past it (DESIGN 13). And the entries are read through the redaction patterns this
+    home has now, because the archive holds only what the patterns of the day it was written
+    allowed: text the person has since marked secret is never sent to a model. A quote that
+    would span one of those redactions matches no archived entry and is refused the way any
+    unverifiable quote is; ``aft forget pattern`` redacts both sides at once, which is how a
+    pattern the archive should never have held gets settled.
     """
     _require_session_id(session_id)
     vault.require(config)
+
+    budget = config.settings.work.daily_token_budget
+    if model.tokens_used_today(config, now) >= budget:
+        raise DigestError(
+            f"the day's token budget of {budget} tokens is already spent, so rebuilding the"
+            f" digest of session {session_id!r} waits for a day with room in it (DESIGN 13)"
+        )
 
     cwd = queue.session_cwd(config, session_id)
     if cwd is not None and is_excluded(cwd, config):
@@ -830,7 +873,7 @@ def redigest(
         )
     role = rules.WORKER if cwd is not None and is_worker(cwd, config) else rules.PRIMARY
 
-    entries = evidence.entries(config, session_id)
+    entries = _redacted_entries(config, evidence.entries(config, session_id))
     if not entries:
         raise DigestError(f"no archived evidence for session {session_id!r}")
 
