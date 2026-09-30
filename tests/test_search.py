@@ -397,6 +397,28 @@ def test_project_filter_scoping(populated_vault: Config):
     assert any("global/preferences.md" in h.path for h in hits_global)
 
 
+def test_search_scopes_to_the_project_of_the_current_directory(
+    populated_vault: Config, monkeypatch
+):
+    """Inside a registered project search covers it plus global pages; from outside every
+    project it covers global pages only."""
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+    hits = search.search(populated_vault, "titanium bolt")
+    assert any(h.path == "projects/widget/assembly.md" for h in hits)
+    hits = search.search(populated_vault, "dark theme")
+    assert any(h.path == "global/preferences.md" for h in hits)
+    hits = search.search(populated_vault, "monochrome OLED screen")
+    assert not any(h.path.startswith("projects/gadget") for h in hits)
+
+    outside = populated_vault.vault.parent / "unregistered"
+    outside.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(outside)
+    hits = search.search(populated_vault, "titanium bolt")
+    assert not any(h.path.startswith(("projects/", "digests/")) for h in hits)
+    hits = search.search(populated_vault, "dark theme")
+    assert any(h.path == "global/preferences.md" for h in hits)
+
+
 def test_search_json_and_limit(populated_vault: Config, capsys):
     """Test --json output and --limit flag via CLI."""
     ret = main(["search", "titanium", "--all", "--json", "--limit", "2"])
@@ -439,6 +461,24 @@ def test_read_outline(populated_vault: Config):
     assert outline == "# Main Header\n## Subheader"
 
 
+def test_read_outline_skips_lines_that_are_not_headings(populated_vault: Config):
+    """Headings match ^#{1,6}\\s, so a #tag or #include line is not a heading."""
+    tagged = populated_vault.vault / "projects" / "widget" / "tags.md"
+    tagged.write_text(
+        "---\n"
+        "title: Tag Page\n"
+        "---\n"
+        "# Real Header\n\n"
+        "#not_a_heading\n"
+        "#include <config.h>\n"
+        "####### seven hashes are not a heading\n\n"
+        "## Sub Header\n",
+        encoding="utf-8",
+    )
+    outline = search.read_page(populated_vault, "projects/widget/tags.md", level="outline")
+    assert outline == "# Real Header\n## Sub Header"
+
+
 def test_read_abstract(populated_vault: Config):
     """read --level abstract prints description plus active facts."""
     abstract = search.read_page(populated_vault, "projects/widget/overview.md", level="abstract")
@@ -460,6 +500,51 @@ def test_read_cli(populated_vault: Config, capsys):
     out = capsys.readouterr().out
     assert "# Widget" in out
     assert "## Decisions" in out
+
+
+def test_read_resolves_a_relative_path_against_the_vault_first(
+    populated_vault: Config, tmp_path, monkeypatch
+):
+    """A page path is vault-relative, so a same-named file in the cwd does not win."""
+    decoy = tmp_path / "projects" / "widget" / "overview.md"
+    decoy.parent.mkdir(parents=True, exist_ok=True)
+    decoy.write_text("---\ntitle: Decoy\n---\n\n# Decoy\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    full = search.read_page(populated_vault, "projects/widget/overview.md")
+    assert "Everything known about the widget." in full
+    assert "Decoy" not in full
+
+
+def test_read_refuses_a_file_outside_the_vault(
+    populated_vault: Config, tmp_path, monkeypatch, capsys
+):
+    """A path that resolves outside the vault is refused, not read."""
+    secret = tmp_path / "secrets.md"
+    secret.write_text("# Bank account numbers\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(search.SearchError, match="outside the vault"):
+        search.read_page(populated_vault, "secrets.md")
+    assert main(["read", "secrets.md"]) == 2
+    assert "outside the vault" in capsys.readouterr().err
+
+
+def test_read_refuses_a_path_that_climbs_out_of_the_vault(populated_vault: Config, monkeypatch):
+    """A .. that leaves the vault is refused even from a cwd inside it."""
+    outside = populated_vault.vault.parent / "outside.md"
+    outside.write_text("# Outside the vault\n", encoding="utf-8")
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+    with pytest.raises(search.SearchError, match="outside the vault"):
+        search.read_page(populated_vault, "../outside.md")
+
+
+def test_read_absolute_paths_inside_and_outside_the_vault(populated_vault: Config, tmp_path):
+    """An absolute path inside the vault reads; one outside the vault is refused."""
+    inside = populated_vault.vault / "projects" / "widget" / "overview.md"
+    assert "# Widget" in search.read_page(populated_vault, str(inside), level="outline")
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text("# Elsewhere\n", encoding="utf-8")
+    with pytest.raises(search.SearchError, match="outside the vault"):
+        search.read_page(populated_vault, str(elsewhere))
 
 
 def test_trace_with_evidence(populated_vault: Config):
@@ -536,6 +621,14 @@ def test_trace_missing_source_id_arg(populated_vault: Config, capsys):
     """aft trace without source id exits 2."""
     assert main(["trace", "projects/widget/overview.md"]) == 2
     assert "source id required" in capsys.readouterr().err
+
+
+def test_trace_refuses_a_page_that_is_not_text(populated_vault: Config, capsys):
+    """aft trace on a non-text page gives the clean error aft read gives."""
+    blob = populated_vault.vault / "projects" / "widget" / "blob.md"
+    blob.write_bytes(b"\xff\xfe\x00\x01 not UTF-8 text")
+    assert main(["trace", "projects/widget/blob.md", "s1"]) == 2
+    assert "is not UTF-8 text" in capsys.readouterr().err
 
 
 def test_empty_query_returns_nothing(populated_vault: Config):
