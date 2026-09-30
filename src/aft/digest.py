@@ -274,14 +274,23 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     _require_session_id(job.session_id)
     vault.require(config)
     registry = registrymod.Registry.load(config.registry_path)
+    resolution: keys.Resolution | None
     try:
         resolution = keys.resolve(job.cwd, registry, config.host)
-    except GitError as exc:
-        # The directory belongs to whatever ran the session and goes away with it, so git
-        # failing there is this session's own loss. Git failing in the vault is the host's
+    except GitError:
+        # The directory belongs to whatever ran the session and goes away with it: a worktree
+        # is made, worked in and removed. The project was decided while it still stood, at
+        # session start, and that record files the session now (DESIGN 7). With no record
+        # the words are still kept, under no project. Git failing in the vault is the host's
         # and still stops the run.
-        raise DigestError(f"{job.cwd} could not be read as a project: {exc}") from exc
-    if resolution.slug is None:
+        resolution = _recorded_resolution(config, registry, job)
+        if resolution is None and config.settings.capture.exclude_projects:
+            # A project named in capture.exclude_projects is known by resolving its
+            # directory, and this one can no longer be resolved. It cannot be shown to be
+            # outside the exclusion, so it is treated as inside it and leaves no queue row.
+            queue.drop_job(config, job)
+            return None
+    if resolution is not None and resolution.slug is None:
         raise DigestError(
             f"{job.cwd} resolves to no project, so this session has nowhere to be filed"
         )
@@ -320,10 +329,17 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         config,
         job.agent,
         job.session_id,
-        None if resolution.project is None else resolution.project.id,
+        None if resolution is None or resolution.project is None else resolution.project.id,
         kept,
     )
     index.update(config)
+    if resolution is None:
+        # Unfiled: the directory is gone and nothing recorded its project. The words are in
+        # the archive and the index under no project, where `aft search --all` finds them. A
+        # digest page needs a project to stand under, so none is written and no model is
+        # asked; the mark moves, because these entries are stored and decided.
+        queue.complete(config, job, read[-1].id, off_record=off_record)
+        return None
 
     # The page's own name is taken here, before a token is spent on it, from what already
     # stands in the day's directory: a job writes the page it is given and never a page
@@ -374,6 +390,27 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
 
 
+def _recorded_resolution(
+    config: Config, registry: registrymod.Registry, job: queue.Job
+) -> keys.Resolution | None:
+    """The project a session started in, as the queue recorded it, or None.
+
+    The record holds the project's id when the registry knew it at session start, and its
+    slug either way. A project registered since then is found by that slug; one still
+    unregistered is digested under its own name, as its directory would have been.
+    """
+    recorded = queue.recorded_project(config, job.agent, job.session_id)
+    if recorded is None:
+        return None
+    project_id, slug = recorded
+    project = registry.by_id(project_id) if project_id else None
+    if project is None:
+        project = registry.by_slug(slug)
+    if project is not None:
+        return keys.Resolution(kind="recorded", cwd=job.cwd, project=project, slug=project.slug)
+    return keys.Resolution(kind="recorded", cwd=job.cwd, slug=slug)
+
+
 def archive_worker_job(config: Config, job: queue.Job) -> bool:
     """Store a worker session in the evidence archive and search index without digesting.
 
@@ -416,12 +453,18 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
         registry = registrymod.Registry.load(config.registry_path)
         try:
             resolution = keys.resolve(job.cwd, registry, config.host)
-            project_id = resolution.project.id if resolution.project else None
         except GitError:
-            # Archiving files no page, so the project it would resolve to is a label rather
-            # than a requirement: a directory that has gone away still gets its words stored.
-            # Anything else the resolver raises is a bug or a host failure, and travels up.
-            project_id = None
+            # Archiving files no page, so the project is a label rather than a requirement:
+            # a directory that has gone away takes the project its session start recorded,
+            # and with no record its words are still stored, under no project. Anything else
+            # the resolver raises is a bug or a host failure, and travels up.
+            resolution = _recorded_resolution(config, registry, job)
+            if resolution is None and config.settings.capture.exclude_projects:
+                # As in digest_job: a directory that cannot be resolved cannot be shown to
+                # be outside capture.exclude_projects, so its row is dropped.
+                queue.drop_job(config, job)
+                return False
+        project_id = resolution.project.id if resolution and resolution.project else None
         evidence.store(config, job.agent, job.session_id, project_id, kept)
         index.update(config)
         archived = True

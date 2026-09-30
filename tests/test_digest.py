@@ -1196,36 +1196,120 @@ def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: 
     assert watermark(cfg, "gone-1") is None
 
 
-def test_a_directory_deleted_since_the_session_fails_only_its_own_job(session: Session, tmp_path):
-    """A worktree cleaned up after its session is ordinary, and one session's loss.
+def test_a_directory_deleted_since_the_session_is_kept_unfiled(session: Session, tmp_path):
+    """A worktree cleaned up after its session is ordinary, and its words are still kept.
 
-    Gate and orchestrator checkouts are made, worked in, and deleted by other processes,
-    and the queue keeps the directory a transcript named as data another process wrote.
-    Naming the project runs git in that directory, so a vanished one has to be told as
-    this job's own failure, path and all. A run that stopped there instead would leave the
-    row claimed, be handed the same row again when its lease lapsed, and never digest
-    another session at all (DESIGN 14).
+    Gate and orchestrator checkouts are made, worked in, and deleted by other processes, so by
+    the time a run reaches such a session its directory cannot say which project it was. With
+    nothing recorded at session start either, the session is archived and indexed under no
+    project: no page, no model call, no failure, and the run goes on (DESIGN 7, DESIGN 14).
     """
     gone = (tmp_path / "gate-worktree").resolve()
     gone.mkdir()
     here = session.transcript.with_name("here.jsonl")
     shutil.copy(session.transcript, here)
-    fake, cfg = serve(session.cfg, answer(said()), answer(said()))
+    fake, cfg = serve(session.cfg, answer(said()))
     try:
         queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
         queue.enqueue(cfg, event(here, session.cwd, session_id="here-1"))
         shutil.rmtree(gone)
         report = work.run(cfg)
+        asked = len(fake.requests)
     finally:
         fake.stop()
     assert report.stopped == "", "a session-local path stopped the whole run"
+    assert report.failures == ()
     assert report.digested == 1
-    assert len(report.failures) == 1
-    assert "gate-worktree" in report.failures[0]
-    assert rows(cfg, queue.FAILED) == ["gone-cwd"]
-    assert rows(cfg, queue.DONE) == ["here-1"]
-    assert watermark(cfg, "gone-cwd") is None
+    assert asked == 1, "the unfiled session was sent to the model"
+    assert rows(cfg, queue.FAILED) == []
+    assert sorted(rows(cfg, queue.DONE)) == ["gone-cwd", "here-1"]
+    assert watermark(cfg, "gone-cwd") is not None
+    assert evidence.entries(cfg, "gone-cwd"), "the session's words were not archived"
+    assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, None)
     assert pages(cfg) == [below("here-1")]
+
+
+def test_a_deleted_directory_is_filed_under_the_project_its_session_started_in(
+    session: Session, tmp_path
+):
+    """The project is decided at session start, while the directory stands (DESIGN 7).
+
+    A worktree of a registered project is removed before the run reaches its session. The
+    record the session-start hook left names the project, so the session is digested under it
+    exactly as a session in the project's own checkout is.
+    """
+    project = registry.Registry.load(session.cfg.registry_path).by_slug(SLUG)
+    gone = (tmp_path / "gate-worktree").resolve()
+    gone.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        assert queue.record_project(cfg, CLAUDE, "gone-cwd", project.id, SLUG)
+        queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
+        shutil.rmtree(gone)
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.failures == ()
+    assert report.digested == 1
+    assert pages(cfg) == [below("gone-cwd")]
+    assert frontmatter(cfg, page_path("gone-cwd"))["aft"]["project"] == project.id
+    assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, project.id)
+
+
+def test_a_deleted_directory_of_an_unregistered_project_keeps_its_recorded_name(
+    session: Session, tmp_path
+):
+    """A project the registry does not hold yet is recorded by its slug alone, and a session
+    whose directory is gone is digested under that name, as the directory would have been."""
+    gone = (tmp_path / "scratch-tool").resolve()
+    gone.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        assert queue.record_project(cfg, CLAUDE, "gone-cwd", None, "scratch-tool")
+        queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
+        shutil.rmtree(gone)
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.failures == ()
+    assert [rel for rel in pages(cfg) if rel.startswith("scratch-tool/")], pages(cfg)
+    assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, None)
+
+
+def test_an_unresolvable_directory_is_dropped_when_projects_are_excluded(
+    session: Session, tmp_path
+):
+    """``capture.exclude_projects`` is answered by resolving the directory. One that is gone,
+    with no project recorded, cannot be shown to be outside the exclusion, so it leaves no
+    queue row, no evidence and no page."""
+    gone = (tmp_path / "gate-worktree").resolve()
+    gone.mkdir()
+    fake, cfg = serve(session.cfg)
+    try:
+        cfg = with_capture(cfg, exclude_projects=["some-private-project"])
+        queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
+        shutil.rmtree(gone)
+        report = work.run(cfg)
+        asked = len(fake.requests)
+    finally:
+        fake.stop()
+    assert report.failures == ()
+    assert asked == 0
+    assert rows(cfg, queue.DONE) == [] and rows(cfg, queue.FAILED) == []
+    assert evidence.entries(cfg, "gone-cwd") == []
+    assert pages(cfg) == []
+
+
+def test_forgetting_a_session_forgets_the_project_it_started_in(session: Session):
+    """`aft forget session` leaves no trace in the queue, the recorded project included, and a
+    forgotten session is not recorded again."""
+    cfg = session.cfg
+    assert queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
+    assert queue.recorded_project(cfg, CLAUDE, SESSION) == (None, SLUG)
+    queue.forget_session(cfg, SESSION)
+    assert queue.recorded_project(cfg, CLAUDE, SESSION) is None
+    assert not queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
+    assert queue.recorded_project(cfg, CLAUDE, SESSION) is None
 
 
 # ---------------------------------------------------------------- the chunk and its parts
