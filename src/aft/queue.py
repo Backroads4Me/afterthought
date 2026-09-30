@@ -14,7 +14,10 @@ A jobs row carries session identity, never a project: resolution to a project ha
 digest time (BUILD-PLAN M2.2). The one row a session has in the ``sessions`` table carries
 where its digest has read to - the entry it stopped on and whether an off-the-record span
 is open there - so the next chunk of that session continues the work instead of starting
-over (BUILD-PLAN M2.2, M2.3).
+over (BUILD-PLAN M2.2, M2.3). That row also carries whether a digest is *owed* for text the
+archive already holds: a worker session stored without budget leaves no waiting job behind,
+so capture keeps following the session, and the debt on the session row is what remembers
+that a digest is still to come (BUILD-PLAN M2.7).
 """
 
 from __future__ import annotations
@@ -88,6 +91,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id  TEXT NOT NULL,
     watermark   TEXT,
     off_record  INTEGER NOT NULL DEFAULT 0,
+    digest_due  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -128,14 +132,20 @@ class SessionState:
     (M2.3); a session with no row of its own has no span open. ``has_open_job`` covers a
     row awaiting a claim and one being digested now: both are capture work in flight for
     that session, and a second row for either would be a chunk the digest has already read.
-    ``read_at`` is when the newest finished digest of the session claimed its job, so a
-    transcript untouched since then holds nothing that digest did not read. ``failed_at``
+    ``digest_due`` is the archive's record that this session's words are stored and no
+    digest has read them yet (M2.7). It is a debt the queue carries for the digest, never
+    capture work in flight: capture ignores it, which is the whole point of not leaving a
+    waiting row behind an archived worker.
+    ``read_at`` is when the queue last read the session's text: when its newest finished
+    job was claimed, or, for a worker row the archive stored without digesting, when it was
+    stored. A transcript untouched since then holds nothing unread. ``failed_at``
     is when the session's newest job failed, or None when that job did not fail.
     """
 
     watermark: str | None
     off_record: bool
     has_open_job: bool
+    digest_due: bool
     read_at: datetime | None = None
     failed_at: datetime | None = None
 
@@ -320,6 +330,13 @@ def complete(
                 " watermark = excluded.watermark, off_record = excluded.off_record",
                 (job.agent, job.session_id, watermark, int(off_record)),
             )
+        # A digest that closed a job for this session read everything from the watermark to
+        # the end of its transcript, so the archive's debt is settled by this close and not
+        # by the page: a chunk the filter emptied owes no digest either (M2.7).
+        conn.execute(
+            "UPDATE sessions SET digest_due = 0 WHERE agent = ? AND session_id = ?",
+            (job.agent, job.session_id),
+        )
 
 
 def fail(config: Config, job: Job, error: str) -> None:
@@ -333,7 +350,10 @@ def fail(config: Config, job: Job, error: str) -> None:
     failure, so a worker whose row has gone on to another process cannot mark that row
     failed or clear that process's claim. Recording a failure on a row this process does
     not hold - one already handed on, or one no longer in the queue - is an error, not a
-    silence: why the digest could not run has to reach the report.
+    silence: why the digest could not run has to reach the report. A session the archive
+    still owes a digest to stays owing when its job fails, so the digest is tried again
+    rather than quietly dropped: a worker that went quiet the moment it was stored has no
+    later sweep to enqueue its chunk for it (M2.7).
     """
     with _writing(config) as conn:
         recorded = conn.execute(
@@ -345,6 +365,109 @@ def fail(config: Config, job: Job, error: str) -> None:
             raise QueueError(f"job {job.id} is not held by this process")
 
 
+def owe_digest(config: Config, job: Job) -> None:
+    """Close a worker row the archive stored, and record that its digest is owed.
+
+    Archiving read the transcript and put its words in the archive and the index, so the
+    capture work the row stands for is finished and the row closes as any finished row
+    does - with its session's watermark left where the last digest left it, so the digest
+    this run could not afford reads the same chunk when budget allows. The row closes rather
+    than waits because a waiting row is capture work in flight, and capture stops following
+    a session that has one: an archived worker whose row stayed pending would never see its
+    later text reach the vault, which is the hole this fills (BUILD-PLAN M2.7, the lead's
+    review of #39).
+
+    What is still owed goes on the session row instead, because capture never reads that
+    table: the debt says the words are stored and no digest has read them, and
+    :func:`redeem_digest_debts` is what turns it back into work. Only :func:`complete`
+    clears it, so neither a failed digest nor a run that died mid-claim can lose it.
+    """
+    now = _now()
+    with _writing(config) as conn:
+        closed = conn.execute(
+            "UPDATE jobs SET status = ?, claimed_pid = NULL, error = NULL, updated_time = ?"
+            " WHERE id = ? AND status = ?",
+            (DONE, _text(now), job.id, PENDING),
+        ).rowcount
+        if not closed:
+            raise QueueError(f"job {job.id} is no longer waiting to be archived")
+        conn.execute(
+            "INSERT INTO sessions (agent, session_id, watermark, off_record, digest_due)"
+            " VALUES (?, ?, NULL, 0, 1)"
+            " ON CONFLICT (agent, session_id) DO UPDATE SET digest_due = 1",
+            (job.agent, job.session_id),
+        )
+
+
+def redeem_digest_debts(config: Config) -> int:
+    """File one waiting job for every session the archive owes a digest to, and count them.
+
+    A debt is not a job, and only jobs can be claimed, leased, digested, and closed, so the
+    debt becomes one here. A session that already has a row waiting or in flight is left
+    alone: the digest that row brings settles the debt, and filing a second row for one
+    session would be a chunk read twice (M2.2 digests a session one chunk at a time).
+
+    The new row carries the event time of the session's newest row, not this moment, because
+    that time is what the dream's quiet period measures a directory's last sign of life by
+    (BUILD-PLAN M4.1), and a debt being collected says nothing about when the session itself
+    last spoke. The debt outlives this call and is cleared by the digest that closes the row,
+    so a failure to digest leaves it owed for the next run rather than lost.
+
+    A debt is dropped, not filed, when there is nothing left to digest - no row of that
+    session names a transcript, or the directory is now under ``capture.exclude_paths``. An
+    excluded session leaves no trace in the queue, and a debt naming one is a trace (M2.7).
+
+    Returns how many jobs were filed. A debt left owed - because the session already has a
+    row in flight, or because filing it is what this call just did - is tried again by the
+    next run, and the digest that eventually closes a job for that session is what clears it.
+    """
+    now = _now()
+    filed = 0
+    with _writing(config) as conn:
+        owed = conn.execute(
+            "SELECT agent, session_id FROM sessions WHERE digest_due = 1 ORDER BY agent, session_id"
+        ).fetchall()
+        for agent, session_id in owed:
+            newest = conn.execute(
+                "SELECT cwd, transcript_path, kind, event_time FROM jobs"
+                " WHERE agent = ? AND session_id = ?"
+                " ORDER BY created_time DESC, id DESC LIMIT 1",
+                (agent, session_id),
+            ).fetchone()
+            if newest is None or newest[1] is None or is_excluded(Path(newest[0]), config):
+                conn.execute(
+                    "UPDATE sessions SET digest_due = 0 WHERE agent = ? AND session_id = ?",
+                    (agent, session_id),
+                )
+                continue
+            waiting = conn.execute(
+                "SELECT 1 FROM jobs WHERE agent = ? AND session_id = ? AND status IN (?, ?)"
+                " LIMIT 1",
+                (agent, session_id, PENDING, RUNNING),
+            ).fetchone()
+            if waiting is not None:
+                continue
+            conn.execute(
+                "INSERT INTO jobs (id, agent, session_id, cwd, transcript_path, kind,"
+                " event_time, status, created_time, updated_time)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    new_id("job"),
+                    agent,
+                    session_id,
+                    newest[0],
+                    newest[1],
+                    newest[2],
+                    newest[3],
+                    PENDING,
+                    _text(now),
+                    _text(now),
+                ),
+            )
+            filed += 1
+    return filed
+
+
 def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     """The queue's facts about one session: where its digest read to, whether a span is open
     there, and whether it has capture work in flight.
@@ -354,7 +477,8 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     """
     with _reading(config) as conn:
         row = conn.execute(
-            "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
+            "SELECT watermark, off_record, digest_due FROM sessions"
+            " WHERE agent = ? AND session_id = ?",
             (agent, session_id),
         ).fetchone()
         open_row = conn.execute(
@@ -362,7 +486,11 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
             (agent, session_id, PENDING, RUNNING),
         ).fetchone()
         read = conn.execute(
-            "SELECT max(claimed_time) FROM jobs WHERE agent = ? AND session_id = ? AND status = ?",
+            # The moment the queue last read this session's text: when its newest finished
+            # job was claimed, or - for a worker row the archive stored without digesting,
+            # which no process ever claimed - the moment it was stored (M2.7).
+            "SELECT max(coalesce(claimed_time, updated_time)) FROM jobs"
+            " WHERE agent = ? AND session_id = ? AND status = ?",
             (agent, session_id, DONE),
         ).fetchone()
         newest = conn.execute(
@@ -374,6 +502,7 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
         watermark=row[0] if row else None,
         off_record=bool(row[1]) if row else False,
         has_open_job=open_row is not None,
+        digest_due=bool(row[2]) if row else False,
         read_at=_moment(read[0]),
         failed_at=_moment(newest[1]) if newest and newest[0] == FAILED else None,
     )
@@ -500,7 +629,7 @@ def _connect(config: Config) -> sqlite3.Connection:
     conn.executescript(_SCHEMA)
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
-    if "off_record" not in sessions or "claimed_time" not in jobs:
+    if "off_record" not in sessions or "digest_due" not in sessions or "claimed_time" not in jobs:
         conn.close()
         raise QueueError(
             f"{path} was written by an earlier build of afterthought; delete it to start"

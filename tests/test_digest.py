@@ -298,6 +298,11 @@ def watermark(cfg: Config, session_id: str = SESSION) -> str | None:
     return queue.session_state(cfg, CLAUDE, session_id).watermark
 
 
+def owed_digest(cfg: Config, session_id: str = SESSION) -> bool:
+    """Whether the archive holds this session's words and no digest has read them yet."""
+    return queue.session_state(cfg, CLAUDE, session_id).digest_due
+
+
 def indexed_words(cfg: Config, needle: str) -> dict[str, int]:
     """How many rows of each search collection hold ``needle``, indexed or not.
 
@@ -1804,7 +1809,14 @@ def test_worker_session_is_archived_and_indexed_but_not_digested_when_budget_is_
         assert indexed_count > 0
 
         assert pages(cfg) == []
-        assert rows(cfg, queue.PENDING) == ["worker-s1"]
+        # The row is finished work, not work waiting: a waiting row for an archived worker is
+        # what stopped capture following the session at all. What the run still owes is the
+        # digest, and that is the debt on the session row - with the watermark left where it
+        # was, so the digest reads this same chunk when the budget has room (M2.7).
+        assert rows(cfg, queue.PENDING) == []
+        assert rows(cfg, queue.DONE) == ["worker-s1"]
+        assert owed_digest(cfg, "worker-s1") is True
+        assert watermark(cfg, "worker-s1") is None
     finally:
         fake.stop()
 
@@ -1902,8 +1914,11 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
         conn.close()
         assert count > 0
 
-        assert "worker-1" in rows(cfg, queue.PENDING)
+        assert "worker-1" not in rows(cfg, queue.PENDING), "archiving left work waiting"
+        assert owed_digest(cfg, "worker-1") is True
 
+        # The debt is what the second run digests: no row of the worker's is waiting any more,
+        # so a run that only read the queue would report an idle day and file no page.
         second = work.run(with_budget(cfg, 100_000))
         assert second.digested == 1
         assert any("worker-1" in p for p in pages(cfg))
@@ -1911,6 +1926,7 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
         fm_worker = frontmatter(cfg, f"digests/{worker_page}")
         assert fm_worker["aft"]["role"] == "worker"
         assert fm_worker["aft"]["facts"][0]["role"] == "worker"
+        assert owed_digest(cfg, "worker-1") is False, "the digest left the debt owed"
     finally:
         fake.stop()
 
@@ -2017,7 +2033,9 @@ def test_a_worker_whose_directory_is_gone_still_has_its_words_stored(
         assert report.stopped == work.STOP_BUDGET
         archived = evidence.entries(cfg, "worker-1")
         assert any("nitrile gasket" in entry.text for entry in archived)
-        assert "worker-1" in rows(cfg, queue.PENDING), "the digest lost its place"
+        assert rows(cfg, queue.DONE) == ["worker-1"]
+        assert owed_digest(cfg, "worker-1") is True
+        assert watermark(cfg, "worker-1") is None, "archiving moved the digest out of its place"
     finally:
         fake.stop()
 
@@ -2187,5 +2205,146 @@ def test_what_the_index_could_not_read_is_said_by_the_run(session: Session):
         assert report.digested == 1, "an unreadable page stopped the digest it never touched"
         assert report.stopped == ""
         assert [line for line in report.failures if "not-text.md" in line], report.failures
+    finally:
+        fake.stop()
+
+
+def test_capture_follows_a_worker_session_the_archive_stored(
+    session: Session, tmp_path, monkeypatch
+):
+    """An archived worker is not a session capture stopped watching.
+
+    The row archiving left behind used to wait in the queue, and a waiting row is capture work
+    in flight, so every later sweep passed the session by and text written after the archive
+    was stored by nothing at all. Archiving closes that row and owes a digest instead, and a
+    debt on the session row is not capture work: the session is offered again as soon as it
+    has said more (BUILD-PLAN M2.7, the lead's review of #39).
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    sessions = tmp_path / "agent-sessions"
+    monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
+    monkeypatch.setattr(queue, "_now", lambda: NOW)
+    fake, cfg = serve(session.cfg)
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+        transcript = write_records(
+            sessions / "dev-worker" / "worker-1.jsonl",
+            {"cwd": str(worker_dir)},
+            record("w1", "user", "Worker prompt: the suite is red."),
+        )
+        quiet = NOW - timedelta(minutes=40)
+        os.utime(transcript, (quiet.timestamp(), quiet.timestamp()))
+        queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+
+        assert work.run(cfg, NOW).stopped == work.STOP_BUDGET
+        assert owed_digest(cfg, "worker-1") is True
+        # The archive read the transcript through here, so the sweep has nothing to hand over
+        # and re-filing the same text would be the churn this replaces.
+        assert capture.sweep(cfg, NOW + timedelta(hours=2)) == []
+
+        spoke = NOW + timedelta(hours=1)
+        append_records(transcript, record("w2", "user", "Worker says the fix landed."))
+        os.utime(transcript, (spoke.timestamp(), spoke.timestamp()))
+
+        found = capture.sweep(cfg, NOW + timedelta(hours=2))
+        assert [e.session_id for e in found] == ["worker-1"], "capture is still skipping it"
+
+        assert work.run(cfg, NOW + timedelta(hours=2)).stopped == work.STOP_BUDGET
+        assert any("fix landed" in entry.text for entry in evidence.entries(cfg, "worker-1")), (
+            "the text written after the archive reached nothing"
+        )
+    finally:
+        fake.stop()
+
+
+def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Session, tmp_path):
+    """Nothing has to happen in the session for its digest to arrive.
+
+    Its row left the queue when the archive stored it, so no hook and no sweep will ever bring
+    that text back: the debt is the only thing left that remembers the digest, and a run with
+    room in the budget after primaries has to find it on its own (BUILD-PLAN M2.7).
+    """
+    worker_dir = make_repo(tmp_path / "worker_repo").resolve()
+    worker_answer = answer(
+        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+    )
+    fake, cfg = serve(session.cfg, worker_answer, worker_answer)
+    try:
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+        transcript = write_records(
+            tmp_path / "worker.jsonl",
+            {"cwd": str(worker_dir)},
+            record("w1", "user", "Worker ran tests: all green."),
+            record("w2", "assistant", "Recorded test results.", model="claude-real"),
+        )
+        queue.enqueue(cfg, event(transcript, worker_dir, session_id="worker-1"))
+
+        assert work.run(cfg).stopped == work.STOP_BUDGET
+        assert pages(cfg) == []
+        assert owed_digest(cfg, "worker-1") is True
+
+        report = work.run(with_budget(cfg, 100_000))
+
+        assert report.digested == 1, "the run found nothing, though it owed this session"
+        assert any("worker-1" in p for p in pages(cfg))
+        assert owed_digest(cfg, "worker-1") is False, "the digest left the debt owed"
+        assert rows(cfg, queue.PENDING) == []
+        assert watermark(cfg, "worker-1") is not None
+    finally:
+        fake.stop()
+
+
+def test_a_stored_worker_makes_the_next_run_walk_the_vault_once(
+    session: Session, tmp_path, monkeypatch
+):
+    """A worker the archive already stored is not stored again on every run.
+
+    Its row used to wait in the queue, so each run re-read the same transcript from the
+    session's watermark, re-wrote the same entries, and walked the whole vault to re-index
+    them - work that grows with the vault and buys nothing (BUILD-PLAN M2.7). One walk per run
+    is the run's own: a closed row leaves the archive nothing to do.
+    """
+    cfg, fake = _one_waiting_worker(session, tmp_path)
+    walks: list[int] = []
+    real = digest.index.update
+
+    def count_the_walks(config: Config) -> list[str]:
+        walks.append(1)
+        return real(config)
+
+    monkeypatch.setattr(digest.index, "update", count_the_walks)
+    try:
+        work.run(cfg)
+        after_first = len(walks)
+        assert after_first == 2, "one walk to index what was stored, one for the run's end"
+
+        assert work.run(cfg).stopped == work.STOP_BUDGET
+
+        assert len(walks) == after_first + 1, "a run with nothing to store re-walked the vault"
+        assert owed_digest(cfg, "worker-1") is True, "and lost the digest it still owes"
+    finally:
+        fake.stop()
+
+
+def test_a_debt_for_a_session_excluded_after_it_was_stored_is_dropped(session: Session, tmp_path):
+    """A debt owed on words the vault has decided not to hold is not collected.
+
+    Naming the worker's directory in `exclude_paths` after the fact says its words are not the
+    vault's, and exclusion is enforced by leaving no trace: a waiting row or a debt naming that
+    session is a trace, so the debt goes rather than filing work whose digest would only be
+    refused (BUILD-PLAN M2.7).
+    """
+    cfg, fake = _one_waiting_worker(session, tmp_path)
+    worker_dir = (tmp_path / "worker_repo").resolve()
+    try:
+        assert work.run(cfg).stopped == work.STOP_BUDGET
+        assert owed_digest(cfg, "worker-1") is True
+
+        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], exclude_paths=[str(worker_dir)])
+
+        assert queue.redeem_digest_debts(cfg) == 0
+        assert owed_digest(cfg, "worker-1") is False
+        assert rows(cfg, queue.PENDING) == []
+        assert pages(cfg) == []
     finally:
         fake.stop()

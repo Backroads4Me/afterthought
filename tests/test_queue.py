@@ -793,6 +793,88 @@ def test_a_queue_file_without_span_state_is_refused(cfg: Config) -> None:
         queue.enqueue(cfg, event(session_id="old"))
 
 
+def test_a_queue_file_without_the_digest_debt_is_refused(cfg: Config) -> None:
+    """A queue written before sessions carried the digest debt is refused, not guessed at.
+
+    The alternative is quieter and worse: archiving would go on leaving its rows waiting -
+    which is what stopped capture following an archived worker at all - and the run that
+    collects owed digests would read a table with nothing in it (BUILD-PLAN M2.7).
+    """
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    conn.execute(
+        "CREATE TABLE sessions (agent TEXT NOT NULL, session_id TEXT NOT NULL,"
+        " watermark TEXT, off_record INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (agent, session_id))"
+    )
+    conn.close()
+
+    with pytest.raises(queue.QueueError, match="earlier build"):
+        queue.enqueue(cfg, event(session_id="old"))
+
+
+def test_an_owed_digest_is_filed_once_and_settled_by_the_digest(cfg: Config) -> None:
+    """The archive's debt becomes one row, not one row per run, and a digest settles it.
+
+    The debt is deliberately not capture work in flight, so capture keeps following the
+    session; it is work the digest owes, and filing it twice would hand one chunk out to be
+    read twice (BUILD-PLAN M2.7, M2.2's one chunk at a time).
+    """
+    queue.enqueue(cfg, event(session_id="owed"))
+    waiting = queue.pending_jobs(cfg)
+    assert [job.session_id for job in waiting] == ["owed"]
+    queue.owe_digest(cfg, waiting[0])
+
+    assert queue.session_state(cfg, CLAUDE, "owed").digest_due is True
+    assert query(cfg, "SELECT count(*) FROM jobs WHERE status = ?", (queue.PENDING,)) == [(0,)]
+
+    assert queue.redeem_digest_debts(cfg) == 1
+    assert queue.redeem_digest_debts(cfg) == 0, "the same debt filed a second row"
+    assert queue.session_state(cfg, CLAUDE, "owed").digest_due is True, "a row is not a digest"
+
+    claimed = queue.next_job(cfg)
+    assert claimed is not None and claimed.session_id == "owed"
+    queue.complete(cfg, claimed, "entry-9", off_record=False)
+
+    assert queue.session_state(cfg, CLAUDE, "owed").digest_due is False
+
+
+def test_owing_a_digest_to_a_row_another_worker_holds_is_refused(cfg: Config) -> None:
+    """A row some other process is digesting is not the archive's to close.
+
+    Closing it would both owe a digest for text a live digest is reading and move the
+    session's read-at out from under the run that holds the claim (M2.7, DESIGN 8).
+    """
+    queue.enqueue(cfg, event(session_id="held"))
+    held = queue.next_job(cfg)
+    assert held is not None
+
+    with pytest.raises(queue.QueueError, match="no longer waiting"):
+        queue.owe_digest(cfg, held)
+
+    assert queue.session_state(cfg, CLAUDE, "held").digest_due is False
+    assert query(cfg, "SELECT status FROM jobs") == [(queue.RUNNING,)]
+
+
+def test_a_debt_whose_digest_failed_is_filed_again(cfg: Config) -> None:
+    """A debt is cleared by a digest, not by an attempt at one.
+
+    An archived worker that went quiet has no later sweep to bring its chunk back, so a run
+    that gave up on it has to leave the debt owed - or the session's words sit in the archive
+    with nothing left anywhere that remembers a digest is missing (BUILD-PLAN M2.7, M2.1).
+    """
+    queue.enqueue(cfg, event(session_id="dry"))
+    queue.owe_digest(cfg, queue.pending_jobs(cfg)[0])
+    assert queue.redeem_digest_debts(cfg) == 1
+    claimed = queue.next_job(cfg)
+    assert claimed is not None
+
+    queue.fail(cfg, claimed, "the transcript would not parse")
+
+    assert queue.session_state(cfg, CLAUDE, "dry").digest_due is True
+    assert queue.redeem_digest_debts(cfg) == 1
+
+
 def sweep_dirs(monkeypatch, sessions: Path, tmp_path: Path) -> None:
     monkeypatch.setattr(capture, "SESSION_DIRS", {CLAUDE: sessions, PI: tmp_path / "no-pi"})
 

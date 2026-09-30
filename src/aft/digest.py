@@ -336,10 +336,24 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
 def archive_worker_job(config: Config, job: queue.Job) -> bool:
     """Store a worker session in the evidence archive and search index without digesting.
 
-    Returns True if entries were archived, False if excluded, not a worker, or empty.
-    The job watermark is left unmoved so it can be digested when budget allows.
+    Returns True if entries were archived, False if there was nothing new to store. Either
+    way the row closes and the session's digest becomes owed (``queue.owe_digest``): the
+    archive read this transcript through here, so the row is finished work, and what is
+    still missing is a digest - which the debt on the session row remembers, and
+    ``work.run`` collects when the day's budget has room after primaries. The row cannot be
+    left waiting, because capture stops following a session that has a waiting row and the
+    worker's later text would never be stored at all (BUILD-PLAN M2.7, the lead's review of
+    #39). The session's watermark is left unmoved either way, so the digest the debt calls
+    for reads the chunk this run skipped.
+
+    False with no debt is returned only for a row that is not the archive's to handle: one
+    whose session is not a worker's, or whose transcript the adapter has not written yet -
+    the sweep files that path when the transcript appears, and the row is digested or
+    archived then. An excluded session's row is deleted rather than closed, because
+    exclusion says it leaves no queue row at all.
     """
     if is_excluded(job.cwd, config):
+        queue.drop_job(config, job)
         return False
     if not is_worker(job.cwd, config):
         return False
@@ -347,23 +361,23 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
         return False
     vault.require(config)
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
-    if not read:
-        return False
-    kept, _ = filtermod.filter_entries(read, config, job.off_record)
-    if not kept:
-        return False
-    registry = registrymod.Registry.load(config.registry_path)
-    try:
-        resolution = keys.resolve(job.cwd, registry, config.host)
-        project_id = resolution.project.id if resolution.project else None
-    except GitError:
-        # Archiving files no page, so the project it would resolve to is a label rather
-        # than a requirement: a directory that has gone away still gets its words stored.
-        # Anything else the resolver raises is a bug or a host failure, and travels up.
-        project_id = None
-    evidence.store(config, job.agent, job.session_id, project_id, kept)
-    index.update(config)
-    return True
+    kept, _ = filtermod.filter_entries(read, config, job.off_record) if read else ([], False)
+    archived = False
+    if kept:
+        registry = registrymod.Registry.load(config.registry_path)
+        try:
+            resolution = keys.resolve(job.cwd, registry, config.host)
+            project_id = resolution.project.id if resolution.project else None
+        except GitError:
+            # Archiving files no page, so the project it would resolve to is a label rather
+            # than a requirement: a directory that has gone away still gets its words stored.
+            # Anything else the resolver raises is a bug or a host failure, and travels up.
+            project_id = None
+        evidence.store(config, job.agent, job.session_id, project_id, kept)
+        index.update(config)
+        archived = True
+    queue.owe_digest(config, job)
+    return archived
 
 
 def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:

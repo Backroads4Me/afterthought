@@ -170,6 +170,11 @@ def run(config: Config, now: datetime | None = None) -> Report:
             if stopped or model.tokens_used_today(config, moment) >= budget:
                 stopped = _archive_workers(config, failures) or stopped or STOP_BUDGET
             else:
+                # A worker session the archive stored on an earlier run is owed a digest, and
+                # this is the moment the design gives it one: the primaries are done and the
+                # day's budget still has room. Filing those debts as rows is what lets the
+                # loop below claim them like any other work (BUILD-PLAN M2.7).
+                queue.redeem_digest_debts(config)
                 while True:
                     if model.tokens_used_today(config, moment) >= budget:
                         stopped = _archive_workers(config, failures) or STOP_BUDGET
