@@ -383,7 +383,7 @@ def test_stated_on_an_assistants_own_entry_is_dropped(session: Session):
     assert wrote.facts == ()
     assert (
         frontmatter(session.cfg, wrote.path)["aft"]["dropped"][0]["reason"]
-        == "[stated] cites entry e2, which is not one of Ted's turns"
+        == "[stated] cites entry e2, which is not one of the user's turns"
     )
 
 

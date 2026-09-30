@@ -47,7 +47,8 @@ def test_unit_file_contents(tmp_path: Path, cfg: Config) -> None:
     service_text = service_file.read_text(encoding="utf-8")
     assert "[Unit]" in service_text
     assert "Description=Afterthought background work" in service_text
-    assert "Documentation=https://github.com/Backroads4Me/afterthought" in service_text
+    # The unit lands in the home of whoever runs aft, so it names no account or repository.
+    assert "Documentation=" not in service_text
     assert "[Service]" in service_text
     assert "Type=oneshot" in service_text
     assert "EnvironmentFile=-%h/.afterthought/env" in service_text
