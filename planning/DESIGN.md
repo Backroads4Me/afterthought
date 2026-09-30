@@ -745,7 +745,10 @@ explains how to do but never does on its own.
 ## 13. The model and its load
 
 - One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`, such as a local vLLM
-  server with an open-weight model. A hosted endpoint works the same way. An endpoint that
+  server with an open-weight model. A hosted endpoint works the same way. What one endpoint
+  needs and another does not, such as telling a reasoning model not to think, goes in the
+  optional `model.extra_body` table, whose fields are added to every request; it cannot
+  override the fields aft sets itself. An endpoint that
   needs an API key, local or hosted, gets it from an environment variable: `config.toml` names
   the variable in `model.api_key_env`, never the key itself, and the key is sent as a bearer
   token. An endpoint without a key needs neither. The key never appears in logs, reports or
