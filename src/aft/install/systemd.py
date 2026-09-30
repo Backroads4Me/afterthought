@@ -82,7 +82,6 @@ def service_content(aft_path: Path | str | None = None) -> str:
     return f"""\
 [Unit]
 Description=Afterthought background work
-Documentation=https://github.com/Backroads4Me/afterthought
 
 [Service]
 Type=oneshot
@@ -97,7 +96,6 @@ def timer_content(interval_minutes: int = 30) -> str:
     return f"""\
 [Unit]
 Description=Afterthought background work timer
-Documentation=https://github.com/Backroads4Me/afterthought
 
 [Timer]
 OnBootSec=5min

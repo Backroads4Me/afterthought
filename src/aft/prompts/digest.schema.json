@@ -68,7 +68,7 @@
           },
           "scope": {
             "type": "string",
-            "description": "Global for Ted's preferences and environment; project for everything else.",
+            "description": "Global for the user's preferences and environment; project for everything else.",
             "enum": ["project", "global"]
           }
         },
