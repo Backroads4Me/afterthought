@@ -578,6 +578,15 @@ def run_project(
                                     path=rel_target,
                                 )
                             )
+                        if isinstance(outcome, rules.Downgrade):
+                            report.downgrades.append(
+                                DowngradeFact(
+                                    statement=new_fact.statement,
+                                    to_action=action,
+                                    rule=outcome.rule,
+                                    reason=proposal.decision.reason,
+                                )
+                            )
 
                     record_write(target_file)
                     target_file.write_text(doc.render(), encoding="utf-8")
