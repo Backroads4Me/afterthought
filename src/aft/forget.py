@@ -19,10 +19,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from aft import evidence, index, lint, page, pagewrite, queue, redact, vault
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
+from aft.library import propose
 
 FORGOTTEN_MARKER = "[forgotten]"
 
@@ -60,6 +62,7 @@ class PatternForgetReport:
     pages_redacted: tuple[str, ...] = ()
     pages_refused: tuple[str, ...] = ()
     vault_committed: bool = False
+    verified_quotes_redacted: int = 0
 
 
 def forget_session(config: Config, session_id: str) -> SessionForgetReport:
@@ -92,6 +95,10 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         if digests_dir.exists():
             for p in list(digests_dir.rglob("*.md")):
                 if _is_session_digest(p, session_id):
+                    # What the page carried goes with it: a dream report quotes a
+                    # digest's facts, including the ones the verifier refused, and the
+                    # page is the only place those sentences are written down.
+                    words.extend(_digest_words(p))
                     rel = p.relative_to(config.vault).as_posix()
                     p.unlink()
                     digests_removed.append(rel)
@@ -212,6 +219,37 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
     )
 
 
+def _digest_words(path: Path) -> list[str]:
+    """Every sentence a session digest page carries, read before the page is deleted.
+
+    A digest records what it proposed in full: the kept facts as lines and again in
+    ``aft.facts``, and the facts the verifier refused in ``aft.dropped`` with the reason each
+    one failed on. A dream report writes a kept fact's statement above its quote and names a
+    refused fact's statement in its Rejected section, so a sentence the model wrote and the
+    rules refused lives only on this page and in that report: deleting the page first would
+    leave the report quoting words no archive row and no page can point at any more. A page
+    that cannot be read contributes nothing, and is deleted all the same.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    words: list[str] = []
+    frontmatter, _, _, error = page.split_frontmatter(text)
+    for source in (frontmatter or {}).get("sources") or []:
+        if isinstance(source, dict):
+            words.extend(str(source[key]) for key in ("quote", "title") if source.get(key))
+    aft = (frontmatter or {}).get("aft")
+    if isinstance(aft, dict):
+        for key in ("facts", "dropped"):
+            for fact in aft.get(key) or []:
+                if isinstance(fact, dict) and fact.get("statement"):
+                    words.append(str(fact["statement"]))
+    if error is None:
+        words.extend(fact.statement for fact in page.parse(text, path).facts)
+    return [word for word in words if word.strip()]
+
+
 def _scrub_report_pages(config: Config, words: list[str]) -> list[str]:
     """Replace the session's words in every page under ``reports/``, and name what changed.
 
@@ -255,16 +293,23 @@ def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
 
     The archive's own rewrite cleans its freed pages and log; the vault's pages are committed
     so the working tree holds nothing either, and the index is rebuilt over both. The vault's
-    git history is beyond this, as it is for a forgotten session.
+    git history is beyond this, as it is for a forgotten session, so the commit says only what
+    happened: a redaction pattern is often the secret it removes, and this command writes it to
+    no page, commit or config file. The record of imported library quotes takes the same
+    replacement, because an imported quote is verified against the page citing it and both
+    sides have to move together to keep verifying.
     """
     compiled = redact.compile_patterns([pattern])[0]
     count = evidence.redact_pattern(config, compiled)
     pages, refused = _redact_pages(config, compiled)
+    quotes_redacted = propose.redact_verified_quotes(config.home, compiled)
     index.update(config)
     committed = False
     if pages:
-        committed = vault.commit(config.vault, pages, f"aft: forget pattern {pattern}")
-    return PatternForgetReport(count, tuple(pages), tuple(refused), committed)
+        # A pattern is often the secret itself, so the commit says what happened and names
+        # nothing: a forgetting cannot rewrite git history, so it writes none of it either.
+        committed = vault.commit(config.vault, pages, "aft: forget pattern")
+    return PatternForgetReport(count, tuple(pages), tuple(refused), committed, quotes_redacted)
 
 
 def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str], list[str]]:

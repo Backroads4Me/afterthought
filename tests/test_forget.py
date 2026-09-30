@@ -35,6 +35,7 @@ from aft import config as configmod
 from aft.config import Config
 from aft.events import SESSION_END, SessionEvent
 from aft.forget import FORGOTTEN_MARKER
+from aft.library import propose
 from aft.readers import CLAUDE, PI, Entry
 from conftest import make_repo, run_git
 from fakes.model_server import FakeEndpoint
@@ -1484,3 +1485,149 @@ def test_a_redigest_after_the_day_s_budget_is_spent_asks_nothing_of_the_model(
 
     assert asked == 0, "a rebuild spent past the day's token budget"
     assert digest_pages(cfg) == []
+
+
+# --------------------------------------- what a redaction writes down, and what a report quotes
+
+
+IMPORT_RESOURCE = "aft://library/claude-memory/widget/AGENTS.md"
+IMPORT_QUOTE = f"rotate the key {SECRET} before friday"
+IMPORT_QUOTE_REDACTED = "rotate the key [redacted] before friday"
+
+REJECTED_STATEMENT = "Rotate the vault key by hand before every release."
+KEPT_STATEMENT = "The hook writes one row per session end."
+
+
+def session_digest(project_id: str) -> str:
+    """A digest page for the forgotten session: one kept fact and one the rules refused.
+
+    Neither statement is in the archive. A digest's sentences are the model's own, and the
+    refused one reaches no memory page, so this page is the only place it is written down.
+    """
+    return (
+        "---\n"
+        "type: Session Digest\n"
+        "title: Widget session 2026-10-01\n"
+        "description: A session about the widget hook.\n"
+        "sources:\n"
+        "  - id: s1\n"
+        f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+        f'    quote: "{FORGOTTEN_PHRASE}"\n'
+        "aft:\n"
+        f"  project: {project_id}\n"
+        "  facts:\n"
+        f"    - statement: {KEPT_STATEMENT}\n"
+        "      kind: decision\n"
+        "      source: stated\n"
+        "      date: '2026-10-01'\n"
+        "      ref: s1\n"
+        "  dropped:\n"
+        f"    - statement: {REJECTED_STATEMENT}\n"
+        "      kind: fact\n"
+        "      source: inferred\n"
+        "      entry: e1\n"
+        "      reason: the quote is not found in entry e1\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        f"- {KEPT_STATEMENT} [stated] 2026-10-01 [^s1]\n"
+    )
+
+
+def digest_quoting_report() -> str:
+    """A dream report that quotes the digest's kept line and names the fact it refused."""
+    return f"""---
+type: Dream Report
+title: "2026-10-01"
+---
+
+# widget 12:00:00Z
+
+## Added and Confirmed
+
+### Added
+
+- {KEPT_STATEMENT} [stated] (2026-10-01)
+  Quote: "{FORGOTTEN_PHRASE}"
+
+## Rejected
+
+- Proposed add on "{REJECTED_STATEMENT}": refused by R1 (the quote is not found in entry e1)
+"""
+
+
+def test_forget_session_scrubs_the_digest_sentences_a_report_quoted(initialized: Config):
+    """A dream report quotes the session's digest, including the facts the rules refused and
+    the statements that never reached a memory page, so a forgetting reads those off the digest
+    page before deleting it and scrubs them out of the report (DESIGN 12)."""
+    cfg = initialized
+    digest_rel = f"digests/widget/2026/10/2026-10-01-claude-{FORGOTTEN_SESSION}.md"
+    project_id = widget_project(cfg)
+    evidence.store(
+        cfg,
+        CLAUDE,
+        FORGOTTEN_SESSION,
+        project_id,
+        [Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)],
+    )
+    create_curated_page(
+        cfg.vault,
+        digest_rel,
+        session_digest(project_id),
+    )
+    report = report_page(cfg, "reports/2026/10/2026-10-01.md", digest_quoting_report())
+    assert REJECTED_STATEMENT in report.read_text(encoding="utf-8")
+
+    result = forget.forget_session(cfg, FORGOTTEN_SESSION)
+
+    text = report.read_text(encoding="utf-8")
+    assert REJECTED_STATEMENT not in text, "a refused digest fact is still quoted in the report"
+    assert KEPT_STATEMENT not in text, "a digest statement that never reached a page remains"
+    assert FORGOTTEN_PHRASE not in text
+    assert text.count(FORGOTTEN_MARKER) == 3, text
+    # The report's own reading of the refusal is the person's, and stays.
+    assert "refused by R1 (the quote is not found in entry e1)" in text
+    assert not (cfg.vault / digest_rel).exists()
+    assert "reports/2026/10/2026-10-01.md" in result.reports_scrubbed
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+
+
+def test_forget_pattern_commits_the_redaction_without_naming_the_pattern(initialized: Config):
+    """A redaction pattern is often the secret it removes, so the commit that carries the
+    redacted pages says what happened and names nothing: a forgetting cannot rewrite git
+    history, and writes none of the pattern into it either (DESIGN 12)."""
+    cfg = initialized
+    project_id = widget_project(cfg)
+    create_curated_page(cfg.vault, "projects/widget/overview.md", pattern_page(project_id))
+
+    assert cli.main(["forget", "pattern", SECRET_PATTERN]) == 0
+
+    history = run_git(["log", "--format=%B"], cfg.vault)
+    assert run_git(["log", "-1", "--format=%s"], cfg.vault) == "aft: forget pattern"
+    assert SECRET not in history, "the commit message carries the secret"
+    assert SECRET_PATTERN not in history, "the commit message carries the pattern"
+
+
+def test_forget_pattern_redacts_the_imported_quote_record_that_still_verifies(
+    initialized: Config, capsys
+):
+    """An imported quote lives in the library record as well as on the page quoting it, so the
+    redaction moves both: the secret leaves the record, and the redacted quote a page now shows
+    still verifies against it (DESIGN 12)."""
+    cfg = initialized
+    propose.record_verified_quote(
+        cfg.home, IMPORT_RESOURCE, IMPORT_QUOTE, "sha256:0f9e", "2026-10-01T00:00:00Z"
+    )
+    record = cfg.home / "library" / propose.VERIFIED_QUOTES_FILE
+    assert propose.is_verified_import_quote(cfg.home, IMPORT_RESOURCE, IMPORT_QUOTE)
+
+    assert cli.main(["forget", "pattern", SECRET_PATTERN]) == 0
+    out = capsys.readouterr().out
+
+    assert SECRET not in record.read_text(encoding="utf-8"), "the record still holds the secret"
+    assert "imported quote(s)" in out
+    assert propose.is_verified_import_quote(cfg.home, IMPORT_RESOURCE, IMPORT_QUOTE_REDACTED), (
+        "the redacted quote no longer verifies against the redacted record"
+    )
+    assert not propose.is_verified_import_quote(cfg.home, IMPORT_RESOURCE, IMPORT_QUOTE), (
+        "the unredacted words are still accepted as a verified quote"
+    )

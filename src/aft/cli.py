@@ -522,6 +522,12 @@ def cmd_forget_pattern(args) -> int:
         )
         for rel in report.pages_refused:
             print(f"  {rel}")
+    if report.verified_quotes_redacted:
+        print(
+            f"redacted {report.verified_quotes_redacted} imported quote(s)"
+            " in library/verified_quotes.json"
+        )
+
     existing = list(config.settings.capture.redact_patterns)
     if args.pattern not in existing:
         existing.append(args.pattern)
