@@ -169,8 +169,16 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_read)
 
     p = sub.add_parser("trace", help="trace a fact quote back to session evidence")
-    p.add_argument("page", help="path to the page")
-    p.add_argument("source_id", nargs="?", default=None, help="source id, e.g. s1 or [^s1]")
+    p.add_argument(
+        "page",
+        help="path to the page, or an evidence hit's path (aft://session/<agent>/<id>#<entry>)",
+    )
+    p.add_argument(
+        "source_id",
+        nargs="?",
+        default=None,
+        help="source id, e.g. s1 or [^s1]; with an evidence path, the entry id",
+    )
     p.set_defaults(handler=cmd_trace)
 
     p = sub.add_parser("eval", help="check memory against a golden set of known answers")

@@ -481,7 +481,7 @@ index matches the original (DESIGN 15, M3).
 - **Files:** `src/aft/search.py`, `src/aft/cli.py` (`aft search`, `aft read`,
   `aft trace`), `tests/test_search.py`.
 - **Behavior:** `aft search "<words>" [--project <slug>] [--archive] [--reports]
-  [--json] [--limit 8]` prints one line per hit: path, one-line description, and a
+  [--json] [--limit 8]` prints one line per hit: path, collection, heading, one-line description, and a
   snippet with the match. It defaults to the current directory's project plus global
   pages, and `--all` searches every project. `aft read <path> --level outline|abstract|full`
   prints headings only, the description plus the active facts, or the whole file.

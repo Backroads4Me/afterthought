@@ -989,13 +989,12 @@ def test_withdraw_takes_a_stale_line_out_of_memory(initialized, doc):
     assert states(result, "State") == [("The GPU host runs vLLM.", page.WITHDRAWN)]
 
 
-def test_withdraw_refuses(initialized, doc):
-    before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="cannot be struck through"):
-        doc.withdraw(doc.fact("Long sessions need checkpoints."), "2026-10-04")
-    with pytest.raises(pagewrite.WriteError, match="YYYY-MM-DD"):
-        doc.withdraw(doc.fact("The GPU host runs vLLM."), "2026-13-01")
-    assert doc.render() == before
+def test_withdraw_takes_a_superseded_line_out_of_memory(initialized, doc):
+    """A struck line whose evidence is being forgotten is withdrawn too. Its ``superseded`` mark
+    says a newer line replaced it, and that line stays above it on its own evidence; what is
+    going is the old line's support, and DESIGN 12's answer to a memory line with none left is
+    withdrawn - which is also what gets it out of the archive collection, built of superseded
+    lines as that is (DESIGN 10)."""
     doc.supersede(
         doc.fact("The index is plain SQLite."),
         "The index is FTS5.",
@@ -1003,9 +1002,30 @@ def test_withdraw_refuses(initialized, doc):
         "2026-10-04",
         ("s2",),
     )
+    old = doc.fact("The index is plain SQLite.")
+    assert old.state == page.SUPERSEDED
+    assert doc.withdraw(old, "2026-10-05") is True
+    result = written(initialized, doc)
+    assert states(result, "Decisions") == [
+        ("The index is FTS5.", page.ACTIVE),
+        ("The index is plain SQLite.", page.WITHDRAWN),
+    ]
+    (struck,) = [line for line in doc.render().splitlines() if "plain SQLite" in line]
+    assert struck == (
+        "- ~~The index is plain SQLite.~~ [stated] 2026-09-20 [^s1] withdrawn 2026-10-05"
+    )
+    # A line already withdrawn keeps the date it was withdrawn on rather than taking a new one.
+    after = doc.render()
+    assert doc.withdraw(doc.fact("The index is plain SQLite."), "2026-10-09") is False
+    assert doc.render() == after
+
+
+def test_withdraw_refuses(initialized, doc):
     before = doc.render()
-    with pytest.raises(pagewrite.WriteError, match="already out of memory"):
-        doc.withdraw(doc.fact("The index is plain SQLite."), "2026-10-05")
+    with pytest.raises(pagewrite.WriteError, match="cannot be struck through"):
+        doc.withdraw(doc.fact("Long sessions need checkpoints."), "2026-10-04")
+    with pytest.raises(pagewrite.WriteError, match="YYYY-MM-DD"):
+        doc.withdraw(doc.fact("The GPU host runs vLLM."), "2026-13-01")
     assert doc.render() == before
     doc = make(initialized, PAGE.replace(f"{STATE}\n", f"{STATE}\n\n{NOTE}\n"))
     before = doc.render()

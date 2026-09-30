@@ -7,11 +7,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from aft import evidence, index, search
+from aft import evidence, forget, index, search
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
 from aft.registry import Project, Registry
+from conftest import run_git
 
 WIDGET_OVERVIEW = """---
 type: Project
@@ -433,14 +434,22 @@ def test_search_json_and_limit(populated_vault: Config, capsys):
 
 
 def test_search_cli_plain_text(populated_vault: Config, capsys):
-    """Test CLI plain text output format is tab-separated single lines."""
+    """The plain-text line names where the hit came from as well as what matched: document,
+    collection, section, description, snippet, tab-separated on one line (DESIGN 10 asks a result
+    to name its document and its section, and a hit from the archive reads differently once the
+    line says which collection it came from)."""
     ret = main(["search", "titanium", "--all", "--limit", "5"])
     assert ret == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert len(lines) >= 1
     for line in lines:
-        parts = line.split("\t")
-        assert len(parts) == 3
+        assert len(line.split("\t")) == 5
+    path, collection, heading, description, snippet = lines[0].split("\t")
+    assert path == "projects/widget/assembly.md"
+    assert collection == "pages"
+    assert heading == "State"
+    assert description == "Procedures for assembling the widget."
+    assert "titanium" in snippet.lower()
 
 
 def test_read_outline(populated_vault: Config):
@@ -700,3 +709,220 @@ def test_archived_resolved_notes_are_searchable_with_archive_flag(
     assert main(["search", "offline portability"]) == 0
     out_default = capsys.readouterr().out
     assert "archive/projects/widget/overview.md" not in out_default
+
+
+# ------------------------------------------- scoping: an unfiled row is no project's memory
+
+UNFILED_DIGEST = """---
+type: Session Digest
+title: Scratch session
+description: Notes taken in a directory that names no project.
+---
+
+## Summary
+
+The scratch build was held together with zirconium pins.
+"""
+
+
+def plant_unfiled(cfg: Config) -> None:
+    """Memory the index holds with no project on its rows: an archived entry whose session resolved
+    to no project (DESIGN 7 step 4), and a digest filed under a slug no registry answers for."""
+    evidence.store(
+        cfg,
+        "pi",
+        "s-unreg",
+        None,
+        [Entry("e-7", datetime(2026, 9, 28, 12, 0, tzinfo=UTC), "user", "zirconium pins", False)],
+    )
+    path = cfg.vault / "digests/scratchdir/2026/09/2026-09-28-pi-s-scratch.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(UNFILED_DIGEST, encoding="utf-8")
+    index.update(cfg)
+
+
+def test_a_project_search_leaves_out_memory_that_names_no_project(populated_vault: Config) -> None:
+    """`aft search` defaults to the current project plus the global pages (BUILD-PLAN M3.2), and
+    only a page row's empty project means global (DESIGN 6). An entry whose session resolved to no
+    project and a digest under a slug the registry has never heard of are text that was never
+    filed, so neither belongs in widget's results - while ``--all`` still reaches them."""
+    cfg = populated_vault
+    plant_unfiled(cfg)
+
+    everywhere = {hit.path for hit in search.search(cfg, "zirconium", all_projects=True, limit=20)}
+    assert "digests/scratchdir/2026/09/2026-09-28-pi-s-scratch.md" in everywhere
+    assert "aft://session/pi/s-unreg#e-7" in everywhere, "both unfiled rows are indexed"
+
+    assert search.search(cfg, "zirconium", project="widget") == []
+
+
+def test_search_from_outside_every_project_reaches_only_the_shared_pages(
+    populated_vault: Config, monkeypatch
+) -> None:
+    """From a working directory inside no project, the query is the person's whole memory minus
+    what belongs to somebody's project: the shared pages answer, and unfiled conversation and
+    digests do not sneak in because they carry no project either."""
+    cfg = populated_vault
+    plant_unfiled(cfg)
+    outside = cfg.vault.parent / "unregistered"
+    outside.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(outside)
+
+    assert [hit.path for hit in search.search(cfg, "dark theme")] == ["global/preferences.md"]
+    assert search.search(cfg, "zirconium") == []
+
+
+def test_a_known_answer_pass_at_the_default_scope_reaches_every_collection(
+    populated_vault: Config,
+) -> None:
+    """The known-answer set above runs with ``--all``, so it never expected a hit from the
+    evidence archive. This is the same promise at the default scope: the project's curated line and
+    the archived entry it quotes both answer, its digest answers a query about what it recorded,
+    and no row of the other project comes back."""
+    cfg = populated_vault
+    paths = {hit.path for hit in search.search(cfg, "plain SQLite storage", project="widget")}
+
+    assert "projects/widget/overview.md" in paths, "the curated line"
+    assert "aft://session/claude/s-widget-1#e-1" in paths, "the archived entry itself"
+    assert not any(path.startswith(("projects/gadget", "digests/gadget")) for path in paths)
+
+    digest_paths = {hit.path for hit in search.search(cfg, "prototype", project="widget")}
+    assert "digests/widget/2026/09/2026-09-28-claude-s-widget-1.md" in digest_paths, "the digest"
+
+
+# ------------------------------------------- a hit says where it came from
+
+
+def test_an_evidence_hit_names_its_entry_so_a_trace_opens_it(
+    populated_vault: Config, capsys
+) -> None:
+    """An evidence hit used to print the session's resource and nothing else, which `aft read`
+    refuses and `aft trace` cannot use: the hit led nowhere. The row is one archived entry, so the
+    path names that entry, and DESIGN 10's `aft trace` opens the entries around it straight from
+    the path a search printed."""
+    hits = search.search(populated_vault, "debugging SPI bus", all_projects=True, limit=20)
+    paths = {hit.path for hit in hits if hit.collection == "evidence"}
+    assert "aft://session/claude/s-gadget-1#e-0" in paths, "the hit names the entry it matched"
+
+    assert main(["trace", "aft://session/claude/s-gadget-1#e-0"]) == 0
+    out = capsys.readouterr().out
+    assert "[e-0] USER" in out and "debugging SPI bus" in out
+    assert "[e-1] USER" in out, "the trace shows the entries around the hit"
+
+    # The two-argument form, with the session and the entry named apart, works the same way.
+    assert main(["trace", "aft://session/claude/s-gadget-1", "e-0"]) == 0
+    assert "debugging SPI bus" in capsys.readouterr().out
+
+
+def test_json_hits_carry_their_collection_and_section(populated_vault: Config, capsys) -> None:
+    """The machine-readable hit answers the same question the plain-text line does: which
+    collection, and which section of it (DESIGN 10 names a library result by its page or section,
+    and there is no reason to make a person read the page to learn where a hit came from)."""
+    assert main(["search", "titanium", "--all", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    (first,) = [hit for hit in data if hit["path"] == "projects/widget/assembly.md"]
+    assert first["collection"] == "pages"
+    assert first["heading"] == "State"
+
+
+# ------------------------------------------- the abstract carries what the block injects
+
+CONFLICTED_PAGE = """---
+type: Project
+title: Widget Materials
+description: What the widget is made of.
+sources:
+  - id: s1
+    resource: aft://session/claude/s-widget-1#e-1
+    quote: "we will use plain SQLite storage"
+aft:
+  project: p_widget
+---
+
+# Widget Materials
+
+## Facts
+
+- The flange tolerance is 50 microns. [observed] 2026-09-22 [^s1]
+
+- Ship the flange in titanium. [stated] 2026-09-23 [^s1]
+
+> [!conflict] 2026-09-24
+> The vendor's sheet calls for bronze.
+
+- Ask the vendor for the bolt torque. [stated] 2026-09-23 [^s1]
+
+> [!question] 2026-09-24
+> What torque does the vendor rate the bolt at?
+"""
+
+
+def test_read_abstract_keeps_the_disputed_and_waiting_lines(
+    populated_vault: Config,
+) -> None:
+    """DESIGN 6 makes a conflict and a question an active line with a note beside it, and
+    `aft inject` shows all three to a new session. An abstract that kept only the unmarked lines
+    dropped the two a person most needs before acting on the page - and kept each line's mark, so
+    a disputed line still reads as disputed."""
+    populated_vault.vault.joinpath("projects/widget/materials.md").write_text(
+        CONFLICTED_PAGE, encoding="utf-8"
+    )
+
+    abstract = search.read_page(populated_vault, "projects/widget/materials.md", level="abstract")
+
+    assert "- The flange tolerance is 50 microns." in abstract
+    assert "- Ship the flange in titanium. (disputed)" in abstract
+    assert "- Ask the vendor for the bolt torque. (waiting on the user)" in abstract
+
+
+# ------------------------------------------- forgotten and purged memory answers nothing
+
+
+def test_search_read_and_trace_answer_nothing_once_a_session_is_forgotten(
+    populated_vault: Config,
+) -> None:
+    """DESIGN 12 promises forgotten content leaves everything afterthought controls, and the three
+    ways back into memory are the three that must go quiet: `aft search` answers no collection,
+    `aft read` has no digest left to open, and `aft trace` has no context to show."""
+    cfg = populated_vault
+    assert "we will use plain SQLite storage" in search.trace(
+        cfg, "projects/widget/overview.md", "s1"
+    )
+    assert search.search(cfg, "plain SQLite storage", all_projects=True, limit=20)
+    # A forget commits what it changed, and the fixture wrote its pages straight to the working
+    # tree: commit them first, as a finished run would have left them.
+    run_git(["add", "-A"], cfg.vault)
+    run_git(["commit", "-q", "-m", "fixture memory"], cfg.vault)
+
+    forget.forget_session(cfg, "s-widget-1")
+
+    assert search.search(cfg, "plain SQLite storage", all_projects=True, limit=20) == []
+    with pytest.raises(search.SearchError):
+        search.read_page(cfg, "digests/widget/2026/09/2026-09-28-claude-s-widget-1.md")
+    assert search.trace(cfg, "aft://session/claude/s-widget-1", "e-1") == search.EXPIRED
+    assert "we will use plain SQLite storage" not in search.trace(
+        cfg, "projects/widget/overview.md", "s1"
+    )
+
+
+def test_search_and_trace_answer_nothing_once_a_session_is_purged(
+    populated_vault: Config,
+) -> None:
+    """The retention window expires archived conversation with no `aft forget` behind it (DESIGN 8),
+    and the index follows the archive out: the words answer no search, and a trace of a quote that
+    rested on them says what DESIGN 10 has it say."""
+    cfg = populated_vault
+    long_ago = datetime(2026, 1, 1, tzinfo=UTC)
+    evidence.store(
+        cfg, "pi", "s-old", "p_widget", [Entry("e-1", long_ago, "user", "nitrile gaskets", False)]
+    )
+    index.update(cfg)
+    assert "aft://session/pi/s-old#e-1" in {
+        hit.path for hit in search.search(cfg, "nitrile", all_projects=True, limit=20)
+    }
+
+    assert evidence.purge(cfg, datetime(2026, 9, 28, 12, 0, tzinfo=UTC)) == 1
+    index.update(cfg)
+
+    assert search.search(cfg, "nitrile", all_projects=True, limit=20) == []
+    assert search.trace(cfg, "aft://session/pi/s-old", "e-1") == search.EXPIRED
