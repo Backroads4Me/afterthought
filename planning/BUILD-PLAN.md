@@ -375,7 +375,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Prompt** (`src/aft/prompts/digest.md`):
 
 ```text
-You read one part of a working session between Ted and an AI coding agent, and you
+You read one part of a working session between the user and an AI coding agent, and you
 extract what a future session would need to know. You are building long-term memory, so
 precision matters more than coverage. Return nothing rather than something uncertain.
 
@@ -389,16 +389,16 @@ For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
 - source:
-  - stated: Ted said it and committed to it.
+  - stated: the user said it and committed to it.
   - observed: seen in a file, a command's output, a log, or an error.
   - inferred: your own conclusion from the session.
   - suggested: an idea, a question, or a tentative remark nobody committed to.
-  A tentative remark from Ted ("I think I'll switch to X", "maybe we should") is suggested,
+  A tentative remark from the user ("I think I'll switch to X", "maybe we should") is suggested,
   not stated.
 - quote: copy the words that support the fact exactly as they appear in one entry, at
   most 300 characters. Do not paraphrase or join words from different entries.
 - entry: the id of the entry the quote comes from.
-- scope: global only for Ted's preferences and environment that apply to every project;
+- scope: global only for the user's preferences and environment that apply to every project;
   otherwise project.
 
 Also write:
@@ -658,16 +658,19 @@ set; tuning of caps, prompts and budgets comes from what the reports and `aft ev
 
 ### M7 Library
 
-Done when: the RV-C and Victron collections import with every file accounted for, every
-reference quote verified, and no instruction file, tooling or git history retained; a
-false claim planted in an imported index is rejected; known-answer queries about the RV-C
+Done when: the RV-C collection (imported as `authoritative`) and the Victron collection
+(imported as `reference`) import with every file accounted for, every reference quote
+verified, and no instruction file, tooling or git history retained; a false claim planted
+in an imported index is rejected; facts from the RV-C specification enter as `[observed]`
+and facts from the Victron collection as candidates; known-answer queries about the RV-C
 specification return the right document and page (DESIGN 15, M7).
 
 - **M7.1 Survey:** `aft library survey <path>`: file list with type, size, hash; duplicates;
   suggested derived pairs; instruction files and tooling flagged; prints the procedure.
   Changes nothing.
 - **M7.2 Manifest and validator:** the manifest format (YAML: `name`, `title`,
-  `description`, `projects`, and `files` mapping each surveyed path to a role and
+  `description`, `projects`, `authority` (`authoritative` or `reference`, default
+  `reference`; see F5), and `files` mapping each surveyed path to a role and
   relations) and a validator enforcing DESIGN 11: every file has one role, relations point
   inside the collection, instruction files and tooling are `exclude`.
 - **M7.3 Import:** copy files, extract text (`pdftotext -layout` per page; markdown and
@@ -682,7 +685,9 @@ specification return the right document and page (DESIGN 15, M7).
   installed by `aft install claude` and `aft install pi`. It drives only the `aft library`
   commands.
 - **M7.6 Facts from notes and instruction files:** the agent proposes facts with quotes;
-  each is verified against its file and enters the dream as a candidate digest.
+  each is verified against its file and enters the dream as a digest, tagged by the
+  collection's authority (DESIGN 11, Authority; F5). A library quote is never the user's
+  own words, so nothing imported is `[stated]`.
 
 ### Follow-ups from rulings
 
@@ -703,6 +708,22 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   M4.5 uses it when an anchor's words reappear; the line keeps its date. Trust decisions
   such as whether a replacement is newer live in `aft.dream.rules`; the writer only writes. Test: a cleared line parses as active and
   lints.
+- **F5 Collection authority** (after M7.6). DESIGN 11, Authority. The manifest gains
+  `authority: authoritative | reference` (default `reference`), validated by M7.2's
+  validator. The import skill asks the user for it and records the answer; the agent never
+  chooses it. `aft library propose` tags facts from an authoritative collection's
+  `original`, `derived` and `errata` files `[observed]`, and every other imported fact
+  `[inferred]` or `[suggested]`; `[stated]` is always refused. The import report and
+  commit message name the authority. Tests: an authoritative collection's document fact
+  enters as `[observed]` and, with no conflict, goes active in one dream run; the same fact
+  from a reference collection stays a candidate; a notes-file fact in an authoritative
+  collection stays a candidate; an authoritative fact contradicting a stated `decision`
+  becomes `needs you`; a manifest without `authority` imports as `reference`.
+- **F6 Shipped text names no one** (any time). Prompts, JSON schemas, skills, CLI output and
+  code comments say "the user" (or "you" in user-facing text), never a person's name, and
+  use no example drawn from one user's projects. Covers `src/aft/prompts/digest.md` and
+  `digest.schema.json` (a prompt change, so it gets its review checkpoint), and comments in
+  `inject.py`, `digest.py`, `filter.py` and `redact.py`.
 
 ## 6. Ted's checklists at milestone ends
 
@@ -728,6 +749,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
 
 1. Read the first week of dream reports and `needs-you.md`.
 2. Revert one dream commit with `git revert` to confirm it works.
+
+### 6.4 M7
+
+1. Import the RV-C documentation as `authoritative` and the Victron documentation as
+   `reference`, through the import skill.
+2. Check the import reports, then run known-answer searches: RV-C DGN definitions and their
+   pages, and a Victron device setting.
 
 ## 7. Order and parallel work
 
