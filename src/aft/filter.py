@@ -3,7 +3,7 @@
 Four steps, and the order is the behavior:
 
 1. drop the off-the-record spans (DESIGN 12), decided on each prompt's whole text;
-2. keep the text the design keeps - Ted's prompts and the assistant's answers, and from a
+2. keep the text the design keeps - the user's prompts and the assistant's answers, and from a
    tool entry the agent flagged as an error its head of 500 characters plus the lines
    below it that report something breaking or name a ``path:line``, or from any other tool
    entry only the lines that report something breaking or name a ``path:line``;
@@ -121,7 +121,7 @@ def filter_entries(
     module docstring for why that order is the behavior. Entries keep their id, time, role
     and error flag; only their text changes.
 
-    Ted's own redaction patterns are compiled here, before the first entry is looked at, so
+    The user's own redaction patterns are compiled here, before the first entry is looked at, so
     a pattern that cannot be applied is refused before anything has been dropped rather than
     halfway through a capture.
     """
@@ -141,7 +141,7 @@ def _outside_spans(entries: Iterable[Entry], off_record: bool) -> tuple[list[Ent
 
     A prompt beginning with an off marker starts a span and one beginning with an on
     marker ends it; both markers are dropped along with everything between them. Only a
-    prompt carries a marker: what the assistant says is not Ted speaking for himself
+    prompt carries a marker: what the assistant says is not the user speaking for themselves
     (DESIGN 12).
 
     The span's state arrives with the call and is handed back by it. A span belongs to the

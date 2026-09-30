@@ -19,6 +19,8 @@ from aft import evidence, index, inject, keys, page, vault
 from aft.config import Config
 from aft.registry import Registry
 
+#: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
+_HEADING = re.compile(r"^#{1,6}\s")
 _FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 
@@ -226,6 +228,8 @@ def trace(config: Config, page_path_str: str, source_id: str) -> str:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise SearchError(f"cannot read {page_path_str}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise SearchError(f"{page_path_str} is not UTF-8 text: {exc}") from exc
 
     frontmatter, _, _, err = page.split_frontmatter(text)
     if err or not isinstance(frontmatter, dict):
@@ -294,18 +298,27 @@ def _to_fts5_query(query: str) -> str | None:
 
 
 def _resolve_page_path(config: Config, path_str: str) -> Path:
-    """Resolve a page path against the current directory or vault."""
+    """Resolve a page path inside the vault: the vault is searched before the cwd.
+
+    A page path is relative to the vault root, so the vault wins over a same-named file in
+    the working directory. Nothing outside the vault is read: a path whose real location
+    is elsewhere, through `..`, a symlink, or a working directory outside the vault, is
+    refused.
+    """
+    vault_root = config.vault.resolve()
     p = Path(path_str)
-    if p.is_absolute() and p.exists():
-        return p
-    cwd_path = Path.cwd() / p
-    if cwd_path.exists():
-        return cwd_path
-    vault_path = config.vault / p
-    if vault_path.exists():
-        return vault_path
-    if p.exists():
-        return p
+    candidates = [p] if p.is_absolute() else [vault_root / p, Path.cwd() / p]
+    escaped: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if not resolved.is_relative_to(vault_root):
+            if resolved.exists():
+                escaped.append(resolved)
+            continue
+        if resolved.exists():
+            return resolved
+    if escaped:
+        raise SearchError(f"{path_str} is outside the vault at {vault_root}: {escaped[0]}")
     raise SearchError(f"file not found: {path_str}")
 
 
@@ -333,7 +346,7 @@ def _extract_outline(text: str) -> str:
         if in_fence:
             continue
         stripped = line.strip()
-        if stripped.startswith("#"):
+        if _HEADING.match(stripped):
             headings.append(stripped)
     return "\n".join(headings)
 

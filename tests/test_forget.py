@@ -484,7 +484,7 @@ def test_forget_session_candidate_lines_scrubbed_or_removed(initialized: Config)
 
 def test_forget_pattern_redacts_archive_and_byte_level_erasure(initialized: Config, capsys):
     """Forget pattern redacts matching text across the archive and updates the index,
-    printing the redact_patterns line for Ted to add."""
+    printing the redact_patterns line for the user to add."""
     secret_pat = "secret-token-4815162342"
     filler = "ordinary conversation text"
     entries = [

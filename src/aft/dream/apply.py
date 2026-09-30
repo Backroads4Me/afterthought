@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import evidence, lint, page, pagewrite
+from aft import digest, evidence, lint, page, pagewrite
 from aft import vault as vaultmod
 from aft.config import Config
 from aft.dream import decide, maintain, rules
@@ -170,7 +170,7 @@ def run_project(
     # cannot hold that commit's sha: it holds this run id instead, and the commit
     # message names the same id, so `git log --grep <run id>` answers with the sha.
     run_id = f"dream-{slug}-{now:%Y%m%dT%H%M%SZ}"
-    vault_path = config.vault
+    vault_path = config.vault.resolve()
 
     report = ProjectRunReport(project=slug)
 
@@ -239,15 +239,6 @@ def run_project(
                 if isinstance(f, dict) and "statement" in f
             }
 
-            digest_date = ""
-            m = re.match(r"^(\d{4}-\d{2}-\d{2})", digest_path.name)
-            if m:
-                digest_date = m.group(1)
-            elif frontmatter.get("date"):
-                d_val = str(frontmatter.get("date", ""))
-                if len(d_val) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", d_val[:10]):
-                    digest_date = d_val[:10]
-
             parsed_page = page.parse(d_text, digest_path)
 
             for fact in parsed_page.facts:
@@ -265,21 +256,23 @@ def run_project(
                 )
 
                 # R1 trust rule: a quote must verify against its source before a line is written
-                fact_ev_date = digest_date or fact.date or today
+                # R1: a quote must verify against its source before a line is written. Each ref
+                # is dated by its own evidence entry; the digest line's date is that day, and it
+                # is only the fallback for a ref the archive no longer holds.
                 evidence_list: list[rules.Evidence] = []
                 for ref in fact.refs:
                     s_entry = sources_map.get(ref, {})
                     res = str(s_entry.get("resource", ""))
                     q = str(s_entry.get("quote", ""))
                     v, origin, ev_date, y = _lookup_evidence(
-                        config, res, q, fallback_date=fact_ev_date, source_entry=s_entry
+                        config, res, q, fallback_date=fact.date or today, source_entry=s_entry
                     )
                     evidence_list.append(
                         rules.Evidence(
                             source=ref,
                             resource=res,
                             origin=digest_role if origin == rules.PRIMARY else origin,
-                            date=fact_ev_date,
+                            date=ev_date,
                             verified=v,
                             yours=y,
                         )
@@ -675,6 +668,37 @@ def run_project(
     return report
 
 
+def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
+    """Whether one of this session's digest pages carries ``aft.role: worker``.
+
+    The evidence archive stores no worker role, so the digest page is what says a session
+    was a worker's (DESIGN 8). ``digest._path`` names a digest
+    ``<date>-<agent>-<session>.md``, with ``-<part>`` before the extension when a session
+    is digested more than once in a day, so the name must have that shape and the agent
+    must match too: a session id that is another session's prefix, and the same id under
+    another agent, keep their own role.
+    """
+    digests_dir = config.vault / "digests"
+    if not digests_dir.is_dir():
+        return False
+    later_part = re.compile(rf"{re.escape(sess_id)}-\d+")
+    for path in digests_dir.rglob("*.md"):
+        named = digest._DIGEST_NAME.match(path.stem)
+        if named is None or (agent and named.group("agent") != agent):
+            continue
+        session = named.group("session")
+        if session != sess_id and not later_part.fullmatch(session):
+            continue
+        try:
+            frontmatter, _, _, _ = page.split_frontmatter(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        aft_dict = frontmatter.get("aft") if isinstance(frontmatter, dict) else None
+        if isinstance(aft_dict, dict) and aft_dict.get("role") == "worker":
+            return True
+    return False
+
+
 def _lookup_evidence(
     config: Config,
     resource: str,
@@ -730,6 +754,7 @@ def _lookup_evidence(
         parts = uri.split("#", 1)
         if len(parts) == 2:
             agent_sess = parts[0].split("/")
+            agent = agent_sess[0] if len(agent_sess) > 1 else ""
             sess_id = agent_sess[-1]
             entry_id = parts[1]
             db_path = config.home / "evidence.sqlite"
@@ -748,28 +773,7 @@ def _lookup_evidence(
                             is_yours = entry_role == "user"
                             is_worker = entry_role == "worker"
                             if not is_worker:
-                                digests_dir = config.vault / "digests"
-                                if digests_dir.is_dir():
-                                    patterns = [f"*{sess_id}*.md"]
-                                    if len(sess_id) >= 8:
-                                        patterns.append(f"*{sess_id[:8]}*.md")
-                                    matched_digests: set[Path] = set()
-                                    for pat in patterns:
-                                        matched_digests.update(digests_dir.rglob(pat))
-                                    for d_path in matched_digests:
-                                        try:
-                                            dfm, _, _, _ = page.split_frontmatter(
-                                                d_path.read_text(encoding="utf-8")
-                                            )
-                                            if (
-                                                dfm
-                                                and isinstance(dfm.get("aft"), dict)
-                                                and dfm["aft"].get("role") == "worker"
-                                            ):
-                                                is_worker = True
-                                                break
-                                        except OSError:
-                                            pass
+                                is_worker = _worker_digest_names(config, agent, sess_id)
                             origin = rules.WORKER if is_worker else rules.PRIMARY
                             return True, origin, entry_date, is_yours
                 except Exception:
@@ -778,19 +782,36 @@ def _lookup_evidence(
 
     if resource.startswith("aft://edit/"):
         sha = resource.removeprefix("aft://edit/").strip()
-        if not sha:
+        if not sha or not re.match(r"^[0-9a-f]{7,40}$", sha):
             return False, rules.PRIMARY, fallback_date, False
         try:
-            res = git(["show", "--format=", sha], cwd=config.vault, check=False)
+            res = git(
+                ["show", "--format=", "--end-of-options", sha],
+                cwd=config.vault,
+                check=False,
+            )
             if res.returncode == 0:
-                added_lines = [
-                    line[1:]
-                    for line in res.stdout.splitlines()
-                    if line.startswith("+") and not line.startswith("+++")
-                ]
-                added_text = "\n".join(added_lines)
-                if evidence._spaced(quote) in evidence._spaced(added_text):
-                    c_res = git(["show", "-s", "--format=%ct", sha], cwd=config.vault, check=False)
+                spaced_quote = evidence._spaced(quote)
+                current_run: list[str] = []
+                matched = False
+                for line in res.stdout.splitlines():
+                    if line.startswith("+") and not line.startswith("+++"):
+                        current_run.append(line[1:])
+                    else:
+                        if current_run:
+                            if spaced_quote in evidence._spaced("\n".join(current_run)):
+                                matched = True
+                                break
+                            current_run = []
+                if not matched and current_run:
+                    if spaced_quote in evidence._spaced("\n".join(current_run)):
+                        matched = True
+                if matched:
+                    c_res = git(
+                        ["show", "-s", "--format=%ct", "--end-of-options", sha],
+                        cwd=config.vault,
+                        check=False,
+                    )
                     if c_res.returncode == 0:
                         stamp = int(c_res.stdout.strip())
                         c_date = datetime.fromtimestamp(stamp, UTC).date().isoformat()

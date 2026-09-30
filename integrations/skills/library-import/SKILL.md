@@ -1,6 +1,6 @@
 ---
 name: library-import
-description: Import reference documentation and collections into the afterthought library. Use when asked to import or add reference documents, specifications, or documentation collections into afterthought (e.g. "add my RV-C documentation to the library"). Drives aft library survey, validate, check-map, import, and propose commands.
+description: Import reference documentation and collections into the afterthought library. Use when asked to import or add reference documents, specifications, or documentation collections into afterthought (e.g. "add my protocol documentation to the library"). Drives aft library survey, validate, check-map, import, and propose commands.
 ---
 
 # Library Import
