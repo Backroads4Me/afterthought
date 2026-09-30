@@ -736,6 +736,29 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   default search. Withdrawn lines stay out of every collection. Tests: a line superseded in
   this run and a stale line are found with `--archive` and not without it; a withdrawn line
   is found by neither; the F18 pipeline test's xfail becomes a passing case.
+- **F21 Injection holds its budget on a real vault** (M1 milestone review 1). DESIGN 10.
+  `aft inject`, and the session-start hook that prints the same block, finish in under 150 ms
+  end to end (process start included) on a vault of 50 pages of 200 facts, each fact with a
+  source as R1 requires, plus 20 digests on the newest day. A page's title, description and
+  timestamps are read without parsing its `sources` list, and the CLI imports only what the
+  command needs. Tests: the benchmark uses pages with real sources and measures a cold
+  subprocess; the block's text is unchanged. The PR body gives timings before and after.
+- **F22 What the block contains** (M1 review 3, 4, 11). "Last session" takes the newest digest
+  of a primary session that carries a handoff; worker, library and memory-import digests never
+  supply or remove it. Layers are trimmed in the order M1.2 gives, so global preferences are
+  kept ahead of page pointers. A working directory that no longer exists still gets global
+  preferences and the how-to lines. A `SessionStart` with no transcript path still injects.
+- **F23 Hooks stay inside their budget** (M1 review 6, 7, 8). A hook returns within its 2
+  second budget even when another process holds the queue's write lock (the SQLite busy
+  timeout on the hook path sits inside the budget, and the failure is logged). The hook's
+  timeout is never swallowed as a missing file. A run with `AFT_HOME` set to a directory that
+  is not the default never calls the user's systemd.
+- **F24 The pi extension and packaging** (M1 review 5, 9, 10). After a compaction the pi
+  extension asks for a fresh block and replaces the one it holds, as Claude Code's
+  `SessionStart` does. Building the payload cannot throw out of a handler. The pi fixtures and
+  the adapter match the installed pi's payloads. The wheel ships `integrations/`, so
+  `aft install claude` and `aft install pi` work from an installed package; a test builds the
+  wheel and installs from it into a temporary directory.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
