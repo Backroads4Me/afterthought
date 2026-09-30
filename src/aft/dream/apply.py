@@ -699,6 +699,51 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
     return False
 
 
+def _lookup_library_evidence(
+    config: Config, resource: str, quote: str, fallback_date: str
+) -> tuple[bool, str, str, bool]:
+    """Whether a collection quote stands, and what it is worth.
+
+    No session stands behind an imported quote, so it verifies a fact and carries no recurrence:
+    the dream counts none of it toward R3 however many imported files repeat the sentence, and the
+    fact waits as a candidate (DESIGN 11 step 5).
+
+    The copy in the vault is first weighed to the hash the import recorded, so a sentence written
+    into that copy afterwards verifies nothing. The quote is then looked for in the extracted text
+    the index and the reference pages carry - the same text `aft library propose` checked it
+    against, page breaks joined - and the extraction is rebuilt from the file when the cache under
+    the home directory is gone. What a person excluded keeps no copy at all, so its proof is the
+    record `aft library propose` left, which holds the quote as it was checked.
+    """
+    from aft.library import importing
+    from aft.library.propose import is_verified_import_quote
+    from aft.library.survey import file_sha256
+
+    stands = True, rules.LIBRARY, fallback_date, False
+    refused = False, rules.LIBRARY, fallback_date, False
+
+    rel = resource.removeprefix("aft://library/").strip()
+    collection, _, within = rel.partition("/")
+    if not collection or not within:
+        return refused
+
+    lib_root = (config.vault / "library" / collection).resolve()
+    lib_path = (lib_root / within).resolve()
+    if lib_path.is_relative_to(lib_root) and lib_path.is_file():
+        record = importing.read_import_record(config.vault, collection)
+        recorded = record.hashes.get(within) if record is not None else None
+        if recorded is None or file_sha256(lib_path) != recorded:
+            return refused
+        text = importing.extracted_text(lib_path, config.home)
+        if evidence._spaced(quote) in evidence._spaced(text):
+            return stands
+        return refused
+
+    if is_verified_import_quote(config.home, resource, quote):
+        return stands
+    return refused
+
+
 def _lookup_evidence(
     config: Config,
     resource: str,
@@ -715,39 +760,7 @@ def _lookup_evidence(
         return False, rules.PRIMARY, fallback_date, False
 
     if resource.startswith("aft://library/"):
-        rel = resource.removeprefix("aft://library/").strip()
-        lib_root = (config.vault / "library").resolve()
-        lib_path = (lib_root / rel).resolve()
-        if lib_path.is_relative_to(lib_root) and lib_path.is_file():
-            try:
-                content = lib_path.read_text(encoding="utf-8", errors="replace")
-                if evidence._spaced(quote) in evidence._spaced(content):
-                    return True, rules.PRIMARY, fallback_date, False
-            except Exception:
-                pass
-            try:
-                import hashlib
-                import json
-
-                f_hash = hashlib.sha256(lib_path.read_bytes()).hexdigest()
-                cache_file = config.home / "library" / f"{f_hash}.json"
-                if cache_file.is_file():
-                    data = json.loads(cache_file.read_text(encoding="utf-8"))
-                    if isinstance(data, dict) and "chunks" in data:
-                        for chunk in data["chunks"]:
-                            chunk_text = chunk.get("text", "")
-                            if evidence._spaced(quote) in evidence._spaced(chunk_text):
-                                return True, rules.PRIMARY, fallback_date, False
-            except Exception:
-                pass
-
-        # Check tamper-proof verified quotes record written by propose (for excluded files)
-        from aft.library.propose import is_verified_import_quote
-
-        if is_verified_import_quote(config.home, resource, quote):
-            return True, rules.PRIMARY, fallback_date, False
-
-        return False, rules.PRIMARY, fallback_date, False
+        return _lookup_library_evidence(config, resource, quote, fallback_date)
 
     if resource.startswith("aft://session/"):
         uri = resource.removeprefix("aft://session/")

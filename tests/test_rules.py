@@ -679,6 +679,53 @@ def test_a_worker_only_fact_never_confirms_a_standing_line():
     assert outcome == reject("design 8 worker sessions")
 
 
+def library_only() -> tuple[rules.Evidence, ...]:
+    """Three verified quotes from three imported collections: one sentence a person wrote down
+    once and filed in three places, spoken by no session."""
+    return tuple(
+        sig(
+            f"col{i}",
+            date,
+            origin=rules.LIBRARY,
+            yours=False,
+            resource=f"aft://library/col{i}/notes.md",
+        )
+        for i, date in enumerate(("2026-10-04", "2026-10-03", "2026-10-02"), start=1)
+    )
+
+
+def test_an_imported_quote_earns_recurrence_nothing():
+    """A sentence repeated in three imported files is still one sentence nobody said. R3 counts
+    the quote toward recurrence nothing, so the fact waits however many copies the vault holds
+    (DESIGN 11 step 5)."""
+    outcome = check(
+        decide("add", line=None), new_fact(source="inferred"), None, ctx(*library_only())
+    )
+    assert outcome == downgrade("candidate", "R3")
+
+
+def test_an_authoritative_documents_own_word_earns_its_line():
+    """Design 8's lower rank is about the rank of the session that spoke, and an imported
+    document spoke no session: an authoritative collection's word enters as [observed] and takes
+    the line it earned (DESIGN 11 step 5)."""
+    outcome = check(
+        decide("add", line=None), new_fact(source="observed"), None, ctx(*library_only())
+    )
+    assert outcome == apply("add")
+
+
+def test_an_imported_quote_releases_no_worker_held_line():
+    """Confirming is recurrence by itself, and a collection has none to give: the copy in the
+    vault adds no source and no date to a standing line."""
+    outcome = check(
+        decide("confirm"),
+        new_fact(source="observed"),
+        line(VLLM),
+        ctx(sig("col1", NEWER, origin=rules.LIBRARY, yours=False)),
+    )
+    assert outcome == reject("design 8 worker sessions")
+
+
 def test_one_primary_session_corroborating_a_worker_fact_lifts_the_lower_rank():
     outcome = check(
         decide("add", line=None),

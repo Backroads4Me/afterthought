@@ -59,6 +59,12 @@ WORKER = "worker"
 """How the session behind a quote was classified: a session under a worker path is
 "evidence of a lower rank" whose facts "carry that role into the dream" (design 8, M2.7).
 """
+LIBRARY = "library"
+"""No session stands behind the quote: it was taken from an imported document or an
+instruction file (DESIGN 11 step 5). Such a quote verifies a fact and carries no recurrence,
+so R3 counts none of it, however many imported files repeat the sentence, and a fact proposed
+from a collection waits as a candidate.
+"""
 
 SIGNALS_GATE = pagewrite.SIGNALS_GATE
 SESSIONS_GATE = pagewrite.SESSIONS_GATE
@@ -126,7 +132,9 @@ class Evidence:
     the part of that uri before the fragment, which is what R3 counts sessions of."""
 
     origin: str
-    """``PRIMARY`` or ``WORKER``: how that session was classified (design 8, worker sessions)."""
+    """``PRIMARY``, ``WORKER`` or ``LIBRARY``: the session that stands behind the quote, or
+    no session at all when the quote came out of an imported collection (design 8, design 11).
+    """
 
     date: str
     """YYYY-MM-DD the evidence is dated, which decides whether it counts half (R3) and
@@ -303,10 +311,16 @@ def check(
     # A fact resting only on worker sessions is evidence of a lower rank: it stays a
     # candidate until a primary session corroborates it, whatever its tag, and it never
     # confirms a line, so it adds no source and no date to one (design 8).
+    #
+    # The rule is about the rank of the session that spoke. A quote from an imported collection
+    # was spoken by no session: DESIGN 11 gives an authoritative document's own word an
+    # [observed] line, and R3 counts that quote toward recurrence nothing. Confirming is the one
+    # action that is recurrence by itself, and no collection can supply it.
     if not _primary(context.evidence):
         if decision.action == "confirm":
             return reject("design 8 worker sessions")
-        return downgrade("candidate", "design 8 worker sessions")
+        if _only_worker(context.evidence):
+            return downgrade("candidate", "design 8 worker sessions")
 
     if decision.action == "add":
         return _new_line(new_fact, context)
@@ -457,9 +471,20 @@ def _passes_gate(context: Context) -> bool:
 
 
 def _primary(evidence: tuple[Evidence, ...]) -> list[Evidence]:
-    """The verified quotes from primary sessions: a worker session's evidence never
-    carries a fact over the gate, and an unverified quote is no signal at all."""
+    """The verified quotes from primary sessions: a worker session's evidence and a quote
+    imported from a collection never carry a fact over the gate, and an unverified quote is no
+    signal at all."""
     return [q for q in evidence if q.verified and q.origin == PRIMARY]
+
+
+def _only_worker(evidence: tuple[Evidence, ...]) -> bool:
+    """Whether every verified quote rests on a worker session.
+
+    Design 8 ranks the session that spoke, and an imported quote came from no session, so a fact
+    resting on a collection is not the lower-ranked evidence this rule was written to hold.
+    """
+    verified = [q for q in evidence if q.verified]
+    return bool(verified) and all(q.origin == WORKER for q in verified)
 
 
 def _aged(ref: str, quotes: list[Evidence], today: str) -> bool:

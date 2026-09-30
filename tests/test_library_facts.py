@@ -14,8 +14,15 @@ from aft import cli, lint, page
 from aft.config import Config
 from aft.dream import apply, rules
 from aft.dream.decide import Proposal
-from aft.library import propose
+from aft.library import importing, propose
 from aft.registry import Registry
+
+SAMPLE_ROLES = {
+    "rvc_spec.txt": "original",
+    "notes.md": "notes",
+    "AGENTS.md": "exclude",
+    "tools/build.sh": "exclude",
+}
 
 
 @pytest.fixture
@@ -80,12 +87,41 @@ def library_env(tmp_path: Path, initialized: Config) -> tuple[Config, Path, Path
     manifest_file = tmp_path / "rvc.yaml"
     manifest_file.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
 
-    # Simulate import of notes.md into vault/library/rvc/notes.md
-    lib_notes = vault_dir / "library" / "rvc" / "notes.md"
-    lib_notes.parent.mkdir(parents=True, exist_ok=True)
-    lib_notes.write_text(notes_text, encoding="utf-8")
+    # The collection the tests propose against was imported, not hand-copied: the import is
+    # what leaves the record (references/rvc/) that propose and the dream verify against.
+    importing.import_collection(manifest_file, config=cfg)
 
     return cfg, manifest_file, col_dir
+
+
+def import_collection_as(
+    cfg: Config,
+    col_dir: Path,
+    *,
+    name: str,
+    roles: dict,
+    authority: str = "reference",
+    projects: tuple[str, ...] = ("rv-project",),
+) -> Path:
+    """Import the sample collection this way and return the manifest the import read.
+
+    Authority and roles are set by an import and recorded in the vault, so a test that wants a
+    collection imported differently imports it that way instead of editing a manifest afterwards:
+    propose and the dream trust the record, not the manifest (DESIGN 11).
+    """
+    manifest_data = {
+        "name": name,
+        "title": f"{name} collection",
+        "description": f"RV-C specifications and notes, imported as {authority}.",
+        "projects": list(projects),
+        "path": str(col_dir),
+        "authority": authority,
+        "files": roles,
+    }
+    manifest_file = col_dir.parent / f"{name}.yaml"
+    manifest_file.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+    importing.import_collection(manifest_file, config=cfg)
+    return manifest_file
 
 
 def test_propose_facts_from_notes(library_env):
@@ -249,7 +285,7 @@ def test_propose_project_not_in_manifest_refused(library_env):
             "statement": "Fact for another project.",
             "quote": "Always connect ground before positive terminal.",
             "file": "notes.md",
-            "project": "somebody-else",
+            "project": "widget",
             "source": "inferred",
         }
     ]
@@ -263,35 +299,33 @@ def test_propose_project_not_in_manifest_refused(library_env):
 def test_propose_disallowed_roles_rejected(library_env):
     cfg, manifest_file, _ = library_env
 
-    proposals = [
-        {
-            "statement": "RV-C spec is authoritative.",
-            "quote": "Authoritative RV-C specification 2023.",
-            "file": "rvc_spec.txt",  # role: original, but not imported yet
-            "source": "inferred",
-        },
+    tooling = [
         {
             "statement": "Build script echoes building.",
             "quote": "echo building",
-            "file": "tools/build.sh",  # role: exclude (tooling)
+            "file": "tools/build.sh",  # role: exclude, and no instruction file
             "source": "inferred",
-        },
+        }
     ]
 
-    res = propose.propose_facts(manifest_file, proposals, config=cfg)
-    assert res.total_proposed == 2
+    res = propose.propose_facts(manifest_file, tooling, config=cfg)
+    assert res.total_proposed == 1
     assert len(res.verified_facts) == 0
-    assert len(res.dropped_facts) == 2
+    assert len(res.dropped_facts) == 1
     assert len(res.digests_written) == 0
+    assert "excluded as tooling/data" in res.dropped_facts[0].reason
 
-    assert "collection has not been imported yet" in res.dropped_facts[0].reason
-    assert "excluded as tooling/data" in res.dropped_facts[1].reason
+    # A document the import retained is another matter: its copy and its hash stand.
+    document = [
+        {
+            "statement": "RV-C spec is the standard.",
+            "quote": "Authoritative RV-C specification 2023.",
+            "file": "rvc_spec.txt",  # role: original, imported
+            "source": "inferred",
+        }
+    ]
 
-    # Once imported into vault library, document files (original, derived, errata) can be proposed!
-    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
-    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
-
-    res2 = propose.propose_facts(manifest_file, [proposals[0]], config=cfg)
+    res2 = propose.propose_facts(manifest_file, document, config=cfg)
     assert len(res2.verified_facts) == 1
     assert len(res2.dropped_facts) == 0
 
@@ -769,25 +803,9 @@ def test_authoritative_document_fact_enters_observed_and_active_in_dream(library
     """An authoritative document fact enters as [observed] and goes active in dream (F5)."""
     cfg, _, col_dir = library_env
 
-    manifest_data = {
-        "name": "rvc",
-        "title": "RV-C Standard",
-        "description": "RV-C specifications and notes",
-        "authority": "authoritative",
-        "projects": ["rv-project"],
-        "path": str(col_dir),
-        "files": {
-            "rvc_spec.txt": "original",
-            "notes.md": "notes",
-            "AGENTS.md": "exclude",
-            "tools/build.sh": "exclude",
-        },
-    }
-    auth_manifest = tmp_path / "auth.yaml"
-    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
-
-    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
-    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
+    auth_manifest = import_collection_as(
+        cfg, col_dir, name="rvcauth", authority="authoritative", roles=SAMPLE_ROLES
+    )
 
     proposals = [
         {
@@ -841,25 +859,7 @@ def test_reference_document_fact_stays_candidate_in_dream(library_env, tmp_path)
     """The same document fact from a reference collection stays a candidate (F5)."""
     cfg, _, col_dir = library_env
 
-    manifest_data = {
-        "name": "rvc",
-        "title": "RV-C Standard",
-        "description": "RV-C specifications and notes",
-        "authority": "reference",
-        "projects": ["rv-project"],
-        "path": str(col_dir),
-        "files": {
-            "rvc_spec.txt": "original",
-            "notes.md": "notes",
-            "AGENTS.md": "exclude",
-            "tools/build.sh": "exclude",
-        },
-    }
-    ref_manifest = tmp_path / "ref.yaml"
-    ref_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
-
-    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
-    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
+    ref_manifest = import_collection_as(cfg, col_dir, name="rvcref", roles=SAMPLE_ROLES)
 
     proposals = [
         {
@@ -912,22 +912,9 @@ def test_authoritative_notes_fact_stays_candidate_in_dream(library_env, tmp_path
     """A notes-file fact in an authoritative collection stays a candidate (F5)."""
     cfg, _, col_dir = library_env
 
-    manifest_data = {
-        "name": "rvc",
-        "title": "RV-C Standard",
-        "description": "RV-C specifications and notes",
-        "authority": "authoritative",
-        "projects": ["rv-project"],
-        "path": str(col_dir),
-        "files": {
-            "rvc_spec.txt": "original",
-            "notes.md": "notes",
-            "AGENTS.md": "exclude",
-            "tools/build.sh": "exclude",
-        },
-    }
-    auth_manifest = tmp_path / "auth.yaml"
-    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+    auth_manifest = import_collection_as(
+        cfg, col_dir, name="rvcauth", authority="authoritative", roles=SAMPLE_ROLES
+    )
 
     proposals = [
         {
@@ -996,25 +983,20 @@ def test_authoritative_fact_contradicting_stated_decision_becomes_needs_you(libr
     )
     overview_path.write_text(standing_content, encoding="utf-8")
 
-    manifest_data = {
-        "name": "rvc",
-        "title": "RV-C Standard",
-        "description": "RV-C specifications and notes",
-        "authority": "authoritative",
-        "projects": ["rv-project"],
-        "path": str(col_dir),
-        "files": {
-            "rvc_spec.txt": "original",
-            "notes.md": "notes",
-            "AGENTS.md": "exclude",
-            "tools/build.sh": "exclude",
-        },
-    }
-    auth_manifest = tmp_path / "auth.yaml"
-    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
-
-    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
-    lib_spec.write_text("All CAN communication must use 250 kbps baud rate.\n", encoding="utf-8")
+    # The spec that contradicts the standing decision is its own collection, imported as
+    # authoritative: authority comes from the import, not from a manifest edited afterwards.
+    spec_dir = tmp_path / "baud-spec"
+    spec_dir.mkdir()
+    (spec_dir / "rvc_spec.txt").write_text(
+        "All CAN communication must use 250 kbps baud rate.\n", encoding="utf-8"
+    )
+    auth_manifest = import_collection_as(
+        cfg,
+        spec_dir,
+        name="rvcbaud",
+        authority="authoritative",
+        roles={"rvc_spec.txt": "original"},
+    )
 
     proposals = [
         {
@@ -1171,14 +1153,7 @@ def test_propose_derived_and_errata_document_roles(library_env, tmp_path):
     m_path = tmp_path / "docs.yaml"
     m_path.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
 
-    lib_dir = cfg.vault / "library" / "rvc-docs"
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    (lib_dir / "clean_spec.md").write_text(
-        "# Clean Spec\nNormalized RV-C 2023.\n", encoding="utf-8"
-    )
-    (lib_dir / "errata.md").write_text(
-        "# Errata\nCorrection: DGN 456 uses big-endian polarity.\n", encoding="utf-8"
-    )
+    importing.import_collection(m_path, config=cfg)
 
     proposals = [
         {

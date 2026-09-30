@@ -158,6 +158,16 @@ def check_claim(
             reason=f"target path '{claim.target_path}' is not a file",
         )
 
+    # A claim needs something a document can be checked against. A path on its own says only
+    # that a file exists, which is what the map was written to point at and proves nothing about
+    # what the document holds (DESIGN 11 step 4).
+    if claim.quote is None and claim.heading is None and claim.key is None:
+        return ClaimResult(
+            claim=claim,
+            passed=False,
+            reason=f"map entry for '{claim.target_path}' names a document and says nothing of it",
+        )
+
     # 1. Heading check against extracted text (B3)
     if claim.heading is not None:
         target_heading = claim.heading.strip()
@@ -348,6 +358,32 @@ def parse_claims_from_json(map_path: Path, rel_source: str | None = None) -> lis
     return claims
 
 
+def _line_descriptions(line: str, link_snippets: list[str]) -> list[str]:
+    """What a line says besides its links, as the sentences a map claims.
+
+    In a table every remaining cell is a claim: the row
+    ``| [Spec](spec.md) | v1 | This document defines the lunar landing protocol |`` states a
+    version and a description, and reading only the first cell would verify the row on ``v1``
+    while an invented description went unexamined. In a list the words after the link are the
+    claim: ``- [Spec](spec.md): defines the lunar landing protocol`` says that sentence of the
+    document, and it is the sentence a verification has to find (DESIGN 11 step 4).
+    """
+    if "|" in line:
+        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+        kept = []
+        for cell in cells:
+            # A cell that only repeats the link, as label or as target, says nothing further.
+            if any(snippet in cell or cell in snippet for snippet in link_snippets):
+                continue
+            kept.append(cell)
+        return kept
+    said = line
+    for snippet in link_snippets:
+        said = said.replace(snippet, "")
+    said = said.strip().lstrip("#->*+ \t").strip().strip(":-").strip()
+    return [said] if said else []
+
+
 def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) -> list[Claim]:
     """Parse link claims from a markdown table or list."""
     src = rel_source or map_path.name
@@ -400,21 +436,17 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
             heading = link_target.split("#")[1].strip() if "#" in link_target else None
             if not path:
                 continue
-            quote = None
-            if "|" in line:
-                cells = [c.strip() for c in line.split("|") if c.strip()]
-                desc_cells = [c for c in cells if link_target not in c and link_text not in c]
-                if desc_cells:
-                    quote = desc_cells[0]
-            claims.append(
-                Claim(
-                    target_path=path,
-                    heading=heading,
-                    quote=quote,
-                    source_map=src,
-                    line=line_num,
+            descriptions = _line_descriptions(line, [f"[{link_text}]({link_target})"])
+            for description in descriptions or [None]:
+                claims.append(
+                    Claim(
+                        target_path=path,
+                        heading=heading,
+                        quote=description,
+                        source_map=src,
+                        line=line_num,
+                    )
                 )
-            )
 
         # Wikilinks [[target#heading|label]] or [[target]]
         for target, label in wiki_matches:
@@ -422,12 +454,11 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
             heading = target.split("#")[1].strip() if "#" in target else None
             if not path:
                 continue
-            quote = label if label else None
-            if "|" in line:
-                cells = [c.strip() for c in line.split("|") if c.strip()]
-                desc_cells = [c for c in cells if target not in c and (not label or label not in c)]
-                if desc_cells:
-                    quote = desc_cells[0]
+            descriptions = _line_descriptions(
+                line, [f"[[{target}|{label}]]" if label else f"[[{target}]]"]
+            )
+            # Outside a table, a wikilink's own label is the sentence the map offers for it.
+            quote = descriptions[0] if descriptions else (label or None)
             claims.append(
                 Claim(
                     target_path=path,

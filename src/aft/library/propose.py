@@ -28,8 +28,8 @@ import yaml
 
 from aft import evidence, pagewrite, redact, vault
 from aft.config import Config, load
+from aft.library import importing
 from aft.library import manifest as manifest_mod
-from aft.library.importing import extract_document_chunks
 from aft.library.manifest import Manifest, UniqueKeyLoader
 from aft.library.survey import file_sha256, is_instruction_file
 from aft.registry import Registry
@@ -282,8 +282,17 @@ def verify_fact(
     manifest: Manifest,
     collection_root: Path,
     vault_path: Path | None = None,
+    home: Path | None = None,
+    record: importing.ImportRecord | None = None,
 ) -> FactVerificationResult:
-    """Verify one proposed fact against its file and collection role."""
+    """Verify one proposed fact against the collection as it was imported.
+
+    Authority and role come from the import record, never from the manifest this command was
+    handed: a manifest says what someone would like the files to be, and the record says what
+    the person reviewed and imported. The vault copy is compared with the hash that record holds
+    before any quote is looked for, and the quote is looked for in the extracted text, the same
+    text the index, the reference pages and the dream read (DESIGN 11).
+    """
     # 1. Statement validation
     stmt = fact.statement.strip()
     if not stmt:
@@ -370,10 +379,57 @@ def verify_fact(
         )
 
     entry = manifest.files[fact.file]
-    role = entry.role
+    claimed_role = entry.role
     is_inst = is_instruction_file(Path(fact.file))
 
-    # 8. Role check: documents, notes, and excluded instruction files (F5)
+    # 8a. What the file is, as the import recorded it. The manifest this command is handed is
+    # not evidence of anything: importing again is what changes a role, and the person reviews
+    # the record the import leaves (DESIGN 11 step 2).
+    if record is None:
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=(
+                f"collection {manifest.name!r} left no import record under "
+                f"references/{manifest.name}/: run 'aft library import' before proposing facts"
+            ),
+        )
+    if manifest.authority != record.authority:
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=(
+                f"the manifest says this collection is {manifest.authority!r}; the import "
+                f"record says {record.authority!r}. Authority is set by the import, not propose"
+            ),
+        )
+    recorded_role = record.roles.get(fact.file)
+    if recorded_role is None:
+        # Nothing was retained behind this file, so only an instruction file the person
+        # excluded can carry a fact, and then as evidence that is not kept.
+        if claimed_role != "exclude":
+            return FactVerificationResult(
+                fact=fact,
+                verified=False,
+                reason=(
+                    f"file {fact.file!r} is not in the import record of collection "
+                    f"{manifest.name!r}, which imported it as nothing"
+                ),
+            )
+        role = "exclude"
+    elif claimed_role != recorded_role:
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=(
+                f"the manifest says {fact.file!r} is {claimed_role!r}; the import record says "
+                f"{recorded_role!r}. Import the collection again if the roles changed"
+            ),
+        )
+    else:
+        role = recorded_role
+
+    # 8b. Role check: documents, notes, and excluded instruction files (F5)
     if role in DOCUMENT_ROLES or role == "notes":
         original_retained = True
         # Non-excluded files must be checked against the imported copy in the vault
@@ -393,6 +449,28 @@ def verify_fact(
                     ),
                 )
             target_file = lib_file
+            # A quote proves what a document said, so it is looked for in the copy the import
+            # left and no other: a sentence written into that copy afterwards would verify a
+            # fact that no document holds and no person reviewed.
+            recorded_hash = record.hashes.get(fact.file)
+            if recorded_hash is None:
+                return FactVerificationResult(
+                    fact=fact,
+                    verified=False,
+                    reason=(
+                        f"the import record of collection {manifest.name!r} holds no hash for "
+                        f"{fact.file!r}; import the collection again"
+                    ),
+                )
+            if file_sha256(lib_file) != recorded_hash:
+                return FactVerificationResult(
+                    fact=fact,
+                    verified=False,
+                    reason=(
+                        f"'library/{manifest.name}/{fact.file}' no longer matches the hash the "
+                        "import recorded: the copy in the vault was changed after the import"
+                    ),
+                )
     elif role == "exclude":
         if is_inst:
             original_retained = False
@@ -424,53 +502,68 @@ def verify_fact(
 
     quote_norm = evidence._spaced(fact.quote)
 
-    # 9. Quote check: try direct text read
-    try:
-        file_text = target_file.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return FactVerificationResult(
-            fact=fact,
-            verified=False,
-            reason=f"cannot read file {fact.file!r}: {exc}",
-        )
-
-    # Authority tagging (BUILD-PLAN F5, DESIGN 11):
-    # Documents from an authoritative collection are tagged [observed].
-    # All other imported facts (reference collections, notes, excluded instruction files)
-    # enter as [inferred] or [suggested].
-    if manifest.authority == "authoritative" and role in DOCUMENT_ROLES:
+    # 9. Authority tagging (BUILD-PLAN F5, DESIGN 11), read from the record: a document from a
+    # collection the person called authoritative witnesses its contents, and everything else
+    # (a reference collection, notes, an excluded instruction file) enters as a candidate.
+    if record.authority == "authoritative" and role in DOCUMENT_ROLES:
         effective_source = "observed"
     else:
         effective_source = "suggested" if fact.source == "suggested" else "inferred"
 
     verified_fact = replace(fact, source=effective_source)
 
-    if quote_norm in evidence._spaced(file_text):
+    # 10. Quote check, against the extracted text and nothing else. The bytes of an HTML or PDF
+    # file hold more than the document says, and the index, the reference pages and the dream all
+    # carry the extraction, so a quote a document never told anyone stays unverified here too. An
+    # excluded instruction file is read without the cache: caching its text would retain what the
+    # import declined to keep.
+    document_text = importing.extracted_text(target_file, home if original_retained else None)
+    if quote_norm in evidence._spaced(document_text):
         return FactVerificationResult(
             fact=verified_fact,
             verified=True,
             original_retained=original_retained,
         )
 
-    # If direct text did not match, try chunk extraction (e.g. for PDF, JSON, HTML)
-    try:
-        chunks = extract_document_chunks(target_file)
-        if chunks:
-            extracted_text = "\n".join(t for _, t in chunks)
-            if quote_norm in evidence._spaced(extracted_text):
-                return FactVerificationResult(
-                    fact=verified_fact,
-                    verified=True,
-                    original_retained=original_retained,
-                )
-    except Exception:
-        pass
-
     return FactVerificationResult(
         fact=fact,
         verified=False,
         reason=f"quote {fact.quote!r} not found in {fact.file!r}",
     )
+
+
+def _demand_registered(
+    manifest: Manifest, proposed: Sequence[ProposedFact], reg: Registry | None
+) -> None:
+    """Refuse a proposal whose project the registry does not know, before anything is written.
+
+    A candidate digest lands under ``digests/<slug>/``, so a project name is a path as much as it
+    is a name: an unregistered slug writes a page outside the vault, and a name that is merely a
+    typo gets an id nobody chose, which the dream later reads as a project someone asked for. Both
+    the collection's projects and each fact's are checked here, so the run that would have written
+    outside the vault writes nothing at all (DESIGN 11).
+    """
+    named = [slug for slug in manifest.projects if slug]
+    named += [fact.project for fact in proposed if fact.project]
+    if not named:
+        return
+    if reg is None:
+        raise ProposeError(
+            "the vault has no registry, so no project is registered to receive: "
+            + ", ".join(repr(slug) for slug in dict.fromkeys(named))
+            + "; register it with 'aft project add' first"
+        )
+    unknown = [
+        slug
+        for slug in dict.fromkeys(named)
+        if reg.by_slug(slug) is None and reg.by_id(slug) is None
+    ]
+    if unknown:
+        raise ProposeError(
+            "no such project in the vault: "
+            + ", ".join(repr(slug) for slug in unknown)
+            + "; register it with 'aft project add' or fix the manifest"
+        )
 
 
 def propose_facts(
@@ -492,11 +585,16 @@ def propose_facts(
     if not proposed:
         raise ProposeError("no proposed facts provided")
 
+    reg_path = cfg.vault / "registry.yaml"
+    reg = Registry.load(reg_path) if reg_path.is_file() else None
+    _demand_registered(manifest, proposed, reg)
+    record = importing.read_import_record(cfg.vault, manifest.name)
+
     verified_list: list[FactVerificationResult] = []
     dropped_list: list[FactVerificationResult] = []
 
     for fact in proposed:
-        res = verify_fact(fact, manifest, collection_root, cfg.vault)
+        res = verify_fact(fact, manifest, collection_root, cfg.vault, cfg.home, record)
         if res.verified:
             verified_list.append(res)
         else:
@@ -522,9 +620,6 @@ def propose_facts(
         for t in targets:
             by_project.setdefault(t, []).append(vf)
 
-    reg_path = cfg.vault / "registry.yaml"
-    reg = Registry.load(reg_path) if reg_path.is_file() else None
-
     now_dt = now or datetime.now(UTC)
     today_str = now_dt.strftime("%Y-%m-%d")
     year_str = now_dt.strftime("%Y")
@@ -548,13 +643,11 @@ def propose_facts(
                 )
 
         for raw_slug, v_facts in sorted(by_project.items()):
-            proj_id = f"p_{raw_slug}"
-            canonical_slug = raw_slug
-            if reg is not None:
-                p_obj = reg.by_slug(raw_slug) or reg.by_id(raw_slug)
-                if p_obj is not None:
-                    proj_id = p_obj.id
-                    canonical_slug = p_obj.slug
+            # `_demand_registered` refused any name the registry does not know, so the project
+            # landing here has a slug to write under and an id to be named by: neither is invented.
+            project = reg.by_slug(raw_slug) or reg.by_id(raw_slug)
+            proj_id = project.id
+            canonical_slug = project.slug
 
             digests_dir = cfg.vault / "digests" / canonical_slug / year_str / month_str
             digests_dir.mkdir(parents=True, exist_ok=True)

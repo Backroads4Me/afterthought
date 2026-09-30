@@ -65,12 +65,14 @@ def collection_tree(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
 
-    # Index map in Markdown
+    # An index map in Markdown. Each description cell is a sentence the map claims about the
+    # document, so each one has to be found in the document it points at.
     (root / "README.md").write_text(
         "# Collection Index\n\n"
         "| Document | Link |\n"
         "|---|---|\n"
-        "| Specification details | [Spec](spec.md#General Overview) |\n"
+        "| authoritative protocol specification | [Spec](spec.md#General Overview) |\n"
+        "| Nominal voltage is 12V DC. | [Levels](spec.md#Signal Levels) |\n"
         "| Parameters | [Defs](defs.json) |\n"
         "| Nonexistent file | [Missing](missing.pdf) |\n",
         encoding="utf-8",
@@ -157,11 +159,15 @@ def test_parse_claims_from_json(collection_tree: Path) -> None:
 
 def test_parse_claims_from_markdown(collection_tree: Path) -> None:
     claims = parse_claims_from_markdown(collection_tree / "README.md")
-    assert len(claims) == 3
-    targets = [c.target_path for c in claims]
-    assert "spec.md" in targets
-    assert "defs.json" in targets
-    assert "missing.pdf" in targets
+    assert len(claims) == 4
+    assert [c.target_path for c in claims] == ["spec.md", "spec.md", "defs.json", "missing.pdf"]
+    # Each row carries its own description as the sentence to look for, not the link's label.
+    assert [c.quote for c in claims] == [
+        "authoritative protocol specification",
+        "Nominal voltage is 12V DC.",
+        "Parameters",
+        "Nonexistent file",
+    ]
 
 
 def test_verify_map_files(collection_tree: Path) -> None:
@@ -169,9 +175,9 @@ def test_verify_map_files(collection_tree: Path) -> None:
         [collection_tree / "index.json", collection_tree / "README.md"],
         collection_tree,
     )
-    assert summary.total == 5
-    # 2 from index.json pass, 2 from README pass, 1 from README fails (missing.pdf)
-    assert len(summary.verified) == 4
+    assert summary.total == 6
+    # 2 from index.json pass, 3 from README pass, 1 from README fails (missing.pdf)
+    assert len(summary.verified) == 5
     assert len(summary.rejected) == 1
     assert summary.rejected[0].claim.target_path == "missing.pdf"
     assert "does not exist" in summary.rejected[0].reason
@@ -280,8 +286,8 @@ def test_write_import_report_includes_map_evidence_section(
 
     report_text = (initialized.vault / report_rel).read_text(encoding="utf-8")
     assert "### Map evidence" in report_text
-    assert "Claims checked: 5" in report_text
-    assert "Claims verified: 4" in report_text
+    assert "Claims checked: 6" in report_text
+    assert "Claims verified: 5" in report_text
     assert "Claims rejected: 1" in report_text
     assert "missing.pdf" in report_text
     assert "does not exist in collection" in report_text
@@ -506,3 +512,64 @@ def test_cli_library_check_map_default_exclude_files(
     out = capsys.readouterr().out
     assert "✓ [index.json] spec.md#General Overview" in out
     assert "✗ [README.md] missing.pdf" in out
+
+
+def test_a_row_is_verified_by_what_it_says_of_the_document(collection_tree: Path) -> None:
+    """A row whose description is not in the document verifies on nothing (F12.9).
+
+    The link's label sits inside the description, which is how a description used to vanish: the
+    row was then judged by its path and its heading alone, and an invented sentence about the
+    document passed as evidence for it.
+    """
+    (collection_tree / "TITLES.md").write_text(
+        "# Index\n\n"
+        "| Document | Link |\n"
+        "|---|---|\n"
+        "| Specification details | [Spec](spec.md#General Overview) |\n",
+        encoding="utf-8",
+    )
+
+    summary = verify_map_files([collection_tree / "TITLES.md"], collection_tree)
+    assert len(summary.verified) == 0
+    assert len(summary.rejected) == 1
+    assert "quoted description does not appear" in summary.rejected[0].reason
+
+
+def test_every_cell_of_a_row_is_a_claim_to_be_found(collection_tree: Path) -> None:
+    """A row states one thing per cell, and each of those sentences has to be in the document
+    it points at (F12.9)."""
+    (collection_tree / "CELLS.md").write_text(
+        "# Index\n\n"
+        "| Signal | Version | What it says | Link |\n"
+        "|---|---|---|---|\n"
+        "| Voltage | v1 | Nominal voltage is 12V DC. | [Spec](spec.md#Signal Levels) |\n",
+        encoding="utf-8",
+    )
+
+    claims = parse_claims_from_markdown(collection_tree / "CELLS.md")
+    assert [c.quote for c in claims] == ["Voltage", "v1", "Nominal voltage is 12V DC."]
+
+    summary = verify_map_files([collection_tree / "CELLS.md"], collection_tree)
+    assert len(summary.verified) == 1
+    assert summary.verified[0].quote == "Nominal voltage is 12V DC."
+    assert {r.claim.quote for r in summary.rejected} == {"Voltage", "v1"}
+
+
+def test_a_bare_link_in_a_list_claims_only_that_a_document_exists(collection_tree: Path) -> None:
+    """A list item is a claim about a document, not a pointer to one (F12.9): the words after
+    the link are what gets looked for, and an item with none says too little to verify."""
+    (collection_tree / "LIST.md").write_text(
+        "# Index\n\n"
+        "- [Spec](spec.md)\n"
+        "- [Spec](spec.md#Signal Levels): Nominal voltage is 12V DC.\n",
+        encoding="utf-8",
+    )
+
+    claims = parse_claims_from_markdown(collection_tree / "LIST.md")
+    assert claims[0].quote is None
+    assert claims[1].quote == "Nominal voltage is 12V DC."
+
+    summary = verify_map_files([collection_tree / "LIST.md"], collection_tree)
+    assert len(summary.verified) == 1
+    assert summary.verified[0].quote == "Nominal voltage is 12V DC."
+    assert "says nothing of it" in summary.rejected[0].reason
