@@ -4,6 +4,7 @@ import dataclasses
 import io
 import json
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from aft import inject, keys
-from aft.cli import main
+from aft.cli import HOOK_TIMEOUT_SECONDS, main
 from aft.config import Config, InjectConfig
 from aft.gitutil import normalize_remote
 from aft.registry import Registry, path_key
@@ -857,3 +858,60 @@ def test_a_session_start_before_the_vault_exists_prints_nothing(cfg, tmp_path, c
         == ""
     )
     assert hook_log(cfg) == []
+
+
+def timed_session_start(monkeypatch, capsys, cwd: Path) -> tuple[str, float]:
+    started = time.monotonic()
+    out = run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, cwd)
+    return out, time.monotonic() - started
+
+
+def test_a_stalled_page_read_ends_the_session_start_inside_the_budget(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """`inject._read` takes an ``OSError`` for a page that is not there. The hook's expiry is
+    not one, so a read that stalls ends the build instead of being counted as an absent page
+    and followed by every other stalled read, with the one-shot timer already spent."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    pages = widget.vault / "projects"
+    read_text = Path.read_text
+    stalled = []
+
+    def stall(self, *args, **kwargs):
+        if pages in self.parents:
+            stalled.append(self)
+            time.sleep(10)
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", stall)
+
+    out, elapsed = timed_session_start(monkeypatch, capsys, tmp_path / "widget")
+
+    assert out == ""
+    assert len(stalled) == 1
+    assert elapsed < HOOK_TIMEOUT_SECONDS
+    lines = hook_log(widget)
+    assert len(lines) == 1
+    assert "HookTimeoutError" in lines[0]
+
+
+def test_a_stalled_git_ends_the_session_start_inside_the_budget(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """The same for the git call that resolves the directory: its handler turns an
+    ``OSError`` into a ``GitError``, and the expiry passes through it as itself."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+
+    def stall(*args, **kwargs):
+        time.sleep(10)
+        raise AssertionError("the hook's time limit never fired")
+
+    monkeypatch.setattr(subprocess, "run", stall)
+
+    out, elapsed = timed_session_start(monkeypatch, capsys, tmp_path / "widget")
+
+    assert out == ""
+    assert elapsed < HOOK_TIMEOUT_SECONDS
+    lines = hook_log(widget)
+    assert len(lines) == 1
+    assert "HookTimeoutError" in lines[0]

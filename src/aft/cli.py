@@ -836,7 +836,7 @@ def cmd_hook(args) -> int:
         # never leaves an agent holding the first half of a block.
         if block:
             print(block)
-    except Exception as exc:
+    except (Exception, HookTimeoutError) as exc:
         _log_hook_failure(args.agent, args.event, exc)
     return 0
 
@@ -882,6 +882,17 @@ def _dispatch(event: SessionEvent) -> str:
     return ""
 
 
+class HookTimeoutError(BaseException):
+    """One blocking step of the hook spent its share of the hook budget.
+
+    The timer behind it fires once, so the expiry has to reach `cmd_hook` the first time it
+    is raised. It is a ``BaseException`` for that reason: the code a hook runs treats an
+    ``OSError`` as a page that is absent or a command that would not start, and carries on,
+    and the built-in ``TimeoutError`` is an ``OSError``. Only the two handlers in this module
+    that name this class catch it.
+    """
+
+
 @contextmanager
 def _hook_time_limit(seconds: float) -> Iterator[None]:
     """Bound one blocking step of the hook to its share of the hook budget.
@@ -896,7 +907,7 @@ def _hook_time_limit(seconds: float) -> Iterator[None]:
         return
 
     def expire(signum, frame) -> None:
-        raise TimeoutError(f"the hook gave up after {seconds} seconds")
+        raise HookTimeoutError(f"the hook gave up after {seconds} seconds")
 
     previous = signal.signal(signal.SIGALRM, expire)
     signal.setitimer(signal.ITIMER_REAL, seconds)
@@ -938,5 +949,5 @@ def _log_hook_failure(agent: str, event: str, exc: BaseException) -> None:
             (home / "logs").mkdir(parents=True, exist_ok=True)
             with (home / "logs" / "hooks.log").open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
-    except Exception:
+    except (Exception, HookTimeoutError):
         pass
