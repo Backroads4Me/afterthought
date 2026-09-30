@@ -86,6 +86,7 @@ def complete_json(
         raise ModelError(f"the schema aft was given is faulty: {exc}") from exc
 
     body = {
+        **config.settings.model.extra_body,
         "model": config.settings.model.name,
         "messages": [
             {"role": "system", "content": system},
@@ -219,6 +220,16 @@ def _chat(config: Config, body: dict) -> str:
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
+        finish = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+        if finish == "length":
+            # A reasoning model spends its tokens thinking before it answers, and one that
+            # runs out has nothing left to answer with. The cause is the endpoint's setup,
+            # so the error names the setting that fixes it rather than the reply alone.
+            raise ModelError(
+                f"{url} used all {body.get('max_tokens')} tokens without answering"
+                " (finish_reason length); a reasoning model can be told not to think with"
+                " model.extra_body in config.toml"
+            )
         echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} returned no message content: {echo}")
     return content

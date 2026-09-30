@@ -27,6 +27,14 @@ class ModelConfig:
     endpoint: str = "http://localhost:8000/v1"
     name: str = ""
     api_key_env: str = ""
+    # Fields merged into every request body, for what one endpoint needs and another does
+    # not: turning a reasoning model's thinking off, for example. The fields aft sets itself
+    # are refused here, so this can add to a request and never change what aft asks for.
+    extra_body: dict[str, typing.Any] = field(default_factory=dict)
+
+
+# The request fields aft sets itself, which model.extra_body may not name.
+MODEL_REQUEST_FIELDS = frozenset({"model", "messages", "max_tokens", "response_format"})
 
 
 @dataclass(frozen=True)
@@ -127,6 +135,11 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
     vault = Path(settings.vault).expanduser()
     if not vault.is_absolute():
         raise ConfigError(f"{path}: vault must be an absolute path, got {settings.vault!r}")
+    taken = sorted(MODEL_REQUEST_FIELDS & set(settings.model.extra_body))
+    if taken:
+        raise ConfigError(
+            f"{path}: model.extra_body may not set {', '.join(taken)}; aft sets those itself"
+        )
     if settings.dream.interval_minutes <= 0:
         raise ConfigError(f"{path}: dream.interval_minutes must be positive")
     host = settings.host or default_host()
@@ -168,6 +181,10 @@ def _coerce(hint, value, name: str):
     if hint is str:
         if not isinstance(value, str):
             raise ConfigError(f"{name} must be a string")
+        return value
+    if hint is dict or typing.get_origin(hint) is dict:
+        if not isinstance(value, dict):
+            raise ConfigError(f"{name} must be a table")
         return value
     if typing.get_origin(hint) is tuple:
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -250,6 +267,9 @@ name = ""
 # aft stores the name of a key and never the key itself. Empty means the endpoint
 # takes no key.
 # api_key_env = ""
+# Fields added to every request, for what this endpoint needs. A reasoning model served
+# by vLLM that spends its whole answer thinking is told not to with:
+# extra_body = { chat_template_kwargs = { enable_thinking = false } }
 
 [capture]
 # Sessions under these paths are worker sessions: archived and searchable, digested

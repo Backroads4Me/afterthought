@@ -99,6 +99,29 @@ def test_a_raw_newline_inside_a_string_is_still_an_answer(serve):
     assert len(fake.requests) == 1
 
 
+def test_extra_body_fields_travel_with_every_request(serve, home):
+    """model.extra_body adds what one endpoint needs to the request aft sends."""
+    fake, cfg = serve({"answer": "ok"})
+    with open(home / "config.toml", "a") as handle:
+        handle.write("extra_body = { chat_template_kwargs = { enable_thinking = false } }\n")
+    cfg = configmod.load()
+    assert call(cfg) == {"answer": "ok"}
+    sent = fake.requests[0]
+    assert sent["chat_template_kwargs"] == {"enable_thinking": False}
+    assert sent["model"] == "fake-model" and sent["max_tokens"] == 128
+
+
+def test_an_answer_lost_to_reasoning_names_the_setting_that_fixes_it(serve):
+    """A reasoning model that spends every token thinking returns no content with
+    finish_reason length. That is the endpoint's setup, so the error says how to fix it and
+    the call is not repeated: a second attempt would think just as long."""
+    fake, cfg = serve(Reply(null_content=True, finish_reason="length", usage=(200, 128)))
+    with pytest.raises(model.ModelError, match="model.extra_body") as caught:
+        call(cfg)
+    assert "used all 128 tokens without answering" in str(caught.value)
+    assert len(fake.requests) == 1
+
+
 def test_two_invalid_answers_raise_after_one_retry(serve):
     fake, cfg = serve({"answer": "x" * 40}, {"answer": 7})
     with pytest.raises(model.ModelError) as answer:

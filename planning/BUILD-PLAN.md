@@ -779,6 +779,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   says so; `--dry-run` names the commands; `--uninstall` disables and stops the timer before
   removing its unit. Units written to a directory systemd does not read run no command, and
   a refusal from systemd exits 1 with the commands to run by hand.
+- **F28 An endpoint's own request fields** (ruling 2026-09-30; tester finding T10).
+  DESIGN 13. `model.extra_body`, a table in `config.toml`, is merged into every request body;
+  naming `model`, `messages`, `max_tokens` or `response_format` is a config error. An answer
+  with no content and `finish_reason: length` fails once, without the retry, with an error
+  that names the setting. Tests: the fields reach the endpoint; the reserved names are
+  refused; the lost-to-reasoning error and its single call.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
