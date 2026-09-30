@@ -23,7 +23,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft.config import Config
+from aft.config import Config, is_excluded
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.queue import enqueue, session_state, watching_since
 from aft.readers import CLAUDE, PI
@@ -126,9 +126,9 @@ def _candidate(
     if not idle and not _grown_since_watermark(path, state.watermark, agent):
         return None
     cwd = _cwd_of(path)
-    if cwd is None:
-        # Nothing in the file names the directory it was started in, so there is no cwd
-        # for the digest to resolve and no event to hand it (BUILD-PLAN M2.6).
+    if cwd is None or is_excluded(cwd, config):
+        # Nothing in the file names the directory it was started in, or the directory
+        # is under capture.exclude_paths, so there is no event to hand capture.
         return None
     return SessionEvent(
         agent=agent,

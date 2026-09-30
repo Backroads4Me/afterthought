@@ -40,7 +40,8 @@ import yaml
 from aft import __version__, evidence, index, keys, model, page, pagewrite, queue, readers, vault
 from aft import filter as filtermod
 from aft import registry as registrymod
-from aft.config import Config
+from aft.config import Config, is_excluded, is_worker
+from aft.dream import rules
 from aft.gitutil import GitError, git
 from aft.model import ModelError
 from aft.page import KIND_SECTIONS
@@ -125,6 +126,7 @@ class Fact:
     entry: str
     scope: str
     date: str  # the day of that entry, which is the line's date last evidenced
+    role: str = rules.PRIMARY
 
 
 @dataclass(frozen=True)
@@ -236,6 +238,9 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     filter emptied moves the mark past the entries read, because those are decided and
     would be decided again by every later run.
     """
+    if is_excluded(job.cwd, config):
+        queue.drop_job(config, job)
+        return None
     _require_session_id(job.session_id)
     vault.require(config)
     registry = registrymod.Registry.load(config.registry_path)
@@ -277,6 +282,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         None if resolution.project is None else resolution.project.id,
         kept,
     )
+    index.update(config)
 
     # The page's own name is taken here, before a token is spent on it, from what already
     # stands in the day's directory: a job writes the page it is given and never a page
@@ -284,6 +290,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     when = read[-1].time.astimezone(UTC).date()
     rel = _path(config, resolution.slug, job.agent, job.session_id, when)
 
+    role = rules.WORKER if is_worker(job.cwd, config) else rules.PRIMARY
     facts: list[Fact] = []
     dropped: list[Dropped] = []
     summaries: list[str] = []
@@ -292,11 +299,11 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     schema = digest_schema()
     # One page per job, whatever the number of parts: the parts of one job are one digest,
     # and a handoff is what stood at the end of the part that read it, so the last part's is
-    # the job's. Summaries are joined uncut - a page's description has no cap, so nothing is
+    # the job's. Summaries are joined uncut: a page's description has no cap, so nothing is
     # truncated at the join, and a reader sees every part's own words.
     for part in parts(kept):
         answer = _model_answer(config, prompt, render(part), schema)
-        part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"])
+        part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"], role=role)
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
@@ -314,6 +321,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         dropped,
         when,
         now or datetime.now(UTC),
+        role=role,
     )
     dropped.extend(refused)
     rel = _write(
@@ -323,6 +331,53 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # away has been decided, and reading it again would decide it again (DESIGN 8).
     queue.complete(config, job, read[-1].id, off_record=off_record)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=read[-1].id)
+
+
+def archive_worker_job(config: Config, job: queue.Job) -> bool:
+    """Store a worker session in the evidence archive and search index without digesting.
+
+    Returns True if entries were archived, False if there was nothing new to store. Either
+    way the row closes and the session's digest becomes owed (``queue.owe_digest``): the
+    archive read this transcript through here, so the row is finished work, and what is
+    still missing is a digest - which the debt on the session row remembers, and
+    ``work.run`` collects when the day's budget has room after primaries. The row cannot be
+    left waiting, because capture stops following a session that has a waiting row and the
+    worker's later text would never be stored at all (BUILD-PLAN M2.7, the lead's review of
+    #39). The session's watermark is left unmoved either way, so the digest the debt calls
+    for reads the chunk this run skipped.
+
+    False with no debt is returned only for a row that is not the archive's to handle: one
+    whose session is not a worker's, or whose transcript the adapter has not written yet -
+    the sweep files that path when the transcript appears, and the row is digested or
+    archived then. An excluded session's row is deleted rather than closed, because
+    exclusion says it leaves no queue row at all.
+    """
+    if is_excluded(job.cwd, config):
+        queue.drop_job(config, job)
+        return False
+    if not is_worker(job.cwd, config):
+        return False
+    if job.transcript_path is None:
+        return False
+    vault.require(config)
+    read = list(readers.read(job.agent, job.transcript_path, job.watermark))
+    kept, _ = filtermod.filter_entries(read, config, job.off_record) if read else ([], False)
+    archived = False
+    if kept:
+        registry = registrymod.Registry.load(config.registry_path)
+        try:
+            resolution = keys.resolve(job.cwd, registry, config.host)
+            project_id = resolution.project.id if resolution.project else None
+        except GitError:
+            # Archiving files no page, so the project it would resolve to is a label rather
+            # than a requirement: a directory that has gone away still gets its words stored.
+            # Anything else the resolver raises is a bug or a host failure, and travels up.
+            project_id = None
+        evidence.store(config, job.agent, job.session_id, project_id, kept)
+        index.update(config)
+        archived = True
+    queue.owe_digest(config, job)
+    return archived
 
 
 def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:
@@ -344,7 +399,11 @@ def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict
 
 
 def verify(
-    config: Config, session_id: str, part: Sequence[Entry], facts: Sequence[dict]
+    config: Config,
+    session_id: str,
+    part: Sequence[Entry],
+    facts: Sequence[dict],
+    role: str = rules.PRIMARY,
 ) -> tuple[list[Fact], list[Dropped]]:
     """The facts of one part that pass the design's checks, and the refusals beside them.
 
@@ -386,6 +445,7 @@ def verify(
                 entry=entry.id,
                 scope=fact["scope"],
                 date=entry.time.astimezone(UTC).date().isoformat(),
+                role=role,
             )
         )
     return kept, dropped
@@ -449,6 +509,7 @@ def _page(
     dropped: Sequence[Dropped],
     when: date,
     stamp: datetime,
+    role: str = rules.PRIMARY,
 ) -> tuple[str, tuple[Fact, ...], tuple[Dropped, ...]]:
     """The digest page: the frontmatter, then the fact lines the script kept.
 
@@ -463,7 +524,7 @@ def _page(
     what ``aft.facts`` names, so the record beside a page and the lines on it cannot part.
     """
     frontmatter = _frontmatter(
-        config, resolution, slug, summaries, handoff, facts, dropped, when, stamp
+        config, resolution, slug, summaries, handoff, facts, dropped, when, stamp, role=role
     )
     text, written, refused = _written(frontmatter, rel, session, facts)
     if refused:
@@ -479,6 +540,7 @@ def _page(
             [*dropped, *refused],
             when,
             stamp,
+            role=role,
         )
         text, written, _ = _written(frontmatter, rel, session, facts)
     return text, tuple(written), tuple(refused)
@@ -494,6 +556,7 @@ def _frontmatter(
     dropped: Sequence[Dropped],
     when: date,
     stamp: datetime,
+    role: str = rules.PRIMARY,
 ) -> dict:
     """The page's OKF frontmatter, with afterthought's own fields under one ``aft`` key.
 
@@ -502,6 +565,8 @@ def _frontmatter(
     the verifier or the page writer refused, with the reason each one failed on.
     """
     aft: dict[str, object] = {}
+    if role == rules.WORKER:
+        aft["role"] = rules.WORKER
     if resolution.project is not None:
         aft["project"] = resolution.project.id
     aft["handoff"] = {
@@ -601,6 +666,8 @@ def _verified(fact: Fact) -> dict:
         "entry": fact.entry,
         "scope": fact.scope,
     }
+    if fact.role == rules.WORKER:
+        record["role"] = rules.WORKER
     if fact.scope == "global" and fact.source != "stated":
         record["skip"] = GLOBAL_NOT_STATED
     return record
@@ -744,9 +811,24 @@ def redigest(
     The entries come from the evidence archive rather than a transcript, so this works
     even when the transcript has expired or is no longer present. The resulting digest
     replaces any existing digest page for that session in the vault.
+
+    A rebuild starts from a session id, so the role comes from the directory the queue last
+    saw that session in: a worker's digest rebuilt without its role files a primary digest,
+    whose confirmed lines then count toward the one session the dream's minimum is measured
+    against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
+    outright - exclusion says its words are not the vault's, and a rebuild of an archive
+    written before that decision was added does not change the answer.
     """
     _require_session_id(session_id)
     vault.require(config)
+
+    cwd = queue.session_cwd(config, session_id)
+    if cwd is not None and is_excluded(cwd, config):
+        raise DigestError(
+            f"session {session_id!r} ran in {cwd}, which capture excludes,"
+            " so its words are not this vault's to rebuild"
+        )
+    role = rules.WORKER if cwd is not None and is_worker(cwd, config) else rules.PRIMARY
 
     entries = evidence.entries(config, session_id)
     if not entries:
@@ -801,7 +883,7 @@ def redigest(
 
     for part in parts(entries):
         answer = _model_answer(config, prompt, render(part), schema)
-        part_facts, part_dropped = verify(config, session_id, part, answer["facts"])
+        part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
@@ -819,6 +901,7 @@ def redigest(
         dropped,
         when,
         now or datetime.now(UTC),
+        role=role,
     )
     dropped.extend(refused)
 

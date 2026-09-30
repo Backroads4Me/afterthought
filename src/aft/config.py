@@ -172,6 +172,32 @@ def _coerce(hint, value, name: str):
     raise ConfigError(f"{name} has an unsupported type")
 
 
+def is_under(path: Path | str, parents: tuple[str, ...]) -> bool:
+    """Whether path is equal to or a descendant of any path in parents."""
+    if not parents:
+        return False
+    resolved = Path(path).expanduser().resolve()
+    for parent in parents:
+        if not parent.strip():
+            continue
+        try:
+            if resolved.is_relative_to(Path(parent).expanduser().resolve()):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def is_excluded(path: Path | str, config: Config) -> bool:
+    """Whether path is excluded from capture by capture.exclude_paths."""
+    return is_under(path, config.settings.capture.exclude_paths)
+
+
+def is_worker(path: Path | str, config: Config) -> bool:
+    """Whether path is a worker session path under capture.worker_paths."""
+    return not is_excluded(path, config) and is_under(path, config.settings.capture.worker_paths)
+
+
 DEFAULT_CONFIG_TEXT = """\
 # Afterthought configuration. Every setting is optional; the values shown are the defaults.
 
