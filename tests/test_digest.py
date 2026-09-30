@@ -2750,3 +2750,117 @@ def test_a_planted_secret_reaches_neither_model_archive_nor_index(session: Sessi
         assert secret.encode() not in on_disk, f"{secret} reached the files on disk"
         assert secret not in written, f"{secret} reached the page"
     assert REDACTED in archived, "nothing was redacted, so the zeros prove nothing"
+
+
+# ---------------------------------------------------------------- memory reflected back (T14)
+
+REMEMBERED = "Capture and injection run from agent lifecycle hooks, not from the model."
+
+OVERVIEW_WITH_MEMORY = """---
+type: Project
+title: Widget
+description: A widget that ships on time.
+sources:
+  - id: s1
+    resource: aft://session/claude/s-0#e1
+    quote: hooks, not the model
+aft:
+  project: {project_id}
+---
+
+# Widget
+
+## Decisions
+
+- {remembered} [stated] 2026-09-01 [^s1]
+"""
+
+
+def remembering(session: Session) -> None:
+    """Give the widget project a curated line, so a session starting there is given it."""
+    project = registry.Registry.load(session.cfg.registry_path).by_slug(SLUG)
+    page_path_ = session.cfg.vault / "projects" / SLUG / "overview.md"
+    page_path_.parent.mkdir(parents=True, exist_ok=True)
+    page_path_.write_text(
+        OVERVIEW_WITH_MEMORY.format(project_id=project.id, remembered=REMEMBERED),
+        encoding="utf-8",
+    )
+
+
+def test_memory_lines_are_the_block_a_session_is_given(session: Session):
+    remembering(session)
+    resolution = keys.resolve(
+        session.cwd, registry.Registry.load(session.cfg.registry_path), session.cfg.host
+    )
+    assert REMEMBERED in digest.memory_lines(session.cfg, resolution)
+
+
+def test_lines_that_repeat_memory_are_taken_out_and_the_rest_kept():
+    """A line is an echo whatever list marker or wrapping it arrives in; the entry keeps
+    everything else, and an entry that held nothing but memory is gone."""
+    memory = frozenset({REMEMBERED, "Files are the truth: every index is a cache."})
+    # "## Decisions" is a line of every block, and too short to be taken for memory.
+    entries = [
+        Entry(
+            "a1",
+            NOW,
+            "assistant",
+            f"Here is what I know:\n- {REMEMBERED}\nAnd one new thing.",
+            False,
+        ),
+        Entry("a2", NOW, "assistant", f">   {REMEMBERED.replace(' ', '   ')}", False),
+        Entry("a3", NOW, "assistant", "## Decisions", False),
+        Entry("u1", NOW, "user", "Capture runs at session end.", False),
+    ]
+    kept = digest.without_memory_echo(entries, memory)
+    assert [(entry.id, entry.text) for entry in kept] == [
+        ("a1", "Here is what I know:\nAnd one new thing."),
+        ("a3", "## Decisions"),
+        ("u1", "Capture runs at session end."),
+    ]
+
+
+def test_a_session_repeating_its_memory_is_not_evidence_for_it(session: Session):
+    """The words a session was given at start and repeated back never reach the model, the
+    archive or a digest: memory confirmed by its own echo would count as recurrence (R3)."""
+    remembering(session)
+    write_transcript(
+        session.transcript,
+        session.cwd,
+        record("e6", "assistant", f"From memory:\n- {REMEMBERED}", model="claude-real"),
+    )
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+        sent = json.dumps(fake.requests)
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert "From memory" in sent, "the rest of the entry still reaches the model"
+    assert REMEMBERED not in sent
+    archived = evidence.entries(cfg, SESSION)
+    assert all(REMEMBERED not in entry.text for entry in archived)
+    assert [entry.text for entry in archived if entry.id == "e6"] == ["From memory:"]
+
+
+def test_the_digest_prompt_says_restated_memory_is_not_a_fact():
+    assert "A fact\nwhose only support is that memory being restated" in digest.prompt_text()
+
+
+def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
+    """Worker sessions are archived without a digest, and search reads that archive, so the
+    echo is taken out on that path too; an entry that was nothing but memory is not stored."""
+    remembering(session)
+    write_transcript(
+        session.transcript,
+        session.cwd,
+        record("e6", "assistant", f"- {REMEMBERED}", model="claude-real"),
+    )
+    cfg = with_capture(session.cfg, worker_paths=[str(session.cwd)])
+    queue.enqueue(cfg, event(session.transcript, session.cwd))
+    [job] = queue.pending_jobs(cfg, role="worker")
+    assert digest.archive_worker_job(cfg, job)
+    archived = evidence.entries(cfg, SESSION)
+    assert archived, "the worker's other words are archived"
+    assert all(REMEMBERED not in entry.text for entry in archived)
+    assert "e6" not in [entry.id for entry in archived]

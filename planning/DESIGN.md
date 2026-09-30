@@ -360,6 +360,9 @@ A deterministic filter turns each transcript chunk into evidence:
 - drop anything you marked off the record (section 12)
 - redact secrets (keys, tokens, private keys, credentials in URLs) and your own patterns
 - skip sessions with fewer than two prompts, and excluded paths
+- drop any line that repeats the project's memory block, which the session was given at
+  start: memory reflected back is not new evidence, and counting it would confirm memory
+  with its own echo
 
 Measured on this host over 30 days, this takes Claude Code transcripts from 500 MB to
 13.8 MB, and the interactive sessions that matter to about 6.4 MB: roughly 55,000 tokens a
