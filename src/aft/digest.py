@@ -37,7 +37,19 @@ from pathlib import Path
 
 import yaml
 
-from aft import __version__, evidence, index, keys, model, page, pagewrite, queue, readers, vault
+from aft import (
+    __version__,
+    evidence,
+    index,
+    keys,
+    model,
+    page,
+    pagewrite,
+    queue,
+    readers,
+    redact,
+    vault,
+)
 from aft import filter as filtermod
 from aft import registry as registrymod
 from aft.config import Config, is_excluded, is_worker
@@ -225,18 +237,36 @@ def parts(entries: Sequence[Entry]) -> list[list[Entry]]:
     return split_parts(entries, max(1, MAX_CHUNK_TOKENS - tokens(prompt_text())))
 
 
+def _past_the_floor(job: queue.Job, chunk: Sequence[Entry]) -> bool:
+    """Whether this session has earned capture: two user prompts of its own (DESIGN 8).
+
+    The chunk is what the filter kept, so a prompt counted here is one the session said on
+    the record, and two in a chunk are two in the session. A thinner chunk is measured over
+    the whole transcript - the floor is about the session, and one chunk of a long
+    conversation can carry a single exchange - counted by `filtermod.prompt_count`, which is
+    the filter's own span-aware count rather than a second reading of the spans here.
+    """
+    if sum(1 for entry in chunk if entry.role == USER) >= filtermod.MIN_SESSION_PROMPTS:
+        return True
+    if job.transcript_path is None:
+        return False
+    whole = readers.read(job.agent, job.transcript_path)
+    return filtermod.prompt_count(whole) >= filtermod.MIN_SESSION_PROMPTS
+
+
 def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> Digest | None:
     """Digest one queued job, or report that it held nothing to digest.
 
-    Reads, filter, archive, model, verify, page, watermark, commit, in that order: the
-    archive takes the chunk before the model sees it, because the page's quotes are found
+    Reads, filter, the floor, archive, model, verify, page, watermark, commit, in that order:
+    the archive takes the chunk before the model sees it, because the page's quotes are found
     in the archive, and the watermark moves only once the page stands in git or the chunk
     is known to hold nothing the filter would keep.
 
     Returns ``None`` when the job held nothing to digest, which closes it and files no
-    page. A session with no entry past its watermark keeps the mark it had; a chunk the
-    filter emptied moves the mark past the entries read, because those are decided and
-    would be decided again by every later run.
+    page. A session with no entry past its watermark keeps the mark it had, and so does one
+    under the two-prompt floor: its entries are not decided against keeping, only not worth
+    keeping yet. A chunk the filter emptied moves the mark past the entries read, because
+    those are decided and would be decided again by every later run.
     """
     if is_excluded(job.cwd, config):
         queue.drop_job(config, job)
@@ -273,6 +303,17 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         # mark moves and the job closes. A page of nothing would stand as the session's
         # last word and speak for the work that came after it.
         queue.complete(config, job, read[-1].id, off_record=off_record)
+        return None
+    if not _past_the_floor(job, kept):
+        # DESIGN 8's floor, decided before a token is spent or a word archived: a session
+        # that never got past one prompt is not captured. The close moves no watermark,
+        # because these entries are not decided against keeping, only not yet worth keeping:
+        # a session that grows past the floor is read again from where its last digest
+        # stopped, so nothing it said is lost to the floor it was under.
+        # stopped, so nothing it said is lost to the floor it was under. The span state
+        # closes as it arrived, because a span is stored against the watermark it belongs to
+        # and that mark did not move.
+        queue.complete(config, job, None, off_record=job.off_record)
         return None
 
     evidence.store(
@@ -362,6 +403,14 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     vault.require(config)
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
     kept, _ = filtermod.filter_entries(read, config, job.off_record) if read else ([], False)
+    if kept and not _past_the_floor(job, kept):
+        # The same floor as a primary session: below it the worker's words reach no archive
+        # and no digest is owed for them. Its row still closes, because a waiting row would
+        # stop capture from following the session at all, and the watermark stays where it
+        # was, so the worker that grows past the floor is read whole next time. The row is
+        # closed without a debt: nothing was stored, so nothing is owed to be digested.
+        queue.close_waiting(config, job)
+        return False
     archived = False
     if kept:
         registry = registrymod.Registry.load(config.registry_path)
@@ -801,6 +850,21 @@ def _is_session_digest(path: Path, session_id: str) -> bool:
     return is_exact
 
 
+def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
+    """The archived entries as a rebuild may read them: with today's redaction on them.
+
+    The archive holds what the patterns known at capture time let through, and a pattern added
+    since then is the person saying that text is not to leave this host. Sending the archived
+    words to a model unchanged would hand over exactly what they marked secret, so the same
+    replacement runs over each entry before any of it is rendered into a prompt (DESIGN 12).
+    """
+    patterns = config.settings.capture.redact_patterns
+    return [
+        Entry(entry.id, entry.time, entry.role, redact.redact(entry.text, patterns), entry.is_error)
+        for entry in entries
+    ]
+
+
 def redigest(
     config: Config,
     session_id: str,
@@ -818,9 +882,25 @@ def redigest(
     against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
     outright - exclusion says its words are not the vault's, and a rebuild of an archive
     written before that decision was added does not change the answer.
+
+    Two costs the rebuild owns. Its calls are charged to the day's token budget as any
+    digest's are, and a rebuild asked for after that budget is spent refuses rather than
+    spending past it (DESIGN 13). And the entries are read through the redaction patterns this
+    home has now, because the archive holds only what the patterns of the day it was written
+    allowed: text the person has since marked secret is never sent to a model. A quote that
+    would span one of those redactions matches no archived entry and is refused the way any
+    unverifiable quote is; ``aft forget pattern`` redacts both sides at once, which is how a
+    pattern the archive should never have held gets settled.
     """
     _require_session_id(session_id)
     vault.require(config)
+
+    budget = config.settings.work.daily_token_budget
+    if model.tokens_used_today(config, now) >= budget:
+        raise DigestError(
+            f"the day's token budget of {budget} tokens is already spent, so rebuilding the"
+            f" digest of session {session_id!r} waits for a day with room in it (DESIGN 13)"
+        )
 
     cwd = queue.session_cwd(config, session_id)
     if cwd is not None and is_excluded(cwd, config):
@@ -830,7 +910,7 @@ def redigest(
         )
     role = rules.WORKER if cwd is not None and is_worker(cwd, config) else rules.PRIMARY
 
-    entries = evidence.entries(config, session_id)
+    entries = _redacted_entries(config, evidence.entries(config, session_id))
     if not entries:
         raise DigestError(f"no archived evidence for session {session_id!r}")
 

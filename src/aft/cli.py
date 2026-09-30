@@ -517,8 +517,10 @@ def cmd_forget_session(args) -> int:
     print(
         f"forgot session {args.session_id}: removed evidence, "
         f"{len(report.digests_removed)} digest file(s), "
+        f"{report.jobs_removed} queue job row(s), "
         f"withdrew {len(report.lines_withdrawn)} curated line(s), "
-        f"removed {len(report.candidates_removed)} candidate line(s)"
+        f"removed {len(report.candidates_removed)} candidate line(s), "
+        f"scrubbed {len(report.reports_scrubbed)} report page(s)"
     )
     if report.lines_unwithdrawn:
         print(
@@ -534,8 +536,25 @@ def cmd_forget_session(args) -> int:
 def cmd_forget_pattern(args) -> int:
     config = load()
     vault.require(config)
-    count = forget.forget_pattern(config, args.pattern)
-    print(f"redacted {count} {'entry' if count == 1 else 'entries'} in the evidence archive")
+    report = forget.forget_pattern(config, args.pattern)
+    count = report.entries_redacted
+    print(
+        f"redacted {count} {'entry' if count == 1 else 'entries'} in the evidence archive"
+        f" and {len(report.pages_redacted)} vault page(s)"
+    )
+    if report.pages_refused:
+        print(
+            f"{len(report.pages_refused)} page(s) would not read as itself redacted,"
+            " and were left as they stand:"
+        )
+        for rel in report.pages_refused:
+            print(f"  {rel}")
+    if report.verified_quotes_redacted:
+        print(
+            f"redacted {report.verified_quotes_redacted} imported quote(s)"
+            " in library/verified_quotes.json"
+        )
+
     existing = list(config.settings.capture.redact_patterns)
     if args.pattern not in existing:
         existing.append(args.pattern)

@@ -29,9 +29,10 @@ These rules apply to every task and every pull request.
    client uses the standard library.
 7. **Reviews look at code and behavior** against the design section the task cites, never
    at the wording of planning documents.
-8. **Size budget:** about 5,000 non-blank lines of Python in `src/` through M4. Count with
-   `cat src/aft/*.py src/aft/**/*.py | grep -cvE '^\s*($|#)'`. M0 is about 1,160. Going
-   past the budget is reported, not worked around.
+8. **Size is measured, not a target.** Performance and accuracy come first. Count with
+   `cat src/aft/*.py src/aft/**/*.py | grep -cvE '^\s*($|#)'` and report the number at each
+   milestone end; remove real duplication when it is found, never working code for the
+   count's sake.
 9. **Never write to the real vault or `~/.afterthought`** during a task. Installing into
    the real environment (`aft install`, systemd units, hooks) is done by Ted, at milestone
    ends, from the checklists in section 6.
@@ -616,7 +617,8 @@ Give a reason of at most 200 characters that a person can check against the quot
   again, except on a line with an open note, where the break is only reported; moves superseded lines older than 90 days to `archive/<page path>`, the page's own vault path under `archive/`; flags
   pages over 12,000 characters in the report; regenerates each `index.md` and appends to
   `log.md`; runs lint and aborts the run without committing if lint fails; marks consumed
-  digests with `aft.consumed: <commit>`; makes one commit per project run.
+  digests with `aft.consumed: <run id>`, the dream run's id, which the run's commit message
+  also names; makes one commit per project run.
 - **Tests:** the M4 fixture suite from DESIGN 15, driven end to end with the fake endpoint.
 - **Review checkpoint:** every PR touching `apply.py`.
 
@@ -708,6 +710,30 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   M4.5 uses it when an anchor's words reappear; the line keeps its date. Trust decisions
   such as whether a replacement is newer live in `aft.dream.rules`; the writer only writes. Test: a cleared line parses as active and
   lints.
+- **F8 Forget is complete** (after M2.8; M2 milestone review). DESIGN 12. `aft forget session`
+  also clears the session from the capture queue (pending and failed jobs, their error text,
+  its digest debt and session row), so a later `aft work` cannot bring its words back, and
+  scrubs its quotes in reports and `needs-you.md`. `aft forget pattern` replaces matches with
+  `[redacted]` in digest quotes, page sources and statements, and reports, and updates the
+  index, as well as the archive. `aft redigest` applies the current redaction patterns and
+  counts against the daily budget (DESIGN 8). Tests: forget, then `aft work`, leaves no trace;
+  after forget pattern, `aft search` finds the pattern nowhere; a redigest of a session whose
+  text matches a pattern added later sends none of it to the model.
+- **F9 Capture privacy** (after M2.7; M2 milestone review). DESIGN 8 and 12. The retention
+  purge runs from `aft work`; redaction covers quoted JSON keys and the missing token formats
+  and runs before the length cap; sessions with fewer than two prompts are skipped;
+  `capture.exclude_projects` names projects that are never captured. Test: a secret planted
+  in a transcript is absent from the model request, the archive and the index after
+  `aft work`.
+- **F10 Archived notes are searchable** (after M4.2; ruling 2026-09-30). DESIGN 10. An
+  archive file written by `resolve_callout` has a section heading so it parses, and the
+  archive collection indexes resolved notes with the fact they belonged to. Test: after a
+  note is resolved, `aft search --archive <words of the answer>` finds it, and default
+  search does not.
+- **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
+  busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
+  repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
+  and one test per store checks WAL mode and lock serialization through the shared module.
 - **F5 Collection authority** (after M7.6). DESIGN 11, Authority. The manifest gains
   `authority: authoritative | reference` (default `reference`), validated by M7.2's
   validator. The import skill asks the user for it and records the answer; the agent never
