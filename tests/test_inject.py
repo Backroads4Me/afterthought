@@ -681,30 +681,81 @@ def test_absent_pages_leave_the_block_with_what_exists(widget, tmp_path):
 def test_builds_50_pages_of_200_lines_in_under_150_ms(initialized, tmp_path):
     registry = Registry.load(initialized.registry_path)
     project = registry.add("wide", "Wide")
-    registry.add_path(project, path_key(HOST, make_repo(tmp_path / "wide").resolve()))
+    repo = make_repo(tmp_path / "wide").resolve()
+    registry.add_path(project, path_key(initialized.host, repo))
     registry.save()
     for number in range(50):
+        sources = [
+            f"  - id: s{line}\n"
+            f"    resource: aft://session/claude/s{number}\n"
+            f"    quote: Fact {line} quote"
+            for line in range(200)
+        ]
         facts = "\n".join(
-            f"- Fact {line} on page {number} is worth keeping. [observed] 2026-09-30 [^s1]"
+            f"- Fact {line} on page {number} is worth keeping. [observed] 2026-09-30 [^s{line}]"
             for line in range(200)
         )
         name = "overview" if number == 0 else f"page{number:02d}"
+        sources_text = "\n".join(sources)
         write(
             initialized.vault / f"projects/wide/{name}.md",
             f"---\ntype: Project\ntitle: Page {number}\n"
-            f"description: What page {number} is about.\nsources: []\n"
+            f"description: What page {number} is about.\n"
+            f"sources:\n{sources_text}\n"
             f"aft:\n  project: {project.id}\n---\n\n## Facts\n\n{facts}\n",
         )
-    resolution = resolve(initialized, tmp_path / "wide")
-    inject.build(initialized, resolution)  # warm the file cache, then time one build
-    started = time.perf_counter()
+    for i in range(20):
+        write(
+            initialized.vault / f"digests/wide/2026/09/2026-09-30-claude-s{i:02d}.md",
+            f"---\ntype: Digest\ngenerated:\n  at: 2026-09-30T10:{i:02d}:00Z\n"
+            f"aft:\n  handoff:\n    in_flight: Task {i}\n    open:\n      - Item 1\n"
+            f"sources:\n  - id: s1\n    resource: aft://session/claude/s\n    quote: Quote {i}\n"
+            f"---\n\n## Summary\n\nSession {i}\n",
+        )
+    resolution = resolve(initialized, repo)
     block = inject.build(initialized, resolution)
-    elapsed = time.perf_counter() - started
     assert block.count("\n- Fact ") > 1
     assert len(block) <= initialized.settings.inject.max_chars
     assert block.startswith("# Memory: ")
     assert inject.HOW_TO in block
-    assert elapsed < 0.15, f"the block took {elapsed * 1000:.0f} ms to build"
+
+    import os
+
+    env = {
+        **os.environ,
+        "AFT_HOME": str(initialized.home),
+        "HOME": str(tmp_path),
+    }
+
+    # Cold subprocess aft inject
+    started = time.perf_counter()
+    res = subprocess.run(
+        [sys.executable, "-m", "aft", "inject", str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    elapsed_inject = time.perf_counter() - started
+    assert res.returncode == 0
+    assert res.stdout == block + "\n"
+    assert elapsed_inject < 0.15, f"aft inject took {elapsed_inject * 1000:.1f} ms"
+
+    # Cold subprocess session-start hook
+    payload = json.dumps(
+        {"cwd": str(repo), "session_id": "bench-1", "transcript_path": "/tmp/t.jsonl"}
+    )
+    started = time.perf_counter()
+    res = subprocess.run(
+        [sys.executable, "-m", "aft", "hook", "claude", "SessionStart"],
+        input=payload,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    elapsed_hook = time.perf_counter() - started
+    assert res.returncode == 0
+    assert res.stdout == block + "\n"
+    assert elapsed_hook < 0.15, f"session-start hook took {elapsed_hook * 1000:.1f} ms"
 
 
 def test_inject_prints_the_block(widget, tmp_path, capsys, monkeypatch):

@@ -354,13 +354,13 @@ def _frontmatter(path: Path) -> dict:
     text = _read(path)
     if text is None:
         return {}
-    frontmatter, _, _, error = pagemod.split_frontmatter(text)
+    frontmatter, _, _, error = pagemod.split_frontmatter(text, strip_sources_list=True)
     return frontmatter if not error and isinstance(frontmatter, dict) else {}
 
 
 def _read_page(path: Path) -> pagemod.Page | None:
     text = _read(path)
-    return None if text is None else pagemod.parse(text, path)
+    return None if text is None else pagemod.parse(text, path, strip_sources_list=True)
 
 
 def _read(path: Path) -> str | None:
