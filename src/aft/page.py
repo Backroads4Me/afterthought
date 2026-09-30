@@ -163,13 +163,21 @@ def split_frontmatter(
         if lines[index].strip() == "---":
             raw = "\n".join(lines[1:index])
             body = "\n".join(lines[index + 1 :])
-            raw_yaml = strip_sources(raw) if strip_sources_list else raw
-            try:
-                data = yaml.safe_load(raw_yaml) if raw_yaml.strip() else {}
-            except yaml.YAMLError as exc:
-                return None, body, index + 2, f"frontmatter is not valid YAML: {exc}"
-            if not isinstance(data, dict):
-                return None, body, index + 2, "frontmatter must be a mapping"
+            data = None
+            if strip_sources_list and raw.strip():
+                try:
+                    data = yaml.safe_load(strip_sources(raw))
+                    if not isinstance(data, dict):
+                        data = None
+                except yaml.YAMLError:
+                    data = None
+            if data is None:
+                try:
+                    data = yaml.safe_load(raw) if raw.strip() else {}
+                except yaml.YAMLError as exc:
+                    return None, body, index + 2, f"frontmatter is not valid YAML: {exc}"
+                if not isinstance(data, dict):
+                    return None, body, index + 2, "frontmatter must be a mapping"
             return data, body, index + 2, None
     return None, text, 1, "frontmatter has no closing ---"
 

@@ -17,6 +17,7 @@ from aft.events import (
     SESSION_END,
     SESSION_START,
     SessionEvent,
+    optional_path_field,
     optional_string_field,
     path_field,
     resolve_event,
@@ -41,12 +42,17 @@ EVENTS = {
 def parse_claude(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
     """One Claude Code hook event and payload, as a SessionEvent."""
     kind, detail_field = resolve_event(AGENT, hook_event, EVENTS)
+    transcript = (
+        optional_path_field(payload, "transcript_path")
+        if kind == SESSION_START
+        else path_field(payload, "transcript_path")
+    )
     return SessionEvent(
         agent=AGENT,
         kind=kind,
         session_id=string_field(payload, "session_id"),
         cwd=path_field(payload, "cwd"),
-        transcript_path=path_field(payload, "transcript_path"),
+        transcript_path=transcript,
         time=now,
         detail=optional_string_field(payload, detail_field),
     )

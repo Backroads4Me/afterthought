@@ -141,10 +141,15 @@ def test_the_hook_takes_every_fixture(home, monkeypatch, capsys, name, agent, ho
     assert hook_log(home) == []
 
 
-def test_claude_without_a_transcript_is_refused():
+def test_claude_session_start_without_a_transcript_parses():
     without_transcript = payload("claude-session-start.json") | {"transcript_path": None}
+    assert parse_claude("SessionStart", without_transcript, NOW).transcript_path is None
+
+
+def test_claude_non_start_without_a_transcript_is_refused():
+    without_transcript = payload("claude-session-end.json") | {"transcript_path": None}
     with pytest.raises(AdapterError, match="transcript_path"):
-        parse_claude("SessionStart", without_transcript, NOW)
+        parse_claude("SessionEnd", without_transcript, NOW)
 
 
 def test_pi_before_its_session_is_written_has_no_transcript():

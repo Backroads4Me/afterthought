@@ -91,19 +91,27 @@ def _handoff_part(config: Config, slug: str) -> Part:
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The digest of the session that ended most recently under ``directory``, which the
-    digest step files under ``digests/`` as design 6 lays it out.
+    """The newest digest of a primary session that carries a handoff under ``directory``.
 
-    A page stands under the day its digested chunk ended, so that day leads; on the newest
-    day the page written last is the newest word, whatever order its name sorts in. Only
-    the newest day's pages are opened, which is where the writing times have to be read.
+    Worker, library and memory-import digests never supply or remove it.
     """
     digests = list(directory.rglob("*.md"))
     if not digests:
         return None
-    day = _digest_day(max(digests, key=_digest_day))
-    same_day = (digest for digest in digests if _digest_day(digest) == day)
-    return max(same_day, key=_digest_recency)
+    days = sorted({_digest_day(d) for d in digests}, reverse=True)
+    for day in days:
+        same_day = [d for d in digests if _digest_day(d) == day]
+        same_day.sort(key=_digest_recency, reverse=True)
+        for digest in same_day:
+            if "-library-" in digest.name or "-import-" in digest.name:
+                continue
+            fm = _frontmatter(digest)
+            aft = fm.get("aft") if isinstance(fm, dict) else None
+            if isinstance(aft, dict) and aft.get("role") == "worker":
+                continue
+            if handoff(fm):
+                return digest
+    return None
 
 
 # A digest name's part suffix: a session's second and later digests of one day are filed
@@ -326,9 +334,12 @@ def _block(
     minimal = _trim(floors, max_chars)
     extra = (max_chars - _width(minimal)) // 2
     project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
-    pages = _trim(page_map, min(_width(map_floor) + extra, max_chars))
-    room = max_chars - _width([*head, *project_layer, *pages, *closing]) - 2
-    body = [*project_layer, *_trim(preferences, room), *pages]
+    # Global preferences (layer 4) is ahead of page pointers (layer 5).
+    # Reserve map_floor and closing so page pointers keep their floor.
+    pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, max_chars))
+    room = max_chars - _width([*head, *project_layer, *pref_layer, *closing]) - 2
+    pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
+    body = [*project_layer, *pref_layer, *pages]
     cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
     parts = [*head, *cut, *body, *closing]
     return "\n\n".join(_blocks(_trim(parts, max_chars)))

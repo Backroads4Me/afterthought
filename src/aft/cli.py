@@ -360,11 +360,14 @@ def _injection_block(path: Path) -> str:
     `aft inject` and the session-start hook both print what this returns, so an agent's
     session starts with exactly the text `aft inject` shows for its directory.
     """
-    from aft import inject, keys
+    from aft import gitutil, inject, keys
 
     config = load()
     registry = Registry.load(config.registry_path)
-    result = keys.resolve(path, registry, config.host)
+    try:
+        result = keys.resolve(path, registry, config.host)
+    except gitutil.GitError:
+        result = keys.Resolution(kind=keys.NONE, cwd=path)
     return inject.build(config, result)
 
 
@@ -1004,14 +1007,17 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
     session in an excluded path or project records nothing, and neither does a directory
     that resolves to no project.
     """
-    from aft import inject, keys, vault
+    from aft import gitutil, inject, keys, vault
     from aft.config import is_excluded
 
     config = load()
     if not vault.is_initialized(config.vault):
         return "", None
     registry = Registry.load(config.registry_path)
-    result = keys.resolve(event.cwd, registry, config.host)
+    try:
+        result = keys.resolve(event.cwd, registry, config.host)
+    except gitutil.GitError:
+        result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
     block = inject.build(config, result)
     if result.slug is None or is_excluded(event.cwd, config):
         return block, None
