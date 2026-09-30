@@ -414,8 +414,13 @@ then:
 - drops `[stated]` unless the cited entry is one of your turns
 - writes the digest as an OKF file (`type: Session Digest`) under `digests/`: one page
   per job. The first job for a session on a day writes `<date>-<agent>-<session>.md`, and
-  later jobs that day add `-2`, `-3` before `.md`. A digest's content never changes once
-  written; dreaming only marks it consumed, so each page is dreamed once, in session order.
+  later jobs that day add `-2`, `-3` before `.md`. A digest's content changes only when
+  you ask: `aft redigest <session>` replaces a session's digest pages with ones rebuilt from
+  the archive (applying the current redaction patterns and counting against the daily
+  budget), and `aft forget` scrubs them. Otherwise dreaming only marks a digest consumed, so
+  each page is dreamed once, in session order. A rebuilt digest is unconsumed and is dreamed
+  again; a fact it repeats confirms rather than duplicates. The replaced pages stay in the
+  vault's git history.
 
 ## 9. Dreaming
 
@@ -709,10 +714,14 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
 - **Exclusions.** Paths and projects listed in `~/.afterthought/config.toml` are never
   captured.
 - **Redaction.** Built-in secret patterns plus your own patterns, applied before archiving.
-- **`aft forget session <id>`** removes the session from the evidence archive, the index
-  and the digests, and withdraws curated lines that rested only on it.
-- **`aft forget pattern <regex>`** redacts matching text from the archive and index and adds
-  the pattern to future redaction.
+- **`aft forget session <id>`** removes the session from the evidence archive, the capture
+  queue, the index and the digests, withdraws curated lines that rested only on it, and
+  scrubs its quotes wherever afterthought copied them: page sources, reports and
+  `needs-you.md`.
+- **`aft forget pattern <regex>`** replaces matching text with `[redacted]` in the archive
+  and everywhere afterthought copied it (digest quotes, page sources and statements, reports),
+  updates the index to match, and prints the line that adds the pattern to future redaction.
+  Quotes stay verifiable because the archive holds the same redaction.
 
 Forgetting removes content from everything afterthought controls. The vault's git history
 still holds older commits; removing them means rewriting history, which `aft forget`
