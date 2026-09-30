@@ -72,6 +72,12 @@ Nothing is waiting on you.
 OBSIDIAN_APP = {"userIgnoreFilters": ["reports/"]}
 
 
+# The block `aft` owns inside the vault's `.gitignore`: its own marker, then the rule it
+# wrote. A line the owner added themselves is never touched.
+LIBRARY_IGNORE_MARKER = "# library.commit = false"
+LIBRARY_IGNORE_RULE = "library/"
+
+
 def gitignore_text(commit_library: bool) -> str:
     lines = [
         "# Obsidian keeps per-device state here; only the shared settings are committed.",
@@ -79,8 +85,45 @@ def gitignore_text(commit_library: bool) -> str:
         "!.obsidian/app.json",
     ]
     if not commit_library:
-        lines += ["", "# library.commit = false", "library/"]
+        lines += ["", LIBRARY_IGNORE_MARKER, LIBRARY_IGNORE_RULE]
     return "\n".join(lines) + "\n"
+
+
+def maintain_library_ignore(vault: Path, commit_library: bool) -> bool:
+    """Bring the vault's `.gitignore` in line with `library.commit`; report a change.
+
+    `aft init` wrote that file once and the setting is read from `config.toml` on every run, so
+    turning `library.commit` off afterwards used to leave `library/<name>/` untracked *and*
+    unignored - and whatever git reports as changed is what the dream's checkpoint commit
+    collects, so imported sources went in as human edits (M7 review 12).
+
+    Only the block this program wrote is rewritten: a `library/` line the owner added is theirs.
+    Turning the setting off also untracks what an earlier import committed - the files stay on
+    disk and in history, and stop being committed on every later run.
+    """
+    path = vault / ".gitignore"
+    lines = path.read_text().splitlines() if path.is_file() else []
+    kept: list[str] = []
+    position = 0
+    while position < len(lines):
+        if (
+            lines[position] == LIBRARY_IGNORE_MARKER
+            and position + 1 < len(lines)
+            and lines[position + 1] == LIBRARY_IGNORE_RULE
+        ):
+            position += 2
+            continue
+        kept.append(lines[position])
+        position += 1
+    if not commit_library and LIBRARY_IGNORE_RULE not in kept:
+        kept += ["", LIBRARY_IGNORE_MARKER, LIBRARY_IGNORE_RULE]
+    text = "\n".join(kept) + "\n" if kept else ""
+    changed = not path.is_file() or path.read_text() != text
+    if changed:
+        path.write_text(text)
+    if not commit_library and git(["ls-files", "--", "library"], cwd=vault).stdout.split():
+        git(["rm", "-r", "--cached", "--quiet", "--", "library"], cwd=vault)
+    return changed
 
 
 def initial_files(config: Config) -> dict[str, str]:

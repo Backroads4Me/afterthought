@@ -10,15 +10,21 @@ from pathlib import Path
 import pytest
 import yaml
 
-from aft import cli, lint, page
+from aft import cli, lint, page, vault
 from aft.config import Config
 from aft.library import describe, importing
 from aft.library.describe import DescribeError
+from aft.registry import Registry
 
 
 @pytest.fixture
-def sample_collection(tmp_path: Path) -> tuple[Path, Path]:
-    """Create a sample collection directory and valid manifest file."""
+def sample_collection(tmp_path: Path, initialized: Config) -> tuple[Path, Path]:
+    """A sample collection directory, its manifest, and the project it names registered.
+
+    The project is registered in the vault first: a collection is filed against projects the vault
+    already knows, and an import refuses one it has never seen rather than write a reference page
+    whose `aft.projects` row `aft lint` then reports as an unknown project.
+    """
     col_dir = tmp_path / "sample_rvc"
     col_dir.mkdir(parents=True)
 
@@ -60,6 +66,12 @@ def sample_collection(tmp_path: Path) -> tuple[Path, Path]:
 
     manifest_file = tmp_path / "manifest.yaml"
     manifest_file.write_text(yaml.dump(manifest_data, sort_keys=False), encoding="utf-8")
+
+    with vault.locked(initialized):
+        registry = Registry.load(initialized.registry_path)
+        registry.add("rv-project", "RV Project")
+        registry.save()
+    vault.commit(initialized.vault, ["registry.yaml"], "aft: register rv-project")
 
     return col_dir, manifest_file
 
