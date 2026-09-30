@@ -1384,10 +1384,16 @@ def test_resolve_callout_archives_the_note_verbatim_with_the_line_it_was_about(i
         "description: Notes and lines resolved out of widget.",
         "---",
         "",
+        "## Resolved notes",
+        "",
         f"> {STATE}",
         *note,
         "",
     ]
+    parsed_archive = page.parse(
+        "\n".join(archived(initialized)), Path("archive/projects/widget/overview.md")
+    )
+    assert parsed_archive.errors == []
 
 
 def test_resolving_two_notes_appends_both_blocks_to_the_archive(initialized, doc):

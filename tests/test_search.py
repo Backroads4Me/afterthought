@@ -635,3 +635,68 @@ def test_empty_query_returns_nothing(populated_vault: Config):
     """An empty or whitespace-only query returns no hits."""
     assert search.search(populated_vault, "") == []
     assert search.search(populated_vault, "   ") == []
+
+
+def test_archived_resolved_notes_are_searchable_with_archive_flag(
+    populated_vault: Config, monkeypatch, capsys
+):
+    """F10: after a note is resolved, aft search --archive <words of the answer> finds it,
+    and default search does not.
+    """
+    from aft import pagewrite
+
+    overview_path = populated_vault.vault / "projects/widget/overview.md"
+    doc = pagewrite.PageDoc.read(overview_path, vault=populated_vault.vault)
+    fact = doc.fact("The index is plain SQLite storage.")
+    doc.add_callout(
+        fact,
+        "question",
+        (
+            "Should we switch to PostgreSQL for concurrency?\n"
+            "We will stick with embedded SQLite for offline portability."
+        ),
+        "2026-10-01",
+    )
+    overview_path.write_text(doc.render())
+
+    # Switch into project directory for implicit cwd scoping
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+
+    # Before resolving, searching for the answer finds nothing (callouts on
+    # active pages are not indexed)
+    assert search.search(populated_vault, "offline portability", archive=True) == []
+    assert search.search(populated_vault, "offline portability") == []
+
+    # Resolve the callout
+    doc = pagewrite.PageDoc.read(overview_path, vault=populated_vault.vault)
+    fact = doc.fact("The index is plain SQLite storage.")
+    assert doc.resolve_callout(fact) is True
+    overview_path.write_text(doc.render())
+
+    # After resolving:
+    # 1. aft search --archive <words of the answer> finds it!
+    archive_hits = search.search(populated_vault, "offline portability", archive=True)
+    assert len(archive_hits) >= 1
+    assert archive_hits[0].path == "archive/projects/widget/overview.md"
+    assert archive_hits[0].collection == "archive"
+    assert archive_hits[0].heading == "Resolved notes"
+    assert "portability" in archive_hits[0].snippet or "embedded" in archive_hits[0].snippet
+
+    # 2. default search does NOT find it
+    default_hits = search.search(populated_vault, "offline portability")
+    assert default_hits == []
+
+    # 3. aft search --archive <words of the fact> also finds it in archive
+    fact_hits = search.search(populated_vault, "plain SQLite storage", archive=True)
+    assert any(h.path == "archive/projects/widget/overview.md" for h in fact_hits)
+
+    # 4. CLI test with AFT_HOME pointing to populated_vault.home
+    monkeypatch.setenv("AFT_HOME", str(populated_vault.home))
+    assert main(["search", "offline portability", "--archive"]) == 0
+    out = capsys.readouterr().out
+    assert "archive/projects/widget/overview.md" in out
+    assert "portability" in out
+
+    assert main(["search", "offline portability"]) == 0
+    out_default = capsys.readouterr().out
+    assert "archive/projects/widget/overview.md" not in out_default
