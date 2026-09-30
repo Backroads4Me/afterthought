@@ -35,7 +35,7 @@ from aft import (
 )
 from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, is_excluded, load, resolve_home
 from aft.dream import schedule
-from aft.events import COMPACTION, SESSION_END, AdapterError, SessionEvent
+from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
 from aft.install import claude as claude_install
 from aft.install import pi as pi_install
@@ -351,13 +351,22 @@ def cmd_key(args) -> int:
 
 def cmd_inject(args) -> int:
     """Print the block. The lookup records no alias: injection only reads memory."""
-    config = load()
-    registry = Registry.load(config.registry_path)
-    result = keys.resolve(Path(args.path), registry, config.host)
-    block = inject.build(config, result)
+    block = _injection_block(Path(args.path))
     if block:
         print(block)
     return 0
+
+
+def _injection_block(path: Path) -> str:
+    """The block a session starting in ``path`` is given, "" when there is none.
+
+    `aft inject` and the session-start hook both print what this returns, so an agent's
+    session starts with exactly the text `aft inject` shows for its directory.
+    """
+    config = load()
+    registry = Registry.load(config.registry_path)
+    result = keys.resolve(path, registry, config.host)
+    return inject.build(config, result)
 
 
 def _alias_writer(config: Config):
@@ -822,7 +831,11 @@ def cmd_hook(args) -> int:
     try:
         with _hook_time_limit(HOOK_TIMEOUT_SECONDS - HOOK_LOG_TIMEOUT_SECONDS):
             payload = json.load(sys.stdin)
-            _dispatch(_hook_event(args, payload))
+            block = _dispatch(_hook_event(args, payload))
+        # Printed once the block is whole and the time limit is behind it, so an expiry
+        # never leaves an agent holding the first half of a block.
+        if block:
+            print(block)
     except Exception as exc:
         _log_hook_failure(args.agent, args.event, exc)
     return 0
@@ -840,20 +853,33 @@ def _hook_event(args, payload: object) -> SessionEvent:
     return parse(args.event, payload, datetime.now(UTC))
 
 
-def _dispatch(event: SessionEvent) -> None:
-    """Hand one normalized event to the part of afterthought that consumes it.
+def _dispatch(event: SessionEvent) -> str:
+    """Hand one normalized event to the part of afterthought that consumes it, and return
+    what the hook prints for it.
+
+    ``session_start`` is injection's: it returns the block `aft inject` prints for the
+    event's working directory (BUILD-PLAN M1.1, M1.2). The block goes out as plain text.
+    Claude Code adds a ``SessionStart`` hook's plain stdout to the session's context, for
+    every source including ``compact`` (hooks reference, "SessionStart"), and pi's extension
+    reads the same text and adds it as a system prompt section. Injection only reads, so
+    ``capture.exclude_paths`` and ``capture.exclude_projects`` do not apply to it. A vault
+    that is not initialized has no memory to give and returns nothing.
 
     ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
-    returns: no model call, no transcript read, no project resolution (DESIGN 8, BUILD-PLAN
-    M2.2). ``session_start`` is injection's, which the agents run as `aft inject` (M1.2),
-    so it prints nothing here, and the hook contract asks for silence and exit 0.
+    returns nothing to print: no model call, no transcript read, no project resolution
+    (DESIGN 8, BUILD-PLAN M2.2).
     """
+    if event.kind == SESSION_START:
+        if not vault.is_initialized(load().vault):
+            return ""
+        return _injection_block(event.cwd)
     if event.kind in (COMPACTION, SESSION_END):
         cfg = load()
         if is_excluded(event.cwd, cfg):
-            return
+            return ""
         queue.enqueue(cfg, event)
         systemd_install.trigger_early(cfg)
+    return ""
 
 
 @contextmanager

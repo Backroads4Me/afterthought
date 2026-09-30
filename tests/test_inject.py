@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import dataclasses
+import io
+import json
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -737,3 +740,120 @@ def test_injection_writes_nothing_even_when_it_resolves_by_remote(
     assert widget.registry_path.read_bytes() == registry_before
     assert run_git(["log", "--format=%H"], widget.vault) == log_before
     assert run_git(["status", "--porcelain"], widget.vault) == status_before
+
+
+HOOK_FIXTURES = Path(__file__).parent / "fixtures" / "hooks"
+
+# fixture, agent, the event name that agent fires for a session start
+SESSION_STARTS = [
+    ("claude-session-start.json", "claude", "SessionStart"),
+    ("claude-session-start-resume.json", "claude", "SessionStart"),
+    ("claude-session-start-compact.json", "claude", "SessionStart"),
+    ("pi-session-start.json", "pi", "session_start"),
+]
+SESSION_START_IDS = [name.removesuffix(".json") for name, _, _ in SESSION_STARTS]
+CLAUDE_START = ("claude", "SessionStart")
+
+
+def run_session_start(monkeypatch, capsys, name: str, agent: str, event: str, cwd: Path) -> str:
+    """What `aft hook <agent> <event>` prints for one captured payload, started in ``cwd``."""
+    payload = json.loads((HOOK_FIXTURES / name).read_text(encoding="utf-8"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload | {"cwd": str(cwd)})))
+    assert main(["hook", agent, event]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    return captured.out
+
+
+def hook_log(config: Config) -> list[str]:
+    log = config.home / "logs" / "hooks.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
+def test_a_session_start_hook_prints_what_inject_prints(
+    name, agent, event, widget, tmp_path, capsys, monkeypatch
+):
+    """Both agents start a session with the text `aft inject` shows for that directory,
+    and Claude Code's start after a compaction is a start like any other."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    cwd = tmp_path / "widget"
+    assert main(["inject", str(cwd)]) == 0
+    injected = capsys.readouterr().out
+    assert injected == EXPECTED + "\n"
+
+    assert run_session_start(monkeypatch, capsys, name, agent, event, cwd) == injected
+    assert hook_log(widget) == []
+
+
+@pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
+def test_a_session_start_hook_elsewhere_prints_what_inject_prints_there(
+    name, agent, event, widget, tmp_path, capsys, monkeypatch
+):
+    """A directory no project claims gets the preferences and the how-to lines (M1.2)."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert main(["inject", str(plain)]) == 0
+    injected = capsys.readouterr().out
+    assert injected == "## Preferences\n\n- Prefer short commits.\n\n" + inject.HOW_TO + "\n"
+
+    assert run_session_start(monkeypatch, capsys, name, agent, event, plain) == injected
+
+
+def test_a_session_start_hook_injects_into_a_path_capture_excludes(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """``capture.exclude_paths`` keeps a session out of the archive. Injection only reads, so
+    a session in such a path still starts with its memory."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    cwd = tmp_path / "widget"
+    config = widget.home / "config.toml"
+    config.write_text(config.read_text() + f'[capture]\nexclude_paths = ["{cwd}"]\n')
+
+    out = run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, cwd)
+    assert out == EXPECTED + "\n"
+
+
+@pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
+def test_a_failing_injection_exits_zero_and_prints_nothing(
+    name, agent, event, widget, tmp_path, capsys, monkeypatch
+):
+    """An agent can do nothing with a hook failure, so a block that cannot be built costs
+    the session its memory and nothing else: exit 0, no output, one line in the hook log."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+
+    def broken(config, resolution):
+        raise RuntimeError("the vault is unreadable")
+
+    monkeypatch.setattr(inject, "build", broken)
+
+    assert run_session_start(monkeypatch, capsys, name, agent, event, tmp_path / "widget") == ""
+    lines = hook_log(widget)
+    assert len(lines) == 1
+    assert "RuntimeError: the vault is unreadable" in lines[0]
+
+
+def test_a_session_start_in_a_directory_that_is_gone_prints_nothing(
+    widget, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    gone = tmp_path / "gone"
+
+    assert (
+        run_session_start(monkeypatch, capsys, "pi-session-start.json", "pi", "session_start", gone)
+        == ""
+    )
+    assert len(hook_log(widget)) == 1
+
+
+def test_a_session_start_before_the_vault_exists_prints_nothing(cfg, tmp_path, capsys, monkeypatch):
+    """Before `aft init` there is no memory to give, and that is not a failure to log."""
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    assert (
+        run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, cwd)
+        == ""
+    )
+    assert hook_log(cfg) == []
