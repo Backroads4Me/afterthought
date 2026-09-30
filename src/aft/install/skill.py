@@ -46,11 +46,10 @@ class SkillChange:
 
 
 def skill_source() -> Path:
-    """The skill file shipped with the package in the checkout or installed wheel."""
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / SOURCE
-        if candidate.is_file():
-            return candidate
+    """The skill file shipped with the package in the installed package or the checkout."""
+    installed = Path(__file__).resolve().parents[1] / SOURCE
+    if installed.is_file():
+        return installed
     return Path(__file__).resolve().parents[3] / SOURCE
 
 

@@ -26,6 +26,20 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
     assert len(wheels) == 1, f"expected 1 wheel, got {wheels}"
     wheel = wheels[0]
 
+    import zipfile
+
+    with zipfile.ZipFile(wheel) as zf:
+        namelist = zf.namelist()
+        assert not any(name.startswith("integrations/") for name in namelist), (
+            f"wheel holds top-level integrations/: {namelist}"
+        )
+        assert any(name == "aft/integrations/pi/afterthought.ts" for name in namelist), (
+            f"expected aft/integrations/pi/afterthought.ts in wheel: {namelist}"
+        )
+        assert any(
+            name == "aft/integrations/skills/library-import/SKILL.md" for name in namelist
+        ), f"expected aft/integrations/skills/library-import/SKILL.md in wheel: {namelist}"
+
     # 2. Create isolated virtualenv and install the wheel
     venv_dir = tmp_path / "venv"
     subprocess.run(["uv", "venv", str(venv_dir)], check=True, capture_output=True)

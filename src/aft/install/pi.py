@@ -97,11 +97,13 @@ def target_path(extensions: Path) -> Path:
 
 
 def extension_source() -> Path:
-    """The extension this package ships, in the checkout or installed wheel that holds it."""
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / SOURCE
-        if candidate.is_file():
-            return candidate
+    """The extension this package ships, in the installed package or the checkout."""
+    installed = Path(__file__).resolve().parents[1] / SOURCE
+    if installed.is_file():
+        return installed
+    checkout = Path(__file__).resolve().parents[3] / SOURCE
+    if checkout.is_file():
+        return checkout
     raise InstallError(f"no {SOURCE} beside the aft package; run from a checkout")
 
 
