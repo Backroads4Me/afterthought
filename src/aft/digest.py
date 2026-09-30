@@ -225,18 +225,36 @@ def parts(entries: Sequence[Entry]) -> list[list[Entry]]:
     return split_parts(entries, max(1, MAX_CHUNK_TOKENS - tokens(prompt_text())))
 
 
+def _past_the_floor(job: queue.Job, chunk: Sequence[Entry]) -> bool:
+    """Whether this session has earned capture: two user prompts of its own (DESIGN 8).
+
+    The chunk is what the filter kept, so a prompt counted here is one the session said on
+    the record, and two in a chunk are two in the session. A thinner chunk is measured over
+    the whole transcript - the floor is about the session, and one chunk of a long
+    conversation can carry a single exchange - counted by `filtermod.prompt_count`, which is
+    the filter's own span-aware count rather than a second reading of the spans here.
+    """
+    if sum(1 for entry in chunk if entry.role == USER) >= filtermod.MIN_SESSION_PROMPTS:
+        return True
+    if job.transcript_path is None:
+        return False
+    whole = readers.read(job.agent, job.transcript_path)
+    return filtermod.prompt_count(whole) >= filtermod.MIN_SESSION_PROMPTS
+
+
 def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> Digest | None:
     """Digest one queued job, or report that it held nothing to digest.
 
-    Reads, filter, archive, model, verify, page, watermark, commit, in that order: the
-    archive takes the chunk before the model sees it, because the page's quotes are found
+    Reads, filter, the floor, archive, model, verify, page, watermark, commit, in that order:
+    the archive takes the chunk before the model sees it, because the page's quotes are found
     in the archive, and the watermark moves only once the page stands in git or the chunk
     is known to hold nothing the filter would keep.
 
     Returns ``None`` when the job held nothing to digest, which closes it and files no
-    page. A session with no entry past its watermark keeps the mark it had; a chunk the
-    filter emptied moves the mark past the entries read, because those are decided and
-    would be decided again by every later run.
+    page. A session with no entry past its watermark keeps the mark it had, and so does one
+    under the two-prompt floor: its entries are not decided against keeping, only not worth
+    keeping yet. A chunk the filter emptied moves the mark past the entries read, because
+    those are decided and would be decided again by every later run.
     """
     if is_excluded(job.cwd, config):
         queue.drop_job(config, job)
@@ -273,6 +291,17 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         # mark moves and the job closes. A page of nothing would stand as the session's
         # last word and speak for the work that came after it.
         queue.complete(config, job, read[-1].id, off_record=off_record)
+        return None
+    if not _past_the_floor(job, kept):
+        # DESIGN 8's floor, decided before a token is spent or a word archived: a session
+        # that never got past one prompt is not captured. The close moves no watermark,
+        # because these entries are not decided against keeping, only not yet worth keeping:
+        # a session that grows past the floor is read again from where its last digest
+        # stopped, so nothing it said is lost to the floor it was under.
+        # stopped, so nothing it said is lost to the floor it was under. The span state
+        # closes as it arrived, because a span is stored against the watermark it belongs to
+        # and that mark did not move.
+        queue.complete(config, job, None, off_record=job.off_record)
         return None
 
     evidence.store(
@@ -362,6 +391,14 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     vault.require(config)
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
     kept, _ = filtermod.filter_entries(read, config, job.off_record) if read else ([], False)
+    if kept and not _past_the_floor(job, kept):
+        # The same floor as a primary session: below it the worker's words reach no archive
+        # and no digest is owed for them. Its row still closes, because a waiting row would
+        # stop capture from following the session at all, and the watermark stays where it
+        # was, so the worker that grows past the floor is read whole next time. The row is
+        # closed without a debt: nothing was stored, so nothing is owed to be digested.
+        queue.close_waiting(config, job)
+        return False
     archived = False
     if kept:
         registry = registrymod.Registry.load(config.registry_path)

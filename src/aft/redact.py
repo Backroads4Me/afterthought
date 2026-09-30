@@ -1,10 +1,14 @@
 """Redaction: the secret shapes that must not reach the archive, the index or a model.
 
 Design section 12 makes redaction a rule of capture rather than a cleanup: built-in
+Design section 12 makes redaction a rule of capture rather than a cleanup: built-in
 secret patterns plus the user's own, applied before anything is archived. The list of shapes
 is the one BUILD-PLAN 5 (M2.3) names - private key blocks, the ``sk-``, ``ghp_``,
 ``github_pat_``, ``xox*`` and AWS access key id tokens, ``Authorization:`` headers,
-password-style assignments, and credentials in URLs - and patterns from
+password-style assignments, and credentials in URLs - plus the shapes the same text arrives
+in: a secret under a quoted JSON key, the Google, GitLab and npm token prefixes, a bearer
+token with no header word in front of it, a credential header that names itself
+(``X-Api-Key:``), and a mysql password glued to its option. Patterns from
 ``capture.redact_patterns`` are applied after it, adding to the list rather than
 replacing it.
 
@@ -50,24 +54,44 @@ _TOKENS = (
     r"xox[baprs]-[A-Za-z0-9-]{8,}",
     # An AWS access key id: twenty characters, AKIA long-term or ASIA from temporary creds.
     r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+    # A Google API key: AIza, then the 35 characters its issuer writes after it.
+    r"(?<!\w)AIza[0-9A-Za-z_-]{35,}",
+    # A GitLab personal access or project token, and an npm access token: both carry their
+    # own prefix, so neither needs a name beside it to say what it is.
+    r"(?<!\w)glpat-[A-Za-z0-9_-]{16,}",
+    r"(?<!\w)npm_[A-Za-z0-9]{16,}",
 )
 
 # An Authorization header, scheme and all: which scheme was used says nothing a digest
 # needs, and the value runs to the end of the line.
 _HEADER = r"\bauthorization\s*:\s*[^\r\n]*"
 
+# A bearer token with no header word in front of it, which is how one arrives in a pasted
+# curl line or a library's own error. Sixteen characters of the JWT and base64url alphabet
+# is past any ordinary word that could follow the noun, and the token is what must not stay.
+_BEARER = r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"
+
 # A password-style assignment: an option, a key, or a field whose name says it holds a
 # secret, with the value that follows it. The name may be one word of a longer identifier
-# (AWS_SECRET_ACCESS_KEY) or a command-line option (--password), and the value may be
-# quoted and hold spaces. A value beginning with the marker is already redacted, so
-# redaction is never re-applied to its own output.
+# (AWS_SECRET_ACCESS_KEY), the two words of a header joined by a dash (X-Api-Key), or a
+# command-line option (--password); it closes with a quote before its colon when the text is
+# JSON, which is how tool output and pasted config write a credential. A value beginning with
+# the marker is already redacted, so redaction is never re-applied to its own output.
 _ASSIGNMENT = (
     r"[\w-]*"
-    r"(?:passwor\w*|passwd|pwd|secret\w*|token\w*|api\w*key\w*|access\w*key\w*"
-    r"|private\w*key\w*|credential\w*)"
+    r"(?:passwor\w*|passwd|pwd|secret\w*|token\w*|api[-\w]*key\w*|access[-\w]*key\w*"
+    r"|private[-\w]*key\w*|credential\w*)"
     r"[\w-]*"
+    r"""["']?"""
     r"\s*(?:=|:)\s*(?:\"[^\"]*\"|'[^']*'|(?!\[)[^\s,;)\]}]+)"
 )
+
+# mysql takes its password glued to the option (-pS3cret), and no fixed-width lookbehind can
+# name that option while leaving the command around it, so the match runs from the command
+# word to the option. What goes with the secret is the invocation, and the failure line that
+# reported it keeps its own words. A bare -p<value> is not enough to go on: that is how half
+# the tools on a host write a port, a package or a plugin.
+_MYSQL_PASSWORD = r"\b(?:mysql|mariadb|mysqldump)\b[^\r\n]*?\s-p[^\s]+"
 
 # Credentials in a URL: the userinfo run up to and including the @, so the host the
 # session was talking to stays. The fixed lookbehind is what tells a URL's userinfo from
@@ -78,7 +102,9 @@ _BUILTIN_SOURCES: tuple[str, ...] = (
     _KEY_BLOCK,
     *_TOKENS,
     _HEADER,
+    _BEARER,
     _ASSIGNMENT,
+    _MYSQL_PASSWORD,
     _URL_CREDENTIAL,
 )
 

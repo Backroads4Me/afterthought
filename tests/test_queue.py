@@ -847,6 +847,34 @@ def test_an_owed_digest_is_filed_once_and_settled_by_the_digest(cfg: Config) -> 
     assert queue.session_state(cfg, CLAUDE, "owed").digest_due is False
 
 
+def test_closing_a_waiting_row_owes_no_digest_and_moves_nothing(cfg: Config) -> None:
+    """The archiving path's other close: read, filed nowhere, nothing owed (DESIGN 8).
+
+    A session the two-prompt floor turned away has no text in the archive, so a debt would
+    hand a chunk of it to a digest of nothing. The watermark and the debt stay exactly where
+    they were, so the session that goes on to say more is read from its start - and a row
+    another process is digesting is still not this close's to take (M2.7).
+    """
+    queue.enqueue(cfg, event(session_id="thin"))
+    waiting = queue.pending_jobs(cfg)
+    assert [job.session_id for job in waiting] == ["thin"]
+
+    queue.close_waiting(cfg, waiting[0])
+
+    assert queue.session_state(cfg, CLAUDE, "thin").digest_due is False
+    assert queue.session_state(cfg, CLAUDE, "thin").watermark is None
+    assert queue.redeem_digest_debts(cfg) == 0, "a close of nothing owed a digest"
+    assert query(cfg, "SELECT count(*) FROM jobs WHERE status = ?", (queue.PENDING,)) == [(0,)]
+    assert query(cfg, "SELECT count(*) FROM jobs WHERE status = ?", (queue.DONE,)) == [(1,)]
+    assert queue.next_job(cfg) is None, "the closed row came back as work"
+
+    queue.enqueue(cfg, event(session_id="held"))
+    claimed = queue.next_job(cfg)
+    assert claimed is not None
+    with pytest.raises(queue.QueueError, match="no longer waiting"):
+        queue.close_waiting(cfg, claimed)
+
+
 def test_owing_a_digest_to_a_row_another_worker_holds_is_refused(cfg: Config) -> None:
     """A row some other process is digesting is not the archive's to close.
 
