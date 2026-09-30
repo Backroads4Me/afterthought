@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sqlite3
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,7 +36,15 @@ from aft import (
 from aft import (
     eval as evalmod,
 )
-from aft.config import DEFAULT_CONFIG_TEXT, Config, ConfigError, is_excluded, load, resolve_home
+from aft.config import (
+    DEFAULT_CONFIG_TEXT,
+    HOME_ENV,
+    Config,
+    ConfigError,
+    is_excluded,
+    load,
+    resolve_home,
+)
 from aft.dream import schedule
 from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
@@ -112,6 +122,11 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("path", nargs="?", default=".")
     q.add_argument("--slug", help="defaults to the directory name")
     q.add_argument("--title")
+    q.add_argument(
+        "--allow-temp",
+        action="store_true",
+        help="register a path under the system temporary directory in the default home",
+    )
     q.set_defaults(handler=cmd_project_add)
     q = psub.add_parser("rename", help="change a project's slug")
     q.add_argument("old")
@@ -403,6 +418,8 @@ def cmd_project_add(args) -> int:
     vault.require(config)
     info = gitutil.repo_info(Path(args.path).resolve())
     root = info.main if info else Path(args.path).resolve()
+    if not args.allow_temp:
+        _refuse_temporary_project(root)
     slug = args.slug or slugify(root.name)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
@@ -414,6 +431,25 @@ def cmd_project_add(args) -> int:
         vault.commit(config.vault, ["registry.yaml"], f"aft: register {slug}")
     print(f"registered {slug} ({project.id}) at {config.host}:{root}")
     return 0
+
+
+def _refuse_temporary_project(root: Path) -> None:
+    """Refuse to register a temporary directory in the default home (BUILD-PLAN F25).
+
+    With ``AFT_HOME`` unset the command is using the default home and so the user's real
+    vault, where a project under the system temporary directory is a scratch run that lost
+    its way: the directory will be gone and the registry will keep naming it. A run that set
+    ``AFT_HOME`` chose its home, so it registers whatever it likes.
+    """
+    if os.environ.get(HOME_ENV):
+        return
+    temporary = Path(tempfile.gettempdir()).resolve()
+    if root == temporary or temporary in root.parents:
+        raise UsageError(
+            f"{root} is under the temporary directory {temporary}, and {HOME_ENV} is not set, "
+            f"so this would register it in the vault of the default home. Set {HOME_ENV} to a "
+            "scratch home for a test or benchmark run, or pass --allow-temp to register it here."
+        )
 
 
 def cmd_project_rename(args) -> int:

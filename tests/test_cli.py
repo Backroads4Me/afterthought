@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
+
+import pytest
 
 from aft import vault
 from aft.cli import main
@@ -150,3 +154,60 @@ def test_errors_are_reported_not_raised(initialized, tmp_path, capsys):
 def test_commands_need_a_vault(home, capsys):
     assert main(["lint"]) == 2
     assert "run `aft init` first" in capsys.readouterr().err
+
+
+@pytest.fixture
+def default_home(tmp_path, monkeypatch) -> Path:
+    """An initialized default home: ``AFT_HOME`` unset and ``HOME`` moved under tmp_path, so
+    the home aft falls back to, and the vault its config names, are both this test's own."""
+    monkeypatch.delenv("AFT_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".afterthought"
+    home.mkdir()
+    (home / "config.toml").write_text(f'vault = "{tmp_path / "vault"}"\nhost = "testhost"\n')
+    cfg = load()
+    assert cfg.home == home
+    vault.init(cfg)
+    return home
+
+
+def test_the_default_home_refuses_a_temporary_project(default_home, tmp_path, capsys):
+    """With AFT_HOME unset the vault is the user's real one, and a project under the system
+    temporary directory is a scratch run that lost its way (BUILD-PLAN F25)."""
+    repo = make_repo(tmp_path / "widget")
+    registry_before = load().registry_path.read_bytes()
+    log_before = run_git(["log", "--format=%H"], load().vault)
+
+    assert main(["project", "add", str(repo)]) == 2
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert str(repo) in captured.err
+    assert "temporary directory" in captured.err
+    assert "AFT_HOME" in captured.err
+    assert "--allow-temp" in captured.err
+    assert load().registry_path.read_bytes() == registry_before
+    assert run_git(["log", "--format=%H"], load().vault) == log_before
+
+
+def test_allow_temp_registers_a_temporary_project_in_the_default_home(
+    default_home, tmp_path, capsys
+):
+    repo = make_repo(tmp_path / "widget")
+
+    assert main(["project", "add", str(repo), "--allow-temp"]) == 0
+
+    assert [p.slug for p in Registry.load(load().registry_path).projects] == ["widget"]
+
+
+def test_a_chosen_home_registers_a_temporary_project_without_the_flag(
+    initialized, tmp_path, monkeypatch, capsys
+):
+    """A run that set AFT_HOME chose its home, so tests and benchmarks are unaffected."""
+    assert os.environ.get("AFT_HOME")
+    repo = make_repo(tmp_path / "widget")
+    assert tempfile.gettempdir() in str(repo.resolve())
+
+    assert main(["project", "add", str(repo)]) == 0
+
+    assert [p.slug for p in Registry.load(initialized.registry_path).projects] == ["widget"]
