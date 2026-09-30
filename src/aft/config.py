@@ -33,6 +33,10 @@ class ModelConfig:
 class CaptureConfig:
     worker_paths: tuple[str, ...] = ()
     exclude_paths: tuple[str, ...] = ()
+    # Projects whose sessions are never captured, named by id or by slug. A path cannot
+    # answer this: the same project reaches the host through a second clone or a worktree
+    # at a directory no one listed.
+    exclude_projects: tuple[str, ...] = ()
     redact_patterns: tuple[str, ...] = ()
 
 
@@ -189,8 +193,39 @@ def is_under(path: Path | str, parents: tuple[str, ...]) -> bool:
 
 
 def is_excluded(path: Path | str, config: Config) -> bool:
-    """Whether path is excluded from capture by capture.exclude_paths."""
-    return is_under(path, config.settings.capture.exclude_paths)
+    """Whether this directory is excluded from capture.
+
+    Two settings answer it: a directory under ``capture.exclude_paths``, and a directory
+    belonging to a project named in ``capture.exclude_projects`` - by id or by slug, and by
+    the project rather than by one of its directories, which is how a second clone or a
+    worktree of it is kept out too.
+
+    The project question is asked only when someone named a project, because answering it
+    resolves the directory the way a digest does, and the capture hook has a budget (DESIGN
+    8). With nothing named, this costs the path check and nothing else.
+    """
+    if is_under(path, config.settings.capture.exclude_paths):
+        return True
+    names = config.settings.capture.exclude_projects
+    if not names:
+        return False
+    # Read here rather than imported at the top: the resolver reads the registry, and the
+    # registry is a vault file this module is asked about before any vault is settled.
+    from aft import keys, registry  # a local import breaks the cycle with the resolver
+    from aft.gitutil import GitError
+
+    try:
+        resolved = keys.resolve(
+            Path(path), registry.Registry.load(config.registry_path), config.host
+        )
+    except GitError:
+        # A directory git will not read is not a project this setting can name. The digest
+        # fails such a session on its own resolve, which is what happens when no project is
+        # named here either, so this path neither captures the words nor loses a session the
+        # resolver would have placed.
+        return False
+    project = resolved.project
+    return project is not None and (project.id in names or project.slug in names)
 
 
 def is_worker(path: Path | str, config: Config) -> bool:
@@ -222,6 +257,10 @@ name = ""
 worker_paths = []
 # Sessions under these paths are never captured.
 exclude_paths = []
+# Sessions of these projects are never captured, by project id or slug. A project named
+# here is kept out whatever directory its session ran in, including a second clone or a
+# worktree of it that no path above names.
+exclude_projects = []
 # Extra regular expressions to redact, on top of the built-in secret patterns
 # (see aft.redact). They match case-insensitively and are applied after the
 # built-ins. One that does not compile, or that holds nothing to match, is an error

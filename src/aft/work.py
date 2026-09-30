@@ -5,6 +5,10 @@ fired is in this run's queue rather than the next one's (DESIGN 8); then the que
 one job at a time and oldest first, until the work runs out or the day's tokens are spent.
 Nothing here decides what a digest says - only how far one run goes.
 
+Before both the run enforces the retention window: conversation older than
+``evidence.retention_days`` leaves the archive, and the index forgets it with this run's own
+update at the end (DESIGN 8).
+
 A run stops between jobs, never inside one. The jobs it did not reach are still queued with
 their sessions' watermarks unmoved, so the next run picks them up where this one left off
 (DESIGN 13: "when a budget runs out, work waits in the queue"). A job that belongs to one
@@ -22,7 +26,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from aft import capture, digest, index, model, queue, vault
+from aft import capture, digest, evidence, index, model, queue, vault
 from aft.config import Config
 from aft.evidence import EvidenceError
 from aft.gitutil import GitError
@@ -67,6 +71,7 @@ class Report:
     digested: int = 0
     empty: int = 0
     failures: tuple[str, ...] = ()
+    purged: int = 0
     stopped: str = ""
 
     def line(self) -> str:
@@ -76,6 +81,8 @@ class Report:
             f"{self.digested} digested",
             f"{self.empty} with nothing to digest",
         ]
+        if self.purged:
+            said.append(f"{self.purged} purged")
         if self.failures:
             said.append(f"{len(self.failures)} failed")
         if self.stopped:
@@ -141,10 +148,19 @@ def run(config: Config, now: datetime | None = None) -> Report:
     """
     vault.require(config)
     moment = now or datetime.now(UTC)
-    swept = digested = empty = 0
+    swept = digested = empty = purged = 0
     failures: list[str] = []
     stopped = ""
     budget = config.settings.work.daily_token_budget
+    # The retention window is enforced here, on every run: conversation that has outlived
+    # `evidence.retention_days` leaves the archive (DESIGN 8, M2.4), and the index rows of
+    # what left go with this run's own `index.update` at the end, which drops every row whose
+    # archive row is gone. An archive that refuses the window it was configured with is said
+    # out loud and does not stop the day's digests.
+    try:
+        purged = evidence.purge(config, moment)
+    except EvidenceError as exc:
+        failures.append(f"the archive: {exc}")
     # The sweep, the claim and the close all touch the queue's own database, and a run that
     # cannot use it reports the queue's words on the line the timer reads rather than dying
     # with a traceback (DESIGN 14).
@@ -240,5 +256,10 @@ def run(config: Config, now: datetime | None = None) -> Report:
         failures.append(f"the queue: {exc}")
         stopped = STOP_QUEUE
     return Report(
-        swept=swept, digested=digested, empty=empty, failures=tuple(failures), stopped=stopped
+        swept=swept,
+        digested=digested,
+        empty=empty,
+        failures=tuple(failures),
+        purged=purged,
+        stopped=stopped,
     )
