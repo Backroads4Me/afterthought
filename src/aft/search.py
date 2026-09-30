@@ -246,12 +246,14 @@ def _scope(
     """The project clause one collection contributes to a scoped query, or None for no rows.
 
     BUILD-PLAN M3.2 scopes the default to "the current directory's project plus global pages",
-    and only a page row's empty project means global (`index.GLOBAL_COLLECTIONS`). A digest
+    and an empty project means global only for a page row and for the archive row of a page's
+    line that left memory (`index.GLOBAL_COLLECTIONS`). A digest
     filed under a slug no registry answers for, and an archived entry whose session resolved to
     no project (DESIGN 7 step 4), are text that was never filed rather than memory every project
     shares, so neither answers a project's query. A report day names no project because it spans
     them all, and DESIGN 10 reaches it only through ``--reports``, which is the request for it.
-    From a working directory inside no project, only the shared pages answer at all.
+    From a working directory inside no project, only the shared pages answer, and under
+    ``--archive`` the lines those pages hold back.
     """
     if collection in index.SPANNING_COLLECTIONS:
         return "", []

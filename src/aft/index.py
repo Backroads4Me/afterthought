@@ -13,8 +13,8 @@ Table       Built from                                             A row is
 =========== ====================================================== ==========================
 ``pages``   fact pages under ``projects/``, ``global/``,            one ``##`` section's live
             ``references/``                                         curated lines
-``archive`` the pages under ``archive/``                            one ``##`` section's
-                                                                   resting lines
+``archive`` the pages under ``archive/``, and the struck            one ``##`` section's
+            lines a live page still carries                         resting lines
 ``digests`` ``digests/<slug>/<yyyy>/<mm>/*.md``                     one heading section or
                                                                     its frontmatter handoff
 ``reports`` ``reports/**/*.md``                                     one heading section
@@ -155,11 +155,13 @@ LIBRARY = "library"
 COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS, LIBRARY)
 
 #: The collections whose rows with no project id are every project's memory: DESIGN 6's global
-#: pages, a reference page that covers nothing yet. Whoever queries the index takes a row with
-#: no id from one of these as shared memory; from any other collection an id-less row is text
-#: that was never filed under a project at all - a session that resolved to none (DESIGN 7
-#: step 4), a digest under a slug no registry answers for - and is not that project's memory.
-GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES,)
+#: pages, a reference page that covers nothing yet, and the archive, which mirrors the pages: a
+#: global page's line that left memory is shared history exactly as the line was shared memory.
+#: Whoever queries the index takes a row with no id from one of these as shared; from any other
+#: collection an id-less row is text that was never filed under a project at all - a session
+#: that resolved to none (DESIGN 7 step 4), a digest under a slug no registry answers for - and
+#: is not that project's memory.
+GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES, ARCHIVE)
 
 #: The collections whose rows name no project because they span them all: one dream report day
 #: consolidates every project (DESIGN 9). Such a row answers a query about any project, and
@@ -187,17 +189,27 @@ PROJECT_DIRS = vault.PROJECT_DIRS
 # collection table in DESIGN 10. ``pages`` holds "active curated lines", which are the lines
 # `aft.inject` injects, so the index and the block a session starts with carry the same lines
 # by construction. A candidate is its own state and DESIGN 10 files candidate facts under
-# Digests, where the digest that raised it is searchable. Superseded lines are "Injected? No"
-# and rest in ``archive``, which DESIGN 10 searches only when ``--archive`` asks for it, and
-# DESIGN 10 says what that collection holds twice over: "superseded lines, and resolved notes
-# with the fact they belonged to". A withdrawn line is in no collection at all: the line is out
-# of memory because `aft forget` took its evidence away (DESIGN 12), so its words answer no
-# query, with or without ``--archive``. A stale line is memory still standing, only doubted, so
-# it stays searchable wherever its page is.
+# Digests, where the digest that raised it is searchable. A superseded or stale line is
+# "Injected? No" and rests in ``archive``, which DESIGN 10 searches only when ``--archive`` asks
+# for it, and DESIGN 10 says who reaches that collection twice over: "superseded and stale
+# lines, whether still on their page or moved to ``archive/``, and resolved notes with the fact
+# they belonged to" - which is `RESTING_PLACE` below, since the line usually has not moved. A
+# withdrawn line is in no collection at all: the line is out of memory because `aft forget` took
+# its evidence away (DESIGN 12), so its words answer no query, with or without ``--archive``.
 FACT_STATES: dict[str, tuple[str, ...]] = {
     PAGES: inject.INJECTED,
     ARCHIVE: (page.SUPERSEDED, page.STALE),
 }
+
+#: Where the lines a fact collection does not admit are indexed instead of nowhere, by the
+#: collection the file itself feeds. A page keeps its struck and doubted lines on the page:
+#: `dream.maintain` takes a line down to ``archive/`` only once it has rested for 90 days, while
+#: DESIGN 10 has ``--archive`` reach it the day it leaves memory. Without this the line is in
+#: neither collection - held back from ``pages`` by its state, held back from ``archive`` by the
+#: directory it sits in - and its words answer no query at all, which is what M3 review 11 found
+#: and BUILD-PLAN F20 rules closed. The lines that go to the archive keep their page's path, so a
+#: hit names where the line still is and `aft read` opens the page that holds it.
+RESTING_PLACE: dict[str, str] = {PAGES: ARCHIVE}
 
 # BM25 weights (BUILD-PLAN M3.1: "BM25 weights title and description above body", with the
 # section's own heading belonging with the columns above that divide). The plan fixes the
@@ -261,8 +273,11 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: modification time is this host's rather than the text's, so no rebuild can answer with the
 #: moment an earlier run stored, which is how a rebuild and an index kept up to date came to
 #: disagree), and ``files`` records the modification each hash was taken beside, which is what lets
-#: a run ask whether anything moved without reading a file.
-BUILD_STAMP = "rows-3"
+#: a run ask whether anything moved without reading a file. ``rows-4`` is the build whose archive
+#: collection began holding the superseded and stale lines that are still on a live page
+#: (``RESTING_PLACE``, BUILD-PLAN F20): rows an index from ``rows-3`` never built for that page, so
+#: a struck line there stays unreachable under ``--archive`` until the file is rebuilt.
+BUILD_STAMP = "rows-4"
 BUILD_TABLE = "build"
 
 #: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
@@ -570,8 +585,9 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         except _Unreadable as exc:
             report.append(f"{rel}: {exc}")
             continue  # its rows and hash went with the drop, so a repaired page reads again
-        for row in rows:
-            _insert(conn, current.collection, row)
+        for collection, file_rows in rows.items():
+            for row in file_rows:
+                _insert(conn, collection, row)
         conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
     conn.execute(_RECORD_ORIGIN, (PROJECTS_ORIGIN, projects.digest))
     return report
@@ -727,6 +743,21 @@ def _read_file(collection: str, path: Path) -> _File:
     )
 
 
+def _feeds(rel: str) -> tuple[str, ...]:
+    """Every collection that takes rows out of one file, which is not always one.
+
+    A live fact page feeds the archive as well as the pages collection (`RESTING_PLACE`), so a
+    run that re-reads the page clears it out of both: drop only the directory's own collection
+    and a line the page stopped carrying keeps answering `--archive` from a row its file no
+    longer holds - the same row `aft forget` withdrew, the same way M3 review 3 found it.
+    """
+    collection = _collection_of(rel)
+    if collection is None:
+        return ()
+    resting = RESTING_PLACE.get(collection)
+    return (collection, resting) if resting is not None else (collection,)
+
+
 def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
     """Stop holding the rows and the hash record of every one of these vault paths.
 
@@ -734,11 +765,14 @@ def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
     unindexed and so reads every row a collection holds whatever the filter says: one statement
     per path costs the whole collection once per path, which is a run that took out a thousand
     pages reading a million rows. The rows of a path this is not given keep their place.
+
+    A collection is asked whenever any path here feeds it, not only when its own directory is
+    among them (`_feeds`): the statement filters on path, so a path with no row there is a
+    statement that deletes nothing rather than a row left behind.
     """
     by_collection: dict[str, list[str]] = {}
     for rel in rels:
-        collection = _collection_of(rel)
-        if collection is not None:
+        for collection in _feeds(rel):
             by_collection.setdefault(collection, []).append(rel)
     _fill_keys(conn, ((rel, "") for rel in rels))
     for collection in by_collection:
@@ -766,8 +800,13 @@ def _collection_of(rel: str) -> str | None:
     return None
 
 
-def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
-    """The rows one file contributes to its collection.
+def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[Row]]:
+    """The rows one file contributes, under each collection they belong to.
+
+    Usually one collection, the one named by the directory the file sits in. A live fact page is
+    the exception: its active lines go to ``pages`` and its struck and doubted lines go to
+    ``archive`` without leaving the page (`RESTING_PLACE`), because the line does not move when a
+    dream supersedes it and DESIGN 10 has ``--archive`` reach it that same day.
 
     A fact collection (``pages``, ``archive``) takes the lines its own state admits, read
     through ``aft.page``, grouped under the section each line sits in: the parser owns what a
@@ -793,23 +832,49 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
     scopes = _project_scopes(rel, frontmatter, registry)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
+    sections: dict[str, list[tuple[str, str]]] = {}
     if admitted is None:
         chunks = _prose_chunks(body)
         if current.collection == DIGESTS:
             chunks = [*chunks, *_handoff_chunks(frontmatter)]
-    elif current.collection == ARCHIVE:
+        sections[current.collection] = chunks
+    else:
         parsed = page.parse(current.text, Path(rel))
         fact_chunks = _fact_chunks(parsed, admitted)
-        fact_sections = {h for h, _ in fact_chunks}
-        archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
-        prose_chunks = [
-            (heading, text)
-            for heading, text in _prose_chunks(body)
-            if heading not in fact_sections and heading in archive_prose
-        ]
-        chunks = [*fact_chunks, *prose_chunks]
-    else:
-        chunks = _fact_chunks(page.parse(current.text, Path(rel)), admitted)
+        if current.collection == ARCHIVE:
+            fact_sections = {h for h, _ in fact_chunks}
+            archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
+            prose_chunks = [
+                (heading, text)
+                for heading, text in _prose_chunks(body)
+                if heading not in fact_sections and heading in archive_prose
+            ]
+            fact_chunks = [*fact_chunks, *prose_chunks]
+        sections[current.collection] = fact_chunks
+        resting = RESTING_PLACE.get(current.collection)
+        if resting is not None:
+            sections[resting] = _fact_chunks(parsed, FACT_STATES[resting])
+    return {
+        collection: _section_rows(rel, title, description, scopes, agent, session_id, chunks)
+        for collection, chunks in sections.items()
+    }
+
+
+def _section_rows(
+    rel: str,
+    title: str,
+    description: str,
+    scopes: list[tuple[str | None, str | None]],
+    agent: str | None,
+    session_id: str | None,
+    chunks: list[tuple[str, str]],
+) -> list[Row]:
+    """The rows one collection takes from one file's sections.
+
+    The occurrence count that keeps a repeated heading's rows apart (`_row_key`) is counted here,
+    per collection: two collections built from the same file keep their own numbering, since a
+    row's id is only ever compared inside the table that holds it.
+    """
     rows: list[Row] = []
     occurrences: dict[str, int] = {}
     for heading, text in chunks:
