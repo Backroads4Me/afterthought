@@ -159,7 +159,8 @@ def test_survey_format_includes_procedure(sample_collection: Path):
     assert "1. Write a manifest:" in formatted
     assert "2. Validate the manifest:" in formatted
     assert "3. Import the collection:" in formatted
-    assert "4. Add descriptions:" in formatted
+    assert "4. Add verified descriptions:" in formatted
+    assert "aft library describe" in formatted
     assert "5. Propose facts:" in formatted
     assert "6. Report and commit:" in formatted
 
