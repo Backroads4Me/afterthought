@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from aft import config as configmod
-from aft import evidence, inject, model, page, pagewrite, vault
+from aft import evidence, inject, lint, page, pagewrite, vault
 from aft.dream import apply, rules, schedule
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
@@ -327,6 +327,8 @@ def test_allowed_supersede_for_each_kind(
 
 
 def test_refused_supersede_becomes_conflict_or_needs_you(initialized, home, fake):
+    from aft.readers import USER, Entry
+
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
@@ -343,6 +345,31 @@ def test_refused_supersede_becomes_conflict_or_needs_you(initialized, home, fake
             "- Server has 16 cores. [observed] 2026-09-20 [^s1]\n"
         ),
         sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "serves"}],
+    )
+
+    # Each quote sits in the archive on the day it was said: the RGB sighting is from today,
+    # the 8-cores one from 2026-09-10, the date its digest line carries.
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="2",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1",
+                time=datetime(2026, 10, 5, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="RGB lighting is present",
+                is_error=False,
+            ),
+            Entry(
+                id="e2",
+                time=datetime(2026, 9, 10, 9, 0, tzinfo=UTC),
+                role=USER,
+                text="8 cores",
+                is_error=False,
+            ),
+        ],
     )
 
     write_digest(
@@ -369,6 +396,7 @@ def test_refused_supersede_becomes_conflict_or_needs_you(initialized, home, fake
             {"id": "s2", "resource": "aft://session/c/2#e1", "quote": "RGB lighting is present"},
             {"id": "s3", "resource": "aft://session/c/2#e2", "quote": "8 cores"},
         ],
+        store_evidence=False,
     )
 
     # First call tries to supersede preference with observed -> needs-you
@@ -389,9 +417,15 @@ def test_refused_supersede_becomes_conflict_or_needs_you(initialized, home, fake
     assert "- No RGB lighting. [stated] 2026-09-01 [^s1]" in text
     assert "- Server has 16 cores. [observed] 2026-09-20 [^s1]" in text
     assert "> [!question]" in text
-    assert "observed RGB" in text
+    assert "RGB lighting is present on the server. ([^s2])" in text
     assert "> [!conflict]" in text
-    assert "seen 8 cores" in text
+    assert "Server has 8 cores. ([^s3])" in text
+    assert "observed RGB" not in text
+    assert "seen 8 cores" not in text
+    assert report.conflicts[0].refs == ("s3",)
+    assert report.conflicts[0].path == "projects/widget/overview.md"
+    assert report.questions[0].refs == ("s2",)
+    assert report.questions[0].path == "projects/widget/overview.md"
 
 
 def test_tentative_statement_stays_suggested(initialized, home, fake):
@@ -1024,7 +1058,7 @@ def test_regenerates_index_and_appends_log(initialized, home, fake):
     assert f"- {TODAY}: dream widget" in log_text
 
 
-def test_lint_failure_aborts_run_without_commit(initialized, home, fake):
+def test_lint_failure_aborts_run_without_commit(initialized, home, fake, monkeypatch):
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
@@ -1041,16 +1075,47 @@ def test_lint_failure_aborts_run_without_commit(initialized, home, fake):
     digest_path = write_digest(cfg, "widget", "d1", facts=[], sources=[])
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
 
-    # Corrupt a file to make lint fail
+    # An unparsable hand edit does NOT stop the run (per-page lint)
     corrupt_page = cfg.vault / "projects" / "widget" / "broken.md"
     corrupt_page.write_text("---\nstatus: bad_status\n---\n")
 
+    rep = apply.run_project(cfg, "widget", [digest_path], now=NOW)
+    assert rep is not None
+    assert corrupt_page.exists()
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) != before_sha
+
+    # But a lint error on a page the run wrote aborts without commit
+    digest_path2 = write_digest(
+        cfg,
+        "widget",
+        "d2",
+        facts=[
+            {
+                "statement": "Fact triggers lint.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[{"id": "s2", "resource": "aft://session/c/2#e1", "quote": "quote"}],
+    )
+    fake.script = [reply("add", None, "add fact")]
+    current_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    def fail_written(vault, rel_paths, reg=None):
+        return [
+            apply.lint.Finding(
+                "projects/widget/overview.md", 1, "simulated lint failure on written page"
+            )
+        ]
+
+    monkeypatch.setattr(apply.lint, "lint_pages", fail_written)
     with pytest.raises(apply.ApplyError, match="lint failed"):
-        apply.run_project(cfg, "widget", [digest_path], now=NOW)
+        apply.run_project(cfg, "widget", [digest_path2], now=NOW)
 
     # Aborted without commit!
-    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
-    # The pre-existing corrupt file is untouched; run does not destroy uncommitted files
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) == current_sha
     assert corrupt_page.exists()
     assert run_git(["status", "--porcelain"], cfg.vault) == "?? projects/widget/broken.md"
 
@@ -1587,7 +1652,13 @@ def test_lint_failure_leaves_unrelated_uncommitted_file_untouched(
     )
 
     # Force lint_vault to fail
-    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+    monkeypatch.setattr(
+        apply.lint,
+        "lint_pages",
+        lambda _vault, _paths, _reg=None: [
+            apply.lint.Finding("dummy.md", 1, "simulated lint failure")
+        ],
+    )
 
     fake.script = [reply("add", None, "add fact")]
     with pytest.raises(apply.ApplyError, match="lint failed"):
@@ -1655,12 +1726,15 @@ def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake):
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
     fake.script = [reply("add", None, "first"), Reply(status=500)]
 
-    with pytest.raises(model.ModelError):
-        schedule.run(cfg, now=NOW)
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.failures
+    assert "500" in res.failures["widget"]
 
-    # Nothing of the run is left in the vault: clean worktree, no commit
+    # The run's own writes are gone and the work tree is clean. The only commit since is the
+    # report section that names the failure, which is how the failure reaches the person.
     assert run_git(["status", "--porcelain"], cfg.vault) == ""
-    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
+    subjects = run_git(["log", "--format=%s", f"{before_sha}..HEAD"], cfg.vault).splitlines()
+    assert subjects == ["aft: report widget"]
     assert "First fact." not in overview.read_text()
     for digest in (first, second):
         fm, _, _, _ = page.split_frontmatter(digest.read_text())
@@ -2019,7 +2093,13 @@ def test_lint_rollback_restores_run_writes_not_unrelated_edits(
         ],
     )
 
-    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+    monkeypatch.setattr(
+        apply.lint,
+        "lint_pages",
+        lambda _vault, _paths, _reg=None: [
+            apply.lint.Finding("dummy.md", 1, "simulated lint failure")
+        ],
+    )
     fake.script = [reply("add", None, "new decision")]
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
 
@@ -2092,3 +2172,398 @@ def test_global_confirm_writes_to_the_targets_page(initialized, home, fake):
 
     assert "- No RGB lighting. [stated] 2026-10-05 [^s1] [^s2]" in prefs.read_text()
     assert environment.read_text() == environment_before
+
+
+def test_edit_quote_matches_only_added_lines(initialized, home):
+    cfg = config_with_fake(home, initialized.vault, FakeEndpoint())
+    test_file = cfg.vault / "test.txt"
+    test_file.write_text("initial line to be removed\ncontext line\n")
+    vault.commit(cfg.vault, ["test.txt"], "initial commit")
+
+    test_file.write_text("brand new added line\ncontext line\n")
+    vault.commit(cfg.vault, ["test.txt"], "update commit with added line")
+    sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    # Added line matches
+    v, origin, dt, yours = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "brand new added line")
+    assert v is True
+    assert yours is True
+
+    # Removed line does NOT match
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "initial line to be removed")
+    assert v is False
+
+    # Commit message does NOT match
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "update commit with added line")
+    assert v is False
+
+    # Argument injection / non-hex sha is rejected
+    v, _, _, _ = apply._lookup_evidence(
+        cfg, "aft://edit/--output=/tmp/evil", "brand new added line"
+    )
+    assert v is False
+    v, _, _, _ = apply._lookup_evidence(
+        cfg, "aft://edit/not_a_valid_hex_sha!", "brand new added line"
+    )
+    assert v is False
+
+    # Non-consecutive added lines across files/hunks do NOT match
+    f1 = cfg.vault / "file1.txt"
+    f2 = cfg.vault / "file2.txt"
+    f1.write_text("No RGB\n")
+    f2.write_text("lighting.\n")
+    vault.commit(cfg.vault, ["file1.txt", "file2.txt"], "two files added")
+    multi_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{multi_sha}", "No RGB lighting.")
+    assert v is False
+
+    # Consecutive lines within a single added run DO match
+    f3 = cfg.vault / "file3.txt"
+    f3.write_text("No RGB\nlighting.\n")
+    vault.commit(cfg.vault, ["file3.txt"], "single file with consecutive added lines")
+    single_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{single_sha}", "No RGB lighting.")
+    assert v is True
+
+
+def test_lookup_evidence_worker_digest_exact_match_no_leak(initialized, home):
+    from aft.readers import USER, Entry
+
+    cfg = config_with_fake(home, initialized.vault, FakeEndpoint())
+    sess_full = "worker-session-abcdef12345678"
+    entry_id = "e1"
+
+    # Worker digest in nested directory with full session ID in filename
+    d_dir = cfg.vault / "digests" / "widget" / "2026" / "09"
+    d_dir.mkdir(parents=True, exist_ok=True)
+    d_path = d_dir / f"2026-09-29-claude-{sess_full}.md"
+    d_path.write_text("---\ntype: Session Digest\naft:\n  project: p_widget\n  role: worker\n---\n")
+
+    # 1. Query with prefix/substring of session ID: must NOT leak worker role
+    sess_sub = "abcdef12"
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id=sess_sub,
+        project_id="p_widget",
+        entries=[Entry(id=entry_id, time=NOW, role=USER, text="primary statement", is_error=False)],
+    )
+    res_sub = f"aft://session/claude/{sess_sub}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_sub, "primary statement")
+    assert v is True
+    assert origin == rules.PRIMARY  # No leak!
+
+    # 2. Query with different agent: must NOT leak worker role
+    evidence.store(
+        cfg,
+        agent="pi",
+        session_id=sess_full,
+        project_id="p_widget",
+        entries=[Entry(id=entry_id, time=NOW, role=USER, text="pi statement", is_error=False)],
+    )
+    res_pi = f"aft://session/pi/{sess_full}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_pi, "pi statement")
+    assert v is True
+    assert origin == rules.PRIMARY  # No cross-agent leak!
+
+    # 3. Exact session and agent match: returns WORKER
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id=sess_full,
+        project_id="p_widget",
+        entries=[Entry(id=entry_id, time=NOW, role=USER, text="worker statement", is_error=False)],
+    )
+    res_exact = f"aft://session/claude/{sess_full}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_exact, "worker statement")
+    assert v is True
+    assert origin == rules.WORKER
+
+    # 4. Multipart worker digest: returns WORKER
+    d_part2 = d_dir / f"2026-09-29-claude-{sess_full}-2.md"
+    d_part2.write_text(
+        "---\ntype: Session Digest\naft:\n  project: p_widget\n  role: worker\n---\n"
+    )
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_exact, "worker statement")
+    assert v is True
+    assert origin == rules.WORKER
+
+
+def test_new_fact_evidence_date_uses_quote_date_not_digest_date(initialized, home, fake):
+    """The new fact's evidence date comes from the quote's entry time, not the digest's end date."""
+    from aft.readers import USER, Entry
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    # Standing line has evidence from 2026-09-15
+    quote_time_old = datetime(2026, 9, 15, 10, 0, 0, tzinfo=UTC)
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="standing_sess",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1", time=quote_time_old, role=USER, text="Server has 16 cores.", is_error=False
+            )
+        ],
+    )
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Server has 16 cores. [observed] 2026-09-15 [^s1]\n",
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/standing_sess#e1",
+                "quote": "Server has 16 cores.",
+            }
+        ],
+    )
+
+    # User says "Server has 8 cores." on 2026-09-10 in a session whose last entry is on 2026-09-20.
+    quote_time_new = datetime(2026, 9, 10, 14, 0, 0, tzinfo=UTC)
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="new_sess",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e2", time=quote_time_new, role=USER, text="Server has 8 cores.", is_error=False
+            )
+        ],
+    )
+
+    # Digest filename date is 2026-09-20 (the session's end date)
+    write_digest(
+        cfg,
+        "widget",
+        "2026-09-20-claude-new_sess",
+        facts=[
+            {
+                "statement": "Server has 8 cores.",
+                "kind": "state",
+                "source": "observed",
+                "date": "2026-09-20",
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/new_sess#e2",
+                "quote": "Server has 8 cores.",
+            }
+        ],
+    )
+
+    fake.script = [reply("supersede", "L1", "server now has 8 cores")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    # The ref is dated by its own quote's day, 2026-09-10, not by the digest's filename day of
+    # 2026-09-20. 09-10 is older than the standing line's 2026-09-15, so R4 refuses the
+    # supersede and the fact lands as a conflict instead.
+    assert len(report.conflicts) == 1
+    assert report.conflicts[0].new_statement == "Server has 8 cores."
+    assert report.conflicts[0].refs == ("s2",)
+    assert report.conflicts[0].path == "projects/widget/overview.md"
+
+
+def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(
+    initialized, home, fake, monkeypatch
+):
+    """The real per-page lint refuses a page this run wrote, and the run rolls back."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-04-claude-sess1",
+        facts=[
+            {
+                "statement": "Valid fact statement.",
+                "kind": "state",
+                "source": "observed",
+                "date": "2026-10-04",
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": "Valid fact statement.",
+            }
+        ],
+    )
+    fake.script = [reply("add", None, "add fact")]
+
+    # The page this run writes fails the real lint: the appended bullet is not a fact line.
+    orig_render = pagewrite.PageDoc.render
+
+    def render_with_an_unlintable_line(self):
+        return orig_render(self) + "\n- Broken fact line missing required metadata\n"
+
+    monkeypatch.setattr(pagewrite.PageDoc, "render", render_with_an_unlintable_line)
+
+    before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+    res = schedule.run(cfg, now=NOW)
+
+    # run_project refuses the run and rolls its writes back; schedule.run keeps the failure to
+    # this project and names it in the day's report.
+    assert "widget" not in res.ran
+    assert "lint failed" in res.failures["widget"]
+    assert res.reports["widget"].error is not None
+    assert not (cfg.vault / "projects" / "widget" / "overview.md").exists()
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+    report_text = (cfg.vault / "reports" / "2026" / "10" / "2026-10-05.md").read_text()
+    assert "lint failed" in report_text
+    committed = run_git(["log", "--format=%s", f"{before_sha}..HEAD"], cfg.vault).splitlines()
+    assert committed == ["aft: report widget", schedule.CHECKPOINT_MESSAGE]
+
+
+def test_real_per_page_lint_skips_unwritten_broken_page(initialized, home, fake):
+    """Real per-page lint only checks pages written by this run, ignoring unwritten broken pages."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.add("other", "Other")
+    registry.save()
+
+    # Create an unwritten page with an invalid fact line (missing date and ref)
+    broken_page = cfg.vault / "projects" / "other" / "overview.md"
+    broken_page.parent.mkdir(parents=True, exist_ok=True)
+    broken_page.write_text(
+        "---\ntype: Fact Page\naft:\n  project: "
+        + registry.by_slug("other").id
+        + "\n  kind: overview\n---\n\n## State\n\n- Broken line missing date and ref\n"
+    )
+    vault.commit(cfg.vault, ["projects/other/overview.md"], "commit broken page")
+
+    # Confirm that lint_vault fails on the vault
+    vault_findings = lint.lint_vault(cfg.vault)
+    assert any("projects/other/overview.md" in str(f) for f in vault_findings)
+
+    # Dream run for widget only writes widget pages
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-04-claude-sess1",
+        facts=[
+            {
+                "statement": "Valid widget fact.",
+                "kind": "state",
+                "source": "observed",
+                "date": "2026-10-04",
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": "Valid widget fact."}
+        ],
+    )
+    fake.script = [reply("add", None, "add fact")]
+
+    # schedule.run must succeed because per-page lint only lints widget pages!
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    assert "widget" not in res.failures
+    rep = res.reports["widget"]
+    assert rep.commit is not None
+    assert (cfg.vault / "projects" / "widget" / "overview.md").exists()
+
+
+def test_a_failing_project_leaves_the_next_project_alone(initialized, home, fake):
+    """Two ready projects through the real run_project: the first fails partway and gives back
+    every page it wrote, and the second still dreams and commits only its own files."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("alpha", "Alpha")
+    registry.add("beta", "Beta")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    write_digest(
+        cfg,
+        "alpha",
+        "d-a1",
+        facts=[
+            {
+                "statement": "Alpha first.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/c/a1#e1", "quote": "alpha first words"}],
+    )
+    write_digest(
+        cfg,
+        "alpha",
+        "d-a2",
+        facts=[
+            {
+                "statement": "Alpha second.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[{"id": "s2", "resource": "aft://session/c/a2#e1", "quote": "alpha second words"}],
+    )
+    write_digest(
+        cfg,
+        "beta",
+        "d-b1",
+        facts=[
+            {
+                "statement": "Beta only.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/c/b1#e1", "quote": "beta only words"}],
+    )
+
+    # alpha writes its first fact, then the endpoint is down for its second digest (aft tries a
+    # 5xx twice); beta's call is answered after the failure.
+    fake.script = [
+        reply("add", None, "alpha first"),
+        Reply(status=500),
+        Reply(status=500),
+        reply("add", None, "beta only"),
+    ]
+
+    res = schedule.run(cfg, now=NOW)
+
+    assert "500" in res.failures["alpha"]
+    assert "alpha" not in res.ran
+    assert "beta" in res.ran
+    # alpha gave back what it wrote: no page, and its first digest is waiting again.
+    assert not (cfg.vault / "projects" / "alpha" / "overview.md").exists()
+    a1 = cfg.vault / "digests" / "alpha" / "2026" / "10" / "d-a1.md"
+    a1_fm, _, _, _ = page.split_frontmatter(a1.read_text())
+    assert not a1_fm["aft"].get("consumed")
+
+    assert "Beta only." in (cfg.vault / "projects" / "beta" / "overview.md").read_text()
+    committed = run_git(
+        ["show", "--name-only", "--format=", res.reports["beta"].commit], cfg.vault
+    ).split()
+    assert "projects/beta/overview.md" in committed
+    assert [
+        name for name in committed if name.startswith(("projects/alpha", "digests/alpha"))
+    ] == []
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""

@@ -454,6 +454,8 @@ def _dream(config: Config) -> None:
         print(f"aft dream: tagged hand-typed lines [stated] in {', '.join(result.tagged)}")
     for slug in result.ran:
         print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug, err in result.failures.items():
+        print(f"aft dream: {slug}: failed: {err}")
     for slug in result.active:
         print(f"aft dream: {slug}: skipped, a session was active within the quiet period")
     for slug in result.edited:

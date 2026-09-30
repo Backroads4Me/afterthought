@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from aft import page, queue, vault, work
+from aft import page, pagewrite, queue, vault, work
 from aft.cli import main
-from aft.dream import schedule
+from aft.dream import apply, schedule
 from aft.events import SESSION_END, SessionEvent
 from conftest import make_repo, run_git
 
@@ -417,3 +417,49 @@ def test_checkpoint_without_bare_bullets_makes_no_tag_commit(widget, initialized
     result = schedule.run(initialized, Recorder(), now=NOW)
     assert result.checkpoint and result.tagged == []
     assert subjects(initialized)[0] == schedule.CHECKPOINT_MESSAGE
+
+
+def test_a_project_that_fails_stops_only_itself(initialized):
+    """A failure in one project is that project's own: it lands in failures and in the day's
+    report, and the other ready project still runs."""
+    digest(initialized, "p_fail", "d_fail", "2026-09-29T08:00:00Z")
+    digest(initialized, "p_ok", "d_ok", "2026-09-29T08:00:00Z")
+
+    def failing_process(cfg, slug, digests):
+        if slug == "p_fail":
+            # A page writer refusal, which is neither of the two errors the dream expects.
+            raise pagewrite.WriteError("a statement that will not fit one line")
+        return schedule.ProjectRunReport(project=slug, commit="sha123")
+
+    result = schedule.run(initialized, failing_process, now=NOW)
+
+    assert "p_fail" not in result.ran
+    assert result.failures["p_fail"] == "a statement that will not fit one line"
+    assert result.reports["p_fail"].error == "a statement that will not fit one line"
+    assert result.ran == ["p_ok"]
+    assert result.reports["p_ok"].commit == "sha123"
+
+    report_text = (initialized.vault / "reports" / "2026" / "09" / "2026-09-29.md").read_text()
+    assert "# p_fail" in report_text
+    assert "- Error: a statement that will not fit one line" in report_text
+    assert "# p_ok" in report_text
+    assert subjects(initialized)[0] == "aft: report p_ok"
+
+
+def test_every_project_failing_still_reports_the_checkpoint_commits(initialized):
+    """A run whose every project fails still names the checkpoint and the hand-edit tag
+    commits in its report, so the Revert item is never lost (DESIGN 9 item 9)."""
+    digest(initialized, "p_one", "d_one", "2026-09-29T08:00:00Z")
+    hand_edit(initialized, LONG_AGO)
+
+    def failing_process(cfg, slug, digests):
+        raise apply.ApplyError("the model endpoint said no")
+
+    result = schedule.run(initialized, failing_process, now=NOW)
+
+    assert result.checkpoint and result.tagged and result.tag_commit
+    assert list(result.failures) == ["p_one"]
+    report_text = (initialized.vault / "reports" / "2026" / "09" / "2026-09-29.md").read_text()
+    assert "- Error: the model endpoint said no" in report_text
+    assert f"Separate checkpoint commit: git revert {result.checkpoint}" in report_text
+    assert f"Separate hand edits tag commit: git revert {result.tag_commit}" in report_text

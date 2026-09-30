@@ -31,6 +31,7 @@ from typing import Any
 
 from aft import keys, page, pagewrite, queue, vault
 from aft.config import Config
+from aft.dream.apply import ProjectRunReport
 from aft.gitutil import git
 from aft.registry import Registry
 
@@ -68,6 +69,9 @@ class Run:
     reports: dict[str, Any] = field(default_factory=dict)
     """Structured report data from each project run (M4.5, M4.6)."""
 
+    failures: dict[str, str] = field(default_factory=dict)
+    """Projects that failed this run, each mapped to the error that stopped it."""
+
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
     """Run the dream once: every quiet project with waiting digests, one at a time."""
@@ -97,40 +101,78 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if result.tagged:
                 result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
         checkpoint_reported = False
-        from aft.dream import report as reportmod
-
         for slug in ready:
-            if process is not None:
-                rep = process(config, slug, result.waiting[slug])
-            else:
-                from aft.dream import apply
+            # Any failure in one project is that project's own: its writes are rolled back by
+            # run_project, its error reaches the day's report, and the other projects still run
+            # (DESIGN 9, and BUILD-PLAN M4 follow-up).
+            try:
+                if process is not None:
+                    rep = process(config, slug, result.waiting[slug])
+                else:
+                    from aft.dream import apply
 
-                rep = apply.run_project(config, slug, result.waiting[slug], now=now)
-            if rep is not None:
-                result.reports[slug] = rep
-                if hasattr(rep, "project"):
-                    needs_you_path = reportmod.regenerate_needs_you(config.vault)
-                    rel_ny = needs_you_path.relative_to(config.vault).as_posix()
-                    if rep.commit is not None:
-                        checkpoint_arg = result.checkpoint if not checkpoint_reported else None
-                        tag_commit_arg = result.tag_commit if not checkpoint_reported else None
-                        report_path = reportmod.write_report(
-                            config,
-                            rep,
-                            now=now,
-                            checkpoint=checkpoint_arg,
-                            tag_commit=tag_commit_arg,
-                            backlog=len(waiting_digests(config.vault).get(slug, [])),
-                        )
-                        checkpoint_reported = True
-                        rel_report = report_path.relative_to(config.vault).as_posix()
-                        vault.commit(
-                            config.vault,
-                            [rel_report, rel_ny],
-                            f"aft: report {slug}",
-                        )
-            result.ran.append(slug)
+                    rep = apply.run_project(config, slug, result.waiting[slug], now=now)
+                result.ran.append(slug)
+            except Exception as exc:
+                result.failures[slug] = str(exc)
+                rep = ProjectRunReport(project=slug, error=str(exc))
+            if rep is None:
+                continue
+            result.reports[slug] = rep
+            # A failed run has nothing to revert of its own, but it still names the checkpoint
+            # and tag commits, so the run's Revert item is never lost (DESIGN 9 item 9).
+            if getattr(rep, "commit", None) is not None or slug in result.failures:
+                checkpoint, tag_commit = (
+                    (None, None) if checkpoint_reported else (result.checkpoint, result.tag_commit)
+                )
+                failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
+                if failure is None:
+                    checkpoint_reported = True
+                elif slug in result.failures:
+                    result.failures[slug] = f"{result.failures[slug]}; its report failed: {failure}"
+                else:
+                    result.failures[slug] = f"report not written: {failure}"
         return result
+
+
+def _report_run(
+    config: Config,
+    slug: str,
+    rep: ProjectRunReport,
+    now: datetime,
+    checkpoint: str | None,
+    tag_commit: str | None,
+) -> str | None:
+    """Append one run's section to the day's report, refresh needs-you, and commit both.
+
+    Returns None when they are committed, or the reason they are not. A report page that
+    will not write must not stop the other projects from dreaming, so the caller carries
+    the reason into its own output and goes on.
+    """
+    from aft.dream import report as reportmod
+
+    backlog = len(waiting_digests(config.vault).get(slug, []))
+    try:
+        report_path = reportmod.write_report(
+            config,
+            rep,
+            now=now,
+            checkpoint=checkpoint,
+            tag_commit=tag_commit,
+            backlog=backlog,
+        )
+        needs_you = reportmod.regenerate_needs_you(config.vault)
+        vault.commit(
+            config.vault,
+            [
+                report_path.relative_to(config.vault).as_posix(),
+                needs_you.relative_to(config.vault).as_posix(),
+            ],
+            f"aft: report {slug}",
+        )
+    except Exception as exc:
+        return str(exc)
+    return None
 
 
 def tag_hand_edits(config: Config, checkpoint: str) -> list[str]:
