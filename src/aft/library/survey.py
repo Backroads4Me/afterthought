@@ -99,7 +99,8 @@ Import procedure:
 4. Add descriptions:
    Document each major document's authority and purpose with verified quotes.
 5. Propose facts:
-   Propose candidate facts from notes and excluded instruction files.
+   Run `aft library propose <manifest> <facts-file>` to propose candidate facts
+   from notes and excluded instruction files.
 6. Report and commit:
    Review the import report and commit to the vault.
 """

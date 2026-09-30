@@ -256,7 +256,7 @@ def run_project(
                     res = str(s_entry.get("resource", ""))
                     q = str(s_entry.get("quote", ""))
                     v, origin, ev_date, y = _lookup_evidence(
-                        config, res, q, fallback_date=fact.date
+                        config, res, q, fallback_date=fact.date, source_entry=s_entry
                     )
                     evidence_list.append(
                         rules.Evidence(
@@ -301,7 +301,11 @@ def run_project(
                         res = str(s_dict.get("resource", ""))
                         q = str(s_dict.get("quote", ""))
                         v, origin, ev_date, yours = _lookup_evidence(
-                            config, res, q, fallback_date=proposal.target.fact.date
+                            config,
+                            res,
+                            q,
+                            fallback_date=proposal.target.fact.date,
+                            source_entry=s_dict,
                         )
                         line_evidence.append(
                             rules.Evidence(
@@ -639,14 +643,53 @@ def run_project(
 
 
 def _lookup_evidence(
-    config: Config, resource: str, quote: str, fallback_date: str = ""
+    config: Config,
+    resource: str,
+    quote: str,
+    fallback_date: str = "",
+    source_entry: dict | None = None,
 ) -> tuple[bool, str, str, bool]:
-    """Look up an evidence footnote in the archive.
+    """Look up an evidence footnote in the archive or library.
 
     Returns (verified, origin, date, yours).
     """
     quote = quote.strip()
     if not quote or not resource:
+        return False, rules.PRIMARY, fallback_date, False
+
+    if resource.startswith("aft://library/"):
+        rel = resource.removeprefix("aft://library/").strip()
+        lib_root = (config.vault / "library").resolve()
+        lib_path = (lib_root / rel).resolve()
+        if lib_path.is_relative_to(lib_root) and lib_path.is_file():
+            try:
+                content = lib_path.read_text(encoding="utf-8", errors="replace")
+                if evidence._spaced(quote) in evidence._spaced(content):
+                    return True, rules.PRIMARY, fallback_date, False
+            except Exception:
+                pass
+            try:
+                import hashlib
+                import json
+
+                f_hash = hashlib.sha256(lib_path.read_bytes()).hexdigest()
+                cache_file = config.home / "library" / f"{f_hash}.json"
+                if cache_file.is_file():
+                    data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and "chunks" in data:
+                        for chunk in data["chunks"]:
+                            chunk_text = chunk.get("text", "")
+                            if evidence._spaced(quote) in evidence._spaced(chunk_text):
+                                return True, rules.PRIMARY, fallback_date, False
+            except Exception:
+                pass
+
+        # Check tamper-proof verified quotes record written by propose (for excluded files)
+        from aft.library.propose import is_verified_import_quote
+
+        if is_verified_import_quote(config.home, resource, quote):
+            return True, rules.PRIMARY, fallback_date, False
+
         return False, rules.PRIMARY, fallback_date, False
 
     if resource.startswith("aft://session/"):
@@ -719,6 +762,8 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
 
 
 def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
+    if resource.startswith("aft://library/"):
+        return False
     if resource.startswith("aft://edit/"):
         return True
     if resource.startswith("aft://session/"):

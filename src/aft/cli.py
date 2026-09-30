@@ -37,7 +37,7 @@ from aft.install import claude as claude_install
 from aft.install import pi as pi_install
 from aft.install import skill as skill_install
 from aft.install import systemd as systemd_install
-from aft.library import importing, manifest, map_evidence, survey
+from aft.library import importing, manifest, map_evidence, propose, survey
 from aft.registry import Registry, RegistryError, path_key, slugify
 
 
@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         digest.DigestError,
         evidence.EvidenceError,
         importing.ImportError,
+        propose.ProposeError,
         redact.BadPattern,
     ) as exc:
         print(f"aft: {exc}", file=sys.stderr)
@@ -231,6 +232,24 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("map_files", nargs="*", help="path to index or map file(s) to check")
     q.add_argument("--path", help="override or specify collection directory path")
     q.set_defaults(handler=cmd_library_check_map)
+
+    q = lsub.add_parser(
+        "propose",
+        aliases=["propose-facts"],
+        help="propose candidate facts from notes and instruction files",
+    )
+    q.add_argument("manifest", help="path to manifest YAML file")
+    q.add_argument(
+        "facts_file",
+        help="path to YAML file containing proposed facts (or '-' for stdin)",
+    )
+    q.add_argument("--path", help="override or specify collection directory path")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="verify quotes and roles without writing to vault",
+    )
+    q.set_defaults(handler=cmd_library_propose)
     return parser
 
 
@@ -666,6 +685,15 @@ def cmd_library_import(args) -> int:
 
 def cmd_library_check_map(args) -> int:
     return map_evidence.run(args.manifest, map_files=args.map_files, path_override=args.path)
+
+
+def cmd_library_propose(args) -> int:
+    return propose.run(
+        args.manifest,
+        args.facts_file,
+        path_override=args.path,
+        dry_run=args.dry_run,
+    )
 
 
 # An agent's session waits on this command, so the whole hook gets one hard budget
