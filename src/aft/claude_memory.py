@@ -7,9 +7,10 @@ Each memory file becomes one digest whose lines are ``[inferred]`` facts quoted 
 file, which is the same shape a library proposal arrives in (design 6, M7): the lines then
 meet R1 like any other claim, and R3's recurrence gate holds an ``[inferred]`` line in
 Candidates until three signals across two primary sessions corroborate it (design 9). An
-imported memory file is therefore *not* promoted by being imported: one file is one signal,
-so imported lines wait as candidates, and the ones that were actually right get confirmed by
-the sessions that follow. This module decides nothing about which lines are true.
+imported memory file is therefore *not* promoted by being imported: a quote from an imported
+file stands behind no session, so it is no signal at all, and imported lines wait as candidates
+until the sessions that follow bring the same thing up. This module decides nothing about which
+lines are true.
 
 Where a quote can be verified at all is the design gap this command had to settle. A
 ``MEMORY.md`` line sits in no archive: ``aft://session/`` evidence means a conversation the

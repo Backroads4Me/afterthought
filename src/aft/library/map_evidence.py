@@ -23,6 +23,8 @@ from aft.library.importing import extract_document_chunks
 
 MAP_EXTENSIONS = {".json", ".jsonl", ".md", ".markdown", ".txt"}
 MAP_NAME_KEYWORDS = {"index", "toc", "map", "table_of_contents", "catalog", "manifest"}
+LINK_MASK = "\ue000link"
+"""A link's place in a line while the line is read for what it says besides its links."""
 
 
 def is_map_file(rel_path: str | Path) -> bool:
@@ -156,6 +158,16 @@ def check_claim(
             claim=claim,
             passed=False,
             reason=f"target path '{claim.target_path}' is not a file",
+        )
+
+    # A claim needs something a document can be checked against. A path on its own says only
+    # that a file exists, which is what the map was written to point at and proves nothing about
+    # what the document holds (DESIGN 11 step 4).
+    if claim.quote is None and claim.heading is None and claim.key is None:
+        return ClaimResult(
+            claim=claim,
+            passed=False,
+            reason=f"map entry for '{claim.target_path}' names a document and says nothing of it",
         )
 
     # 1. Heading check against extracted text (B3)
@@ -348,6 +360,35 @@ def parse_claims_from_json(map_path: Path, rel_source: str | None = None) -> lis
     return claims
 
 
+def _line_descriptions(line: str, link_snippets: list[str]) -> list[str]:
+    """What a line says besides its links, as the sentences a map claims.
+
+    In a table every remaining cell is a claim: the row
+    ``| [Spec](spec.md) | v1 | This document defines the lunar landing protocol |`` states a
+    version and a description, and reading only the first cell would verify the row on ``v1``
+    while an invented description went unexamined. In a list the words after the link are the
+    claim: ``- [Spec](spec.md): defines the lunar landing protocol`` says that sentence of the
+    document, and it is the sentence a verification has to find (DESIGN 11 step 4).
+
+    Each link is masked before the line is read, because a wikilink carries a pipe of its own
+    (``[[spec.md#Signal Levels|Spec]]``): counting pipes, or splitting on them, would see a table
+    row where a list item stands, and would cut the link into fragments that read like cells. A
+    cell left with nothing but a mask, or repeating a link's own label or target, says nothing
+    further about the document and claims nothing.
+    """
+    masked = line
+    for snippet in link_snippets:
+        masked = masked.replace(snippet, LINK_MASK)
+    cells = masked.split("|") if masked.count("|") >= 2 else [masked]
+    kept: list[str] = []
+    for cell in cells:
+        words = cell.replace(LINK_MASK, " ").strip()
+        if not words or any(words in snippet for snippet in link_snippets):
+            continue
+        kept.append(words.lstrip("#->*+ \t").strip().strip(":-").strip())
+    return [words for words in kept if words]
+
+
 def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) -> list[Claim]:
     """Parse link claims from a markdown table or list."""
     src = rel_source or map_path.name
@@ -355,6 +396,9 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
     claims: list[Claim] = []
 
     link_re = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+    # A wikilink's target may carry a heading (`[[spec.md#Signal Levels|Spec]]`), and `]]` ends
+    # the target or the label; neither may contain another `]`, or a label ending in `]]` would
+    # lose its last bracket to the terminator and the link would not read back as itself.
     wikilink_re = re.compile(r"\[\[([^|\]]+)(?:\|([^\]]+))?\]\]")
 
     lines = text.splitlines()
@@ -400,21 +444,17 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
             heading = link_target.split("#")[1].strip() if "#" in link_target else None
             if not path:
                 continue
-            quote = None
-            if "|" in line:
-                cells = [c.strip() for c in line.split("|") if c.strip()]
-                desc_cells = [c for c in cells if link_target not in c and link_text not in c]
-                if desc_cells:
-                    quote = desc_cells[0]
-            claims.append(
-                Claim(
-                    target_path=path,
-                    heading=heading,
-                    quote=quote,
-                    source_map=src,
-                    line=line_num,
+            descriptions = _line_descriptions(line, [f"[{link_text}]({link_target})"])
+            for description in descriptions or [None]:
+                claims.append(
+                    Claim(
+                        target_path=path,
+                        heading=heading,
+                        quote=description,
+                        source_map=src,
+                        line=line_num,
+                    )
                 )
-            )
 
         # Wikilinks [[target#heading|label]] or [[target]]
         for target, label in wiki_matches:
@@ -422,21 +462,23 @@ def parse_claims_from_markdown(map_path: Path, rel_source: str | None = None) ->
             heading = target.split("#")[1].strip() if "#" in target else None
             if not path:
                 continue
-            quote = label if label else None
-            if "|" in line:
-                cells = [c.strip() for c in line.split("|") if c.strip()]
-                desc_cells = [c for c in cells if target not in c and (not label or label not in c)]
-                if desc_cells:
-                    quote = desc_cells[0]
-            claims.append(
-                Claim(
-                    target_path=path,
-                    heading=heading,
-                    quote=quote,
-                    source_map=src,
-                    line=line_num,
-                )
+            descriptions = _line_descriptions(
+                line, [f"[[{target}|{label}]]" if label else f"[[{target}]]"]
             )
+            # One claim per cell, exactly as a markdown-link row is read: a row stating a
+            # version and a description has both found, not the first one only. Outside a table,
+            # where nothing but the link stands, the link's own label is the sentence the map
+            # offers for the document (DESIGN 11 step 4).
+            for description in descriptions or [label or None]:
+                claims.append(
+                    Claim(
+                        target_path=path,
+                        heading=heading,
+                        quote=description,
+                        source_map=src,
+                        line=line_num,
+                    )
+                )
 
     return claims
 

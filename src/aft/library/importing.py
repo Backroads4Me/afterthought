@@ -9,6 +9,7 @@ indexes text in the `library` search collection, generates reference pages under
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -158,22 +159,44 @@ def extract_json_chunks(text: str) -> list[tuple[str, str]]:
     return [("data", str(data))]
 
 
+HTML_INERT = re.compile(r"<(script|style|noscript)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def _html_words(fragment: str) -> str:
+    """The prose an HTML fragment carries.
+
+    Markup, comments and script bodies are what a page is made of, not what it says. The
+    extracted text is what the index, the reference pages and a quote check all read, so a
+    sentence living inside a comment or inside `<script>` is in none of them, and a fact cannot
+    be verified against a word the document never told anyone.
+    """
+    prose = HTML_COMMENT.sub(" ", fragment)
+    prose = HTML_INERT.sub(" ", prose)
+    prose = re.sub(r"<[^>]+>", " ", prose)
+    return re.sub(r"\s+", " ", prose).strip()
+
+
 def extract_html_chunks(text: str) -> list[tuple[str, str]]:
-    """Extract text from HTML documents, preserving headings as chunk titles."""
+    """Extract text from HTML documents, preserving headings as chunk titles.
+
+    Comments and the bodies of `script`, `style` and `noscript` go before anything is split:
+    a heading tag inside one of them is markup a reader never saw, and letting it break a chunk
+    would let the rest of that block's text in as the body of a heading the page never had.
+    """
+    text = HTML_INERT.sub(" ", HTML_COMMENT.sub(" ", text))
     heading_pattern = re.compile(
         r"<(?:h[1-6]|title)[^>]*>(.*?)</(?:h[1-6]|title)>", re.IGNORECASE | re.DOTALL
     )
     matches = list(heading_pattern.finditer(text))
     if not matches:
-        clean = re.sub(r"<[^>]+>", " ", text)
-        clean = re.sub(r"\s+", " ", clean).strip()
+        clean = _html_words(text)
         return [("content", clean)] if clean else []
 
     chunks: list[tuple[str, str]] = []
     first_start = matches[0].start()
     if first_start > 0:
-        clean_pre = re.sub(r"<[^>]+>", " ", text[:first_start])
-        clean_pre = re.sub(r"\s+", " ", clean_pre).strip()
+        clean_pre = _html_words(text[:first_start])
         if clean_pre:
             chunks.append(("Overview", clean_pre))
 
@@ -183,8 +206,7 @@ def extract_html_chunks(text: str) -> list[tuple[str, str]]:
         clean_h = re.sub(r"\s+", " ", clean_h).strip()
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        clean_body = re.sub(r"<[^>]+>", " ", text[start:end])
-        clean_body = re.sub(r"\s+", " ", clean_body).strip()
+        clean_body = _html_words(text[start:end])
         chunks.append((clean_h or "Section", clean_body))
 
     return chunks
@@ -251,6 +273,124 @@ def cache_extracted_text(
     }
     cache_file.write_text(json.dumps(doc_data, indent=2), encoding="utf-8")
     return cache_file
+
+
+def read_cached_extraction(home: Path, file_hash: str) -> list[tuple[str, str]] | None:
+    """The extraction cached for these bytes, or ``None`` when nothing is cached for them."""
+    cache_file = home / "library" / f"{file_hash}.json"
+    if not cache_file.is_file():
+        return None
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("chunks"), list):
+        return None
+    return [
+        (str(chunk.get("heading", "")), str(chunk.get("text", "")))
+        for chunk in data["chunks"]
+        if isinstance(chunk, dict)
+    ]
+
+
+def extracted_text(path: Path, home: Path | None = None) -> str:
+    """The text a document's quotes are found in: what extraction yields, never raw bytes.
+
+    Extraction is what turns a PDF's object stream or an HTML page's markup into the sentences
+    a person reads, and it is what the index, the reference pages and the dream all hold. A
+    quote verified against the bytes instead would rest on words no page of afterthought ever
+    carried: an HTML comment, a script's body, a sentence the page break split in two. Pages
+    are joined, so a sentence spanning a break is one sentence here and everywhere.
+
+    With a home directory the extraction is read from, and written to, the cache keyed by
+    content hash, so a quote verifies the same on a machine that has since cleared it (DESIGN 11).
+    A document whose kind nothing here can extract carries no text at all: nothing can be quoted
+    from it, and its reference page holds no structure either.
+    """
+    try:
+        file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+    chunks = read_cached_extraction(home, file_hash) if home is not None else None
+    if chunks is None:
+        chunks = extract_document_chunks(path)
+        if chunks and home is not None:
+            cache_extracted_text(home, file_hash, path.name, chunks)
+    return "\n".join(text for _, text in chunks)
+
+
+@dataclass(frozen=True)
+class ImportRecord:
+    """What an import left in the vault about a collection: the person's own review of it."""
+
+    authority: str
+    """``authoritative`` or ``reference``, as the import recorded it."""
+
+    projects: tuple[str, ...]
+    """The project ids the collection was imported for."""
+
+    hashes: dict[str, str]
+    """The SHA-256 of each retained file, over the path it was imported under."""
+
+    roles: dict[str, str]
+    """The role each retained file was imported under."""
+
+
+def read_import_record(vault_path: Path, collection: str) -> ImportRecord | None:
+    """Read the record of an import from ``references/<collection>/``, or ``None`` if none ran.
+
+
+    ``aft library import`` writes these pages, and a person reads, lints and commits them. The
+    collection's own page is rewritten whole by every import and holds the authority the
+    collection was given, the projects it was imported for, the hash of each file it retained and
+    the role each was retained under. Verification trusts that page rather than a manifest handed
+    to a later command, because a manifest says what someone would like the files to be and this
+    says what was imported (DESIGN 11). Nothing here is read from a per-document page: such a page
+    describes the document as the import that made it saw it, and a re-import renames pages and
+    retires them, so the page a later import left behind would speak for a document that no
+    longer exists (M7 review 2).
+    """
+
+    ref_dir = vault_path / "references" / collection
+    collection_page = ref_dir / "collection.md"
+    if not collection_page.is_file():
+        return None
+    try:
+        frontmatter, _, _, error = page.split_frontmatter(
+            collection_page.read_text(encoding="utf-8")
+        )
+    except OSError:
+        return None
+    aft = frontmatter.get("aft") if isinstance(frontmatter, dict) else None
+    if error or not isinstance(aft, dict):
+        return None
+
+    raw_files = aft.get("files")
+    hashes = (
+        {str(path): str(digest) for path, digest in raw_files.items()}
+        if isinstance(raw_files, dict)
+        else {}
+    )
+    raw_projects = aft.get("projects")
+    projects = (
+        tuple(str(project) for project in raw_projects if project)
+        if isinstance(raw_projects, (list, tuple))
+        else ()
+    )
+
+    raw_roles = aft.get("file_roles")
+    roles = (
+        {str(path): str(role) for path, role in raw_roles.items()}
+        if isinstance(raw_roles, dict)
+        else {}
+    )
+
+    return ImportRecord(
+        authority=str(aft.get("authority", "reference")),
+        projects=projects,
+        hashes=hashes,
+        roles=roles,
+    )
 
 
 def _doc_slug(rel_path: str) -> str:
@@ -537,12 +677,20 @@ def generate_reference_pages(
                 continue
         resolved_projects.append(p)
 
+    # The roles the import kept files under, recorded beside their hashes. A per-document page
+    # also names a role, but it describes the document as the import that made it saw it, and a
+    # re-import renames and retires those pages; this page is rewritten whole each time, so what
+    # a person approved at import is read from here and only here (DESIGN 11 step 2, M7 review 2).
     imported_hashes = {
         path: file_hashes[path]
         for path in sorted(file_hashes)
         if manifest.files.get(path) and manifest.files[path].role != "exclude"
     }
-
+    imported_roles = {
+        path: manifest.files[path].role
+        for path in sorted(file_hashes)
+        if manifest.files.get(path) and manifest.files[path].role != "exclude"
+    }
     doc_bullets: list[str] = []
     contents_map_lines: list[str] = []
 
@@ -577,6 +725,7 @@ def generate_reference_pages(
                     "authority": manifest.authority,
                     "projects": resolved_projects,
                     "files": imported_hashes,
+                    "file_roles": imported_roles,
                 },
             }
         )

@@ -59,11 +59,24 @@ WORKER = "worker"
 """How the session behind a quote was classified: a session under a worker path is
 "evidence of a lower rank" whose facts "carry that role into the dream" (design 8, M2.7).
 """
+LIBRARY = "library"
+"""No session stands behind the quote: it was taken from an imported document or an
+instruction file (DESIGN 11 step 5). Such a quote verifies a fact and carries no recurrence,
+so R3 counts none of it, however many imported files repeat the sentence, and a fact proposed
+from a collection waits as a candidate.
+"""
 
 SIGNALS_GATE = pagewrite.SIGNALS_GATE
 SESSIONS_GATE = pagewrite.SESSIONS_GATE
 """R3's numbers, taken from the writer that prints them in a candidate's counts suffix so
 the gate and the page a person reads can never disagree."""
+
+WORKER_RULE = "design 8 worker sessions"
+LIBRARY_RULE = "design 11 library evidence"
+"""Which rule a refusal names: a worker session's quote is the lower rank design 8 holds, and a
+quote with no session behind it at all is the collection evidence of design 11. The report prints
+this string in the Rejected row, so a person reading it learns what stood behind the quote."""
+
 
 HALF_WEIGHT_AFTER_DAYS = 30
 """A signal older than this counts half toward R3's gate (design 9 R3)."""
@@ -126,7 +139,9 @@ class Evidence:
     the part of that uri before the fragment, which is what R3 counts sessions of."""
 
     origin: str
-    """``PRIMARY`` or ``WORKER``: how that session was classified (design 8, worker sessions)."""
+    """``PRIMARY``, ``WORKER`` or ``LIBRARY``: the session that stands behind the quote, or
+    no session at all when the quote came out of an imported collection (design 8, design 11).
+    """
 
     date: str
     """YYYY-MM-DD the evidence is dated, which decides whether it counts half (R3) and
@@ -303,10 +318,18 @@ def check(
     # A fact resting only on worker sessions is evidence of a lower rank: it stays a
     # candidate until a primary session corroborates it, whatever its tag, and it never
     # confirms a line, so it adds no source and no date to one (design 8).
+    #
+    # That rule is about the rank of the session that spoke. A quote from an imported collection
+    # was spoken by no session at all, so it is not the lower rank design 8 holds: DESIGN 11 gives
+    # an authoritative document's own word an [observed] line and sends its facts through R4 like
+    # any other, while R3 still counts the quote toward recurrence nothing. Confirming is the one
+    # action that is recurrence by itself, and no collection can supply it; the refusal says which
+    # kind of evidence came up short, since that is what a person reads in the report.
     if not _primary(context.evidence):
         if decision.action == "confirm":
-            return reject("design 8 worker sessions")
-        return downgrade("candidate", "design 8 worker sessions")
+            return reject(WORKER_RULE if _only_worker(context.evidence) else LIBRARY_RULE)
+        if _only_worker(context.evidence):
+            return downgrade("candidate", WORKER_RULE)
 
     if decision.action == "add":
         return _new_line(new_fact, context)
@@ -384,10 +407,13 @@ def _supersede(new_fact: NewFact, target_line: page.Fact, context: Context) -> O
     and the result is a conflict, or needs you when it is one of your commitments that is
     contradicted."""
     authority = AUTHORITY.get(target_line.kind or "", ())
+
     # The quote that carries the authority is the one that has to be newer: your own words
-    # for a [stated] fact, any verified quote for an [observed] one.
+    # for a [stated] fact, and for an [observed] one a primary session's quote or the word of
+    # an imported document - DESIGN 11 sends a collection's facts through R4 "like any
+    # [observed] fact". A worker session's quote carries no such authority (design 8).
     carrying = (
-        _yours(context.evidence) if new_fact.source == "stated" else _primary(context.evidence)
+        _yours(context.evidence) if new_fact.source == "stated" else _carrying(context.evidence)
     )
     if new_fact.source in authority and _newer_than_the_line(carrying, target_line):
         return apply("supersede")
@@ -457,9 +483,32 @@ def _passes_gate(context: Context) -> bool:
 
 
 def _primary(evidence: tuple[Evidence, ...]) -> list[Evidence]:
-    """The verified quotes from primary sessions: a worker session's evidence never
-    carries a fact over the gate, and an unverified quote is no signal at all."""
+    """The verified quotes from primary sessions: a worker session's evidence and a quote
+    imported from a collection never carry a fact over the gate, and an unverified quote is no
+    signal at all."""
     return [q for q in evidence if q.verified and q.origin == PRIMARY]
+
+
+def _carrying(evidence: tuple[Evidence, ...]) -> list[Evidence]:
+    """The verified quotes an ``[observed]`` fact replaces a standing line on: a primary
+    session's, or an imported document's own word.
+
+    DESIGN 11 gives a collection's facts the authority of ``[observed]`` and sends them through
+    R4 like any other, which asks for one verified quote newer than the line. A worker session's
+    quote is the lower rank design 8 holds back, so it carries nothing, and R3 still counts an
+    imported quote toward recurrence nothing: replacement and recurrence are different questions.
+    """
+    return [q for q in evidence if q.verified and q.origin in (PRIMARY, LIBRARY)]
+
+
+def _only_worker(evidence: tuple[Evidence, ...]) -> bool:
+    """Whether every verified quote rests on a worker session.
+
+    Design 8 ranks the session that spoke, and an imported quote came from no session, so a fact
+    resting on a collection is not the lower-ranked evidence this rule was written to hold.
+    """
+    verified = [q for q in evidence if q.verified]
+    return bool(verified) and all(q.origin == WORKER for q in verified)
 
 
 def _aged(ref: str, quotes: list[Evidence], today: str) -> bool:
