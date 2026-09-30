@@ -822,19 +822,36 @@ def cmd_install_timer(args) -> int:
         if args.uninstall
         else systemd_install.install(unit_dir, config=cfg, dry_run=args.dry_run)
     )
+    would = "would run" if args.dry_run else "ran"
     if not change.changed:
         if args.uninstall:
             print(f"no afterthought timer units to remove in {unit_dir}")
-        else:
-            print(f"afterthought timer units in {unit_dir} are already up to date")
-        return 0
-    if args.dry_run:
+            return 0
+        print(f"afterthought timer units in {unit_dir} are already up to date")
+    elif args.dry_run:
         print(change.preview or f"no changes to {unit_dir}")
-        return 0
-    if args.uninstall:
+    elif args.uninstall:
         print(f"removed {', '.join(str(p) for p in change.units)}")
     else:
         print(f"installed {', '.join(str(p) for p in change.units)}")
+    # Writing the units is half of it: what runs aft is the timer being enabled, so the
+    # command says what it did about that, or what it would do, or what is left to do.
+    if args.dry_run:
+        for command in change.commands:
+            print(f"{would}: {command}")
+    elif change.active:
+        state = "disabled and stopped" if args.uninstall else "enabled and started"
+        print(f"{state} {systemd_install.TIMER_NAME}")
+    elif change.active is False:
+        print(f"systemd refused: {change.problem}", file=sys.stderr)
+        print("run these yourself:", file=sys.stderr)
+        for command in change.commands:
+            print(f"  {command}", file=sys.stderr)
+        return 1
+    elif change.commands:
+        print(f"{unit_dir} is not the directory systemd reads, so nothing was enabled; to do it:")
+        for command in change.commands:
+            print(f"  {command}")
     return 0
 
 

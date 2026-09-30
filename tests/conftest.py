@@ -43,6 +43,7 @@ def direct_connection(monkeypatch):
 def isolated_systemd(monkeypatch):
     """Never invoke real systemd during tests."""
     monkeypatch.setattr("aft.install.systemd._default_runner", lambda cmd: None)
+    monkeypatch.setattr("aft.install.systemd._systemctl", lambda cmd: (True, ""))
 
 
 @pytest.fixture
