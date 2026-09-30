@@ -417,3 +417,25 @@ def test_checkpoint_without_bare_bullets_makes_no_tag_commit(widget, initialized
     result = schedule.run(initialized, Recorder(), now=NOW)
     assert result.checkpoint and result.tagged == []
     assert subjects(initialized)[0] == schedule.CHECKPOINT_MESSAGE
+
+
+def test_per_project_failure_isolation(initialized):
+    """An ApplyError or ModelError in one project is caught per project in schedule.run:
+    that project is recorded in failures/reports, and other ready projects still run."""
+    digest(initialized, "p_fail", "d_fail", "2026-09-29T08:00:00Z")
+    digest(initialized, "p_ok", "d_ok", "2026-09-29T08:00:00Z")
+
+    def failing_process(cfg, slug, digests):
+        if slug == "p_fail":
+            raise schedule.ApplyError("lint failed on bad page")
+        return schedule.ProjectRunReport(project=slug, commit="sha123")
+
+    result = schedule.run(initialized, failing_process, now=NOW)
+    assert "p_fail" in result.failures
+    assert "lint failed on bad page" in result.failures["p_fail"]
+    assert result.reports["p_fail"].error == "lint failed on bad page"
+    assert "p_fail" not in result.ran
+
+    assert "p_ok" in result.ran
+    assert "p_ok" not in result.failures
+    assert result.reports["p_ok"].commit == "sha123"

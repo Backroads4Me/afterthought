@@ -31,7 +31,9 @@ from typing import Any
 
 from aft import keys, page, pagewrite, queue, vault
 from aft.config import Config
+from aft.dream.apply import ApplyError, ProjectRunReport
 from aft.gitutil import git
+from aft.model import ModelError
 from aft.registry import Registry
 
 DIGESTS = "digests"
@@ -65,6 +67,9 @@ class Run:
     reports: dict[str, Any] = field(default_factory=dict)
     """Structured report data from each project run (M4.5, M4.6)."""
 
+    failures: dict[str, str] = field(default_factory=dict)
+    """Projects that failed with ApplyError or ModelError, mapped to error message."""
+
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
     """Run the dream once: every quiet project with waiting digests, one at a time."""
@@ -92,15 +97,19 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
             result.tagged = tag_hand_edits(config, result.checkpoint)
         for slug in ready:
-            if process is not None:
-                rep = process(config, slug, result.waiting[slug])
-            else:
-                from aft.dream import apply
+            try:
+                if process is not None:
+                    rep = process(config, slug, result.waiting[slug])
+                else:
+                    from aft.dream import apply
 
-                rep = apply.run_project(config, slug, result.waiting[slug], now=now)
-            if rep is not None:
-                result.reports[slug] = rep
-            result.ran.append(slug)
+                    rep = apply.run_project(config, slug, result.waiting[slug], now=now)
+                if rep is not None:
+                    result.reports[slug] = rep
+                result.ran.append(slug)
+            except (ApplyError, ModelError) as exc:
+                result.failures[slug] = str(exc)
+                result.reports[slug] = ProjectRunReport(project=slug, error=str(exc))
         return result
 
 

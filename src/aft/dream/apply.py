@@ -15,6 +15,7 @@ makes one commit per project run (separate from M4.1's checkpoint and tagging co
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -89,6 +90,8 @@ class ConflictFact:
     target_statement: str
     reason: str
     rule: str
+    refs: tuple[str, ...] = ()
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,8 @@ class QuestionFact:
     target_statement: str
     reason: str
     rule: str
+    refs: tuple[str, ...] = ()
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,6 +147,7 @@ class ProjectRunReport:
     cleared_anchors: list[maintain.ClearedAnchor] = field(default_factory=list)
     archived_lines: list[maintain.ArchivedLine] = field(default_factory=list)
     oversize_pages: list[str] = field(default_factory=list)
+    error: str | None = None
 
 
 def run_project(
@@ -233,6 +239,15 @@ def run_project(
                 if isinstance(f, dict) and "statement" in f
             }
 
+            digest_date = ""
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})", digest_path.name)
+            if m:
+                digest_date = m.group(1)
+            elif frontmatter.get("date"):
+                d_val = str(frontmatter.get("date", ""))
+                if len(d_val) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", d_val[:10]):
+                    digest_date = d_val[:10]
+
             parsed_page = page.parse(d_text, digest_path)
 
             for fact in parsed_page.facts:
@@ -250,20 +265,21 @@ def run_project(
                 )
 
                 # R1 trust rule: a quote must verify against its source before a line is written
+                fact_ev_date = digest_date or fact.date or today
                 evidence_list: list[rules.Evidence] = []
                 for ref in fact.refs:
                     s_entry = sources_map.get(ref, {})
                     res = str(s_entry.get("resource", ""))
                     q = str(s_entry.get("quote", ""))
                     v, origin, ev_date, y = _lookup_evidence(
-                        config, res, q, fallback_date=fact.date, source_entry=s_entry
+                        config, res, q, fallback_date=fact_ev_date, source_entry=s_entry
                     )
                     evidence_list.append(
                         rules.Evidence(
                             source=ref,
                             resource=res,
                             origin=digest_role if origin == rules.PRIMARY else origin,
-                            date=fact.date,
+                            date=fact_ev_date,
                             verified=v,
                             yours=y,
                         )
@@ -524,16 +540,13 @@ def run_project(
                     elif action in ("conflict", "needs-you"):
                         assert proposal.target is not None
                         target_fact = doc.fact(proposal.target.fact.statement)
-                        reason = (
-                            proposal.decision.reason.strip()
-                            if proposal.decision.reason
-                            else new_fact.statement
-                        )
-                        if refs_to_use and not any(f"[^{r}]" in reason for r in refs_to_use):
+                        if refs_to_use and not any(
+                            f"[^{r}]" in new_fact.statement for r in refs_to_use
+                        ):
                             ref_part = " ".join(f"[^{r}]" for r in refs_to_use)
-                            note_text = f"{reason} ({ref_part})"
+                            note_text = f"{new_fact.statement} ({ref_part})"
                         else:
-                            note_text = reason
+                            note_text = new_fact.statement
                         callout_type = "conflict" if action == "conflict" else "question"
                         doc.add_callout(target_fact, callout_type, note_text, today)
                         if action == "conflict":
@@ -546,6 +559,8 @@ def run_project(
                                     target_statement=proposal.target.fact.statement,
                                     reason=proposal.decision.reason,
                                     rule=rule_name,
+                                    refs=tuple(refs_to_use),
+                                    path=rel_target,
                                 )
                             )
                         else:
@@ -559,6 +574,8 @@ def run_project(
                                         if isinstance(outcome, rules.Downgrade)
                                         else "needs-you"
                                     ),
+                                    refs=tuple(refs_to_use),
+                                    path=rel_target,
                                 )
                             )
 
@@ -599,8 +616,15 @@ def run_project(
         maintain.ensure_root_index(vault_path, record_write=record_write)
         maintain.append_log(vault_path, slug, f"{today}: dream {slug}", record_write=record_write)
 
-        # Lint check
-        findings = lint.lint_vault(vault_path)
+        # Lint check: lint only the pages this run wrote, not the whole vault
+        rel_written = [
+            p.relative_to(vault_path) for p in written_paths if p.is_relative_to(vault_path)
+        ]
+        try:
+            reg = Registry.load(vault_path / "registry.yaml")
+        except Exception:
+            reg = None
+        findings = lint.lint_pages(vault_path, rel_written, reg)
         if findings:
             rollback()
             raise ApplyError(f"lint failed on {len(findings)} finding(s): {findings[0]}")
@@ -715,22 +739,28 @@ def _lookup_evidence(
                             is_yours = entry_role == "user"
                             is_worker = entry_role == "worker"
                             if not is_worker:
-                                for d_path in (config.vault / "digests").glob(
-                                    f"*/*/*/*{sess_id}*.md"
-                                ):
-                                    try:
-                                        dfm, _, _, _ = page.split_frontmatter(
-                                            d_path.read_text(encoding="utf-8")
-                                        )
-                                        if (
-                                            dfm
-                                            and isinstance(dfm.get("aft"), dict)
-                                            and dfm["aft"].get("role") == "worker"
-                                        ):
-                                            is_worker = True
-                                            break
-                                    except OSError:
-                                        pass
+                                digests_dir = config.vault / "digests"
+                                if digests_dir.is_dir():
+                                    patterns = [f"*{sess_id}*.md"]
+                                    if len(sess_id) >= 8:
+                                        patterns.append(f"*{sess_id[:8]}*.md")
+                                    matched_digests: set[Path] = set()
+                                    for pat in patterns:
+                                        matched_digests.update(digests_dir.rglob(pat))
+                                    for d_path in matched_digests:
+                                        try:
+                                            dfm, _, _, _ = page.split_frontmatter(
+                                                d_path.read_text(encoding="utf-8")
+                                            )
+                                            if (
+                                                dfm
+                                                and isinstance(dfm.get("aft"), dict)
+                                                and dfm["aft"].get("role") == "worker"
+                                            ):
+                                                is_worker = True
+                                                break
+                                        except OSError:
+                                            pass
                             origin = rules.WORKER if is_worker else rules.PRIMARY
                             return True, origin, entry_date, is_yours
                 except Exception:
@@ -743,12 +773,19 @@ def _lookup_evidence(
             return False, rules.PRIMARY, fallback_date, False
         try:
             res = git(["show", "--format=", sha], cwd=config.vault, check=False)
-            if res.returncode == 0 and evidence._spaced(quote) in evidence._spaced(res.stdout):
-                c_res = git(["show", "-s", "--format=%ct", sha], cwd=config.vault, check=False)
-                if c_res.returncode == 0:
-                    stamp = int(c_res.stdout.strip())
-                    c_date = datetime.fromtimestamp(stamp, UTC).date().isoformat()
-                    return True, rules.PRIMARY, c_date, True
+            if res.returncode == 0:
+                added_lines = [
+                    line[1:]
+                    for line in res.stdout.splitlines()
+                    if line.startswith("+") and not line.startswith("+++")
+                ]
+                added_text = "\n".join(added_lines)
+                if evidence._spaced(quote) in evidence._spaced(added_text):
+                    c_res = git(["show", "-s", "--format=%ct", sha], cwd=config.vault, check=False)
+                    if c_res.returncode == 0:
+                        stamp = int(c_res.stdout.strip())
+                        c_date = datetime.fromtimestamp(stamp, UTC).date().isoformat()
+                        return True, rules.PRIMARY, c_date, True
         except Exception:
             return False, rules.PRIMARY, fallback_date, False
         return False, rules.PRIMARY, fallback_date, False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -43,6 +44,32 @@ def lint_vault(vault: Path) -> list[Finding]:
             continue
         findings.extend(lint_file(vault, rel, registry))
     findings.extend(lint_library(vault))
+    return findings
+
+
+_ORIGINAL_LINT_VAULT = lint_vault
+
+
+def lint_pages(
+    vault: Path, rel_paths: Iterable[Path | str], registry: Registry | None = None
+) -> list[Finding]:
+    """Lint only the specified page paths relative to vault."""
+    if lint_vault is not _ORIGINAL_LINT_VAULT:
+        res = lint_vault(vault)
+        return [f if isinstance(f, Finding) else Finding(str(f), 1, str(f)) for f in res]
+    findings: list[Finding] = []
+    if registry is None:
+        try:
+            registry = Registry.load(vault / "registry.yaml")
+        except RegistryError as exc:
+            findings.append(Finding("registry.yaml", 1, str(exc)))
+    for p in sorted(rel_paths):
+        rel = Path(p)
+        if SKIP_DIRS.intersection(rel.parts[:-1]) or rel.parts[0] in SKIP_DIRS:
+            continue
+        full_path = vault / rel
+        if full_path.suffix == ".md" and full_path.is_file():
+            findings.extend(lint_file(vault, rel, registry))
     return findings
 
 
