@@ -67,9 +67,10 @@ unreliable notes. Existing memory systems fail in four recurring ways:
    history stays in git. Deletion happens only when you ask for it.
 6. **Small on purpose.** v1 is the smallest system that tests the thesis. A feature earns
    its place through a measured need.
-7. **Self-contained.** Afterthought follows only its own rules and instructions. Nothing it
-   imports, such as another tool's instruction file or index, is trusted or obeyed; it is
-   read as evidence and checked like any other evidence.
+7. **Self-contained.** Afterthought follows only its own rules and instructions. It never
+   obeys what it imports: another tool's instruction file or index is read as evidence and
+   checked like any other evidence. Imported sources are trusted only as far as you say
+   (section 11).
 
 ## 4. The trust pipeline
 
@@ -204,11 +205,11 @@ heading and no line needs extra markup:
 |---|---|---|
 | `preference` | What you want | "No RGB lighting." |
 | `decision` | A choice and its reason | "The index is SQLite FTS5 because it needs no service." |
-| `state` | How something is currently configured or running | "The GPU host serves Qwen3.8-Flash-Next through vLLM." |
-| `fact` | A durable truth about the project or its world | "RV-C amperage is offset-encoded." |
+| `state` | How something is currently configured or running | "The model server runs vLLM on the GPU machine, port 8000." |
+| `fact` | A durable truth about the project or its world | "The protocol's current field is offset-encoded, not two's complement." |
 | `lesson` | What went wrong and what fixed it | "When the libolm build fails on ABI mismatch, pin version X." |
 | `procedure` | How to do something | "Release by tagging on main after the gate passes." |
-| `reference` | Where authoritative information lives and when to use it | "For RV-C DGN definitions use [[rvc-spec-2023]]; it replaces the 2016 edition." |
+| `reference` | Where authoritative information lives and when to use it | "For message definitions use [[protocol-spec-2023]]; it replaces the 2016 edition." |
 
 Candidates sit in their own section until they pass the gate.
 
@@ -232,7 +233,7 @@ sources:
     resource: aft://session/pi/01a0e256#entry-88
     title: Capture hook test
     quote: "capture.py: SessionEnd handler enqueued job in 12 ms"
-generated: {by: "aft 0.1 / vllm Qwen3.8-Flash-Next", at: 2026-09-28T16:02:00Z}
+generated: {by: "aft 0.1 / vllm example-model-8b", at: 2026-09-28T16:02:00Z}
 status: stable
 aft:
   project: p_01j9x4k2
@@ -379,8 +380,8 @@ adds no source and no date.
 
 ### The digest
 
-One model call per chunk returns JSON, constrained by a schema through vLLM's structured
-output:
+One model call per chunk returns JSON, constrained by a schema through the endpoint's
+structured output:
 
 ```json
 {
@@ -462,7 +463,7 @@ so later evidence is applied after earlier evidence.
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
 | **R6 One project per unit of work** | A run never edits another project's pages. Global pages change only from `[stated]` facts. | Script |
 | **R7 Size caps** | Pages over their cap are flagged in the report. Condensing and splitting come after v1. | Script |
-| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it; the line keeps its date, since matching words are not a verified quote. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to Ted is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
+| **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it; the line keeps its date, since matching words are not a verified quote. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to you is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
 | **R9 No free-form writes** | Model output is schema-constrained JSON. Only the script edits files. | Script |
 
 ### Authority to replace a fact
@@ -550,8 +551,8 @@ it. `aft reindex` rebuilds the index from files, and a test proves the rebuild m
 
 ## 11. The library
 
-Some knowledge is not remembered from sessions but imported: specifications such as the
-RV-C standard, datasheets, manuals, vendor documentation, and working notes. The library
+Some knowledge is not remembered from sessions but imported: specifications and
+standards, datasheets, manuals, vendor documentation, and working notes. The library
 holds those sources, and memory holds a detailed, verified map of them, so an agent knows
 what exists, where it is, and when to use it.
 
@@ -560,13 +561,16 @@ Two rules shape it:
 - **The library holds sources; memory holds knowledge.** Source files are read-only once
   imported. What is learned about them, and anything that changes over time, lives in
   memory as curated facts under the normal rules.
-- **Nothing imported is trusted.** An existing index, table of contents, or instruction file
-  in an imported collection is evidence to check, never a map or a rule to follow.
+- **Imported sources are trusted as far as you say, and never obeyed.** You declare each
+  collection's authority when it is imported (below). An existing index, table of
+  contents, or instruction file inside a collection is always evidence to check, never a
+  map or a rule to follow, whatever the collection's authority: it may be out of date or
+  wrong, and nothing says what produced it.
 
 ### Collections
 
 The unit of the library is a collection: a set of related files imported together, such
-as everything about RV-C. A collection's files are copied into `library/<name>/`, keeping
+as everything about one protocol standard. A collection's files are copied into `library/<name>/`, keeping
 their relative layout. The library never points at files outside the vault, because
 nothing stops them being moved, renamed or deleted later. The original location is
 recorded only as history.
@@ -575,7 +579,7 @@ Each file in a collection has one role:
 
 | Role | Meaning | Example |
 |---|---|---|
-| `original` | An authoritative source document | The RV-C specification PDF |
+| `original` | A source document | A protocol specification PDF |
 | `derived` | A version made from another file, such as cleaned text or extracted tables | A cleaned markdown rendering of the specification |
 | `errata` | Corrections to another file, which win where the two conflict | A list of known specification errors |
 | `notes` | Working notes: kept as sources, and mined for facts | Notes on an undocumented device |
@@ -587,11 +591,32 @@ over the document they correct; a newer edition wins over the one it supersedes)
 search (derived text is indexed in place of its original, so one passage is not returned
 twice).
 
+### Authority
+
+Each collection has an authority, which you declare when it is imported. The import skill
+asks you; the agent never chooses it on its own. It is recorded in the manifest and in the
+import commit, so it can be reviewed and changed by importing again.
+
+| Authority | Meaning | Example | Facts from its `original`, `derived` and `errata` files |
+|---|---|---|---|
+| `authoritative` | You accept it as the governing source for what it covers | A standard your project implements | Enter as `[observed]` |
+| `reference` (default) | Useful, but not settled truth | Vendor application notes, a forum write-up | Enter as `[inferred]` or `[suggested]`, so they wait as candidates |
+
+Whatever the collection's authority:
+
+- Facts from `notes` files, and from excluded instruction files, enter as `[inferred]` or
+  `[suggested]`.
+- Nothing imported is `[stated]`. That tag means you committed to something in your own
+  words (R2), and a document is not your words; declaring it authoritative is what gives
+  it weight.
+- Facts from an authoritative source follow R4 like any `[observed]` fact: they never
+  replace a `preference` or `decision` you stated, and a contradiction becomes `needs you`.
+
 ### An agent runs the import
 
 Importing takes judgment that a single command cannot make: which files are originals,
 which are derived, which are notes, and how they relate. An agent makes those judgments
-because you ask it to ("add my RV-C documentation to the library"), and deterministic
+because you ask it to ("add this protocol documentation to the library"), and deterministic
 commands check and carry out its plan. The agent never writes into the library itself.
 
 1. **`aft library survey <path>`** changes nothing. It lists every file with its type,
@@ -599,7 +624,8 @@ commands check and carry out its plan. The agent never writes into the library i
    different extension), and prints the import procedure. The procedure travels with the
    command, so an agent that has not loaded the skill still gets it.
 2. **The agent writes a manifest**: the collection's name and description, the projects it
-   applies to, one role for every file, and the relations between files.
+   applies to, the authority you gave, one role for every file, and the relations between
+   files.
 3. **`aft library import <manifest>`** validates the manifest before touching anything:
    every surveyed file has exactly one role, every relation points at a file in the
    collection, and no instruction file or tooling is kept. It then copies the files,
@@ -607,9 +633,10 @@ commands check and carry out its plan. The agent never writes into the library i
    generates the structure of the reference pages from the files themselves.
 4. **The agent adds descriptions**: what each document is, its authority, and when to use
    it and when not to. Every claim carries a quote that must appear in the extracted text.
-5. **The agent proposes facts** from notes and from excluded instruction files. Each is
-   quote-checked against its file and enters the dream as a candidate, under the same
-   rules as facts from sessions. An excluded file is not kept, so its facts record that the
+5. **The agent proposes facts** from the collection's documents, notes and excluded
+   instruction files. Each is quote-checked against its file and enters the dream as a
+   digest, tagged by the collection's authority (above), under the same rules as facts
+   from sessions. An excluded file is not kept, so its facts record that the
    quote was verified at import and that the original was not retained.
 6. The import ends with a report, in the same format as a dream report, and one commit.
 
@@ -619,7 +646,7 @@ their adapters. The skill only drives these commands, so the procedure lives in 
 ### The map is generated and verified
 
 Afterthought builds every map from the files: the file list, headings, page counts, and
-the keys of structured data (every DGN in a definitions file, for example). A map that came
+the keys of structured data (every message type in a definitions file, for example). A map that came
 with the collection, such as a README table or a JSON index, is only evidence. Each claim
 taken from it is checked: the path exists, the heading or key exists, and any description
 quoted from it appears in the document it describes. Claims that fail are listed in the
@@ -636,10 +663,10 @@ for directory listings, so the collection's own page is `collection.md`:
   relations, a map of its sections with page numbers, and when to use it
 
 Obsidian opens PDFs, so a reference page can link straight to a page of the source, such
-as `[[rvc-spec-2023.pdf#page=112]]`. Injection shows one line per collection in the
+as `[[protocol-spec-2023.pdf#page=112]]`. Injection shows one line per collection in the
 projects it applies to. Agents open reference pages with `aft read` and search the
-collection's text with `aft search`. Facts learned in sessions about a source ("the DGN
-table on page 112 has a known error") are ordinary curated facts on its reference page.
+collection's text with `aft search`. Facts learned in sessions about a source ("the
+message table on page 112 has a known error") are ordinary curated facts on its reference page.
 
 ### Indexing
 
@@ -693,8 +720,8 @@ explains how to do but never does on its own.
 
 ## 13. The model and its load
 
-- One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`. Today that is vLLM serving
-  Qwen3.8-Flash-Next on the GPU host. A hosted endpoint works the same way. An endpoint that
+- One OpenAI-compatible endpoint, set in `~/.afterthought/config.toml`, such as a local vLLM
+  server with an open-weight model. A hosted endpoint works the same way. An endpoint that
   needs an API key, local or hosted, gets it from an environment variable: `config.toml` names
   the variable in `model.api_key_env`, never the key itself, and the key is sent as a bearer
   token. An endpoint without a key needs neither. The key never appears in logs, reports or
@@ -732,12 +759,12 @@ behavior, and this document changes only when a design decision changes.
 |---|---|---|
 | **M0 Skeleton** | Python package and `aft` CLI, `~/.afterthought/config.toml`, paths, vault initialization, registry with stable ids, `aft key`, `aft project`, `aft lint` (required OKF fields, line grammar, fact state) | Key tests pass for a nested repo, a linked worktree, a symlinked path, a submodule, a repo with no remote, and a re-clone found by remote. Lint accepts valid pages and rejects each kind of broken one. |
 | **M1 Recall** | Adapter boundary, `aft inject`, the Claude Code hook, the pi extension, hand-written pages for afterthought | A cold session in each agent receives the same block, under the cap, in under 150 ms. |
-| **M2 Capture** | Capture queue, sweep, transcript readers, filter with off-the-record and redaction, evidence archive, worker classification, digest through vLLM with handoff, `aft forget`, `aft redigest` | Scripted sessions in both agents produce digests whose quotes all verify. A rerun adds nothing. An off-the-record span and planted secrets never reach the archive, the index or the model. Capture returns in under 50 ms. Evidence older than the retention window is purged. |
+| **M2 Capture** | Capture queue, sweep, transcript readers, filter with off-the-record and redaction, evidence archive, worker classification, digest through the model endpoint with handoff, `aft forget`, `aft redigest` | Scripted sessions in both agents produce digests whose quotes all verify. A rerun adds nothing. An off-the-record span and planted secrets never reach the archive, the index or the model. Capture returns in under 50 ms. Evidence older than the retention window is purged. |
 | **M3 Search** | FTS5 over pages, digests and evidence; `aft search`, `aft read`, `aft trace`, `aft reindex` | Known-answer queries return the expected file in the top five. A rebuilt index matches the original. |
 | **M4 Dream** | Timer, quiet period, lock, hand-edit checkpoint, decisions, rules R1 to R9 with the authority table, daily report, `needs-you.md`, vault settings, commit | A fixture suite covers: no-op run makes no commit; add; confirm; allowed supersede for each kind; refused supersede becomes conflict or needs you; tentative statement stays suggested; inferred fact stays a candidate below the gate; worker-only fact stays a candidate; cross-project edit refused; bad quote rejected; broken anchor marked stale; mid-edit project skipped; older hand edit checkpointed; a second run on the same day appends to that day's report; reports never reach injection, default search, or the dream's own input. |
 | **M5 Use and evaluate** | Two weeks on afterthought plus one real project; `aft eval` over a golden set you write | The golden set passes positive and negative cases: expected memory found, irrelevant memory not injected, a known fact survives contradicting noise, and an attractive weak inference is not promoted. You find the injected map useful, and reports show no corrupted facts. |
 | **M6 Switch-over** | Import Claude Code's `MEMORY.md` files as `[inferred]` digests; turn off Claude Code's automatic memory; add a short memory section to `~/AGENTS.md` | Afterthought is the only memory the agents use. |
-| **M7 Library** | `aft library survey` and `aft library import`, the manifest validator, file roles and relations, text extraction, the generated map with verification of imported maps, reference pages, the import skill, the Library search collection, the `library.commit` setting; import the RV-C and Victron documentation | Both collections import with every file accounted for, every reference quote verified, and no instruction file, tooling or git history retained. A claim planted in an imported index that does not match its document is rejected. Known-answer queries about the RV-C specification return the right document and page. |
+| **M7 Library** | `aft library survey` and `aft library import`, the manifest validator, file roles and relations, text extraction, the generated map with verification of imported maps, reference pages, the import skill, the Library search collection, the `library.commit` setting, collection authority; import two real documentation collections | Both collections import with every file accounted for, every reference quote verified, and no instruction file, tooling or git history retained. A claim planted in an imported index that does not match its document is rejected. Facts from an authoritative collection enter as `[observed]` and from a reference collection as candidates. Known-answer queries about a specification return the right document and page. |
 
 The size budget is about 5,000 non-blank lines of Python through M4; M0 is about 1,160.
 Going over it is a signal to cut scope.
