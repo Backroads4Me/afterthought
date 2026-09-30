@@ -35,9 +35,13 @@ a row is: a ``pages`` row holds that section's live lines and nothing else.
 The heading is an indexed column beside the title and the description, so the page title, the
 description and the section's own heading all outrank the line text: BUILD-PLAN M3.1's "BM25
 weights title and description above body" holds with the heading on the near side of that
-divide. Every row also carries path, project id, agent, session and time. Fields a collection
+divide. Every row also carries path, project id, agent and session, plus the entry's moment when
+the row came from an archived entry and nothing when it came from a file. Fields a collection
 has no answer for are left empty rather than invented - a curated page is not one agent's
-record, so its rows carry no agent or session, and an evidence entry sits under no heading. A
+record, so its rows carry no agent or session, an evidence entry sits under no heading, and a
+page carries no time because when a file was last written is this host's history rather than the
+text's: a checkout, a sync or a rebuild answers with a different moment, which is how a rebuild
+and an index kept up to date came to disagree about a row neither of them changed. A
 row's project id comes from the page's own ``aft.project``, the projects a reference page
 lists, or the directory the file is filed under; a row with none is a page that is every
 project's memory (DESIGN 6), not a page whose project went missing.
@@ -45,22 +49,28 @@ project's memory (DESIGN 6), not a page whose project went missing.
 Two keys keep the index in step with what it is built from (BUILD-PLAN M3.1: "updated
 incrementally by file content hash and evidence row id"):
 
-* **Files.** ``files`` records the SHA-256 of every file the index has read, and ``origins``
-  records the bytes of the project registry those rows were filed against. A file whose hash
-  is unchanged is not parsed, re-tokenized or touched again, so the content is the key and a
-  new modification time on unchanged text changes nothing. What the file's bytes do not answer
-  is which project the row belongs to: the registry said that for every page filed under a
-  slug, and a registry that has since moved re-derives every file row rather than leaving
-  rows attributing memory to a project that no longer claims them. A file that is gone has
-  its rows removed: the files are the memory (DESIGN 14), so text from a deleted page has no
-  memory left to be found, and `aft forget` in DESIGN 12 removes content "from everything
-  afterthought controls".
+* **Files.** ``files`` records the SHA-256 of every file the index has read beside the
+  modification that hash was taken beside, and ``origins`` records the bytes of the project
+  registry those rows were filed against. A file whose hash is unchanged is not parsed,
+  re-tokenized or touched again, so the content is the key and a new modification time on
+  unchanged text changes nothing. What the file's bytes do not answer is which project the row
+  belongs to: the registry said that for every page filed under a slug, and a registry that has
+  since moved re-derives every file row rather than leaving rows attributing memory to a project
+  that no longer claims them. A file that is gone has its rows removed: the files are the memory
+  (DESIGN 14), so text from a deleted page has no memory left to be found, and `aft forget` in
+  DESIGN 12 removes content "from everything afterthought controls". What those records make
+  possible is a run that asks whether anything moved before it reads anything at all
+  (`_moved`): the modification beside the hash is the cheap question, the hash is the authority,
+  and a run that finds nothing moved takes no write lock, which is the difference between a
+  search that checks the index and a search that rebuilds it.
 * **Evidence.** A row is keyed by the archive's ``(session_id, entry_id)`` primary key, which
   ``aft.evidence.store`` keeps unique across a rerun, and records the SHA-256 of the stored
   payload beside it. Rows the index has not seen are read once; rows the archive no longer
   holds - purged past the retention window (DESIGN 8) or forgotten (DESIGN 12) - lose their
   index rows. The archive's text is zlib-compressed (``aft.evidence._pack``), so every
-  payload is digested as it is read and only the rows that moved are decompressed.
+  payload is digested as it is read and only the rows that moved are decompressed. What the
+  archive looked like to the run that read it is recorded in ``origins`` too, so a run that has
+  nothing to ask of it never opens it.
 
 A row is read again when its digest moved or when any field the index row copies from the
 archive row - its agent, its project and its time - moved with it. The one writer that
@@ -76,11 +86,18 @@ for the same reason and ``aft lint`` is where every broken page gets named. Only
 file's own failure stops a run, because that is the one failure `aft reindex` exists to answer
 (DESIGN 14).
 
-Whatever leaves the index leaves by name: a run removes nothing it never recorded, and every
-removal names the one row it means by the path or archive key it was stored under. FTS5 keeps
-those columns beside the row unindexed, so a delete over a collection reads every row the
-collection holds however it filters; holding to recorded keys is what makes that read cost what
-a run left behind rather than what the index held, and it is why a rebuild removes nothing.
+Whatever leaves the index leaves by name: a run removes nothing it never recorded, and it names
+the whole set of rows it is finished with in one statement per collection rather than one per
+row. FTS5 keeps a row's path and archive key beside the text unindexed, so a delete over a
+collection reads every row the collection holds however it filters: asking for one row at a time
+charged the whole collection per row, which is what a purge that named 9,000 archived entries
+spent a minute on. Naming the set once, in a table SQLite probes, reads the collection the once
+it cannot avoid (`_fill_keys`). Holding to recorded keys is still what makes a rebuild remove
+nothing at all.
+
+What a committed run could not finish saying is reported rather than assumed done: the write-ahead
+log is drained after every write, and a log another reader holds open still holds the pages that
+run deleted, including the words a forget was meant to take out (`_drain_log`, DESIGN 12).
 
 Beyond those keys the file states which build wrote it. What a row *is* - its columns, the
 states a collection admits, the project a page's rows belong to - is decided here rather than
@@ -104,10 +121,9 @@ import json
 import re
 import sqlite3
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
 from aft import inject, lint, page, vault
@@ -199,21 +215,33 @@ WEIGHTS = (TITLE_WEIGHT, DESCRIPTION_WEIGHT, HEADING_WEIGHT, BODY_WEIGHT) + (0.0
 
 FILES_TABLE = "files"
 
-# What an index row's project id was derived from, recorded beside the file hashes rather
-# than among them: the registry is no collection's source, so it is never walked, and keeping
-# it in a table of its own leaves every row of `files` a page that can be looked up by path.
+# What an index row was derived from that is not one of the walked files, recorded beside the
+# file hashes rather than among them: neither is a collection's source, so neither is ever
+# walked, and keeping them in a table of their own leaves every row of `files` a file that can
+# be looked up by path.
 ORIGINS_TABLE = "origins"
 
-#: The `origins` record naming the project registry, the one non-file input rows are built
-#: from: it answered which project a page filed under a slug belongs to.
+#: The `origins` record naming the project registry: it answered which project a page filed
+#: under a slug belongs to.
 PROJECTS_ORIGIN = "registry"
+#: The `origins` record naming the evidence archive - the collection's source rather than a
+#: page's. It records what the archive looked like to the run that read it (`_archive_state`)
+#: rather than what its rows say, because the question that has to be cheap is whether anything
+#: moved, and asking an archive what it holds is the read the answer exists to avoid.
+ARCHIVE_ORIGIN = "evidence-archive"
 #: The build that wrote these rows, recorded in the file beside the hashes that say which files
 #: they came from. What a row *is* - its columns, the states its collection admits, the project
 #: it carries - is decided by this module rather than by any file, so rows written under another
 #: build answer a query looking exactly as trustworthy as fresh ones, and no query can tell.
 #: Bump the stamp whenever that changes; the repair for meeting another build's rows is
 #: DESIGN 14's `aft reindex` (`_require_current_build`).
-BUILD_STAMP = "rows-1"
+#:
+#: ``rows-3`` says what a row no longer carries and what the table of hashes learned to hold: a
+#: file row's ``time`` is empty (a modification time is this host's rather than the text's, so no
+#: rebuild can answer with the moment an earlier run stored, which is how a rebuild and an index
+#: kept up to date came to disagree), and ``files`` records the modification each hash was taken
+#: beside, which is what lets a run ask whether anything moved without reading a file.
+BUILD_STAMP = "rows-3"
 BUILD_TABLE = "build"
 
 #: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
@@ -242,10 +270,26 @@ _INSERT = {
     name: f"INSERT INTO {name} ({_COLUMNS_SQL}) VALUES ({_PLACEHOLDERS})" for name in COLLECTIONS
 }
 _DELETE_BY_PATH = {name: f"DELETE FROM {name} WHERE path = ?" for name in COLLECTIONS}
-_DELETE_BY_ENTRY = {
-    name: f"DELETE FROM {name} WHERE session_id = ? AND entry_id = ?" for name in COLLECTIONS
+# What a run hands SQLite when it is finished with a set of rows. FTS5 keeps a row's path and
+# its archive key beside the text unindexed, so `DELETE FROM evidence WHERE session_id = ?`
+# reads every row the collection holds whatever it filters on; asking for one row at a time
+# therefore cost the whole collection once per row, which is what a purge of 9,000 archived
+# entries turned into. Naming the set once, in a table SQLite probes rather than scans, reads
+# the collection the once it cannot avoid.
+_TEMP_KEYS = "_aft_gone"
+_NEW_KEYS = f"CREATE TEMP TABLE {_TEMP_KEYS} (first TEXT NOT NULL, second TEXT NOT NULL)"
+_ADD_KEY = f"INSERT INTO {_TEMP_KEYS} (first, second) VALUES (?, ?)"
+_DELETE_KEYS_BY_PATH = {
+    name: f"DELETE FROM {name} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
+    for name in COLLECTIONS
+}
+_DELETE_KEYS_BY_ENTRY = {
+    name: f"DELETE FROM {name}"
+    f" WHERE (session_id, entry_id) IN (SELECT first, second FROM {_TEMP_KEYS})"
+    for name in COLLECTIONS
 }
 _DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
+_DROP_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
 # What the index recorded about each evidence row: the key it was stored under, the digest of
 # its stored payload, and the fields the row copied out of the archive beside it. A row is read
 # again when any of it moved.
@@ -253,9 +297,12 @@ _EVIDENCE_STATE = (
     f"SELECT session_id, entry_id, entry_hash, agent, project_id, time FROM {EVIDENCE}"
 )
 _SELECT_HASHES = f"SELECT path, digest FROM {FILES_TABLE}"
+# The modification each recorded hash was taken beside (`_file_state`), which is what a run reads
+# to ask whether a file moved at all before it reads the file to ask what it now says.
+_SELECT_STATE = f"SELECT path, digest, state FROM {FILES_TABLE}"
 _RECORD_HASH = (
-    f"INSERT INTO {FILES_TABLE} (path, digest) VALUES (?, ?)"
-    f" ON CONFLICT (path) DO UPDATE SET digest = excluded.digest"
+    f"INSERT INTO {FILES_TABLE} (path, digest, state) VALUES (?, ?, ?)"
+    f" ON CONFLICT (path) DO UPDATE SET digest = excluded.digest, state = excluded.state"
 )
 _SELECT_ORIGIN = f"SELECT digest FROM {ORIGINS_TABLE} WHERE input = ?"
 _RECORD_ORIGIN = (
@@ -271,11 +318,12 @@ _RESET_FILE_ROWS: tuple[str, ...] = (
     f"DELETE FROM {FILES_TABLE}",
 )
 
-# The schema: a table of file hashes, a table of the other inputs rows were derived from, and
-# one FTS5 table per collection, holding the indexed columns and storing the identifiers
-# beside them.
+# The schema: a table of what each file hashed out as and when it was read, a table of the
+# other inputs rows were derived from, and one FTS5 table per collection, holding the indexed
+# columns and storing the identifiers beside them.
 _CREATE_FILES = (
-    f"CREATE TABLE IF NOT EXISTS {FILES_TABLE} (path TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+    f"CREATE TABLE IF NOT EXISTS {FILES_TABLE} "
+    "(path TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL)"
 )
 _CREATE_ORIGINS = (
     f"CREATE TABLE IF NOT EXISTS {ORIGINS_TABLE} (input TEXT PRIMARY KEY, digest TEXT NOT NULL)"
@@ -336,7 +384,12 @@ class _Unreadable(Exception):
 
 @dataclass(frozen=True)
 class Row:
-    """One row of one collection, in `COLUMNS` order."""
+    """One row of one collection, in `COLUMNS` order.
+
+    ``time`` is an archived entry's own moment, and only that. A row built from a file carries
+    no time: when a file was last written is this host's history rather than the text's - a
+    checkout, a sync or a rebuild answers with a different moment - so it is the one field
+    DESIGN 14's rebuild could never reproduce and an index kept up to date never refreshed."""
 
     title: str = ""
     description: str = ""
@@ -358,13 +411,13 @@ class Row:
 
 @dataclass(frozen=True)
 class _File:
-    """One vault file as the index reads it: which collection it feeds, its content, the
-    hash that decides whether it needs re-reading, and the moment it last changed."""
+    """One vault file as the index reads it: which collection it feeds, its content, the hash
+    that decides whether it needs re-reading, and the modification that hash was taken beside."""
 
     collection: str
     text: str
     digest: str
-    time: str
+    state: str
 
 
 def update(config: Config) -> list[str]:
@@ -377,6 +430,11 @@ def update(config: Config) -> list[str]:
     either loses its rows. Nothing here waits for a model or a git commit; it reads the files
     as they are.
 
+    Whether any of that has to happen at all is asked of `_moved` first, from a read connection
+    that takes no write lock - which is the difference between a search that checks the index
+    and a search that rebuilds it. `reindex` never asks: dropping the index is the one answer
+    that does not depend on what moved.
+
     What it returns is the report: one line per file it could not read or parse, naming the
     file and the reason. None of those recorded a hash, so the next update reads them again.
 
@@ -384,11 +442,20 @@ def update(config: Config) -> list[str]:
     a file holding no rows at all has never been built and is written now
     (`_require_current_build`).
     """
+    with _reading(config) as probe:
+        if not _moved(probe, config):
+            return []
     with _writing(config) as conn:
+        # Taken before the reading starts, so a file that moves while this run is in the middle
+        # of it is still ahead of what gets recorded, and the next run reads it again. An archive
+        # this host cannot describe at all is recorded as nothing, which the next run reads as
+        # moved and asks again (`_moved`).
+        archive = _archive_state(config) or ""
         registry = _project_registry(config)
         report = _sync_files(conn, config, registry)
         _sync_evidence(conn, config)
         report.extend(_sync_library(conn, config))
+        conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
         return report
 
@@ -404,9 +471,11 @@ def reindex(config: Config) -> list[str]:
     """
     with _writing(config, rebuild=True) as conn:
         _create(conn, fresh=True)
+        archive = _archive_state(config) or ""
         report = _sync_files(conn, config, _project_registry(config))
         _sync_evidence(conn, config)
         report.extend(_sync_library(conn, config))
+        conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
         return report
 
@@ -446,18 +515,28 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
     the bytes of a page say nothing about a slug the registry has since moved on from, so no
     file hash can say which rows went stale. The evidence rows are not touched: an evidence
     row takes its project from the archive row beside it, which the index compares directly.
+
+    What counts as gone is decided among the paths this walk could have found again, which are
+    not every path the table of hashes holds. ``library/`` paths are recorded there too, by
+    `_sync_library`, and name a derived document indexed out of the chunk cache rather than a
+    file in the walked directories: treating one as a file that went missing drops its hash
+    every run, and a run that drops the hash re-reads the cache and rewrites every row of that
+    document - every row of every library document - to write down what it already held.
     """
-    recorded = dict(conn.execute(_SELECT_HASHES))
+    recorded = {rel: (digest, state) for rel, digest, state in conn.execute(_SELECT_STATE)}
     found, report = _vault_files(config)
     filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
     if filed_by is None or filed_by[0] != projects.digest:
         _reset_files(conn)
         rebuild = sorted(found)
     else:
-        rebuild = sorted(
-            (set(recorded) - set(found))
-            | {rel for rel, current in found.items() if recorded.get(rel) != current.digest}
-        )
+        walked = {rel for rel in recorded if _collection_of(rel) is not None}
+        changed = {
+            rel
+            for rel, current in found.items()
+            if recorded.get(rel, ("", ""))[0] != current.digest
+        }
+        rebuild = sorted((walked - set(found)) | changed)
         _drop_paths(conn, rebuild)
     for rel in rebuild:
         current = found.get(rel)
@@ -470,21 +549,61 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
             continue  # its rows and hash went with the drop, so a repaired page reads again
         for row in rows:
             _insert(conn, current.collection, row)
-        conn.execute(_RECORD_HASH, (rel, current.digest))
+        conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
     conn.execute(_RECORD_ORIGIN, (PROJECTS_ORIGIN, projects.digest))
     return report
 
 
-def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
-    """Every vault file the collections are built from, by vault-relative path, and the
-    report lines for the ones that could not be read at all.
+def _moved(conn: sqlite3.Connection, config: Config) -> bool:
+    """Whether anything the rows are built from has moved since the run that recorded them.
 
-    Only the directories of `FILE_COLLECTIONS` are walked, and `aft.lint`'s skipped
-    directories are skipped here too, so the index reads the same pages the linter checks and
-    nothing from ``.git``, ``.obsidian`` or the library's files.
+    This is the question `aft search` asks before it takes a write lock, and it is answered from
+    modification times and sizes rather than from the files: a run that reads and hashes every
+    page to discover that nothing changed has already paid for the rebuild it was trying to
+    avoid, and has taken the write lock while doing it, which is what a search in front of a
+    person cannot do while a dream run is rebuilding.
+
+    Every way this can be wrong is one rebuild it asked for that it did not need, never one row
+    it left behind: a file whose hash it holds no record of, a path this walk no longer reaches,
+    an unreadable page that recorded no hash, an index that has not stamped itself yet, or a
+    state it cannot read at all all answer moved. The one thing a modification time cannot see
+    is content that moved while its size and its moment stayed exactly where they were, which no
+    check that declines to read the file can answer; `aft reindex` is the honest answer to a
+    file whose history this host did not witness.
+
+    The content hash stays the authority for what a row *is*: this decides only whether to look,
+    and a run that looks and finds the bytes unchanged rewrites nothing.
     """
-    found: dict[str, _File] = {}
-    report: list[str] = []
+    if conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone() is None:
+        return True  # nothing has said which build wrote these rows: build them and say so
+    filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
+    if filed_by is None or filed_by[0] != _project_registry(config).digest:
+        return True  # what said which project each page's rows belong to is not what it was
+    archive = conn.execute(_SELECT_ORIGIN, (ARCHIVE_ORIGIN,)).fetchone()
+    seen = _archive_state(config)
+    if archive is None or seen is None or archive[0] != seen:
+        return True  # an entry was archived, purged or redacted since
+    recorded = {rel: state for rel, _, state in conn.execute(_SELECT_STATE)}
+    walked: set[str] = set()
+    for rel, _, path in _vault_paths(config):
+        walked.add(rel)
+        if _state_of(path) != recorded.get(rel):
+            return True
+    return any(_collection_of(rel) is not None and rel not in walked for rel in recorded)
+
+
+def _vault_paths(config: Config) -> list[tuple[str, str, Path]]:
+    """Every vault file the collections are built from, as vault-relative path, collection and
+    the file itself, in path order.
+
+    Only the directories of `FILE_COLLECTIONS` are walked, and `aft.lint`'s skipped directories
+    are skipped here too, so the index reads the same pages the linter checks and nothing from
+    ``.git``, ``.obsidian`` or the library's files. This is the walk both halves of a run share:
+    the one that asks what moved (`_moved`, which stats these paths and reads none of them) and
+    the one that reads them (`_vault_files`), so the two cannot disagree about which files the
+    index is built from.
+    """
+    found: list[tuple[str, str, Path]] = []
     for collection, directories in FILE_COLLECTIONS.items():
         for name in directories:
             root = config.vault / name
@@ -494,23 +613,83 @@ def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
                 rel = path.relative_to(config.vault)
                 if lint.SKIP_DIRS.intersection(rel.parts[:-1]):
                     continue
-                try:
-                    found[rel.as_posix()] = _read_file(collection, path)
-                except _Unreadable as exc:
-                    report.append(f"{rel.as_posix()}: {exc}")
+                found.append((rel.as_posix(), collection, path))
+    return sorted(found)
+
+
+def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
+    """Every vault file the collections are built from, read, and the report lines for the ones
+    that could not be read at all.
+    """
+    found: dict[str, _File] = {}
+    report: list[str] = []
+    for rel, collection, path in _vault_paths(config):
+        try:
+            found[rel] = _read_file(collection, path)
+        except _Unreadable as exc:
+            report.append(f"{rel}: {exc}")
     return found, report
+
+
+def _state_of(path: Path) -> str | None:
+    """What this file looks like to this host right now, or None when that cannot be asked.
+
+    A modification time to the nanosecond beside a size says whether a file was rewritten without
+    anyone reading what it now says, which is the only question worth asking before the reading.
+    A file that is not there answers with the empty string, so an archive that has never been
+    written has a state of its own; a file that cannot be stat'd at all - a directory in the way,
+    a vault on a mount that has gone - answers with None, which every caller reads as "something
+    moved", because the answer it cannot give is the one that would let a stale row stand.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return "" if not path.exists() else None
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _log_holds_pages(path: Path) -> bool:
+    """Whether a write-ahead log still holds pages the file it fronts has not taken back.
+
+    This is the one thing about a log worth asking: a drained log is an empty file or no file at
+    all, and which of those it happens to be says nothing about what was written. Its size is, so
+    the answer is a whole number rather than a modification time - the same bytes at a later
+    moment are still the same answer."""
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _archive_state(config: Config) -> str | None:
+    """What the evidence archive looks like to this host right now.
+
+    The archive's write-ahead log is part of the answer beside the file it fronts: a run that
+    archived new entries wrote them there and may not have moved them back yet, so the archive
+    file alone can keep an old size and an old moment while the entry that has to be indexed sits
+    one file away. Only whether that log still holds pages is asked of it, because a drained log
+    comes and goes (`aft.evidence._drain_log` drains it after every write) and a state that
+    flickered with it would answer "moved" to every run that asked."""
+    state = _state_of(config.home / EVIDENCE_NAME)
+    if state is None:
+        return None
+    return f"{state}:{_log_holds_pages(config.home / f'{EVIDENCE_NAME}-wal')}"
 
 
 def _read_file(collection: str, path: Path) -> _File:
     """One file as the index reads it.
+
+    The state is taken before the bytes, so a file rewritten while this run is partway through
+    it leaves the run holding the older state - and the next run reads the file again rather than
+    believing a state recorded after its own rewrite.
 
     A file that will not read, cannot be stat'd, or is not UTF-8 raises `_Unreadable`, which
     is reported while the rest of the run goes on - a dangling symlink or a page caught
     halfway through a save is no reason for the index to refuse every other page.
     """
     try:
+        state = _state_of(path)
         data = path.read_bytes()
-        moment = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
     except OSError as exc:
         raise _Unreadable(f"cannot be read to index it: {exc}") from exc
     try:
@@ -521,25 +700,27 @@ def _read_file(collection: str, path: Path) -> _File:
         collection=collection,
         text=text,
         digest=hashlib.sha256(data).hexdigest(),
-        time=moment,
+        state=state or "",
     )
 
 
 def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
     """Stop holding the rows and the hash record of every one of these vault paths.
 
-    One statement per path, naming that path and nothing else: FTS5 stores a row's path beside
-    it unindexed, so a delete over a collection reads every row it holds whatever it filters
-    on, which is why a run may only ever ask it for rows it knows are there. The rows of a path
-    this does not name keep their place."""
+    One pass per collection naming the whole set, because FTS5 stores a row's path beside it
+    unindexed and so reads every row a collection holds whatever the filter says: one statement
+    per path costs the whole collection once per path, which is a run that took out a thousand
+    pages reading a million rows. The rows of a path this is not given keep their place.
+    """
     by_collection: dict[str, list[str]] = {}
     for rel in rels:
         collection = _collection_of(rel)
         if collection is not None:
             by_collection.setdefault(collection, []).append(rel)
-    for collection, paths in by_collection.items():
-        conn.executemany(_DELETE_BY_PATH[collection], [(path,) for path in paths])
-    conn.executemany(_DROP_HASH, [(path,) for path in rels])
+    _fill_keys(conn, ((rel, "") for rel in rels))
+    for collection in by_collection:
+        conn.execute(_DELETE_KEYS_BY_PATH[collection])
+    conn.execute(_DROP_HASHES)
 
 
 def _reset_files(conn: sqlite3.Connection) -> None:
@@ -622,7 +803,6 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> list[Row]:
                     project_id=project_id,
                     agent=agent,
                     session_id=session_id,
-                    time=current.time,
                     heading=heading,
                     row_key=_row_key(rel, heading, key_part, seen),
                 )
@@ -882,7 +1062,7 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
                     chunks = extract_document_chunks(src_file)
 
             if not chunks:
-                conn.execute(_RECORD_HASH, (indexed_path, f_hash))
+                conn.execute(_RECORD_HASH, (indexed_path, f_hash, ""))
                 continue
 
             doc_title = Path(rel_path).name
@@ -905,17 +1085,12 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
                         agent=None,
                         session_id=None,
                         entry_id=None,
-                        time=(
-                            datetime.fromtimestamp(src_file.stat().st_mtime, UTC).isoformat()
-                            if src_file.exists()
-                            else ""
-                        ),
                         row_key=_row_key(indexed_path, heading, pid, seen),
                         entry_hash=f_hash,
                     )
                     _insert(conn, LIBRARY, row)
 
-            conn.execute(_RECORD_HASH, (indexed_path, f_hash))
+            conn.execute(_RECORD_HASH, (indexed_path, f_hash, ""))
 
     # Drop any library files no longer in active collections
     for old_path in list(recorded):
@@ -978,15 +1153,37 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
         _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
 
 
+def _fill_keys(conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]) -> None:
+    """Hand this run's whole set of keys to SQLite as a table it can probe.
+
+    The set is what a removal names its rows by - vault paths, or the ``(session_id,
+    entry_id)`` pair an archive row was stored under - and the collections keep those columns
+    beside their text unindexed, so a filter on them is a scan. Written down once in a table of
+    its own, the same filter is one lookup per row instead of one scan per key, which is the
+    difference between purging 9,000 archived entries in a second and in a minute.
+
+    The table is temporary and belongs to this connection: it is dropped before it is filled
+    again, so one run's leftovers cannot answer for the next, and it never outlives the
+    transaction that needed it."""
+    conn.execute(f"DROP TABLE IF EXISTS {_TEMP_KEYS}")
+    conn.execute(_NEW_KEYS)
+    conn.executemany(_ADD_KEY, keys)
+
+
 def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
-    """Stop holding the rows of these archive keys, one statement per key naming exactly it.
+    """Stop holding the rows of these archive keys.
 
     ``(session_id, entry_id)`` is where an evidence row was stored, so it is what its removal
-    names. FTS5 keeps that key beside the row unindexed and so reads the whole collection for a
-    delete whatever the WHERE clause says, which is why the list it is handed is only ever keys
-    whose rows this index recorded itself: the read then costs what a run left behind. Rows
-    under a key this was not given keep their place."""
-    conn.executemany(_DELETE_BY_ENTRY[collection], keys)
+    names, and the whole set goes into one statement (`_fill_keys`). Rows under a key this was
+    not given keep their place.
+
+    Nothing is removed that was never recorded: a row and the state that says it was read land in
+    the same transaction, so the list handed here is only ever keys whose rows this index
+    recorded itself, which is why a rebuild over an empty index deletes nothing at all."""
+    if not keys:
+        return
+    _fill_keys(conn, keys)
+    conn.execute(_DELETE_KEYS_BY_ENTRY[collection])
 
 
 def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:
@@ -1113,6 +1310,24 @@ def _record_build(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
+def _reading(config: Config) -> Iterator[sqlite3.Connection]:
+    """One look at the index that asks for nothing: no write lock, no transaction held open.
+
+    `update` uses this to ask whether anything moved at all (`_moved`) before it takes the lock
+    `_writing` takes. A search that finds the index up to date is the common case, and it has no
+    business waiting behind a rebuild, let alone starting one.
+
+    The connection is opened the same way a writing one is, so the build stamp is still asked
+    before anything is read from the rows: an index another build wrote is refused here too,
+    rather than read as though its rows meant what this build's would."""
+    conn = _connect(config)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
 def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Connection]:
     """One connection held for one transaction, its write lock taken before the first row.
 
@@ -1131,9 +1346,7 @@ def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Conne
         _secure_delete_tokens(conn)
         yield conn
         conn.commit()
-        # A reader still attached to the log keeps the checkpoint from finishing; the next
-        # write drains what this one could not.
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _drain_log(conn, path)
     except sqlite3.Error as exc:
         conn.rollback()
         raise SearchIndexError(f"cannot write the index at {path}: {exc}") from exc
@@ -1142,6 +1355,27 @@ def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Conne
         raise
     finally:
         conn.close()
+
+
+def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
+    """Move the committed pages back into the index file and cut the write-ahead log off behind
+    them, so nothing this run removed is left lying in the log (DESIGN 12).
+
+    A checkpoint that could not finish answers with a row and sets no error, and a log another
+    process is reading cannot finish. That is reported: rows this run deleted are still sitting
+    outside the file it just rewrote, holding the words a forget was meant to take out of the
+    index, and returning quietly would say they had gone. `aft.evidence._drain_log` answers the
+    same failure the same way for the same reason.
+
+    A log another reader holds open is also why an update that changed nothing takes no write
+    lock at all and so never comes here (`update`)."""
+    busy, frames, moved = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        raise SearchIndexError(
+            f"the write-ahead log of {path} is held open by another reader:"
+            f" {frames - moved} of its {frames} pages are still outside the index file,"
+            " so what this run removed may still be read from it"
+        )
 
 
 def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:

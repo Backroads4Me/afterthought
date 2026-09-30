@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -700,3 +702,79 @@ def test_archived_resolved_notes_are_searchable_with_archive_flag(
     assert main(["search", "offline portability"]) == 0
     out_default = capsys.readouterr().out
     assert "archive/projects/widget/overview.md" not in out_default
+
+
+# What a search asks SQLite for (the M3 performance review). A hit is a document and a row is a
+# section, so a limit cannot simply be asked for at the door - and without one asked for at all,
+# a search whose every line carries the queried word built, snippeted and carried back every
+# match in the vault to keep eight of them.
+
+
+def test_a_search_asks_sqlite_for_the_rows_it_keeps(
+    populated_vault: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit belongs in the statement, not in the loop that reads the answer.
+
+    Every statement the search sends to SQLite is caught on its way out and read. Each one that
+    ranks a collection has to name how many rows it wants, and each one that cuts a snippet has
+    to name the rows it is cutting for: a snippet is only correct when it is cut by a scan of
+    that collection's matches, so the rows kept by the ranking statement come back by rowid and
+    are snippeted by a second statement that scans exactly them. A search that asked for none and
+    then stopped counting at eight still returned the right eight hits, which is exactly how the
+    cost stayed invisible, and a search that snippeted its way through every match to get a
+    correct snippet paid for all of them."""
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = real_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(search.sqlite3, "connect", traced_connect)
+
+    hits = search.search(populated_vault, "SQLite", project="widget", limit=3)
+    assert hits, "the search found nothing, so it proved nothing"
+
+    ranked = [sql for sql in statements if "MATCH" in sql and "bm25" in sql]
+    assert ranked, f"no ranking statement reached SQLite: {statements}"
+    assert all("LIMIT" in sql for sql in ranked), ranked
+
+    snippeted = [sql for sql in statements if "MATCH" in sql and "snippet(" in sql]
+    assert snippeted, f"no snippet statement reached SQLite: {statements}"
+    assert all("rowid IN (" in sql for sql in snippeted), snippeted
+    assert any("SQLite" in hit.snippet for hit in hits), [hit.snippet for hit in hits]
+
+
+def test_one_document_with_many_rows_does_not_take_the_whole_limit(
+    populated_vault: Config,
+) -> None:
+    """The room a collection is asked for is documents, not rows.
+
+    Ten archived entries of one session are ten rows and one hit, so a limit asked for before the
+    rows are collapsed to documents hands back the one session and calls the search over. Each
+    collection is narrowed to its best row per document inside the statement that limits it, so
+    the eight rows it holds back are eight documents. The long entries rank below the terse ones
+    by bm25, so the busy session is the best-matching document and still shares the hits."""
+    terse = ["zirconium"] * 10
+    wordy = "The zirconium spacer clears the bracket on the assembly jig by two millimetres."
+    moment = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    evidence.store(
+        populated_vault,
+        "claude",
+        "s-matrix",
+        "p_widget",
+        [Entry(f"e-{number}", moment, "user", text, False) for number, text in enumerate(terse)],
+    )
+    evidence.store(
+        populated_vault, "pi", "s-bolt", "p_widget", [Entry("e-0", moment, "user", wordy, False)]
+    )
+    evidence.store(
+        populated_vault, "pi", "s-washer", "p_widget", [Entry("e-0", moment, "user", wordy, False)]
+    )
+
+    hits = search.search(populated_vault, "zirconium", project="widget", limit=2)
+
+    assert len(hits) == 2, f"only {len(hits)} documents answered: {[h.path for h in hits]}"
+    assert len({hit.path for hit in hits}) == 2, [hit.path for hit in hits]
+    assert hits[0].path == "aft://session/claude/s-matrix"
