@@ -1592,31 +1592,48 @@ def test_an_update_that_found_nothing_moved_never_asks_for_the_write_lock(
     assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
 
 
-def test_a_forget_is_a_change_the_shortcut_cannot_call_unchanged(initialized: Config) -> None:
+def test_a_forget_is_a_change_the_shortcut_cannot_call_unchanged(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """DESIGN 12 reaches "everything afterthought controls", and a run that decides nothing moved
     is one step away from deciding that a forget moved nothing.
 
-    Both forgets rebuild the index themselves, so the proof is what the index answers afterwards:
-    a run that had just found nothing to do, followed by ``aft forget session`` and by
-    ``aft forget pattern``, has to have watched the archive change under it and let the rows go -
-    not keep them because the files they were derived from are all still on disk with the bytes
-    they had. The session neither forget names is checked in the same breath, because an update
-    that answered a forget by rebuilding everything would pass this test while destroying that
-    session. This one passes on the old path too, where there was no shortcut to be fooled: it is
-    the guard that keeps the shortcut honest rather than the test that proves it was missing."""
+    Both halves of the promise are read here, because either can hold while the other fails. What
+    the run was told: the probe is wrapped and the verdicts it gave are recorded - `True` for the
+    first run, which had both sessions to read, `False` for the run after it, and `True` again for
+    the run each forget drives. What came of it: the forgotten rows are out of the index and the
+    session neither forget named is still there field for field, because an update that answered a
+    forget by rebuilding everything would pass this test while destroying that session. Making
+    `_moved` answer unchanged always fails this test at the recorded verdicts - the shortcut calling
+    the very first run unchanged is the same lie one step earlier, before any row was indexed."""
+    verdicts: list[bool] = []
+    asked = index._moved
+
+    def noting(conn: sqlite3.Connection, config: Config) -> bool:
+        moved = asked(conn, config)
+        verdicts.append(moved)
+        return moved
+
+    monkeypatch.setattr(index, "_moved", noting)
+
     evidence.store(initialized, "claude", "abc", "p_widget", entries(FIRST_TEXT))
     evidence.store(initialized, "pi", "def", "p_widget", entries(SECOND_TEXT))
     assert index.update(initialized) == []
     assert index.update(initialized) == []
+    assert verdicts == [True, False], "the shortcut never got live, so the test proved nothing"
     assert sorted(search(initialized, "evidence", "flange")) == ["abc#e1", "def#e1"]
 
+    seen = len(verdicts)
     forget.forget_session(initialized, "abc")
+    assert True in verdicts[seen:], "forget ran an update the probe called unchanged"
     assert search(initialized, "evidence", "bronze") == []
     assert [tuple(row) for row in rows(initialized, "evidence")] == [
         tuple(row_for(initialized, "evidence", "def#e1"))
     ]
 
+    seen = len(verdicts)
     forget.forget_pattern(initialized, "nickel")
+    assert True in verdicts[seen:], "the pattern forget ran an update the probe called unchanged"
     assert search(initialized, "evidence", "nickel") == []
     assert len(rows(initialized, "evidence")) == 1
     assert index.update(initialized) == []
