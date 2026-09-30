@@ -22,6 +22,12 @@ filtered conversation (design 8), and ``yours`` - which is what grants a line R2
 something the person said - is derived from that row's role, so importing text as somebody's
 own words would hand it an authority it does not have (design 11: nothing imported is
 ``[stated]``).
+
+A memory file is text an agent wrote with nobody reviewing it, so a line can hold a token or a
+password. Every line is therefore redacted with the configured ``capture.redact_patterns``
+before it becomes a statement, a quote, or a record - the same thing capture does before
+archiving (design 8) - and a project under ``capture.exclude_paths`` is skipped outright,
+because capture is told never to read that project and an import is not an exemption.
 """
 
 from __future__ import annotations
@@ -29,14 +35,15 @@ from __future__ import annotations
 import hashlib
 import re
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
 
-from aft import __version__, index, pagewrite, vault
-from aft.config import Config
+from aft import __version__, index, pagewrite, redact, vault
+from aft.config import Config, is_excluded
 from aft.library.propose import record_verified_quote
 from aft.registry import Project, Registry, split_key
 
@@ -110,38 +117,46 @@ def encoding_of(path: Path) -> str:
 
 def plans(
     config: Config, source: str | Path | None = None, project: str | None = None
-) -> tuple[list[Candidate], list[str]]:
-    """What would be imported, and the memory directories that name no registered project.
+) -> tuple[list[Candidate], list[str], list[str]]:
+    """What would be imported, the memory that names no registered project, and the excluded.
 
     Projects are matched by encoding each registered path the way Claude Code names a
     directory, because that direction is exact while decoding is not. A directory that
     matches nothing is reported instead of guessed at: registering a project is `aft key`'s
     and `aft project add`'s job, and an import that minted projects from a directory name
-    would invent memory's owners.
+    would invent memory's owners. A project under ``capture.exclude_paths`` is skipped:
+    capture is told never to read that project, and an import that read it anyway would open
+    the hole the setting exists to keep shut.
     """
     root = memory_home(source)
     registry = Registry.load(config.registry_path)
+    patterns = config.settings.capture.redact_patterns
     wanted = None
     if project is not None:
         found = registry.by_slug(project)
         if found is None:
-            slugs = ", ".join(sorted(p.slug for p in registry.projects)) or "no projects"
-            raise ImportMemoryError(f"no project {project!r} in the registry; it has {slugs}")
+            names = ", ".join(sorted(entry.slug for entry in registry.projects)) or "no projects"
+            raise ImportMemoryError(f"no project {project!r} in the registry; it has {names}")
         wanted = found.slug
 
     candidates: list[Candidate] = []
+    excluded: list[str] = []
     matched: set[str] = set()
     for registered in registry.projects:
         if wanted is not None and registered.slug != wanted:
             continue
         for key in registered.paths:
-            name = encoding_of(split_key(key)[1])
+            registered_path = split_key(key)[1]
+            name = encoding_of(registered_path)
             memory_dir = root / name / MEMORY_DIR
             if not memory_dir.is_dir():
                 continue
             matched.add(name)
-            for path in sorted(memory_dir.glob("*.md")):
-                candidate = read_file(registered, path)
+            if is_excluded(registered_path, config):
+                excluded.append(f"{registered.slug} ({registered_path})")
+                continue
+            for memory_file in sorted(memory_dir.glob("*.md")):
+                candidate = read_file(registered, memory_file, patterns)
                 if candidate.lines:
                     candidates.append(candidate)
     unclaimed = sorted(
@@ -149,17 +164,25 @@ def plans(
         for entry in root.iterdir()
         if entry.name not in matched and any((entry / MEMORY_DIR).glob("*.md"))
     )
-    return candidates, unclaimed
+    return candidates, unclaimed, excluded
 
 
-def read_file(project: Project, path: Path) -> Candidate:
-    """One memory file as lines that could become facts, and the lines that cannot."""
+def read_file(project: Project, path: Path, patterns: Iterable[str] = ()) -> Candidate:
+    """One memory file as lines that could become facts, and the lines that cannot.
+
+    A memory file is text an agent wrote without anyone reviewing it, and it can hold a token
+    or a password, so every line is redacted with the configured ``capture.redact_patterns``
+    before it becomes anything at all - statement, quote, or verified record. Redacting later
+    would leave the secret in the digest's own frontmatter, and a dropped line is reported in
+    its redacted form for the same reason. Verification then asks after the redacted text,
+    which is the text the digest actually holds.
+    """
     raw = path.read_text(encoding="utf-8", errors="replace")
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     lines: list[tuple[str, str]] = []
     dropped: list[tuple[str, str]] = []
     for line in _body(raw).splitlines():
-        quote = line.strip()
+        quote = redact.redact(line, patterns).strip()
         if not quote:
             continue
         if quote.startswith("#"):
@@ -263,7 +286,7 @@ def run(
     than a broken command: an operator who expected memory to be there needs the run to say
     it was not. A rerun that changed nothing returns 0 and writes nothing.
     """
-    candidates, unclaimed = plans(config, source, project)
+    candidates, unclaimed, excluded = plans(config, source, project)
     for candidate in candidates:
         print(
             f"{candidate.path}: {len(candidate.lines)} lines -> "
@@ -272,8 +295,13 @@ def run(
         )
     for name in unclaimed:
         print(f"skipped {name}: it names no project in the registry; run `aft project add` first")
+    for name in excluded:
+        print(f"skipped {name}: capture.exclude_paths says its memory is never read")
     if not candidates:
-        print("no Claude Code memory for a registered project", file=sys.stderr)
+        if excluded:
+            print("no Claude Code memory outside capture.exclude_paths", file=sys.stderr)
+        else:
+            print("no Claude Code memory for a registered project", file=sys.stderr)
         return 1
     if dry_run:
         return 0

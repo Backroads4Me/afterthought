@@ -8,6 +8,7 @@ left alone.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from aft import claude_memory, lint
+from aft import config as configmod
 from aft.cli import main
 from aft.config import Config
 from aft.dream.apply import _lookup_evidence
@@ -311,3 +313,61 @@ def test_the_dream_finds_the_imported_digests_waiting(memory: Config):
     waiting = waiting_digests(memory.vault)
 
     assert len(waiting["widget"]) == 2
+
+
+def with_capture(config: Config, exclude: tuple[str, ...] = (), patterns: tuple[str, ...] = ()):
+    """The config again with capture settings written into it, the way an operator sets them."""
+    lines = [f'vault = "{config.vault}"', 'host = "testhost"', "[capture]"]
+    for name, values in (("exclude_paths", exclude), ("redact_patterns", patterns)):
+        listed = ", ".join(f'"{value}"' for value in values)
+        lines.append(f"{name} = [{listed}]")
+    (config.home / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return configmod.load()
+
+
+# A token the built-in patterns know, a password-style assignment, and a secret only the
+# configured pattern knows: an import that copied a memory line verbatim would carry all three
+# into the vault, into the digest's own frontmatter, and into the quote record.
+SECRET = """\
+---
+name: deploy-notes
+---
+
+## Deploy
+
+- The staging key is sk-3f3f3f3f3f3f3f3f.
+- vault_password: "hunter2hunter2"
+- The oddball secret is aardvark-42.
+"""
+
+
+def test_a_secret_in_a_memory_file_reaches_neither_the_vault_nor_the_record(
+    memory: Config,
+):
+    """Capture redacts before archiving for a reason; an import reading the same text has it too."""
+    config = with_capture(memory, patterns=("aardvark-42",))
+    memory_file(Path(os.environ["HOME"]), memory_path_project(config), "secrets.md", SECRET)
+
+    assert claude_memory.run(config) == 0
+
+    text = next(path for path in digests(config) if "secrets" in path.name).read_text()
+    record = json.dumps(json.loads((config.home / "library/verified_quotes.json").read_text()))
+    assert "sk-3f3f3f3f3f3f3f3f" not in text
+    assert "hunter2hunter2" not in text
+    assert "aardvark-42" not in text
+    assert "[redacted]" in text
+    assert "sk-3f3f3f3f3f3f3f3f" not in record
+    assert "aardvark-42" not in record
+
+    # The quote verifies because what was recorded is the redacted line the digest holds.
+    candidate = next(c for c in claude_memory.plans(config)[0] if c.path.name == "secrets.md")
+    quote = next(q for _, q in candidate.lines if "staging key" in q)
+    assert _lookup_evidence(config, candidate.resource, quote)[0]
+
+
+def test_a_project_under_capture_exclude_paths_is_never_read(memory: Config):
+    """A project whose sessions capture must not read has memory capture must not import."""
+    config = with_capture(memory, exclude=(str(memory_path_project(memory)),))
+
+    assert claude_memory.run(config) == 1
+    assert digests(config) == []
