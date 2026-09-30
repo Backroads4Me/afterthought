@@ -12,11 +12,14 @@ Verifies:
 
 from datetime import UTC, datetime
 
-from aft import index, pagewrite, search, vault
+import pytest
+
+from aft import evidence, index, pagewrite, search, vault
 from aft.config import Config
 from aft.dream import apply, decide, maintain, report, rules, schedule
 from aft.gitutil import git
 from aft.registry import Registry
+from fakes.model_server import FakeEndpoint, Reply
 
 NOW = datetime(2026, 10, 4, 14, 30, tzinfo=UTC)
 TODAY = "2026-10-04"
@@ -34,8 +37,10 @@ def _make_dummy_report(
     questions: list[apply.QuestionFact] | None = None,
     skips: list[apply.SkipFact] | None = None,
     rejected: list[apply.RejectedFact] | None = None,
+    downgrades: list[apply.DowngradeFact] | None = None,
     broken_anchors: list[maintain.BrokenAnchor] | None = None,
     cleared_anchors: list[maintain.ClearedAnchor] | None = None,
+    oversize_pages: list[str] | None = None,
 ) -> apply.ProjectRunReport:
     """Create a structured ProjectRunReport with given or empty items."""
     return apply.ProjectRunReport(
@@ -51,8 +56,10 @@ def _make_dummy_report(
         questions=questions or [],
         skips=skips or [],
         rejected=rejected or [],
+        downgrades=downgrades or [],
         broken_anchors=broken_anchors or [],
         cleared_anchors=cleared_anchors or [],
+        oversize_pages=oversize_pages or [],
     )
 
 
@@ -355,7 +362,7 @@ def test_dream_inputs_never_include_report_path(initialized: Config):
         "title: 2026-10-04\n"
         "---\n\n"
         "# widget 12:00:00Z\n\n"
-        "## Added and Confirmed\n"
+        "## Decisions\n"
         "- Secret dream report knowledge. [stated] 2026-10-04 [^s1]\n",
         encoding="utf-8",
     )
@@ -711,3 +718,325 @@ def test_candidate_gate_progress_in_report(initialized: Config):
         "Long sessions need checkpoint capture. [inferred] (2026-10-04) (signals 2/3, sessions 2/2)"
         in text
     )
+
+
+def test_run_with_only_rejected_facts_creates_report_and_revert(initialized: Config):
+    """A run that only rejects gets a report section because it made a commit."""
+    cfg = initialized
+    reg = Registry.load(cfg.registry_path)
+    reg.add("widget", "Widget")
+    reg.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+
+    digest = cfg.vault / "digests" / "widget" / "2026" / "10" / "d1.md"
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text(
+        "---\n"
+        "type: Session Digest\n"
+        "generated: {at: 2026-10-04T12:00:00Z}\n"
+        "aft: {role: primary}\n"
+        "---\n\n"
+        "## Facts\n\n- Bad fact.\n",
+        encoding="utf-8",
+    )
+
+    rejected_rep = apply.ProjectRunReport(
+        project="widget",
+        commit="deadbeef1234",
+        digests_consumed=["digests/widget/2026/10/d1.md"],
+        rejected=[
+            apply.RejectedFact(
+                statement="Bad fact.",
+                decision_action="add",
+                rule="R1",
+                reason="bad quote rejected",
+            )
+        ],
+    )
+    assert not report.has_changes(rejected_rep)
+
+    def fake_process_rejects(c, s, digs):
+        return rejected_rep
+
+    res = schedule.run(cfg, process=fake_process_rejects, now=NOW)
+    assert "widget" in res.reports
+
+    rep_path = cfg.vault / "reports" / "2026" / "10" / "2026-10-04.md"
+    assert rep_path.exists()
+    content = rep_path.read_text(encoding="utf-8")
+    assert "refused by R1 (bad quote rejected)" in content
+    assert "git revert deadbeef1234" in content
+
+
+def test_oversize_pages_are_printed_in_report(initialized: Config):
+    """Pages exceeding their cap are flagged in the report."""
+    rep = _make_dummy_report(
+        slug="widget",
+        oversize_pages=["projects/widget/overview.md"],
+    )
+
+    path = report.write_report(initialized, rep, now=NOW)
+    content = path.read_text(encoding="utf-8")
+    assert "projects/widget/overview.md" in content
+    assert "Oversize pages" in content
+
+
+def test_downgrades_and_skips_print_rule_and_reason(initialized: Config):
+    """Every downgrade prints with its rule and reason, and every skip with its reason."""
+    rep = _make_dummy_report(
+        slug="widget",
+        candidates=[
+            apply.CandidateFact(
+                statement="Tentative worker fact.",
+                tag="inferred",
+                date=TODAY,
+                refs=("s1",),
+                path="projects/widget/overview.md",
+            )
+        ],
+        downgrades=[
+            apply.DowngradeFact(
+                statement="Tentative worker fact.",
+                to_action="candidate",
+                rule="R3",
+                reason="needs 3 signals across 2 primary sessions",
+            )
+        ],
+        skips=[
+            apply.SkipFact(
+                statement="Transient build log message.",
+                reason="not durable, re-derivable from git",
+            )
+        ],
+    )
+
+    path = report.write_report(initialized, rep, now=NOW)
+    content = path.read_text(encoding="utf-8")
+
+    # Downgrade rule and reason are printed
+    assert "Tentative worker fact." in content
+    assert "Downgraded by R3: needs 3 signals across 2 primary sessions" in content
+
+    # Skip statement and reason are printed
+    assert "Transient build log message." in content
+    assert "not durable, re-derivable from git" in content
+
+
+def test_needs_you_regenerated_when_resolved_by_hand(initialized: Config):
+    """needs-you.md is regenerated on every run so hand-resolved notes disappear."""
+    cfg = initialized
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "description: Widget\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/c/1#e1\n"
+        "    quote: verifiable quote\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- A question fact. [stated] 2026-10-04 [^s1]\n\n"
+        "> [!question] 2026-10-04\n"
+        "> Question to Ted\n",
+        encoding="utf-8",
+    )
+    vault.commit(cfg.vault, ["projects/widget/overview.md"], "seed question")
+
+    # Initial generation lists the question
+    report.regenerate_needs_you(cfg.vault)
+    ny_path = cfg.vault / "reports" / "needs-you.md"
+    assert "Question to Ted" in ny_path.read_text(encoding="utf-8")
+
+    # Hand-resolve the question
+    overview.write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "description: Widget\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/c/1#e1\n"
+        "    quote: verifiable quote\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- A question fact. [stated] 2026-10-04 [^s1]\n",
+        encoding="utf-8",
+    )
+    vault.commit(cfg.vault, ["projects/widget/overview.md"], "hand resolve question")
+
+    # Seed a digest for schedule.run
+    digest = cfg.vault / "digests" / "widget" / "2026" / "10" / "d1.md"
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text(
+        "---\n"
+        "type: Session Digest\n"
+        "generated: {at: 2026-10-04T12:00:00Z}\n"
+        "aft: {role: primary}\n"
+        "---\n\n"
+        "## Facts\n\n- Digest fact.\n",
+        encoding="utf-8",
+    )
+
+    # Process makes a dream commit with no fact changes (e.g. only logged/consumed)
+    no_memory_changes_report = apply.ProjectRunReport(project="widget", commit="11223344")
+
+    schedule.run(cfg, process=lambda c, s, d: no_memory_changes_report, now=NOW)
+
+    # needs-you.md must have regenerated and cleared the question
+    cleared_text = ny_path.read_text(encoding="utf-8")
+    assert "Question to Ted" not in cleared_text
+    assert "Nothing is waiting on you." in cleared_text
+
+
+def test_revert_section_includes_tag_commit_and_checkpoint_once_per_run(initialized: Config):
+    """The Revert section includes the tag-hand-edits commit and names the
+    checkpoint once per run.
+    """
+    cfg = initialized
+
+    # Project 1 report with commit, tag_commit, and checkpoint
+    rep1 = _make_dummy_report(slug="p1", commit_sha="11111111")
+    path1 = report.write_report(
+        cfg,
+        rep1,
+        now=NOW,
+        checkpoint="cccc1111",
+        tag_commit="tttt2222",
+    )
+    text1 = path1.read_text(encoding="utf-8")
+    assert "git revert 11111111" in text1
+    assert "Separate hand edits tag commit: git revert tttt2222" in text1
+    assert "Separate checkpoint commit: git revert cccc1111" in text1
+
+    # In a multi-project run, schedule passes checkpoint=None, tag_commit=None for project 2
+    rep2 = _make_dummy_report(slug="p2", commit_sha="33333333")
+    path2 = report.write_report(
+        cfg,
+        rep2,
+        now=NOW,
+        checkpoint=None,
+        tag_commit=None,
+    )
+    text2 = path2.read_text(encoding="utf-8")
+    p2_section = text2.split("# p2")[1]
+    assert "git revert 33333333" in p2_section
+    assert "Separate checkpoint commit" not in p2_section
+    assert "Separate hand edits tag commit" not in p2_section
+
+
+@pytest.fixture
+def fake():
+    endpoint = FakeEndpoint()
+    endpoint.start()
+    yield endpoint
+    endpoint.stop()
+
+
+def test_schedule_run_drives_real_apply_with_fake_endpoint(initialized, home, fake):
+    """schedule.run drives real apply.run_project through to report generation."""
+    from aft import config as configmod
+    from aft.readers import USER, Entry
+
+    (home / "config.toml").write_text(
+        f'vault = "{initialized.vault}"\nhost = "testhost"\n'
+        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+    )
+    cfg = configmod.load()
+
+    registry = Registry.load(cfg.registry_path)
+    proj = registry.add("widget", "Widget")
+    registry.save()
+
+    # Seed overview page
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "description: Widget project\n"
+        f"aft:\n  project: {proj.id}\n"
+        "sources:\n"
+        "  - id: s1\n"
+        "    resource: aft://session/c/1#e1\n"
+        "    quote: verifiable quote\n"
+        "---\n\n"
+        "## State\n\n"
+        "- Initial fact. [observed] 2026-10-01 [^s1]\n",
+        encoding="utf-8",
+    )
+    vault.commit(cfg.vault, ["projects/widget/overview.md"], "seed overview")
+
+    # Write digest
+    digest = cfg.vault / "digests" / "widget" / "2026" / "10" / "d1.md"
+    digest.parent.mkdir(parents=True, exist_ok=True)
+    digest.write_text(
+        "---\n"
+        "type: Session Digest\n"
+        "title: Digest d1\n"
+        "description: Summary of session.\n"
+        "generated:\n"
+        "  by: aft\n"
+        "  at: 2026-10-05T08:00:00Z\n"
+        "sources:\n"
+        "  - id: s10\n"
+        "    resource: aft://session/c/2#e5\n"
+        "    quote: The queue uses SQLite WAL mode.\n"
+        "aft:\n"
+        f"  project: {proj.id}\n"
+        "  role: primary\n"
+        "  facts:\n"
+        "    - statement: The queue uses SQLite WAL mode.\n"
+        "      kind: decision\n"
+        "      source: stated\n"
+        "      date: '2026-10-05'\n"
+        "      ref: s10\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- The queue uses SQLite WAL mode. [stated] 2026-10-05 [^s10]\n",
+        encoding="utf-8",
+    )
+
+    # Store evidence in SQLite so R1 passes
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="2",
+        project_id=proj.id,
+        entries=[
+            Entry(
+                id="e5",
+                time=NOW,
+                role=USER,
+                text="The queue uses SQLite WAL mode.",
+                is_error=False,
+            )
+        ],
+    )
+
+    fake.script = [Reply(content={"action": "add", "line": None, "reason": "new decision"})]
+
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    report_obj = res.reports["widget"]
+    assert len(report_obj.added) == 1
+    assert report_obj.commit is not None
+
+    # Report file exists and contains the run section
+    date_str = NOW.date().isoformat()
+    rep_path = cfg.vault / "reports" / f"{NOW.year:04d}" / f"{NOW.month:02d}" / f"{date_str}.md"
+    assert rep_path.exists()
+    content = rep_path.read_text(encoding="utf-8")
+    assert f"git revert {report_obj.commit}" in content
+    assert "The queue uses SQLite WAL mode." in content
+    assert "## Summary" in content
+
+    # needs-you.md exists and is committed
+    ny_path = cfg.vault / "reports" / "needs-you.md"
+    assert ny_path.exists()
+
+    status = git(["status", "--porcelain=v1"], cwd=cfg.vault).stdout.strip()
+    assert status == ""

@@ -59,6 +59,9 @@ class Run:
     checkpoint: str | None = None
     """The ``checkpoint: human edits`` commit this run made, if any."""
 
+    tag_commit: str | None = None
+    """The ``aft: tag hand edits from <checkpoint>`` commit this run made, if any."""
+
     tagged: list[str] = field(default_factory=list)
     """The pages whose hand-typed bullets this run tagged ``[stated]``."""
 
@@ -91,6 +94,11 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
         if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
             result.tagged = tag_hand_edits(config, result.checkpoint)
+            if result.tagged:
+                result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
+        checkpoint_reported = False
+        from aft.dream import report as reportmod
+
         for slug in ready:
             if process is not None:
                 rep = process(config, slug, result.waiting[slug])
@@ -101,19 +109,21 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if rep is not None:
                 result.reports[slug] = rep
                 if hasattr(rep, "project"):
-                    from aft.dream import report as reportmod
-
-                    if reportmod.has_changes(rep):
+                    needs_you_path = reportmod.regenerate_needs_you(config.vault)
+                    rel_ny = needs_you_path.relative_to(config.vault).as_posix()
+                    if rep.commit is not None:
+                        checkpoint_arg = result.checkpoint if not checkpoint_reported else None
+                        tag_commit_arg = result.tag_commit if not checkpoint_reported else None
                         report_path = reportmod.write_report(
                             config,
                             rep,
                             now=now,
-                            checkpoint=result.checkpoint,
+                            checkpoint=checkpoint_arg,
+                            tag_commit=tag_commit_arg,
                             backlog=len(waiting_digests(config.vault).get(slug, [])),
                         )
-                        needs_you_path = reportmod.regenerate_needs_you(config.vault)
+                        checkpoint_reported = True
                         rel_report = report_path.relative_to(config.vault).as_posix()
-                        rel_ny = needs_you_path.relative_to(config.vault).as_posix()
                         vault.commit(
                             config.vault,
                             [rel_report, rel_ny],

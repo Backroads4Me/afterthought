@@ -77,6 +77,7 @@ def format_run_section(
     vault_path: Path,
     now: datetime | None = None,
     checkpoint: str | None = None,
+    tag_commit: str | None = None,
     tokens_used: int = 0,
     backlog: int = 0,
 ) -> str:
@@ -95,10 +96,19 @@ def format_run_section(
     lines.append(f"- Conflicts: {len(report.conflicts)}")
     lines.append(f"- Needs you: {len(report.questions)}")
     lines.append(f"- Skips: {len(report.skips)}")
+    if report.skips:
+        for sk in report.skips:
+            lines.append(f'  - "{sk.statement}": {sk.reason}')
     lines.append(f"- Rejected: {len(report.rejected)}")
     lines.append(f"- Tokens used: {tokens_used}")
     lines.append(f"- Digests processed: {len(report.digests_consumed)}")
     lines.append(f"- Backlog remaining: {backlog}")
+    if report.oversize_pages:
+        lines.append(f"- Oversize pages: {len(report.oversize_pages)}")
+        for op in report.oversize_pages:
+            lines.append(f"  - {op}")
+    else:
+        lines.append("- Oversize pages: 0")
     lines.append("")
 
     # 2. Needs you
@@ -181,7 +191,7 @@ def format_run_section(
 
     # 7. Stale
     lines.append("## Stale")
-    if report.broken_anchors or report.cleared_anchors:
+    if report.broken_anchors or report.cleared_anchors or report.oversize_pages:
         if report.broken_anchors:
             lines.append("### Broken anchors")
             for b in report.broken_anchors:
@@ -190,31 +200,48 @@ def format_run_section(
             lines.append("### Cleared anchors")
             for cl in report.cleared_anchors:
                 lines.append(f"- {cl.statement} on {cl.page} [^{cl.sid}] (matches again)")
+        if report.oversize_pages:
+            lines.append("### Oversize pages")
+            for op in report.oversize_pages:
+                lines.append(f"- {op} (over size cap)")
     else:
         lines.append("None.")
     lines.append("")
 
     # 8. Candidates
     lines.append("## Candidates")
-    if report.candidates or report.promoted:
+    downgrade_map = {d.statement: d for d in report.downgrades}
+    if report.candidates or report.promoted or report.downgrades:
         for cand in report.candidates:
             progress = _lookup_candidate_progress(vault_path, cand.path, cand.statement)
             lines.append(f"- {cand.statement} [{cand.tag}] ({cand.date}){progress}")
+            d = downgrade_map.get(cand.statement)
+            if d:
+                lines.append(f"  Downgraded by {d.rule}: {d.reason}")
         for p in report.promoted:
             lines.append(f'- Promoted to {p.kind}: "{p.statement}"')
+        for d in report.downgrades:
+            if not any(c.statement == d.statement for c in report.candidates):
+                lines.append(
+                    f'- Downgraded "{d.statement}" to {d.to_action} by {d.rule}: {d.reason}'
+                )
     else:
         lines.append("None.")
     lines.append("")
 
     # 9. Revert
     lines.append("## Revert")
+    has_revert = False
     if report.commit:
         lines.append(f"git revert {report.commit}")
-        if checkpoint:
-            lines.append(f"Separate checkpoint commit: git revert {checkpoint}")
-    elif checkpoint:
+        has_revert = True
+    if tag_commit:
+        lines.append(f"Separate hand edits tag commit: git revert {tag_commit}")
+        has_revert = True
+    if checkpoint:
         lines.append(f"Separate checkpoint commit: git revert {checkpoint}")
-    else:
+        has_revert = True
+    if not has_revert:
         lines.append("No commit made (run made no changes).")
     lines.append("")
 
@@ -226,6 +253,7 @@ def write_report(
     report: apply.ProjectRunReport,
     now: datetime | None = None,
     checkpoint: str | None = None,
+    tag_commit: str | None = None,
     tokens_used: int | None = None,
     backlog: int = 0,
 ) -> Path:
@@ -243,6 +271,7 @@ def write_report(
         vault_path=vault_path,
         now=now,
         checkpoint=checkpoint,
+        tag_commit=tag_commit,
         tokens_used=tokens_used,
         backlog=backlog,
     )
