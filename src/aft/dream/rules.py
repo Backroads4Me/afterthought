@@ -401,7 +401,7 @@ def _newer_than_the_line(quotes, target_line: page.Fact) -> bool:
     line's own date always parses: a line with an unreadable date holds no fact."""
     line_date = _date(target_line.date)
     dated = [d for q in quotes if q.verified if (d := _date(q.date)) is not None]
-    print("DEBUG rules dated:", dated, "line_date:", line_date); return line_date is not None and bool(dated) and max(dated) > line_date
+    return line_date is not None and bool(dated) and max(dated) > line_date
 
 
 def _yours(evidence: tuple[Evidence, ...]) -> list[Evidence]:
