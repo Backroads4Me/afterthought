@@ -658,12 +658,12 @@ set; tuning of caps, prompts and budgets comes from what the reports and `aft ev
 
 ### M7 Library
 
-Done when: two real documentation collections import with every file accounted for, every
-reference quote verified, and no instruction file, tooling or git history retained; a
-false claim planted in an imported index is rejected; facts from an authoritative
-collection enter as `[observed]` and from a reference collection as candidates;
-known-answer queries about a specification return the right document and page (DESIGN 15,
-M7).
+Done when: the RV-C collection (imported as `authoritative`) and the Victron collection
+(imported as `reference`) import with every file accounted for, every reference quote
+verified, and no instruction file, tooling or git history retained; a false claim planted
+in an imported index is rejected; facts from the RV-C specification enter as `[observed]`
+and facts from the Victron collection as candidates; known-answer queries about the RV-C
+specification return the right document and page (DESIGN 15, M7).
 
 - **M7.1 Survey:** `aft library survey <path>`: file list with type, size, hash; duplicates;
   suggested derived pairs; instruction files and tooling flagged; prints the procedure.
@@ -752,9 +752,10 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
 
 ### 6.4 M7
 
-1. Import two documentation collections you use, one as `authoritative` (a standard a
-   project implements) and one as `reference`, through the import skill.
-2. Check the import reports, then run known-answer searches against each collection.
+1. Import the RV-C documentation as `authoritative` and the Victron documentation as
+   `reference`, through the import skill.
+2. Check the import reports, then run known-answer searches: RV-C DGN definitions and their
+   pages, and a Victron device setting.
 
 ## 7. Order and parallel work
 
