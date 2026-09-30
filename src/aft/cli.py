@@ -15,6 +15,7 @@ from pathlib import Path
 from aft import (
     __version__,
     adapters,
+    claude_memory,
     digest,
     evidence,
     forget,
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         search.SearchError,
         UsageError,
         evalmod.EvalError,
+        claude_memory.ImportMemoryError,
         survey.SurveyError,
         manifest.ManifestError,
         queue.QueueError,
@@ -264,6 +266,24 @@ def _parser() -> argparse.ArgumentParser:
         help="verify quotes and roles without writing to vault",
     )
     q.set_defaults(handler=cmd_library_propose)
+
+    p = sub.add_parser("import", help="import memory another tool wrote, as candidate digests")
+    msub = p.add_subparsers(metavar="source")
+    q = msub.add_parser(
+        "claude-memory", help="import Claude Code's memory files so the dream can judge them"
+    )
+    q.add_argument(
+        "--from",
+        dest="source",
+        help="where the memory lives; defaults to ~/.claude/projects",
+    )
+    q.add_argument("--project", help="import one registered project's memory and no other's")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="say what would be imported and write nothing",
+    )
+    q.set_defaults(handler=cmd_import_claude_memory)
     return parser
 
 
@@ -429,6 +449,13 @@ def cmd_eval(args) -> int:
     config = load()
     vault.require(config)
     return evalmod.run(config, args.golden, limit=args.limit)
+
+
+def cmd_import_claude_memory(args) -> int:
+    """Import memory files as digests. What survives them is the dream's, not this call's."""
+    config = load()
+    vault.require(config)
+    return claude_memory.run(config, args.source, project=args.project, dry_run=args.dry_run)
 
 
 def cmd_work(args) -> int:
