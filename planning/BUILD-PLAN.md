@@ -774,6 +774,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   the job closes without a model call; with `capture.exclude_projects` set and no record the
   job is dropped. `aft forget session` removes the record. Tests: each of those cases, and a
   busy queue costing a starting session neither its block nor its budget.
+- **F27 Installing the timer enables it** (tester finding T7). `aft install timer` writes the
+  units, reloads systemd, and enables and starts `aft-work.timer`, every time it runs, and
+  says so; `--dry-run` names the commands; `--uninstall` disables and stops the timer before
+  removing its unit. Units written to a directory systemd does not read run no command, and
+  a refusal from systemd exits 1 with the commands to run by hand.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

@@ -238,3 +238,130 @@ def test_systemd_analyze_verify_timer(tmp_path: Path, cfg: Config) -> None:
         text=True,
     )
     assert result.returncode == 0
+
+
+# ---------------------------------------------------------------- enabling the timer (T7)
+
+
+class Systemctl:
+    """A stand-in for systemctl that records each command and can refuse one."""
+
+    def __init__(self, refuse: str = "") -> None:
+        self.ran: list[str] = []
+        self.refuse = refuse
+
+    def __call__(self, command: list[str]) -> tuple[bool, str]:
+        said = " ".join(command)
+        self.ran.append(said)
+        if self.refuse and self.refuse in said:
+            return False, "Failed to connect to bus"
+        return True, ""
+
+
+ENABLE = ["systemctl --user daemon-reload", f"systemctl --user enable --now {TIMER_NAME}"]
+DISABLE = [f"systemctl --user disable --now {TIMER_NAME}", "systemctl --user daemon-reload"]
+
+
+def test_install_enables_and_starts_the_timer(tmp_path: Path, cfg: Config) -> None:
+    """Writing the units is half an install: a timer nobody enabled never fires."""
+    systemctl = Systemctl()
+    change = systemd_install.install(tmp_path, cfg, runner=systemctl)
+    assert systemctl.ran == ENABLE
+    assert change.active is True
+    assert list(change.commands) == ENABLE
+
+
+def test_install_enables_the_timer_even_when_the_units_are_up_to_date(
+    tmp_path: Path, cfg: Config
+) -> None:
+    """Units written by an earlier install that never enabled them are still enabled."""
+    systemd_install.install(tmp_path, cfg, runner=Systemctl())
+    systemctl = Systemctl()
+    change = systemd_install.install(tmp_path, cfg, runner=systemctl)
+    assert change.changed is False
+    assert systemctl.ran == ENABLE
+    assert change.active is True
+
+
+def test_a_dry_run_names_the_commands_and_runs_none(tmp_path: Path, cfg: Config) -> None:
+    systemctl = Systemctl()
+    change = systemd_install.install(tmp_path, cfg, dry_run=True, runner=systemctl)
+    assert systemctl.ran == []
+    assert list(change.commands) == ENABLE
+    assert change.active is None
+
+
+def test_a_refusal_from_systemd_is_reported_with_what_it_said(tmp_path: Path, cfg: Config) -> None:
+    systemctl = Systemctl(refuse="enable")
+    change = systemd_install.install(tmp_path, cfg, runner=systemctl)
+    assert change.active is False
+    assert "Failed to connect to bus" in change.problem
+    assert (tmp_path / TIMER_NAME).exists(), "the units are still written"
+
+
+def test_uninstall_disables_the_timer_before_removing_its_unit(tmp_path: Path, cfg: Config) -> None:
+    """systemd cannot disable a unit it can no longer read, so the order matters."""
+    systemd_install.install(tmp_path, cfg, runner=Systemctl())
+    seen: list[bool] = []
+
+    def systemctl(command: list[str]) -> tuple[bool, str]:
+        seen.append((tmp_path / TIMER_NAME).exists())
+        ran.append(" ".join(command))
+        return True, ""
+
+    ran: list[str] = []
+    change = systemd_install.uninstall(tmp_path, runner=systemctl)
+    assert ran == DISABLE
+    assert seen == [True, False], "disable ran with the unit present, reload after it was gone"
+    assert change.active is True
+
+
+def test_a_directory_systemd_does_not_read_is_never_enabled(tmp_path: Path, cfg: Config) -> None:
+    """With no runner given, units written outside the user unit directory run no systemctl:
+    enabling them would act on whatever the real directory holds."""
+    called: list[list[str]] = []
+
+    def real(command: list[str]) -> tuple[bool, str]:
+        called.append(command)
+        return True, ""
+
+    import aft.install.systemd as module
+
+    original = module._systemctl
+    module._systemctl = real
+    try:
+        change = systemd_install.install(tmp_path, cfg)
+        gone = systemd_install.uninstall(tmp_path)
+    finally:
+        module._systemctl = original
+    assert called == []
+    assert change.active is None and gone.active is None
+
+
+def test_cli_install_timer_says_what_it_did_about_the_timer(
+    tmp_path: Path, home: Path, monkeypatch, capsys
+) -> None:
+    """The command reports the enable, names the commands under --dry-run, and exits 1 with
+    the commands to run by hand when systemd refuses."""
+    monkeypatch.setattr(systemd_install, "unit_dir", lambda path=None: tmp_path)
+    monkeypatch.setattr(systemd_install, "_systemd_reads", lambda directory: True)
+    systemctl = Systemctl()
+    monkeypatch.setattr(systemd_install, "_systemctl", systemctl)
+
+    assert main(["install", "timer", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert [f"would run: {command}" in out for command in ENABLE] == [True, True]
+    assert systemctl.ran == []
+
+    assert main(["install", "timer"]) == 0
+    assert f"enabled and started {TIMER_NAME}" in capsys.readouterr().out
+    assert systemctl.ran == ENABLE
+
+    assert main(["install", "timer", "--uninstall"]) == 0
+    assert f"disabled and stopped {TIMER_NAME}" in capsys.readouterr().out
+
+    monkeypatch.setattr(systemd_install, "_systemctl", Systemctl(refuse="enable"))
+    assert main(["install", "timer"]) == 1
+    err = capsys.readouterr().err
+    assert "Failed to connect to bus" in err
+    assert f"systemctl --user enable --now {TIMER_NAME}" in err
