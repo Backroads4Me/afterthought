@@ -46,9 +46,12 @@ class SkillChange:
 
 
 def skill_source() -> Path:
-    """The skill file shipped with the package in the checkout."""
-    source = Path(__file__).resolve().parents[3] / SOURCE
-    return source
+    """The skill file shipped with the package in the checkout or installed wheel."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / SOURCE
+        if candidate.is_file():
+            return candidate
+    return Path(__file__).resolve().parents[3] / SOURCE
 
 
 def skill_text() -> str:

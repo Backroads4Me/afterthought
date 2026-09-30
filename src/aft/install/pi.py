@@ -97,17 +97,12 @@ def target_path(extensions: Path) -> Path:
 
 
 def extension_source() -> Path:
-    """The extension this package ships, in the checkout that holds it.
-
-    ``integrations/`` sits beside ``src/`` rather than inside the package, so the checkout is
-    found by walking up from this file: install, then aft, then src, then the root. A package
-    installed without that tree cannot say which extension it is installing, so it says so
-    instead of guessing.
-    """
-    source = Path(__file__).resolve().parents[3] / SOURCE
-    if not source.is_file():
-        raise InstallError(f"no {SOURCE} beside the aft package; run from a checkout")
-    return source
+    """The extension this package ships, in the checkout or installed wheel that holds it."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / SOURCE
+        if candidate.is_file():
+            return candidate
+    raise InstallError(f"no {SOURCE} beside the aft package; run from a checkout")
 
 
 def install(extensions: Path, *, dry_run: bool = False) -> Change:

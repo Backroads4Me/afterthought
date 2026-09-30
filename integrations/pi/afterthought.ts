@@ -51,32 +51,51 @@ export default function (pi: ExtensionAPI) {
   let missingAftReported = false
 
   pi.on("session_start", async (event, ctx) => {
-    block = await hook("session_start", payload("session_start", event.reason, ctx.sessionManager))
+    try {
+      const p = payload("session_start", event?.reason, ctx?.sessionManager, ctx?.cwd)
+      if (p) {
+        block = await hook("session_start", p)
+      }
+    } catch {}
   })
 
   pi.on("before_agent_start", (event) => {
-    // Contribute the block as its own section. The host's prompt, its sections and its
-    // guidelines are left exactly as they arrived.
-    if (block) {
-      event.systemPromptOptions.sections[SECTION] = block
-    }
+    try {
+      if (block && event?.systemPromptOptions?.sections) {
+        event.systemPromptOptions.sections[SECTION] = block
+      }
+    } catch {}
   })
 
   pi.on("session_before_compact", async (event, ctx) => {
-    // Refresh the kept block from the re-run. A compaction is dispatched to capture, not to
-    // injection (BUILD-PLAN M1.1), so aft normally prints nothing here, and nothing printed
-    // means there is nothing new to keep: the block in hand is the one worth carrying.
-    const refreshed = await hook(
-      "session_before_compact",
-      payload("session_before_compact", event.reason, ctx.sessionManager),
-    )
-    if (refreshed) {
-      block = refreshed
-    }
+    try {
+      const p = payload("session_before_compact", event?.reason, ctx?.sessionManager, ctx?.cwd)
+      if (p) {
+        await hook("session_before_compact", p)
+      }
+    } catch {}
+  })
+
+  pi.on("session_compact", async (event, ctx) => {
+    // Refresh the kept block after compaction (BUILD-PLAN M1.4, F24).
+    try {
+      const p = payload("session_start", event?.reason, ctx?.sessionManager, ctx?.cwd)
+      if (p) {
+        const refreshed = await hook("session_start", p)
+        if (refreshed) {
+          block = refreshed
+        }
+      }
+    } catch {}
   })
 
   pi.on("session_shutdown", async (event, ctx) => {
-    await hook("session_shutdown", payload("session_shutdown", event.reason, ctx.sessionManager))
+    try {
+      const p = payload("session_shutdown", event?.reason, ctx?.sessionManager, ctx?.cwd)
+      if (p) {
+        await hook("session_shutdown", p)
+      }
+    } catch {}
   })
 
   /**
@@ -86,7 +105,10 @@ export default function (pi: ExtensionAPI) {
    * break it. A missing `aft` is reported once, since every event would otherwise repeat the
    * same line, and the reason is aft's own to log (~/.afterthought/logs/hooks.log).
    */
-  async function hook(event: string, body: HookPayload): Promise<string> {
+  async function hook(event: string, body?: HookPayload): Promise<string> {
+    if (!body || !body.session_id) {
+      return ""
+    }
     const printed = await new Promise<string>((resolve) => {
       const child = spawn(AFT, ["hook", "pi", event], { stdio: ["pipe", "pipe", "ignore"] })
       let stdout = ""
@@ -132,16 +154,33 @@ export default function (pi: ExtensionAPI) {
 }
 
 /** One payload, as the adapter on the other end names its fields. */
-function payload(event: string, reason: string | undefined, session: SessionInfo): HookPayload {
-  return {
-    session_id: session.getSessionId(),
-    cwd: session.getCwd(),
-    // Undefined until pi first writes the session file, and JSON.stringify leaves an
-    // undefined field out, which src/aft/adapters/pi.py reads as a session with no file yet.
-    transcript_path: session.getSessionFile(),
-    // Repeats the event the command line already names, as the captured payloads do. aft
-    // reads the command line and ignores this field.
-    hook_event_name: event,
-    reason,
+function payload(
+  event: string,
+  reason: string | undefined,
+  session?: SessionInfo,
+  cwd?: string,
+): HookPayload | undefined {
+  try {
+    if (!session) {
+      return undefined
+    }
+    const sessionId = session.getSessionId?.()
+    if (!sessionId) {
+      return undefined
+    }
+    const workingDir = cwd || session.getCwd?.() || ""
+    return {
+      session_id: sessionId,
+      cwd: workingDir,
+      // Undefined until pi first writes the session file, and JSON.stringify leaves an
+      // undefined field out, which src/aft/adapters/pi.py reads as a session with no file yet.
+      transcript_path: session.getSessionFile?.(),
+      // Repeats the event the command line already names, as the captured payloads do. aft
+      // reads the command line and ignores this field.
+      hook_event_name: event,
+      reason,
+    }
+  } catch {
+    return undefined
   }
 }

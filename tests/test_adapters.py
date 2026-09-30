@@ -437,3 +437,15 @@ def test_session_end_hook_never_calls_systemd_with_isolated_home(home, monkeypat
     ) == (0, "", "")
     assert calls == []
     assert not (home / "last-work-trigger").exists()
+
+
+def test_pi_session_compact_parses_as_compaction():
+    """pi's session_compact event also parses as a compaction event (BUILD-PLAN F24)."""
+    from aft.adapters.pi import parse_pi
+    from aft.events import COMPACTION
+
+    data = payload("pi-session-before-compact.json") | {"hook_event_name": "session_compact"}
+    event = parse_pi("session_compact", data, NOW)
+    assert event.kind == COMPACTION
+    assert event.agent == "pi"
+    assert event.detail == "threshold"
