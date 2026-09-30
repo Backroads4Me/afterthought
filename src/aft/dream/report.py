@@ -88,6 +88,8 @@ def format_run_section(
 
     # 1. Summary
     lines.append("## Summary")
+    if report.error:
+        lines.append(f"- Error: {report.error}")
     lines.append(f"- Added: {len(report.added)}")
     lines.append(f"- Confirmed: {len(report.confirmed)}")
     lines.append(f"- Superseded: {len(report.superseded)}")

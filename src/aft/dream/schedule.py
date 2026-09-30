@@ -117,7 +117,7 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                     if hasattr(rep, "project"):
                         needs_you_path = reportmod.regenerate_needs_you(config.vault)
                         rel_ny = needs_you_path.relative_to(config.vault).as_posix()
-                        if rep.commit is not None:
+                        if rep.commit is not None or (result.checkpoint and not checkpoint_reported):
                             checkpoint_arg = result.checkpoint if not checkpoint_reported else None
                             tag_commit_arg = result.tag_commit if not checkpoint_reported else None
                             report_path = reportmod.write_report(
@@ -136,9 +136,52 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                                 f"aft: report {slug}",
                             )
                 result.ran.append(slug)
-            except (ApplyError, ModelError) as exc:
+            except Exception as exc:
                 result.failures[slug] = str(exc)
-                result.reports[slug] = ProjectRunReport(project=slug, error=str(exc))
+                err_rep = ProjectRunReport(project=slug, error=str(exc))
+                result.reports[slug] = err_rep
+                try:
+                    checkpoint_arg = result.checkpoint if not checkpoint_reported else None
+                    tag_commit_arg = result.tag_commit if not checkpoint_reported else None
+                    report_path = reportmod.write_report(
+                        config,
+                        err_rep,
+                        now=now,
+                        checkpoint=checkpoint_arg,
+                        tag_commit=tag_commit_arg,
+                        backlog=len(waiting_digests(config.vault).get(slug, [])),
+                    )
+                    checkpoint_reported = True
+                    needs_you_path = reportmod.regenerate_needs_you(config.vault)
+                    rel_report = report_path.relative_to(config.vault).as_posix()
+                    rel_ny = needs_you_path.relative_to(config.vault).as_posix()
+                    vault.commit(
+                        config.vault,
+                        [rel_report, rel_ny],
+                        f"aft: report {slug}",
+                    )
+                except Exception:
+                    pass
+        if result.checkpoint and not checkpoint_reported:
+            dummy_rep = ProjectRunReport(project=ready[0] if ready else "vault")
+            try:
+                report_path = reportmod.write_report(
+                    config,
+                    dummy_rep,
+                    now=now,
+                    checkpoint=result.checkpoint,
+                    tag_commit=result.tag_commit,
+                )
+                needs_you_path = reportmod.regenerate_needs_you(config.vault)
+                rel_report = report_path.relative_to(config.vault).as_posix()
+                rel_ny = needs_you_path.relative_to(config.vault).as_posix()
+                vault.commit(
+                    config.vault,
+                    [rel_report, rel_ny],
+                    "aft: report checkpoint",
+                )
+            except Exception:
+                pass
         return result
 
 

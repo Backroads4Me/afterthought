@@ -1624,7 +1624,7 @@ def test_lint_failure_leaves_unrelated_uncommitted_file_untouched(
     )
 
     # Force lint_vault to fail
-    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+    monkeypatch.setattr(apply.lint, "lint_pages", lambda _vault, _paths, _reg=None: [apply.lint.Finding("dummy.md", 1, "simulated lint failure")])
 
     fake.script = [reply("add", None, "add fact")]
     with pytest.raises(apply.ApplyError, match="lint failed"):
@@ -2057,7 +2057,7 @@ def test_lint_rollback_restores_run_writes_not_unrelated_edits(
         ],
     )
 
-    monkeypatch.setattr(apply.lint, "lint_vault", lambda _vault: ["simulated lint failure"])
+    monkeypatch.setattr(apply.lint, "lint_pages", lambda _vault, _paths, _reg=None: [apply.lint.Finding("dummy.md", 1, "simulated lint failure")])
     fake.script = [reply("add", None, "new decision")]
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
 
@@ -2155,20 +2155,39 @@ def test_edit_quote_matches_only_added_lines(initialized, home):
     v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "update commit with added line")
     assert v is False
 
+    # Argument injection / non-hex sha is rejected
+    v, _, _, _ = apply._lookup_evidence(cfg, "aft://edit/--output=/tmp/evil", "brand new added line")
+    assert v is False
+    v, _, _, _ = apply._lookup_evidence(cfg, "aft://edit/not_a_valid_hex_sha!", "brand new added line")
+    assert v is False
 
-def test_lookup_evidence_finds_worker_digest_by_substring(initialized, home):
+    # Non-consecutive added lines across files/hunks do NOT match
+    f1 = cfg.vault / "file1.txt"
+    f2 = cfg.vault / "file2.txt"
+    f1.write_text("No RGB\n")
+    f2.write_text("lighting.\n")
+    vault.commit(cfg.vault, ["file1.txt", "file2.txt"], "two files added")
+    multi_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{multi_sha}", "No RGB lighting.")
+    assert v is False
+
+    # Consecutive lines within a single added run DO match
+    f3 = cfg.vault / "file3.txt"
+    f3.write_text("No RGB\nlighting.\n")
+    vault.commit(cfg.vault, ["file3.txt"], "single file with consecutive added lines")
+    single_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+
+    v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{single_sha}", "No RGB lighting.")
+    assert v is True
+
+
+def test_lookup_evidence_worker_digest_exact_match_no_leak(initialized, home):
     from aft.readers import USER, Entry
 
     cfg = config_with_fake(home, initialized.vault, FakeEndpoint())
     sess_full = "worker-session-abcdef12345678"
     entry_id = "e1"
-    evidence.store(
-        cfg,
-        agent="claude",
-        session_id=sess_full,
-        project_id="p_widget",
-        entries=[Entry(id=entry_id, time=NOW, role=USER, text="worker statement", is_error=False)],
-    )
 
     # Worker digest in nested directory with full session ID in filename
     d_dir = cfg.vault / "digests" / "widget" / "2026" / "09"
@@ -2176,58 +2195,203 @@ def test_lookup_evidence_finds_worker_digest_by_substring(initialized, home):
     d_path = d_dir / f"2026-09-29-claude-{sess_full}.md"
     d_path.write_text("---\ntype: Session Digest\naft:\n  project: p_widget\n  role: worker\n---\n")
 
-    # Query with prefix/substring
+    # 1. Query with prefix/substring of session ID: must NOT leak worker role
     sess_sub = "abcdef12"
     evidence.store(
         cfg,
         agent="claude",
         session_id=sess_sub,
         project_id="p_widget",
+        entries=[Entry(id=entry_id, time=NOW, role=USER, text="primary statement", is_error=False)],
+    )
+    res_sub = f"aft://session/claude/{sess_sub}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_sub, "primary statement")
+    assert v is True
+    assert origin == rules.PRIMARY  # No leak!
+
+    # 2. Query with different agent: must NOT leak worker role
+    evidence.store(
+        cfg,
+        agent="pi",
+        session_id=sess_full,
+        project_id="p_widget",
+        entries=[Entry(id=entry_id, time=NOW, role=USER, text="pi statement", is_error=False)],
+    )
+    res_pi = f"aft://session/pi/{sess_full}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_pi, "pi statement")
+    assert v is True
+    assert origin == rules.PRIMARY  # No cross-agent leak!
+
+    # 3. Exact session and agent match: returns WORKER
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id=sess_full,
+        project_id="p_widget",
         entries=[Entry(id=entry_id, time=NOW, role=USER, text="worker statement", is_error=False)],
     )
-    res_uri = f"aft://session/claude/{sess_sub}#{entry_id}"
-    v, origin, _, _ = apply._lookup_evidence(cfg, res_uri, "worker statement")
+    res_exact = f"aft://session/claude/{sess_full}#{entry_id}"
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_exact, "worker statement")
+    assert v is True
+    assert origin == rules.WORKER
+
+    # 4. Multipart worker digest: returns WORKER
+    d_part2 = d_dir / f"2026-09-29-claude-{sess_full}-2.md"
+    d_part2.write_text("---\ntype: Session Digest\naft:\n  project: p_widget\n  role: worker\n---\n")
+    v, origin, _, _ = apply._lookup_evidence(cfg, res_exact, "worker statement")
     assert v is True
     assert origin == rules.WORKER
 
 
-def test_new_fact_evidence_date_uses_digest_date(initialized, home, fake):
+def test_new_fact_evidence_date_uses_quote_date_not_digest_date(initialized, home, fake):
+    """The new fact's evidence date comes from the quote's entry time, not the digest's end date."""
+    from aft.readers import USER, Entry
+
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
     registry.save()
 
+    # Standing line has evidence from 2026-09-15
+    quote_time_old = datetime(2026, 9, 15, 10, 0, 0, tzinfo=UTC)
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="standing_sess",
+        project_id="p_widget",
+        entries=[Entry(id="e1", time=quote_time_old, role=USER, text="Server has 16 cores.", is_error=False)],
+    )
     seed_overview(
         cfg,
         "widget",
         body="## State\n\n- Server has 16 cores. [observed] 2026-09-15 [^s1]\n",
-        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "16 cores"}],
+        sources=[{"id": "s1", "resource": "aft://session/claude/standing_sess#e1", "quote": "Server has 16 cores."}],
     )
 
-    # Digest dated 2026-09-10 (older than 2026-09-15 standing line),
-    # but fact itself carries newer date 2026-10-01
+    # User says "Server has 8 cores." on 2026-09-10 in a session whose last entry is on 2026-09-20.
+    quote_time_new = datetime(2026, 9, 10, 14, 0, 0, tzinfo=UTC)
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="new_sess",
+        project_id="p_widget",
+        entries=[Entry(id="e2", time=quote_time_new, role=USER, text="Server has 8 cores.", is_error=False)],
+    )
+
+    # Digest filename date is 2026-09-20 (the session's end date)
     write_digest(
         cfg,
         "widget",
-        "2026-09-10-claude-sess1",
+        "2026-09-20-claude-new_sess",
         facts=[
             {
                 "statement": "Server has 8 cores.",
                 "kind": "state",
                 "source": "observed",
-                "date": "2026-10-01",  # fact says 2026-10-01, but digest filename is 2026-09-10
+                "date": "2026-09-20",
                 "ref": "s2",
             }
         ],
-        sources=[{"id": "s2", "resource": "aft://session/c/2#e1", "quote": "8 cores"}],
+        sources=[{"id": "s2", "resource": "aft://session/claude/new_sess#e2", "quote": "Server has 8 cores."}],
     )
 
-    fake.script = [reply("supersede", "L1", "trying to supersede with older digest")]
+    fake.script = [reply("supersede", "L1", "server now has 8 cores")]
     res = schedule.run(cfg, now=NOW)
     report = res.reports["widget"]
-    # Evidence date from digest filename (2026-09-10) is older than standing line (2026-09-15),
-    # so even though fact claimed 2026-10-01, R4 uses digest date 2026-09-10 and refuses supersede!
+    # The new fact's evidence date is 2026-09-10 (from its quote), NOT 2026-09-20 (the digest date).
+    # Since 2026-09-10 is older than the standing line's 2026-09-15, R4 refuses the supersede and creates a ConflictFact!
     assert len(report.conflicts) == 1
     assert report.conflicts[0].new_statement == "Server has 8 cores."
     assert report.conflicts[0].refs == ("s2",)
     assert report.conflicts[0].path == "projects/widget/overview.md"
+
+
+def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(initialized, home, fake, monkeypatch):
+    """Real per-page lint fails and rolls back writes if a page written this run has invalid syntax."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-04-claude-sess1",
+        facts=[
+            {
+                "statement": "Valid fact statement.",
+                "kind": "state",
+                "source": "observed",
+                "date": "2026-10-04",
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": "Valid fact statement."}],
+    )
+    fake.script = [reply("add", None, "add fact")]
+
+    # Simulate page writer rendering an invalid fact line on the written overview.md
+    orig_render = pagewrite.PageDoc.render
+
+    def bad_render(self):
+        text = orig_render(self)
+        return text + "\n- Broken fact line missing required metadata\n"
+
+    monkeypatch.setattr(pagewrite.PageDoc, "render", bad_render)
+
+    before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+    with pytest.raises(apply.ApplyError, match="lint failed"):
+        schedule.run(cfg, now=NOW)
+
+    # Rollback must have restored vault HEAD cleanly without leaving uncommitted writes
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before_sha
+    assert not (cfg.vault / "projects" / "widget" / "overview.md").exists()
+
+
+def test_real_per_page_lint_skips_unwritten_broken_page(initialized, home, fake):
+    """Real per-page lint only checks pages written by this run, ignoring unwritten broken pages."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.add("other", "Other")
+    registry.save()
+
+    # Create an unwritten page with an invalid fact line (missing date and ref)
+    broken_page = cfg.vault / "projects" / "other" / "overview.md"
+    broken_page.parent.mkdir(parents=True, exist_ok=True)
+    broken_page.write_text(
+        "---\ntype: Fact Page\naft:\n  project: "
+        + registry.by_slug("other").id
+        + "\n  kind: overview\n---\n\n## State\n\n- Broken line missing date and ref\n"
+    )
+    vault.commit(cfg.vault, ["projects/other/overview.md"], "commit broken page")
+
+    # Confirm that lint_vault fails on the vault
+    vault_findings = lint.lint_vault(cfg.vault)
+    assert any("projects/other/overview.md" in str(f) for f in vault_findings)
+
+    # Dream run for widget only writes widget pages
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-04-claude-sess1",
+        facts=[
+            {
+                "statement": "Valid widget fact.",
+                "kind": "state",
+                "source": "observed",
+                "date": "2026-10-04",
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": "Valid widget fact."}],
+    )
+    fake.script = [reply("add", None, "add fact")]
+
+    # schedule.run must succeed because per-page lint only lints widget pages!
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    assert "widget" not in res.failures
+    rep = res.reports["widget"]
+    assert rep.commit is not None
+    assert (cfg.vault / "projects" / "widget" / "overview.md").exists()

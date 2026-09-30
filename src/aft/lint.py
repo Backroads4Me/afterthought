@@ -47,16 +47,10 @@ def lint_vault(vault: Path) -> list[Finding]:
     return findings
 
 
-_ORIGINAL_LINT_VAULT = lint_vault
-
-
 def lint_pages(
     vault: Path, rel_paths: Iterable[Path | str], registry: Registry | None = None
 ) -> list[Finding]:
     """Lint only the specified page paths relative to vault."""
-    if lint_vault is not _ORIGINAL_LINT_VAULT:
-        res = lint_vault(vault)
-        return [f if isinstance(f, Finding) else Finding(str(f), 1, str(f)) for f in res]
     findings: list[Finding] = []
     if registry is None:
         try:

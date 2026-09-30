@@ -170,7 +170,7 @@ def run_project(
     # cannot hold that commit's sha: it holds this run id instead, and the commit
     # message names the same id, so `git log --grep <run id>` answers with the sha.
     run_id = f"dream-{slug}-{now:%Y%m%dT%H%M%SZ}"
-    vault_path = config.vault
+    vault_path = config.vault.resolve()
 
     report = ProjectRunReport(project=slug)
 
@@ -279,7 +279,7 @@ def run_project(
                             source=ref,
                             resource=res,
                             origin=digest_role if origin == rules.PRIMARY else origin,
-                            date=fact_ev_date,
+                            date=ev_date,
                             verified=v,
                             yours=y,
                         )
@@ -730,6 +730,7 @@ def _lookup_evidence(
         parts = uri.split("#", 1)
         if len(parts) == 2:
             agent_sess = parts[0].split("/")
+            agent = agent_sess[0] if len(agent_sess) > 1 else ""
             sess_id = agent_sess[-1]
             entry_id = parts[1]
             db_path = config.home / "evidence.sqlite"
@@ -748,15 +749,22 @@ def _lookup_evidence(
                             is_yours = entry_role == "user"
                             is_worker = entry_role == "worker"
                             if not is_worker:
+                                from aft import digest
+
                                 digests_dir = config.vault / "digests"
                                 if digests_dir.is_dir():
-                                    patterns = [f"*{sess_id}*.md"]
-                                    if len(sess_id) >= 8:
-                                        patterns.append(f"*{sess_id[:8]}*.md")
-                                    matched_digests: set[Path] = set()
-                                    for pat in patterns:
-                                        matched_digests.update(digests_dir.rglob(pat))
-                                    for d_path in matched_digests:
+                                    for d_path in digests_dir.rglob("*.md"):
+                                        match = digest._DIGEST_NAME.match(d_path.stem)
+                                        if match is None:
+                                            continue
+                                        if agent and match.group("agent") != agent:
+                                            continue
+                                        m_sess = match.group("session")
+                                        is_exact = m_sess == sess_id
+                                        prefix, sep, suffix = m_sess.rpartition("-")
+                                        is_multipart = bool(sep and suffix.isdigit() and prefix == sess_id)
+                                        if not is_exact and not is_multipart:
+                                            continue
                                         try:
                                             dfm, _, _, _ = page.split_frontmatter(
                                                 d_path.read_text(encoding="utf-8")
@@ -778,19 +786,36 @@ def _lookup_evidence(
 
     if resource.startswith("aft://edit/"):
         sha = resource.removeprefix("aft://edit/").strip()
-        if not sha:
+        if not sha or not re.match(r"^[0-9a-f]{7,40}$", sha):
             return False, rules.PRIMARY, fallback_date, False
         try:
-            res = git(["show", "--format=", sha], cwd=config.vault, check=False)
+            res = git(
+                ["show", "--format=", "--end-of-options", sha],
+                cwd=config.vault,
+                check=False,
+            )
             if res.returncode == 0:
-                added_lines = [
-                    line[1:]
-                    for line in res.stdout.splitlines()
-                    if line.startswith("+") and not line.startswith("+++")
-                ]
-                added_text = "\n".join(added_lines)
-                if evidence._spaced(quote) in evidence._spaced(added_text):
-                    c_res = git(["show", "-s", "--format=%ct", sha], cwd=config.vault, check=False)
+                spaced_quote = evidence._spaced(quote)
+                current_run: list[str] = []
+                matched = False
+                for line in res.stdout.splitlines():
+                    if line.startswith("+") and not line.startswith("+++"):
+                        current_run.append(line[1:])
+                    else:
+                        if current_run:
+                            if spaced_quote in evidence._spaced("\n".join(current_run)):
+                                matched = True
+                                break
+                            current_run = []
+                if not matched and current_run:
+                    if spaced_quote in evidence._spaced("\n".join(current_run)):
+                        matched = True
+                if matched:
+                    c_res = git(
+                        ["show", "-s", "--format=%ct", "--end-of-options", sha],
+                        cwd=config.vault,
+                        check=False,
+                    )
                     if c_res.returncode == 0:
                         stamp = int(c_res.stdout.strip())
                         c_date = datetime.fromtimestamp(stamp, UTC).date().isoformat()
