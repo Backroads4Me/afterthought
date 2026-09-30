@@ -3,7 +3,9 @@
 DESIGN 12 promises that forgotten content leaves everything afterthought controls.
 ``aft forget session <id>`` removes the session's evidence from the archive, unindexes
 its rows, deletes its digest files from the vault, and marks curated lines resting only
-on that session as withdrawn.
+on that session as withdrawn, scrubs the quotes of sources citing that session, clears the
+session's rows, watermark and digest debt from the queue, and scrubs the session's words out
+of the dream reports and needs-you, so no later run files the words back or repeats them.
 
 ``aft forget pattern <regex>`` redacts matching text across the evidence archive and
 updates the search index to reflect the redactions.
@@ -16,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from aft import evidence, index, lint, page, pagewrite, vault
+from aft import evidence, index, lint, page, pagewrite, queue, vault
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
 
@@ -34,6 +36,8 @@ class SessionForgetReport:
     lines_unwithdrawn: tuple[str, ...]
     vault_committed: bool
     candidates_removed: tuple[str, ...] = ()
+    jobs_removed: int = 0
+    reports_scrubbed: tuple[str, ...] = ()
 
     @property
     def unwithdrawn_lines(self) -> tuple[str, ...]:
@@ -46,11 +50,17 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
     Removes the session's evidence rows, index rows, and digest files, marks curated
     lines resting only on that session as withdrawn with PageDoc.withdraw, scrubs
     quotes of sources citing that session, and removes candidate lines resting only on it.
+    It clears the session's job rows, watermark and digest debt from the queue, and scrubs
+    the session's words out of every page under ``reports/``, needs-you included.
     """
     evidence._require_name(session_id, "session id")
     vault.require(config)
 
+    # The session's own words, read while the archive still holds them: the dream reports
+    # quote them, and once the archive is gone nothing else says what to look for.
+    words = [entry.text for entry in evidence.entries(config, session_id)]
     evidence.forget(config, session_id)
+    jobs_removed = queue.forget_session(config, session_id)
     index.update(config)
 
     digests_removed: list[str] = []
@@ -97,6 +107,10 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                 }
                 if not session_sources:
                     continue
+                for sid in session_sources:
+                    quote = str(doc.sources[sid].get("quote", ""))
+                    if quote.strip():
+                        words.append(quote)
 
                 rel = p.relative_to(config.vault).as_posix()
                 original_text = doc.render()
@@ -158,7 +172,9 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
 
                 lines_unwithdrawn.extend(unwithdrawn_on_page)
 
-        to_commit = [*digests_removed, *pages_modified]
+        reports_scrubbed = _scrub_report_pages(config, words)
+
+        to_commit = [*digests_removed, *pages_modified, *reports_scrubbed]
         committed = False
         if to_commit:
             committed = vault.commit(config.vault, to_commit, f"aft: forget session {session_id}")
@@ -173,7 +189,39 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         lines_unwithdrawn=tuple(lines_unwithdrawn),
         vault_committed=committed,
         candidates_removed=tuple(candidates_removed),
+        jobs_removed=jobs_removed,
+        reports_scrubbed=tuple(reports_scrubbed),
     )
+
+
+def _scrub_report_pages(config: Config, words: list[str]) -> list[str]:
+    """Replace the session's words in every page under ``reports/``, and name what changed.
+
+    A dream report writes the quote behind each line it added, confirmed or superseded
+    (DESIGN 9), and needs-you repeats the callout text of the lines it lists, so a forgotten
+    session's words would go on living in those pages after its evidence, digests and curated
+    lines are gone. The ruling a forgetting works to is that any text carrying the session's
+    words takes a fixed marker the page grammar accepts, which is what ``FORGOTTEN_MARKER``
+    is. Longer texts go first, so a quote is never left in pieces behind a shorter text that
+    sits inside it.
+    """
+    reports_dir = config.vault / index.REPORTS
+    if not reports_dir.is_dir():
+        return []
+    phrases = sorted({word for word in words if word.strip()}, key=len, reverse=True)
+    changed: list[str] = []
+    for path in sorted(reports_dir.rglob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        scrubbed = text
+        for phrase in phrases:
+            scrubbed = scrubbed.replace(phrase, FORGOTTEN_MARKER)
+        if scrubbed != text:
+            path.write_text(scrubbed, encoding="utf-8")
+            changed.append(path.relative_to(config.vault).as_posix())
+    return changed
 
 
 def forget_pattern(config: Config, pattern: str) -> int:
