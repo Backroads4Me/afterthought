@@ -4,7 +4,7 @@ The manifest specifies a collection's name, title, description, target projects,
 and a mapping of every surveyed file to exactly one role (original, derived,
 errata, notes, exclude) and its relations (derived-from, errata-for, supersedes).
 The validator enforces that every surveyed file has one role, relations point
-inside the collection, instruction files are excluded, and relations fit roles.
+inside the collection, instruction files and tooling are excluded, and relations fit roles.
 """
 
 from __future__ import annotations
@@ -249,15 +249,20 @@ def validate_manifest(manifest: Manifest) -> list[str]:
     for p in missing_from_collection:
         errors.append(f"unknown file: '{p}' listed in manifest does not exist in collection")
 
-    # 2. Instruction files must have role: exclude
+    # 2. Nothing that instructs or builds is kept: DESIGN 11 step 3 validates a manifest
+    # against the surveyed directory, and admits no instruction file and no tooling.
     for finfo in report.files:
         if finfo.path not in manifest.files:
             continue
         entry = manifest.files[finfo.path]
-        if finfo.is_instruction and entry.role != "exclude":
+        if entry.role == "exclude":
+            continue
+        if finfo.is_instruction:
             errors.append(
                 f"instruction file '{finfo.path}' must have role 'exclude', got '{entry.role}'"
             )
+        elif finfo.is_tooling:
+            errors.append(f"tooling '{finfo.path}' must have role 'exclude', got '{entry.role}'")
 
     # 3. Relations fit roles, point inside the collection, and follow authority rules
     for fpath, entry in manifest.files.items():

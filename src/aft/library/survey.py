@@ -2,7 +2,12 @@
 
 The survey lists every file with its type, size and sha256 hash, flags duplicate
 files, suggests likely derived pairs sharing a stem, flags instruction files and
-tooling for exclusion, and prints the import procedure. It changes nothing on disk.
+tooling for exclusion, names any symbolic link, and prints the import procedure. It
+changes nothing on disk.
+
+A symbolic link is named and nothing more. It is not hashed or offered for a role, so the
+manifest cannot ask for it and the import cannot copy what it points at, which may lie
+outside the collection altogether (DESIGN 11, M7 review 4).
 """
 
 from __future__ import annotations
@@ -40,11 +45,9 @@ INSTRUCTION_NAMES = {
     "copilot-instructions.md",
 }
 
-# Tooling and build configuration file names.
+# Tooling and build configuration file names. A file whose name starts with a dot is
+# tooling by rule below, so this list holds the names that are tooling without one.
 TOOLING_EXACT_NAMES = {
-    ".gitignore",
-    ".gitattributes",
-    ".gitmodules",
     "makefile",
     "dockerfile",
     "justfile",
@@ -72,6 +75,14 @@ TOOLING_DIR_NAMES = {
     "test",
 }
 
+# Extensions a document is written in, by the kind of document it is. The import extracts
+# exactly these (aft.library.importing), so a file is never classified as one kind of document
+# and then extracted as another.
+MARKDOWN_EXTS = frozenset({".md", ".markdown", ".mdown"})
+TEXT_EXTS = frozenset({".txt", ".text", ".rst"})
+JSON_EXTS = frozenset({".json", ".json5"})
+HTML_EXTS = frozenset({".html", ".htm"})
+
 # Common document originals and derived formats for pair suggestion.
 ORIGINAL_EXTS = {".pdf", ".docx", ".doc", ".html", ".xml", ".csv"}
 DERIVED_EXTS = {".md", ".markdown", ".txt", ".json"}
@@ -86,7 +97,10 @@ Import procedure:
    - derived: version made from another file (record derived-from relation)
    - errata: corrections to another file (record errata-for relation)
    - notes: working notes kept as sources and mined for facts
-   - exclude: not imported (build scripts, generated indexes, git history, AGENTS.md, tooling)
+   - exclude: not imported (build scripts, generated indexes, git history, AGENTS.md,
+     any dotfile, and everything else the survey flags as tooling)
+   A symbolic link is never imported and gets no role: what it points at may lie outside
+   the collection, and the library holds only files the collection owns.
    Relations:
    - derived-from: points to the original file in the collection
    - errata-for: points to the document being corrected
@@ -135,6 +149,10 @@ class SurveyReport:
     derived_pairs: tuple[DerivedPair, ...]
     instruction_files: tuple[str, ...]
     tooling_files: tuple[str, ...]
+    # Named, and nothing else: a link is not a file to import, so it gets no role and is
+    # never copied (see `survey`). A directory reached through a link is listed with its
+    # trailing slash, since it is the directory that is the link.
+    symlinks: tuple[str, ...] = ()
 
 
 def classify_file_type(path: Path) -> str:
@@ -142,15 +160,15 @@ def classify_file_type(path: Path) -> str:
     ext = path.suffix.lower()
     if ext == ".pdf":
         return "PDF"
-    if ext in (".md", ".markdown", ".mdown"):
+    if ext in MARKDOWN_EXTS:
         return "Markdown"
-    if ext in (".json", ".json5"):
+    if ext in JSON_EXTS:
         return "JSON"
     if ext in (".yaml", ".yml"):
         return "YAML"
-    if ext in (".txt", ".text", ".rst"):
+    if ext in TEXT_EXTS:
         return "Text"
-    if ext in (".html", ".htm"):
+    if ext in HTML_EXTS:
         return "HTML"
     if ext in (".csv", ".tsv"):
         return "CSV"
@@ -193,9 +211,17 @@ def is_instruction_file(rel: Path) -> bool:
 
 
 def is_tooling_file(rel: Path) -> bool:
-    """Return True if the file is a build script, test, cache or tool configuration."""
+    """Return True if the file is build or tool configuration, a script, or a test.
+
+    A dotfile is tooling whatever it is called: configuration and tool state is what carries a
+    leading dot, and DESIGN 11 step 3 admits no tooling into a collection - a dotfile is not a
+    document a reader came to read. Instruction files are named by `is_instruction_file`, which
+    answers first and owns the ones that are both.
+    """
     name = rel.name.lower()
     if name in TOOLING_EXACT_NAMES:
+        return True
+    if name.startswith("."):
         return True
     parts = [p.lower() for p in rel.parts]
     for d in TOOLING_DIR_NAMES:
@@ -211,7 +237,16 @@ def is_tooling_file(rel: Path) -> bool:
 
 
 def survey(root: Path) -> SurveyReport:
-    """Inspect every file in root without making any changes."""
+    """Inspect every file in root without making any changes.
+
+    A symbolic link is named in `SurveyReport.symlinks` and listed nowhere else: not hashed,
+    not offered for a role, not imported. A link's target can sit outside the collection, and
+    DESIGN 11 keeps the library pointing at nothing outside the vault, so copying through a
+    link would pull an unrelated file in and record it as the collection's own. Because the
+    link is not a surveyed file, a manifest cannot give it a role either: the validator refuses
+    a role for a path the survey did not report (M7 review 4). A directory that is itself a
+    link is not walked, and is named with its trailing slash.
+    """
     resolved = root.resolve()
     if not resolved.exists():
         raise SurveyError(f"path does not exist: {root}")
@@ -219,10 +254,23 @@ def survey(root: Path) -> SurveyReport:
         raise SurveyError(f"path is not a directory: {root}")
 
     collected: list[FileInfo] = []
+    links: list[str] = []
     for dirpath, dirnames, filenames in os.walk(resolved):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIR_NAMES)
+        walked: list[str] = []
+        for d in sorted(dirnames):
+            if d in SKIP_DIR_NAMES:
+                continue
+            linked = Path(dirpath) / d
+            if linked.is_symlink():
+                links.append(f"{linked.relative_to(resolved).as_posix()}/")
+                continue
+            walked.append(d)
+        dirnames[:] = walked
         for fname in sorted(filenames):
             full_path = Path(dirpath) / fname
+            if full_path.is_symlink():
+                links.append(full_path.relative_to(resolved).as_posix())
+                continue
             if not full_path.is_file():
                 continue
             rel = full_path.relative_to(resolved)
@@ -264,6 +312,7 @@ def survey(root: Path) -> SurveyReport:
         derived_pairs=pairs,
         instruction_files=instruction_files,
         tooling_files=tooling_files,
+        symlinks=tuple(sorted(links)),
     )
 
 
@@ -405,6 +454,13 @@ def format_survey(report: SurveyReport) -> str:
         lines.append("    none")
     else:
         for p in report.tooling_files:
+            lines.append(f"    - {p}")
+    lines.append("")
+    lines.append("Symlinks (never imported; a link's target may lie outside the collection):")
+    if not report.symlinks:
+        lines.append("    none")
+    else:
+        for p in report.symlinks:
             lines.append(f"    - {p}")
 
     lines.append("")

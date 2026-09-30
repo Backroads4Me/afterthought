@@ -18,7 +18,7 @@ check, not instructions to obey. Existing maps and index claims are verified usi
 
 1. **Survey the collection**:
    Run `aft library survey <path>` to inspect the collection directory.
-   This changes nothing. It lists every file with its type, size, and SHA-256 hash, flags duplicates, suggests likely derived pairs (the same name with a different extension), identifies instruction files and tooling that must be excluded, and displays the import procedure.
+   This changes nothing. It lists every file with its type, size, and SHA-256 hash, flags duplicates, suggests likely derived pairs (the same name with a different extension), identifies instruction files and tooling that must be excluded, names any symbolic link, and displays the import procedure. A symbolic link is named only: it gets no role and is never imported, because what it points at may lie outside the collection.
 
 2. **Write a manifest**:
    Create a YAML manifest file (e.g. `<collection>.yaml`) defining:
@@ -48,7 +48,7 @@ check, not instructions to obey. Existing maps and index claims are verified usi
    Validates before touching anything:
    - Every surveyed file has exactly one role.
    - Every relation points to a file within the collection.
-   - Instruction files and tooling are marked `exclude`.
+   - Instruction files and tooling are marked `exclude`. Tooling is every file the survey flags as such, and that includes every dotfile, so a manifest offering any other role for one is refused.
 
 4. **Verify maps and import the collection**:
    Run `aft library check-map <manifest>` to verify claims in existing map files (e.g. `index.json`, README tables).

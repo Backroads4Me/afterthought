@@ -199,3 +199,47 @@ def test_survey_file_path_fails(sample_collection: Path, capsys):
 
     captured = capsys.readouterr()
     assert "aft: path is not a directory:" in captured.err
+
+
+def test_a_symbolic_link_is_named_and_never_offered_as_a_file(
+    sample_collection: Path, tmp_path: Path
+) -> None:
+    """A link is not a file the collection owns, so it is named and left alone (M7 review 4).
+
+    A link's target can sit outside the collection: listing the link as a file offers it for a
+    role, and the import would then copy whatever it points at into the vault as the collection's
+    own text. A directory that is itself a link would bring a whole tree along the same way.
+    """
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_text("the plans for the bridge", encoding="utf-8")
+    (sample_collection / "link.txt").symlink_to(secret)
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    (outside_dir / "deep.txt").write_text("buried", encoding="utf-8")
+    (sample_collection / "linked-dir").symlink_to(outside_dir)
+
+    report = survey.survey(sample_collection)
+
+    listed = {f.path for f in report.files}
+    assert "link.txt" not in listed
+    assert not any(p.startswith("linked-dir/") for p in listed)
+    assert report.symlinks == ("link.txt", "linked-dir/")
+    secret_hash = survey.file_sha256(secret)
+    assert not any(f.sha256 == secret_hash for f in report.files), "a link's target was hashed"
+
+    formatted = survey.format_survey(report)
+    assert "link.txt" in formatted
+    assert "linked-dir/" in formatted
+
+
+def test_a_dotfile_is_tooling_whatever_it_is_named(sample_collection: Path) -> None:
+    """A dotfile is configuration or tool state, so it is flagged as tooling for exclusion."""
+    (sample_collection / ".env").write_text("API_TOKEN=notreal\n", encoding="utf-8")
+    (sample_collection / ".editorconfig").write_text("root = true\n", encoding="utf-8")
+
+    report = survey.survey(sample_collection)
+
+    assert {".editorconfig", ".env"} <= set(report.tooling_files)
+    by_path = {f.path: f for f in report.files}
+    assert by_path[".env"].is_tooling
+    assert not by_path["notes.txt"].is_tooling
