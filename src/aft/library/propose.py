@@ -1,6 +1,7 @@
 """Propose candidate facts from notes and excluded instruction files (BUILD-PLAN M7.6, DESIGN 11).
 
 The agent proposes facts with quotes mined from:
+- Document files with role `original`, `derived`, or `errata` (verified against `library/<name>/`).
 - Files with role `notes` in the collection manifest (verified against `library/<name>/`).
 - Excluded instruction files (e.g. `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, etc.).
 
@@ -17,7 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO
@@ -38,6 +39,7 @@ except ImportError:
     __version__ = "0.1.0"
 
 VERIFIED_QUOTES_FILE = "verified_quotes.json"
+DOCUMENT_ROLES = frozenset({"original", "derived", "errata"})
 
 
 class ProposeError(Exception):
@@ -257,25 +259,18 @@ def verify_fact(
             fact=fact, verified=False, reason="a fact statement cannot contain ~~"
         )
 
-    # 2. Source tag validation (DESIGN 11 step 5: imported facts enter as candidates)
-    if fact.source not in ("inferred", "suggested"):
-        if fact.source == "stated":
-            return FactVerificationResult(
-                fact=fact,
-                verified=False,
-                reason=(
-                    "stated facts cannot be proposed from library files; "
-                    "facts from notes and instruction files must enter as candidates "
-                    "(use 'inferred' or 'suggested')"
-                ),
-            )
+    # 2. Source tag validation (DESIGN 11 step 5, BUILD-PLAN F5)
+    if fact.source == "stated":
         return FactVerificationResult(
             fact=fact,
             verified=False,
-            reason=(
-                f"unsupported source tag {fact.source!r} for library facts; "
-                "expected 'inferred' or 'suggested'"
-            ),
+            reason="stated facts cannot be proposed from library files",
+        )
+    if fact.source not in ("inferred", "suggested", "observed", ""):
+        return FactVerificationResult(
+            fact=fact,
+            verified=False,
+            reason=f"unsupported source tag {fact.source!r} for library facts",
         )
 
     # 3. Kind validation
@@ -340,29 +335,26 @@ def verify_fact(
     role = entry.role
     is_inst = is_instruction_file(Path(fact.file))
 
-    # 8. Role check: only notes and excluded instruction files
-    if role == "notes":
+    # 8. Role check: documents, notes, and excluded instruction files (F5)
+    if role in DOCUMENT_ROLES or role == "notes":
         original_retained = True
-        # Notes must be checked against the imported copy that the resource names
-        # (library/<name>/<file>) and requires that import has already run.
+        # Non-excluded files must be checked against the imported copy in the vault
         if vault_path is None:
-            lib_file = None
+            target_file = (collection_root / target_p).resolve()
         else:
             lib_root = (vault_path / "library" / manifest.name).resolve()
             lib_file = (lib_root / fact.file).resolve()
             if not (lib_file.is_relative_to(lib_root) and lib_file.is_file()):
-                lib_file = None
-
-        if lib_file is None:
-            return FactVerificationResult(
-                fact=fact,
-                verified=False,
-                reason=(
-                    f"collection has not been imported yet: 'library/{manifest.name}/{fact.file}' "
-                    "not found in vault; run 'aft library import' before proposing facts from notes"
-                ),
-            )
-        target_file = lib_file
+                return FactVerificationResult(
+                    fact=fact,
+                    verified=False,
+                    reason=(
+                        f"collection has not been imported yet: "
+                        f"'library/{manifest.name}/{fact.file}' not found in vault; "
+                        "run 'aft library import' before proposing facts"
+                    ),
+                )
+            target_file = lib_file
     elif role == "exclude":
         if is_inst:
             original_retained = False
@@ -378,7 +370,8 @@ def verify_fact(
                 verified=False,
                 reason=(
                     f"file {fact.file!r} is excluded as tooling/data, not an instruction file; "
-                    "facts may only be proposed from notes and excluded instruction files"
+                    "facts may only be proposed from documents, notes, and "
+                    "excluded instruction files"
                 ),
             )
     else:
@@ -387,7 +380,7 @@ def verify_fact(
             verified=False,
             reason=(
                 f"file {fact.file!r} has role {role!r}; "
-                "facts may only be proposed from notes and excluded instruction files"
+                "facts may only be proposed from documents, notes, and excluded instruction files"
             ),
         )
 
@@ -403,9 +396,20 @@ def verify_fact(
             reason=f"cannot read file {fact.file!r}: {exc}",
         )
 
+    # Authority tagging (BUILD-PLAN F5, DESIGN 11):
+    # Documents from an authoritative collection are tagged [observed].
+    # All other imported facts (reference collections, notes, excluded instruction files)
+    # enter as [inferred] or [suggested].
+    if manifest.authority == "authoritative" and role in DOCUMENT_ROLES:
+        effective_source = "observed"
+    else:
+        effective_source = "suggested" if fact.source == "suggested" else "inferred"
+
+    verified_fact = replace(fact, source=effective_source)
+
     if quote_norm in evidence._spaced(file_text):
         return FactVerificationResult(
-            fact=fact,
+            fact=verified_fact,
             verified=True,
             original_retained=original_retained,
         )
@@ -417,7 +421,7 @@ def verify_fact(
             extracted_text = "\n".join(t for _, t in chunks)
             if quote_norm in evidence._spaced(extracted_text):
                 return FactVerificationResult(
-                    fact=fact,
+                    fact=verified_fact,
                     verified=True,
                     original_retained=original_retained,
                 )

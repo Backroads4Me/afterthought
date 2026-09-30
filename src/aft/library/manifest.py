@@ -20,6 +20,8 @@ from aft.library import survey
 
 ROLES = frozenset({"original", "derived", "errata", "notes", "exclude"})
 RELATIONS = frozenset({"derived-from", "errata-for", "supersedes"})
+AUTHORITIES = frozenset({"authoritative", "reference"})
+DEFAULT_AUTHORITY = "reference"
 
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -61,6 +63,7 @@ class Manifest:
     projects: tuple[str, ...]
     path: Path
     files: dict[str, FileEntry]
+    authority: str = DEFAULT_AUTHORITY
 
 
 def normalize_relation_name(name: str) -> str:
@@ -193,6 +196,21 @@ def load_manifest(
 
             files[fpath] = FileEntry(path=fpath, role=role, relations=relations)
 
+    # Collection authority (DESIGN 11, BUILD-PLAN F5)
+    authority_val = data.get("authority")
+    if authority_val is None:
+        authority = DEFAULT_AUTHORITY
+    elif not isinstance(authority_val, str):
+        errors.append(f"authority must be a string, got {type(authority_val).__name__}")
+        authority = DEFAULT_AUTHORITY
+    else:
+        authority_norm = authority_val.strip().lower()
+        if authority_norm not in AUTHORITIES:
+            errors.append(f"authority must be one of {sorted(AUTHORITIES)}, got {authority_val!r}")
+            authority = DEFAULT_AUTHORITY
+        else:
+            authority = authority_norm
+
     manifest = Manifest(
         name=name,
         title=title,
@@ -200,6 +218,7 @@ def load_manifest(
         projects=projects,
         path=collection_path,
         files=files,
+        authority=authority,
     )
     return manifest, errors
 
@@ -207,6 +226,9 @@ def load_manifest(
 def validate_manifest(manifest: Manifest) -> list[str]:
     """Validate a loaded manifest against its surveyed collection directory."""
     errors: list[str] = []
+
+    if manifest.authority not in AUTHORITIES:
+        errors.append(f"authority must be one of {sorted(AUTHORITIES)}, got {manifest.authority!r}")
 
     try:
         report = survey.survey(manifest.path)

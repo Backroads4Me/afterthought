@@ -25,9 +25,12 @@ def library_env(tmp_path: Path, initialized: Config) -> tuple[Config, Path, Path
     vault_dir = cfg.vault
 
     # Register project
-    reg = Registry(vault_dir / "registry.yaml")
-    reg.add("rv-project", "RV Project")
-    reg.add("widget", "Widget Project")
+    reg = Registry.load(vault_dir / "registry.yaml")
+    if not reg.by_slug("rv-project"):
+        reg.add("rv-project", "RV Project")
+    if not reg.by_slug("widget"):
+        reg.add("widget", "Widget Project")
+    reg.save()
 
     # Create collection
     col_dir = tmp_path / "sample_rvc"
@@ -264,7 +267,7 @@ def test_propose_disallowed_roles_rejected(library_env):
         {
             "statement": "RV-C spec is authoritative.",
             "quote": "Authoritative RV-C specification 2023.",
-            "file": "rvc_spec.txt",  # role: original
+            "file": "rvc_spec.txt",  # role: original, but not imported yet
             "source": "inferred",
         },
         {
@@ -281,8 +284,16 @@ def test_propose_disallowed_roles_rejected(library_env):
     assert len(res.dropped_facts) == 2
     assert len(res.digests_written) == 0
 
-    assert "has role 'original'" in res.dropped_facts[0].reason
+    assert "collection has not been imported yet" in res.dropped_facts[0].reason
     assert "excluded as tooling/data" in res.dropped_facts[1].reason
+
+    # Once imported into vault library, document files (original, derived, errata) can be proposed!
+    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
+    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
+
+    res2 = propose.propose_facts(manifest_file, [proposals[0]], config=cfg)
+    assert len(res2.verified_facts) == 1
+    assert len(res2.dropped_facts) == 0
 
 
 def test_propose_quote_not_found_dropped(library_env):
@@ -639,6 +650,7 @@ def test_excluded_file_fact_verifies_on_page_and_later_runs(library_env):
 
     with patch("aft.dream.decide.decide", side_effect=fake_decide):
         rep = apply.run_project(cfg, "rv-project", [digest_path])
+    assert rep.rejected == []
 
     assert rep.rejected == []
 
@@ -751,3 +763,437 @@ def test_propose_cli(library_env, tmp_path, capsys):
     # 3. Invalid facts file
     code = cli.main(["library", "propose", str(manifest_file), str(tmp_path / "nonexistent.yaml")])
     assert code == 2
+
+
+def test_authoritative_document_fact_enters_observed_and_active_in_dream(library_env, tmp_path):
+    """An authoritative document fact enters as [observed] and goes active in dream (F5)."""
+    cfg, _, col_dir = library_env
+
+    manifest_data = {
+        "name": "rvc",
+        "title": "RV-C Standard",
+        "description": "RV-C specifications and notes",
+        "authority": "authoritative",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    auth_manifest = tmp_path / "auth.yaml"
+    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
+    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
+
+    proposals = [
+        {
+            "statement": "RV-C specification 2023 is the governing protocol standard.",
+            "quote": "Authoritative RV-C specification 2023.",
+            "file": "rvc_spec.txt",
+            "kind": "fact",
+        }
+    ]
+
+    res = propose.propose_facts(auth_manifest, proposals, config=cfg)
+    assert len(res.verified_facts) == 1
+    vf = res.verified_facts[0]
+    assert vf.fact.source == "observed"
+
+    digest_rel = res.digests_written[0]
+    digest_path = cfg.vault / digest_rel
+    d_text = digest_path.read_text(encoding="utf-8")
+    assert "[observed]" in d_text
+
+    def fake_decide(config, new_fact, quote, slug):
+        return Proposal(
+            new_fact=new_fact,
+            lines=(),
+            decision=rules.Decision(action="add"),
+            target=None,
+        )
+
+    with patch("aft.dream.decide.decide", side_effect=fake_decide):
+        rep = apply.run_project(cfg, "rv-project", [digest_path])
+
+    assert rep.rejected == []
+    assert len(rep.added) == 1
+
+    overview = cfg.vault / "projects" / "rv-project" / "overview.md"
+    assert overview.is_file()
+    ov_text = overview.read_text(encoding="utf-8")
+    parsed_ov = page.parse(ov_text, overview)
+
+    facts = [
+        f
+        for f in parsed_ov.facts
+        if f.statement == "RV-C specification 2023 is the governing protocol standard."
+    ]
+    assert len(facts) == 1
+    assert facts[0].kind == "fact"
+    assert facts[0].source == "observed"
+
+
+def test_reference_document_fact_stays_candidate_in_dream(library_env, tmp_path):
+    """The same document fact from a reference collection stays a candidate (F5)."""
+    cfg, _, col_dir = library_env
+
+    manifest_data = {
+        "name": "rvc",
+        "title": "RV-C Standard",
+        "description": "RV-C specifications and notes",
+        "authority": "reference",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    ref_manifest = tmp_path / "ref.yaml"
+    ref_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
+    lib_spec.write_text("Authoritative RV-C specification 2023.\n", encoding="utf-8")
+
+    proposals = [
+        {
+            "statement": "RV-C specification 2023 is the governing protocol standard.",
+            "quote": "Authoritative RV-C specification 2023.",
+            "file": "rvc_spec.txt",
+            "kind": "fact",
+        }
+    ]
+
+    res = propose.propose_facts(ref_manifest, proposals, config=cfg)
+    assert len(res.verified_facts) == 1
+    vf = res.verified_facts[0]
+    assert vf.fact.source == "inferred"
+
+    digest_rel = res.digests_written[0]
+    digest_path = cfg.vault / digest_rel
+    d_text = digest_path.read_text(encoding="utf-8")
+    assert "[inferred]" in d_text
+
+    def fake_decide(config, new_fact, quote, slug):
+        return Proposal(
+            new_fact=new_fact,
+            lines=(),
+            decision=rules.Decision(action="add"),
+            target=None,
+        )
+
+    with patch("aft.dream.decide.decide", side_effect=fake_decide):
+        rep = apply.run_project(cfg, "rv-project", [digest_path])
+
+    assert rep.rejected == []
+
+    overview = cfg.vault / "projects" / "rv-project" / "overview.md"
+    assert overview.is_file()
+    ov_text = overview.read_text(encoding="utf-8")
+    parsed_ov = page.parse(ov_text, overview)
+
+    candidate_facts = [
+        f
+        for f in parsed_ov.facts
+        if f.statement == "RV-C specification 2023 is the governing protocol standard."
+    ]
+    assert len(candidate_facts) == 1
+    assert candidate_facts[0].kind is None
+    assert candidate_facts[0].source == "inferred"
+
+
+def test_authoritative_notes_fact_stays_candidate_in_dream(library_env, tmp_path):
+    """A notes-file fact in an authoritative collection stays a candidate (F5)."""
+    cfg, _, col_dir = library_env
+
+    manifest_data = {
+        "name": "rvc",
+        "title": "RV-C Standard",
+        "description": "RV-C specifications and notes",
+        "authority": "authoritative",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    auth_manifest = tmp_path / "auth.yaml"
+    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    proposals = [
+        {
+            "statement": "Always connect ground before positive terminal.",
+            "quote": "Always connect ground before positive terminal.",
+            "file": "notes.md",
+            "kind": "lesson",
+        }
+    ]
+
+    res = propose.propose_facts(auth_manifest, proposals, config=cfg)
+    assert len(res.verified_facts) == 1
+    assert res.verified_facts[0].fact.source == "inferred"
+
+    digest_rel = res.digests_written[0]
+    digest_path = cfg.vault / digest_rel
+
+    def fake_decide(config, new_fact, quote, slug):
+        return Proposal(
+            new_fact=new_fact,
+            lines=(),
+            decision=rules.Decision(action="add"),
+            target=None,
+        )
+
+    with patch("aft.dream.decide.decide", side_effect=fake_decide):
+        rep = apply.run_project(cfg, "rv-project", [digest_path])
+
+    assert rep.rejected == []
+
+    overview = cfg.vault / "projects" / "rv-project" / "overview.md"
+    ov_text = overview.read_text(encoding="utf-8")
+    parsed_ov = page.parse(ov_text, overview)
+    candidate_facts = [
+        f
+        for f in parsed_ov.facts
+        if f.statement == "Always connect ground before positive terminal."
+    ]
+    assert len(candidate_facts) == 1
+    assert candidate_facts[0].kind is None
+
+
+def test_authoritative_fact_contradicting_stated_decision_becomes_needs_you(library_env, tmp_path):
+    """An authoritative fact contradicting a stated decision becomes needs you (F5)."""
+    cfg, _, col_dir = library_env
+
+    overview_path = cfg.vault / "projects" / "rv-project" / "overview.md"
+    overview_path.parent.mkdir(parents=True, exist_ok=True)
+    reg = Registry.load(cfg.vault / "registry.yaml")
+    proj = reg.by_slug("rv-project")
+    proj_id = proj.id if proj else "p_rv-project"
+    standing_content = (
+        f"---\n"
+        f"type: Project\n"
+        f"title: rv-project\n"
+        f"sources:\n"
+        f"  - id: s0\n"
+        f"    resource: aft://session/user/seed#turn1\n"
+        f"    quote: We decided to use 500 kbps.\n"
+        f"aft:\n"
+        f"  project: {proj_id}\n"
+        f"---\n\n"
+        f"# rv-project\n\n"
+        f"## Decisions\n\n"
+        f"- We decided on CAN baud rate 500 kbps. [stated] 2026-09-01 [^s0]\n"
+    )
+    overview_path.write_text(standing_content, encoding="utf-8")
+
+    manifest_data = {
+        "name": "rvc",
+        "title": "RV-C Standard",
+        "description": "RV-C specifications and notes",
+        "authority": "authoritative",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    auth_manifest = tmp_path / "auth.yaml"
+    auth_manifest.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    lib_spec = cfg.vault / "library" / "rvc" / "rvc_spec.txt"
+    lib_spec.write_text("All CAN communication must use 250 kbps baud rate.\n", encoding="utf-8")
+
+    proposals = [
+        {
+            "statement": "CAN communication must use 250 kbps baud rate.",
+            "quote": "All CAN communication must use 250 kbps baud rate.",
+            "file": "rvc_spec.txt",
+            "kind": "fact",
+        }
+    ]
+
+    res = propose.propose_facts(auth_manifest, proposals, config=cfg)
+    assert len(res.verified_facts) == 1
+    assert res.verified_facts[0].fact.source == "observed"
+
+    digest_rel = res.digests_written[0]
+    digest_path = cfg.vault / digest_rel
+
+    from aft.dream import decide
+
+    def fake_decide(config, new_fact, quote, slug):
+        standing_page = page.parse(overview_path.read_text(encoding="utf-8"), overview_path)
+        dec_line = [f for f in standing_page.facts if f.kind == "decision"][0]
+        target_line = decide.Line(
+            label="L1",
+            path="projects/rv-project/overview.md",
+            project=proj_id,
+            fact=dec_line,
+            sources={
+                "s0": {
+                    "resource": "aft://session/user/seed#turn1",
+                    "quote": "We decided to use 500 kbps.",
+                }
+            },
+        )
+        return Proposal(
+            new_fact=new_fact,
+            lines=(target_line,),
+            decision=rules.Decision(
+                action="conflict", line="L1", reason="specification requires 250 kbps"
+            ),
+            target=target_line,
+        )
+
+    with patch("aft.dream.decide.decide", side_effect=fake_decide):
+        rep = apply.run_project(cfg, "rv-project", [digest_path])
+
+    assert len(rep.questions) == 1
+    q = rep.questions[0]
+    assert "CAN communication must use 250 kbps baud rate" in q.new_statement
+    assert "We decided on CAN baud rate 500 kbps." in q.target_statement
+
+    ov_text = overview_path.read_text(encoding="utf-8")
+    assert "[!question]" in ov_text
+
+
+def test_stated_source_always_refused_on_propose(library_env, tmp_path):
+    """[stated] is always refused on propose from library files (F5)."""
+    cfg, manifest_file, col_dir = library_env
+
+    auth_data = {
+        "name": "rvc-auth",
+        "title": "RV-C Standard Auth",
+        "description": "RV-C specifications and notes",
+        "authority": "authoritative",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    auth_file = tmp_path / "auth.yaml"
+    auth_file.write_text(yaml.safe_dump(auth_data), encoding="utf-8")
+
+    lib_dir = cfg.vault / "library" / "rvc-auth"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    (lib_dir / "rvc_spec.txt").write_text(
+        "Authoritative RV-C specification 2023.\n", encoding="utf-8"
+    )
+    (lib_dir / "notes.md").write_text(
+        "Always connect ground before positive terminal.\n", encoding="utf-8"
+    )
+
+    # 1. Propose stated from document file in authoritative collection
+    proposals_doc = [
+        {
+            "statement": "RV-C spec is authoritative.",
+            "quote": "Authoritative RV-C specification 2023.",
+            "file": "rvc_spec.txt",
+            "source": "stated",
+        }
+    ]
+    res_doc = propose.propose_facts(auth_file, proposals_doc, config=cfg)
+    assert len(res_doc.verified_facts) == 0
+    assert len(res_doc.dropped_facts) == 1
+    assert "stated facts cannot be proposed from library files" in res_doc.dropped_facts[0].reason
+
+    # 2. Propose stated from notes file in authoritative collection
+    proposals_notes = [
+        {
+            "statement": "Connect ground before positive.",
+            "quote": "Always connect ground before positive terminal.",
+            "file": "notes.md",
+            "source": "stated",
+        }
+    ]
+    res_notes = propose.propose_facts(auth_file, proposals_notes, config=cfg)
+    assert len(res_notes.verified_facts) == 0
+    assert len(res_notes.dropped_facts) == 1
+    assert "stated facts cannot be proposed from library files" in res_notes.dropped_facts[0].reason
+
+    # 3. Propose stated from reference collection
+    res_ref = propose.propose_facts(manifest_file, proposals_notes, config=cfg)
+    assert len(res_ref.verified_facts) == 0
+    assert len(res_ref.dropped_facts) == 1
+    assert "stated facts cannot be proposed from library files" in res_ref.dropped_facts[0].reason
+
+
+def test_propose_derived_and_errata_document_roles(library_env, tmp_path):
+    """Document facts from derived and errata roles are supported and tagged [observed] (F5)."""
+    cfg, _, col_dir = library_env
+
+    (col_dir / "clean_spec.md").write_text(
+        "# Clean Spec\nNormalized RV-C 2023.\n", encoding="utf-8"
+    )
+    (col_dir / "errata.md").write_text(
+        "# Errata\nCorrection: DGN 456 uses big-endian polarity.\n", encoding="utf-8"
+    )
+
+    manifest_data = {
+        "name": "rvc-docs",
+        "title": "RV-C Docs",
+        "description": "Full docs",
+        "authority": "authoritative",
+        "projects": ["rv-project"],
+        "path": str(col_dir),
+        "files": {
+            "rvc_spec.txt": "original",
+            "clean_spec.md": {
+                "role": "derived",
+                "relations": {"derived-from": "rvc_spec.txt"},
+            },
+            "errata.md": {
+                "role": "errata",
+                "relations": {"errata-for": "rvc_spec.txt"},
+            },
+            "notes.md": "notes",
+            "AGENTS.md": "exclude",
+            "tools/build.sh": "exclude",
+        },
+    }
+    m_path = tmp_path / "docs.yaml"
+    m_path.write_text(yaml.safe_dump(manifest_data), encoding="utf-8")
+
+    lib_dir = cfg.vault / "library" / "rvc-docs"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    (lib_dir / "clean_spec.md").write_text(
+        "# Clean Spec\nNormalized RV-C 2023.\n", encoding="utf-8"
+    )
+    (lib_dir / "errata.md").write_text(
+        "# Errata\nCorrection: DGN 456 uses big-endian polarity.\n", encoding="utf-8"
+    )
+
+    proposals = [
+        {
+            "statement": "RV-C 2023 is normalized in clean spec.",
+            "quote": "Normalized RV-C 2023.",
+            "file": "clean_spec.md",
+        },
+        {
+            "statement": "DGN 456 uses big-endian polarity.",
+            "quote": "Correction: DGN 456 uses big-endian polarity.",
+            "file": "errata.md",
+        },
+    ]
+
+    res = propose.propose_facts(m_path, proposals, config=cfg)
+    assert len(res.verified_facts) == 2
+    assert res.verified_facts[0].fact.source == "observed"
+    assert res.verified_facts[1].fact.source == "observed"
