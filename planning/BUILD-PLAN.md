@@ -898,6 +898,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   placeholder refuses it, the model sees labels and the page records ids, an ungrounded
   handoff item is left out, and every call stays under the cap. Review checkpoint: yes
   (prompt and schema).
+- **F35 Sessions of no project are digested unfiled** (ruling 2026-10-01). DESIGN 7. A
+  session whose directory resolves to no project, or is gone with no record, is archived
+  under no project and digested to `digests/_unfiled/` (titled "Unfiled") instead of
+  failing; `aft redigest` files such a session there too. Dreaming the `_unfiled` digests
+  puts only global facts to the decision; each project fact is skipped and reported, no
+  project is registered, and no `projects/_unfiled/` is written. An event in such a
+  directory counts as `_unfiled` activity for the quiet period. Tests: a directory of no
+  project and a deleted one are digested unfiled with no failure; an unfiled dream adds the
+  global fact and skips the project fact; redigest files unfiled; the quiet period sees
+  unfiled activity.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

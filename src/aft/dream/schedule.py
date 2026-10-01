@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aft import keys, page, pagewrite, queue, vault
+from aft import digest, keys, page, pagewrite, queue, vault
 from aft.config import Config
 from aft.dream import shortterm
 from aft.dream.apply import ProjectRunReport
@@ -358,8 +358,9 @@ def last_activity(config: Config) -> dict[str, datetime]:
     for cwd, moment in queue.last_events(config).items():
         if not cwd.is_dir():
             continue
-        slug = keys.resolve(cwd, registry, config.host).slug
-        if slug and (slug not in newest or moment > newest[slug]):
+        # A directory of no project files its sessions as unfiled (DESIGN 7).
+        slug = keys.resolve(cwd, registry, config.host).slug or digest.UNFILED
+        if slug not in newest or moment > newest[slug]:
             newest[slug] = moment
     return newest
 

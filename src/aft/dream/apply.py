@@ -142,6 +142,8 @@ class RolledOffLine:
     state: str
 
 
+UNFILED_SKIP = "a session of no project: only its global facts become memory"
+
 LIFT_CONFIRMED = "a later session's long-term fact confirms it"
 LIFT_OUTLASTED = "its sources span the short-term window"
 
@@ -185,6 +187,8 @@ def run_project(
     registry = Registry.load(config.registry_path)
     project = registry.by_slug(slug)
     run_project_id = project.id if project else None
+    # Digests of sessions that belong to no project: only their global facts are memory.
+    unfiled = slug == digest.UNFILED
 
     now = now or datetime.now(UTC)
     today = now.date().isoformat()
@@ -591,6 +595,11 @@ def run_project(
             for fact in parsed_page.facts:
                 meta = facts_meta.get(fact.statement, {})
                 scope = meta.get("scope", "project")
+                if unfiled and scope != "global":
+                    # A session of no project has no project page for this fact; it stays
+                    # in the digest, where search finds it (DESIGN 7).
+                    report.skips.append(SkipFact(statement=fact.statement, reason=UNFILED_SKIP))
+                    continue
                 explicit_correction = bool(meta.get("explicit_correction", False))
 
                 new_fact = rules.NewFact(
@@ -657,12 +666,13 @@ def run_project(
         oversize = maintain.check_oversize(vault_path, project_pages)
         report.oversize_pages.extend(oversize)
 
-        maintain.regenerate_index(
-            vault_path,
-            slug,
-            project.title if project else slug.capitalize(),
-            record_write=record_write,
-        )
+        if not unfiled:
+            maintain.regenerate_index(
+                vault_path,
+                slug,
+                project.title if project else slug.capitalize(),
+                record_write=record_write,
+            )
         maintain.ensure_root_index(vault_path, record_write=record_write)
         maintain.append_log(vault_path, slug, f"{today}: dream {slug}", record_write=record_write)
 
