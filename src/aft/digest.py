@@ -227,9 +227,13 @@ def labelled(entries: Sequence[Entry]) -> dict[str, Entry]:
 
 
 def _cited(part: Sequence[Entry]) -> dict[str, Entry]:
-    """The entries of a part by every name an answer may cite one by: its label, and its
-    own id, which a model may copy from a quoted line instead."""
-    return {**{entry.id: entry for entry in part}, **labelled(part)}
+    """The entries of a part by every name an answer may cite one by: its label, the
+    label's number without its ``#``, which a model writes as often as the label, and the
+    entry's own id, which a model may copy from a quoted line instead. An entry's own id
+    wins over a bare number that happens to spell it."""
+    labels = labelled(part)
+    numbers = {label.removeprefix(LABEL_PREFIX): entry for label, entry in labels.items()}
+    return {**numbers, **{entry.id: entry for entry in part}, **labels}
 
 
 def split_parts(entries: Sequence[Entry], budget: int) -> list[list[Entry]]:
