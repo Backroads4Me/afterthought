@@ -467,9 +467,9 @@ structured output:
 {
   "summary": "2-4 sentences on what happened",
   "handoff": {
-    "in_flight": "what was being worked on when the session ended",
-    "failed": ["approaches tried that did not work"],
-    "open": ["questions and next steps left open"]
+    "in_flight": {"text": "what was being worked on when the session ended", "entry": "#41"},
+    "failed": [{"text": "an approach tried that did not work", "entry": "#17"}],
+    "open": [{"text": "a question or next step left open", "entry": "#40"}]
   },
   "facts": [
     {
@@ -478,7 +478,7 @@ structured output:
       "source": "stated",
       "term": "long",
       "quote": "exact words copied from the transcript",
-      "entry": "entry-148",
+      "entry": "#12",
       "scope": "project",
       "anchors": []
     }
@@ -500,10 +500,11 @@ A summary and a handoff carry no quote, so they are trusted only as far as the a
 came in matches its chunk. The chunk is at most 12,000 tokens, counted at three characters
 to a token so the estimate errs high: a small model given more loses track of it. Each
 entry is shown under a short label (`#1`, `#2`), which every fact and every handoff item
-names, and the script maps the label back to the entry's own id. An answer with a fact
-citing an entry the chunk does not hold, or a placeholder (text with no word in it, such as
-`...`) where a summary, a handoff item or a fact should be, is about something other than
-the chunk: it is asked for once more, and a second such answer fails the job, leaving its
+names, and the script maps the label back to the entry's own id; an entry's id copied
+exactly is accepted too. An answer with a fact citing an entry the chunk does not hold, an
+empty summary, fact statement or quote, or a placeholder (written text with no word in it,
+such as `...`) where a summary, a handoff item or a fact should be, is about something
+other than the chunk: it is asked for once more, and a second such answer fails the job, leaving its
 entries to be read again. The script then:
 
 - drops a handoff item whose entry is not one of the chunk's

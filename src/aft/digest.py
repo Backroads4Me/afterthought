@@ -106,7 +106,8 @@ class DigestError(Exception):
 
 
 class AnswerRefused(DigestError):
-    """The endpoint answered this chunk and its answer failed the digest schema.
+    """The endpoint answered this chunk and its answer failed the digest schema, or twice
+    did not match the chunk it was given (``mismatch``).
 
     The endpoint is up and the fault is this chunk's, so the job is marked failed with the
     model's own words as its reason, its watermark stays where it was, and the run moves on
@@ -570,7 +571,8 @@ _WORDLESS = re.compile(r"\w")
 
 
 def placeholder(text: str) -> bool:
-    """Whether a value is text with no word in it (finding T17)."""
+    """Whether a value is written but holds no word, such as "..." (finding T17). Empty
+    text is not a placeholder: an empty handoff item means nothing to hand off."""
     return bool(text.strip()) and not _WORDLESS.search(text)
 
 
@@ -583,16 +585,21 @@ def mismatch(answer: dict, part: Sequence[Entry]) -> str | None:
     could check, so the whole answer goes, not only the facts that show it.
     """
     cited = _cited(part)
+    if not answer["summary"].strip() or placeholder(answer["summary"]):
+        # A chunk reaches the model only past the two-prompt floor, so it always has
+        # something to summarize; a summary of nothing is a model that did not read it.
+        return "the summary is empty or a placeholder"
     for fact in answer["facts"]:
         if fact["entry"] not in cited:
             return f"a fact cites entry {fact['entry']!r}, which is not in the chunk"
-        if placeholder(fact["statement"]) or placeholder(fact["quote"]):
-            return "a fact is a placeholder"
+        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
+            return "a fact is empty or a placeholder"
     handoff = answer["handoff"]
-    texts = [answer["summary"], handoff["in_flight"]["text"]]
+    # An empty handoff item is how the prompt says nothing is left to hand off.
+    texts = [handoff["in_flight"]["text"]]
     texts += [item["text"] for item in [*handoff["failed"], *handoff["open"]]]
     if any(placeholder(text) for text in texts):
-        return "the summary or handoff is a placeholder"
+        return "the handoff is a placeholder"
     return None
 
 

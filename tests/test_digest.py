@@ -673,6 +673,7 @@ def test_an_answer_citing_an_entry_the_chunk_never_held_is_refused(session: Sess
         fake.stop()
     assert len(fake.requests) == 2
     assert pages(cfg) == []
+    assert watermark(cfg) is None
 
 
 def test_an_answer_that_matches_on_the_second_asking_is_kept(session: Session):
@@ -682,22 +683,50 @@ def test_an_answer_that_matches_on_the_second_asking_is_kept(session: Session):
     ]
 
 
+def with_handoff(key: str, text: str) -> dict:
+    bad = answer(said())
+    bad["handoff"][key] = [{"text": text, "entry": "#1"}]
+    return bad
+
+
 @pytest.mark.parametrize(
     "bad",
     [
         answer(said(statement="...")),
+        answer(said(quote="…")),
+        answer(said(statement=" ")),
         answer(said(), summary="..."),
+        answer(said(), summary=""),
         answer(said(), in_flight="…"),
+        with_handoff("failed", "--"),
+        with_handoff("open", "..."),
     ],
 )
-def test_a_placeholder_answer_is_refused(session: Session, bad: dict):
+def test_a_placeholder_answer_is_refused_and_its_entries_stay_unread(session: Session, bad: dict):
     fake, cfg = serve(session.cfg, bad, bad)
     try:
         with pytest.raises(digest.AnswerRefused, match="placeholder"):
             digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
     finally:
         fake.stop()
+    assert len(fake.requests) == 2
     assert pages(cfg) == []
+    assert watermark(cfg) is None
+
+
+def test_the_chunk_is_counted_at_three_characters_and_the_answer_has_8000_tokens(
+    session: Session,
+):
+    """F34's sizing: a transcript runs nearer three characters to a token than four, and an
+    answer cut off at its cap is lost whole."""
+    assert digest.tokens("x" * 3_000) == 1_000
+    assert digest.MAX_CHUNK_TOKENS == 12_000
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert fake.requests[0]["max_tokens"] == 8_000
 
 
 def test_the_model_sees_short_labels_and_the_page_records_entry_ids(session: Session):
