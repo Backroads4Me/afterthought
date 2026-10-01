@@ -744,6 +744,12 @@ def test_the_model_sees_short_labels_and_the_page_records_entry_ids(session: Ses
     assert f"aft://session/claude/{SESSION}#e1" in (session.cfg.vault / wrote.path).read_text()
 
 
+def test_a_label_written_without_its_hash_is_read_as_the_label(session: Session):
+    """A model writes "1" for "#1" as often as not; that names the entry, not a new one."""
+    wrote = digest_once(session, answer(said(entry="1")))
+    assert [fact.entry for fact in wrote.facts] == ["e1"]
+
+
 def test_a_handoff_item_naming_no_entry_of_the_chunk_is_left_out(session: Session):
     """DESIGN 8: each handoff item names the entry it comes from; one naming none of the
     chunk's entries is not grounded in it."""
