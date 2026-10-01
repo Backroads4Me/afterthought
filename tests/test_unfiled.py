@@ -7,7 +7,7 @@ the digest, and are reported.
 
 from __future__ import annotations
 
-from aft import digest, evidence, lint
+from aft import digest, evidence, lint, page
 from aft.dream import apply, schedule
 from aft.readers import USER, Entry
 from aft.registry import Registry
@@ -15,6 +15,12 @@ from fakes.model_server import Reply
 from test_apply import NOW, TODAY, config_with_fake, fake, reply, write_digest
 
 __all__ = ["fake"]  # the fixture, imported so pytest finds it here
+
+EMPTY_ANSWER = {
+    "summary": "Talked about punctuation.",
+    "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+    "facts": [],
+}
 
 
 def unfiled_digest(cfg) -> None:
@@ -80,20 +86,48 @@ def test_redigest_files_a_session_of_no_project_as_unfiled(initialized, home, fa
         Entry(id="e2", time=NOW, role=USER, text="Thanks, that works.", is_error=False),
     ]
     evidence.store(cfg, agent="claude", session_id="loose-1", project_id=None, entries=entries)
-    fake.script = [
-        Reply(
-            content={
-                "summary": "Talked about punctuation.",
-                "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
-                "facts": [],
-            }
-        )
-    ]
+    fake.script = [Reply(content=EMPTY_ANSWER)]
     wrote = digest.redigest(cfg, "loose-1", now=NOW)
     assert wrote.path.startswith(f"digests/{digest.UNFILED}/")
+    frontmatter = page.split_frontmatter((cfg.vault / wrote.path).read_text())[0]
+    assert frontmatter["title"].startswith("Unfiled session ")
+    assert "project" not in frontmatter["aft"]
 
 
-def test_a_session_in_a_directory_of_no_project_counts_as_unfiled_activity(
+def test_redigest_files_an_unregistered_repository_under_its_own_name(
+    initialized, home, fake, tmp_path
+):
+    """A session in a repository the registry has not met has no project id in the
+    archive, and its directory still names it."""
+    from aft import queue
+    from aft.events import SESSION_END, SessionEvent
+    from conftest import make_repo
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    repo = make_repo(tmp_path / "gizmo")
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="repo-1",
+            cwd=repo,
+            transcript_path=tmp_path / "t.jsonl",
+            time=NOW,
+            detail=None,
+        ),
+    )
+    entries = [
+        Entry(id="e1", time=NOW, role=USER, text="Keep plain hyphens.", is_error=False),
+        Entry(id="e2", time=NOW, role=USER, text="Thanks, that works.", is_error=False),
+    ]
+    evidence.store(cfg, agent="claude", session_id="repo-1", project_id=None, entries=entries)
+    fake.script = [Reply(content=EMPTY_ANSWER)]
+    wrote = digest.redigest(cfg, "repo-1", now=NOW)
+    assert wrote.path.startswith("digests/gizmo/")
+
+
+def test_an_unfiled_dream_waits_while_an_unfiled_session_is_active(
     initialized, home, fake, tmp_path, monkeypatch
 ):
     """The quiet period holds for unfiled sessions too, so a dream never takes up a session
@@ -103,5 +137,9 @@ def test_a_session_in_a_directory_of_no_project_counts_as_unfiled_activity(
     cfg = config_with_fake(home, initialized.vault, fake)
     nowhere = (tmp_path / "loose").resolve()
     nowhere.mkdir()
+    unfiled_digest(cfg)
     monkeypatch.setattr(queue, "last_events", lambda config: {nowhere: NOW})
-    assert schedule.last_activity(cfg) == {digest.UNFILED: NOW}
+    run = schedule.run(cfg, now=NOW)
+    assert digest.UNFILED in run.active
+    assert digest.UNFILED not in run.ran
+    assert fake.requests == []

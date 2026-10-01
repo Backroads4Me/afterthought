@@ -1166,8 +1166,15 @@ def redigest(
                         project = registry.by_slug(slug)
                         break
 
+    if slug is None and cwd is not None and Path(cwd).is_dir():
+        # An unregistered repository has a name of its own and no project id to record it.
+        try:
+            slug = keys.resolve(Path(cwd), registry, config.host).slug
+        except GitError:
+            slug = None
+
     if slug is None:
-        # A session of no project is digested as unfiled, as it was the first time (DESIGN 7).
+        # A session of no project is digested as unfiled (DESIGN 7).
         slug = UNFILED
 
     if agent is None:
