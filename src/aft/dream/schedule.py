@@ -31,6 +31,7 @@ from typing import Any
 
 from aft import keys, page, pagewrite, queue, vault
 from aft.config import Config
+from aft.dream import shortterm
 from aft.dream.apply import ProjectRunReport
 from aft.gitutil import git
 from aft.registry import Registry
@@ -341,18 +342,7 @@ def waiting_digests(vault_path: Path) -> dict[str, list[Path]]:
     }
 
 
-def _written_at(frontmatter: dict) -> str:
-    """A digest's ``generated.at`` as a sortable UTC string, empty when it has none.
-
-    YAML reads an unquoted timestamp as a datetime and a quoted one as text, so both are
-    brought to the one form M2.6 writes.
-    """
-    generated = frontmatter.get("generated")
-    at = generated.get("at") if isinstance(generated, dict) else None
-    if isinstance(at, datetime):
-        at = at if at.tzinfo else at.replace(tzinfo=UTC)
-        return f"{at.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}"
-    return at if isinstance(at, str) else ""
+_written_at = shortterm.written_at
 
 
 def last_activity(config: Config) -> dict[str, datetime]:

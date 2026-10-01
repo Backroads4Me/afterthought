@@ -57,6 +57,8 @@ class EvidenceConfig:
 class DreamConfig:
     interval_minutes: int = 30
     quiet_minutes: int = 15
+    # DESIGN 6: how many of a project's sessions its short-term memory covers.
+    short_term_sessions: int = 5
 
 
 @dataclass(frozen=True)
@@ -142,6 +144,8 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         )
     if settings.dream.interval_minutes <= 0:
         raise ConfigError(f"{path}: dream.interval_minutes must be positive")
+    if settings.dream.short_term_sessions < 1:
+        raise ConfigError(f"{path}: dream.short_term_sessions must be at least 1")
     host = settings.host or default_host()
     return Config(home=home, vault=vault, host=host, settings=settings)
 
@@ -294,6 +298,11 @@ retention_days = 90
 [dream]
 interval_minutes = 30
 quiet_minutes = 15
+# Short-term memory (projects/<slug>/recent.md) holds what the project's last few sessions
+# were working with. A line rolls off once its newest source is older than this many of
+# the project's sessions, counted in sessions and never in days, and becomes long-term
+# memory once its sources are this many sessions apart.
+short_term_sessions = 5
 
 [work]
 # Tokens one day of "aft work" may spend before the rest of the queue waits for

@@ -64,7 +64,7 @@ def _make_dummy_report(
 
 
 def test_section_order_is_fixed(initialized: Config):
-    """The 9 sections appear in the exact fixed order specified by DESIGN 9."""
+    """The 10 sections appear in the exact fixed order specified by DESIGN 9."""
     rep = _make_dummy_report()
     path = report.write_report(initialized, rep, now=NOW, checkpoint="cccc1111")
     assert path.exists()
@@ -80,6 +80,7 @@ def test_section_order_is_fixed(initialized: Config):
         "## Rejected",
         "## Stale",
         "## Candidates",
+        "## Short term",
         "## Revert",
     ]
     assert headings == expected_order

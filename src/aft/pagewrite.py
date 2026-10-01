@@ -627,6 +627,30 @@ class PageDoc:
             self._apply(at, at + 1, [])
         return True
 
+    def remove_short_term(self, fact: page.Fact) -> str:
+        """Take a line off a project's short-term page, returning its text (design 6).
+
+        A short-term line leaves when it rolls off or becomes long-term, whatever its state;
+        its evidence stays in its digest, the evidence archive and git. A note under the line
+        is closed first with ``resolve_callout``, which archives it, so text a person typed
+        there is never lost: a line still carrying one is refused.
+        """
+        if self.path.name != page.RECENT_PAGE or self.path.parent.parent.name != "projects":
+            raise WriteError(f"only a line of short-term memory can be removed; {self.path} is not")
+        found = self._resolve(fact)
+        at = found.line - 1
+        below = at + 1
+        while below < len(self.lines) and not self.lines[below].strip():
+            below += 1
+        if found.callouts or (
+            below < len(self.lines) and self.lines[below].lstrip().startswith(">")
+        ):
+            raise WriteError("a line with a note under it cannot be removed; close the note first")
+        line_content = self.lines[at]
+        with self._atomic():
+            self._apply(at, at + 1, [])
+        return line_content
+
     def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
         """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).
 

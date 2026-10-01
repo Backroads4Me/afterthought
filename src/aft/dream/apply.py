@@ -26,7 +26,7 @@ import yaml
 from aft import digest, evidence, lint, page, pagewrite
 from aft import vault as vaultmod
 from aft.config import Config
-from aft.dream import decide, maintain, rules
+from aft.dream import decide, maintain, rules, shortterm
 from aft.gitutil import git
 from aft.registry import Registry
 
@@ -126,6 +126,26 @@ class RejectedFact:
     reason: str
 
 
+@dataclass(frozen=True)
+class LiftedFact:
+    """A short-term line that left ``recent.md`` to be decided as a long-term fact."""
+
+    statement: str
+    why: str
+
+
+@dataclass(frozen=True)
+class RolledOffLine:
+    """A short-term line whose newest source left the project's last sessions."""
+
+    statement: str
+    state: str
+
+
+LIFT_CONFIRMED = "a later session's long-term fact confirms it"
+LIFT_OUTLASTED = "its sources span the short-term window"
+
+
 @dataclass
 class ProjectRunReport:
     """Structured data from one project's dream run for M4.6 report consumption."""
@@ -147,6 +167,8 @@ class ProjectRunReport:
     cleared_anchors: list[maintain.ClearedAnchor] = field(default_factory=list)
     archived_lines: list[maintain.ArchivedLine] = field(default_factory=list)
     oversize_pages: list[str] = field(default_factory=list)
+    lifted: list[LiftedFact] = field(default_factory=list)
+    rolled_off: list[RolledOffLine] = field(default_factory=list)
     error: str | None = None
 
 
@@ -209,6 +231,331 @@ def run_project(
             except OSError:
                 pass
 
+    # Short-term lines a decision or their sessions carry to long-term memory, with why.
+    to_lift: list[tuple[str, str]] = []
+
+    def settle(
+        new_fact: rules.NewFact,
+        evidence_list: list[rules.Evidence],
+        sources_map: dict[str, dict],
+    ) -> None:
+        """Decide one fact against memory, judge the decision by the rules, and write what
+        survives (design 9 steps 2 to 5). ``sources_map`` holds the sources the fact's
+        evidence cites: its digest's, or for a short-term line becoming long-term, the
+        sources of ``recent.md``."""
+        nonlocal project, run_project_id
+        verified_evidence = [e for e in evidence_list if e.verified]
+        if not verified_evidence:
+            report.rejected.append(
+                RejectedFact(
+                    statement=new_fact.statement,
+                    decision_action="add",
+                    rule="R1",
+                    reason="quote not verified",
+                )
+            )
+            return
+
+        quote_to_send = (
+            sources_map.get(verified_evidence[0].source, {}).get("quote", "")
+            if verified_evidence
+            else ""
+        )
+        proposal = decide.decide(
+            config,
+            new_fact,
+            quote_to_send,
+            slug if project else None,
+        )
+
+        # Target line evidence from archive
+        line_evidence: list[rules.Evidence] = []
+        if proposal.target is not None:
+            for ref in proposal.target.fact.refs:
+                s_dict = proposal.target.sources.get(ref, {})
+                res = str(s_dict.get("resource", ""))
+                q = str(s_dict.get("quote", ""))
+                v, origin, ev_date, yours = _lookup_evidence(
+                    config,
+                    res,
+                    q,
+                    fallback_date=proposal.target.fact.date,
+                    source_entry=s_dict,
+                )
+                line_evidence.append(
+                    rules.Evidence(
+                        source=ref,
+                        resource=res,
+                        origin=origin,
+                        date=ev_date,
+                        verified=v,
+                        yours=yours,
+                    )
+                )
+
+        effective_project = run_project_id or f"p_{slug}"
+        context = proposal.context(
+            today=today,
+            evidence=tuple(evidence_list),
+            run_project=effective_project,
+            line_evidence=tuple(line_evidence),
+        )
+        outcome = proposal.check(context)
+
+        if isinstance(outcome, rules.Reject):
+            report.rejected.append(
+                RejectedFact(
+                    statement=new_fact.statement,
+                    decision_action=proposal.decision.action,
+                    rule=outcome.rule,
+                    reason=proposal.decision.reason,
+                )
+            )
+            return
+
+        action = outcome.action if isinstance(outcome, rules.Apply) else outcome.to_action
+        if action == "skip":
+            report.skips.append(
+                SkipFact(
+                    statement=new_fact.statement,
+                    reason=proposal.decision.reason,
+                )
+            )
+        else:
+            # Actions: add, candidate, confirm, promote, supersede, conflict, needs-you
+            if project is None and new_fact.scope != "global":
+                project = registry.add(slug, title=slug.capitalize())
+                record_write(config.registry_path)
+                registry.save()
+                run_project_id = project.id
+
+            if proposal.target is not None and action in (
+                "confirm",
+                "lift",
+                "supersede",
+                "promote",
+                "conflict",
+                "needs-you",
+            ):
+                target_file = vault_path / proposal.target.path
+                record_write(target_file)
+            elif new_fact.term == rules.SHORT:
+                target_file = _recent_page(vault_path, slug)
+                record_write(target_file)
+                if not target_file.exists():
+                    target_file.write_text(_recent_text(slug, project, run_project_id), "utf-8")
+            elif new_fact.scope == "global":
+                g_file = "preferences.md" if new_fact.kind == "preference" else "environment.md"
+                target_file = vault_path / "global" / g_file
+                if not target_file.exists():
+                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                    content = (
+                        vaultmod.PREFERENCES
+                        if new_fact.kind == "preference"
+                        else vaultmod.ENVIRONMENT
+                    )
+                    record_write(target_file)
+                    target_file.write_text(content, encoding="utf-8")
+                else:
+                    record_write(target_file)
+            else:
+                overview_path = vault_path / "projects" / slug / "overview.md"
+                if not overview_path.exists():
+                    overview_path.parent.mkdir(parents=True, exist_ok=True)
+                    proj_id = run_project_id or (project.id if project else f"p_{slug}")
+                    proj_title = project.title if project else slug.capitalize()
+                    record_write(overview_path)
+                    overview_path.write_text(
+                        f"---\n"
+                        f"type: Project\n"
+                        f"title: {proj_title}\n"
+                        f"description: {slug}\n"
+                        f"sources: []\n"
+                        f"aft:\n"
+                        f"  project: {proj_id}\n"
+                        f"---\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    record_write(overview_path)
+                target_file = overview_path
+
+            doc = pagewrite.PageDoc.read(target_file)
+            verified_refs = [e.source for e in verified_evidence]
+            refs_to_use: list[str] = []
+            for ref in verified_refs:
+                src_entry = sources_map.get(ref, {})
+                res = str(src_entry.get("resource", ""))
+                q = str(src_entry.get("quote", ""))
+                title = str(src_entry.get("title", ""))
+
+                sid: str | None = None
+                for existing_id, existing_s in doc.sources.items():
+                    if existing_s.get("resource") == res and existing_s.get("quote") == q:
+                        sid = existing_id
+                        break
+                if sid is None and res and q:
+                    sid = doc.add_source(resource=res, title=title, quote=q)
+                if sid:
+                    refs_to_use.append(sid)
+
+            rel_target = target_file.relative_to(vault_path).as_posix()
+
+            if action == "add":
+                doc.add_fact(
+                    new_fact.kind,
+                    new_fact.statement,
+                    new_fact.source,
+                    new_fact.date,
+                    refs_to_use,
+                )
+                report.added.append(
+                    AddedFact(
+                        statement=new_fact.statement,
+                        kind=new_fact.kind,
+                        source=new_fact.source,
+                        date=new_fact.date,
+                        refs=tuple(refs_to_use),
+                        path=rel_target,
+                    )
+                )
+            elif action == "candidate":
+                doc.add_candidate(
+                    new_fact.statement,
+                    new_fact.source,
+                    new_fact.date,
+                    refs_to_use,
+                )
+                report.candidates.append(
+                    CandidateFact(
+                        statement=new_fact.statement,
+                        tag=new_fact.source,
+                        date=new_fact.date,
+                        refs=tuple(refs_to_use),
+                        path=rel_target,
+                    )
+                )
+                report.downgrades.append(
+                    DowngradeFact(
+                        statement=new_fact.statement,
+                        to_action="candidate",
+                        rule=(
+                            outcome.rule if isinstance(outcome, rules.Downgrade) else "candidate"
+                        ),
+                        reason=proposal.decision.reason,
+                    )
+                )
+            elif action == "lift":
+                # Confirmed by a long-term fact: the line is cited and, once this run's
+                # digests are in, leaves recent.md as a long-term fact (design 6, R10).
+                assert proposal.target is not None
+                target_fact = doc.fact(proposal.target.fact.statement)
+                for sid in refs_to_use:
+                    doc.confirm(target_fact, source=sid, date=new_fact.date)
+                to_lift.append((target_fact.statement, LIFT_CONFIRMED))
+            elif action == "confirm":
+                assert proposal.target is not None
+                target_fact = doc.fact(proposal.target.fact.statement)
+                for sid in refs_to_use:
+                    doc.confirm(target_fact, source=sid, date=new_fact.date)
+                    report.confirmed.append(
+                        ConfirmedFact(
+                            statement=target_fact.statement,
+                            source=sid,
+                            date=new_fact.date,
+                            refs=(*target_fact.refs, sid),
+                            path=rel_target,
+                        )
+                    )
+            elif action == "promote":
+                assert proposal.target is not None
+                target_fact = doc.fact(proposal.target.fact.statement)
+                promoted = doc.promote(target_fact, kind=new_fact.kind)
+                confirmed_refs = list(promoted.refs)
+                for sid in refs_to_use:
+                    doc.confirm(promoted, source=sid, date=new_fact.date)
+                    confirmed_refs.append(sid)
+                report.promoted.append(
+                    PromotedFact(
+                        statement=target_fact.statement,
+                        kind=new_fact.kind,
+                        source=new_fact.source,
+                        date=new_fact.date,
+                        refs=tuple(confirmed_refs),
+                        path=rel_target,
+                    )
+                )
+            elif action == "supersede":
+                assert proposal.target is not None
+                target_fact = doc.fact(proposal.target.fact.statement)
+                doc.supersede(
+                    target_fact,
+                    statement=new_fact.statement,
+                    tag=new_fact.source,
+                    date=new_fact.date,
+                    refs=refs_to_use,
+                )
+                report.superseded.append(
+                    SupersededFact(
+                        old_statement=target_fact.statement,
+                        new_statement=new_fact.statement,
+                        source=new_fact.source,
+                        date=new_fact.date,
+                        refs=tuple(refs_to_use),
+                        by=refs_to_use[0] if refs_to_use else "",
+                        path=rel_target,
+                    )
+                )
+            elif action in ("conflict", "needs-you"):
+                assert proposal.target is not None
+                target_fact = doc.fact(proposal.target.fact.statement)
+                if refs_to_use and not any(f"[^{r}]" in new_fact.statement for r in refs_to_use):
+                    ref_part = " ".join(f"[^{r}]" for r in refs_to_use)
+                    note_text = f"{new_fact.statement} ({ref_part})"
+                else:
+                    note_text = new_fact.statement
+                callout_type = "conflict" if action == "conflict" else "question"
+                doc.add_callout(target_fact, callout_type, note_text, today)
+                if action == "conflict":
+                    rule_name = outcome.rule if isinstance(outcome, rules.Downgrade) else "conflict"
+                    report.conflicts.append(
+                        ConflictFact(
+                            new_statement=new_fact.statement,
+                            target_statement=proposal.target.fact.statement,
+                            reason=proposal.decision.reason,
+                            rule=rule_name,
+                            refs=tuple(refs_to_use),
+                            path=rel_target,
+                        )
+                    )
+                else:
+                    report.questions.append(
+                        QuestionFact(
+                            new_statement=new_fact.statement,
+                            target_statement=proposal.target.fact.statement,
+                            reason=proposal.decision.reason,
+                            rule=(
+                                outcome.rule
+                                if isinstance(outcome, rules.Downgrade)
+                                else "needs-you"
+                            ),
+                            refs=tuple(refs_to_use),
+                            path=rel_target,
+                        )
+                    )
+                if isinstance(outcome, rules.Downgrade):
+                    report.downgrades.append(
+                        DowngradeFact(
+                            statement=new_fact.statement,
+                            to_action=action,
+                            rule=outcome.rule,
+                            reason=proposal.decision.reason,
+                        )
+                    )
+
+            record_write(target_file)
+            target_file.write_text(doc.render(), encoding="utf-8")
+
     try:
         for digest_path in digests:
             try:
@@ -252,6 +599,7 @@ def run_project(
                     source=fact.source,
                     date=fact.date,
                     scope=scope,
+                    term=digest.term_of(meta),
                     explicit_correction=explicit_correction,
                 )
 
@@ -278,311 +626,7 @@ def run_project(
                         )
                     )
 
-                verified_evidence = [e for e in evidence_list if e.verified]
-                if not verified_evidence:
-                    report.rejected.append(
-                        RejectedFact(
-                            statement=new_fact.statement,
-                            decision_action="add",
-                            rule="R1",
-                            reason="quote not verified",
-                        )
-                    )
-                    continue
-
-                quote_to_send = (
-                    sources_map.get(verified_evidence[0].source, {}).get("quote", "")
-                    if verified_evidence
-                    else ""
-                )
-                proposal = decide.decide(
-                    config,
-                    new_fact,
-                    quote_to_send,
-                    slug if project else None,
-                )
-
-                # Target line evidence from archive
-                line_evidence: list[rules.Evidence] = []
-                if proposal.target is not None:
-                    for ref in proposal.target.fact.refs:
-                        s_dict = proposal.target.sources.get(ref, {})
-                        res = str(s_dict.get("resource", ""))
-                        q = str(s_dict.get("quote", ""))
-                        v, origin, ev_date, yours = _lookup_evidence(
-                            config,
-                            res,
-                            q,
-                            fallback_date=proposal.target.fact.date,
-                            source_entry=s_dict,
-                        )
-                        line_evidence.append(
-                            rules.Evidence(
-                                source=ref,
-                                resource=res,
-                                origin=origin,
-                                date=ev_date,
-                                verified=v,
-                                yours=yours,
-                            )
-                        )
-
-                effective_project = run_project_id or f"p_{slug}"
-                context = proposal.context(
-                    today=today,
-                    evidence=tuple(evidence_list),
-                    run_project=effective_project,
-                    line_evidence=tuple(line_evidence),
-                )
-                outcome = proposal.check(context)
-
-                if isinstance(outcome, rules.Reject):
-                    report.rejected.append(
-                        RejectedFact(
-                            statement=new_fact.statement,
-                            decision_action=proposal.decision.action,
-                            rule=outcome.rule,
-                            reason=proposal.decision.reason,
-                        )
-                    )
-                    continue
-
-                action = outcome.action if isinstance(outcome, rules.Apply) else outcome.to_action
-                if action == "skip":
-                    report.skips.append(
-                        SkipFact(
-                            statement=new_fact.statement,
-                            reason=proposal.decision.reason,
-                        )
-                    )
-                else:
-                    # Actions: add, candidate, confirm, promote, supersede, conflict, needs-you
-                    if project is None and new_fact.scope != "global":
-                        project = registry.add(slug, title=slug.capitalize())
-                        record_write(config.registry_path)
-                        registry.save()
-                        run_project_id = project.id
-
-                    if proposal.target is not None and action in (
-                        "confirm",
-                        "supersede",
-                        "promote",
-                        "conflict",
-                        "needs-you",
-                    ):
-                        target_file = vault_path / proposal.target.path
-                        record_write(target_file)
-                    elif new_fact.scope == "global":
-                        g_file = (
-                            "preferences.md" if new_fact.kind == "preference" else "environment.md"
-                        )
-                        target_file = vault_path / "global" / g_file
-                        if not target_file.exists():
-                            target_file.parent.mkdir(parents=True, exist_ok=True)
-                            content = (
-                                vaultmod.PREFERENCES
-                                if new_fact.kind == "preference"
-                                else vaultmod.ENVIRONMENT
-                            )
-                            record_write(target_file)
-                            target_file.write_text(content, encoding="utf-8")
-                        else:
-                            record_write(target_file)
-                    else:
-                        overview_path = vault_path / "projects" / slug / "overview.md"
-                        if not overview_path.exists():
-                            overview_path.parent.mkdir(parents=True, exist_ok=True)
-                            proj_id = run_project_id or (project.id if project else f"p_{slug}")
-                            proj_title = project.title if project else slug.capitalize()
-                            record_write(overview_path)
-                            overview_path.write_text(
-                                f"---\n"
-                                f"type: Project\n"
-                                f"title: {proj_title}\n"
-                                f"description: {slug}\n"
-                                f"sources: []\n"
-                                f"aft:\n"
-                                f"  project: {proj_id}\n"
-                                f"---\n",
-                                encoding="utf-8",
-                            )
-                        else:
-                            record_write(overview_path)
-                        target_file = overview_path
-
-                    doc = pagewrite.PageDoc.read(target_file)
-                    verified_refs = [e.source for e in verified_evidence]
-                    refs_to_use: list[str] = []
-                    for ref in verified_refs:
-                        src_entry = sources_map.get(ref, {})
-                        res = str(src_entry.get("resource", ""))
-                        q = str(src_entry.get("quote", ""))
-                        title = str(src_entry.get("title", ""))
-
-                        sid: str | None = None
-                        for existing_id, existing_s in doc.sources.items():
-                            if existing_s.get("resource") == res and existing_s.get("quote") == q:
-                                sid = existing_id
-                                break
-                        if sid is None and res and q:
-                            sid = doc.add_source(resource=res, title=title, quote=q)
-                        if sid:
-                            refs_to_use.append(sid)
-
-                    rel_target = target_file.relative_to(vault_path).as_posix()
-
-                    if action == "add":
-                        doc.add_fact(
-                            new_fact.kind,
-                            new_fact.statement,
-                            new_fact.source,
-                            new_fact.date,
-                            refs_to_use,
-                        )
-                        report.added.append(
-                            AddedFact(
-                                statement=new_fact.statement,
-                                kind=new_fact.kind,
-                                source=new_fact.source,
-                                date=new_fact.date,
-                                refs=tuple(refs_to_use),
-                                path=rel_target,
-                            )
-                        )
-                    elif action == "candidate":
-                        doc.add_candidate(
-                            new_fact.statement,
-                            new_fact.source,
-                            new_fact.date,
-                            refs_to_use,
-                        )
-                        report.candidates.append(
-                            CandidateFact(
-                                statement=new_fact.statement,
-                                tag=new_fact.source,
-                                date=new_fact.date,
-                                refs=tuple(refs_to_use),
-                                path=rel_target,
-                            )
-                        )
-                        report.downgrades.append(
-                            DowngradeFact(
-                                statement=new_fact.statement,
-                                to_action="candidate",
-                                rule=(
-                                    outcome.rule
-                                    if isinstance(outcome, rules.Downgrade)
-                                    else "candidate"
-                                ),
-                                reason=proposal.decision.reason,
-                            )
-                        )
-                    elif action == "confirm":
-                        assert proposal.target is not None
-                        target_fact = doc.fact(proposal.target.fact.statement)
-                        for sid in refs_to_use:
-                            doc.confirm(target_fact, source=sid, date=new_fact.date)
-                            report.confirmed.append(
-                                ConfirmedFact(
-                                    statement=target_fact.statement,
-                                    source=sid,
-                                    date=new_fact.date,
-                                    refs=(*target_fact.refs, sid),
-                                    path=rel_target,
-                                )
-                            )
-                    elif action == "promote":
-                        assert proposal.target is not None
-                        target_fact = doc.fact(proposal.target.fact.statement)
-                        promoted = doc.promote(target_fact, kind=new_fact.kind)
-                        confirmed_refs = list(promoted.refs)
-                        for sid in refs_to_use:
-                            doc.confirm(promoted, source=sid, date=new_fact.date)
-                            confirmed_refs.append(sid)
-                        report.promoted.append(
-                            PromotedFact(
-                                statement=target_fact.statement,
-                                kind=new_fact.kind,
-                                source=new_fact.source,
-                                date=new_fact.date,
-                                refs=tuple(confirmed_refs),
-                                path=rel_target,
-                            )
-                        )
-                    elif action == "supersede":
-                        assert proposal.target is not None
-                        target_fact = doc.fact(proposal.target.fact.statement)
-                        doc.supersede(
-                            target_fact,
-                            statement=new_fact.statement,
-                            tag=new_fact.source,
-                            date=new_fact.date,
-                            refs=refs_to_use,
-                        )
-                        report.superseded.append(
-                            SupersededFact(
-                                old_statement=target_fact.statement,
-                                new_statement=new_fact.statement,
-                                source=new_fact.source,
-                                date=new_fact.date,
-                                refs=tuple(refs_to_use),
-                                by=refs_to_use[0] if refs_to_use else "",
-                                path=rel_target,
-                            )
-                        )
-                    elif action in ("conflict", "needs-you"):
-                        assert proposal.target is not None
-                        target_fact = doc.fact(proposal.target.fact.statement)
-                        if refs_to_use and not any(
-                            f"[^{r}]" in new_fact.statement for r in refs_to_use
-                        ):
-                            ref_part = " ".join(f"[^{r}]" for r in refs_to_use)
-                            note_text = f"{new_fact.statement} ({ref_part})"
-                        else:
-                            note_text = new_fact.statement
-                        callout_type = "conflict" if action == "conflict" else "question"
-                        doc.add_callout(target_fact, callout_type, note_text, today)
-                        if action == "conflict":
-                            rule_name = (
-                                outcome.rule if isinstance(outcome, rules.Downgrade) else "conflict"
-                            )
-                            report.conflicts.append(
-                                ConflictFact(
-                                    new_statement=new_fact.statement,
-                                    target_statement=proposal.target.fact.statement,
-                                    reason=proposal.decision.reason,
-                                    rule=rule_name,
-                                    refs=tuple(refs_to_use),
-                                    path=rel_target,
-                                )
-                            )
-                        else:
-                            report.questions.append(
-                                QuestionFact(
-                                    new_statement=new_fact.statement,
-                                    target_statement=proposal.target.fact.statement,
-                                    reason=proposal.decision.reason,
-                                    rule=(
-                                        outcome.rule
-                                        if isinstance(outcome, rules.Downgrade)
-                                        else "needs-you"
-                                    ),
-                                    refs=tuple(refs_to_use),
-                                    path=rel_target,
-                                )
-                            )
-                        if isinstance(outcome, rules.Downgrade):
-                            report.downgrades.append(
-                                DowngradeFact(
-                                    statement=new_fact.statement,
-                                    to_action=action,
-                                    rule=outcome.rule,
-                                    reason=proposal.decision.reason,
-                                )
-                            )
-
-                    record_write(target_file)
-                    target_file.write_text(doc.render(), encoding="utf-8")
+                settle(new_fact, evidence_list, sources_map)
 
             # Mark digest consumed with run id
             dfm, dbody, _, _ = page.split_frontmatter(d_text)
@@ -593,6 +637,10 @@ def run_project(
                 record_write(digest_path)
                 digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
             report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
+
+        # Short-term memory: lift the lines that became long-term, then roll off the lines
+        # whose sessions have gone by (design 6, design 9 step 6).
+        _short_term(config, vault_path, slug, to_lift, settle, report, record_write)
 
         # Maintenance
         broken, cleared = maintain.check_anchors(
@@ -666,6 +714,141 @@ def run_project(
         raise
 
     return report
+
+
+def _recent_page(vault_path: Path, slug: str) -> Path:
+    """The project's short-term page, ``projects/<slug>/recent.md`` (design 6)."""
+    path = vault_path / "projects" / slug / page.RECENT_PAGE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _recent_text(slug: str, project, project_id: str | None) -> str:
+    """A new short-term page: frontmatter only, its lines added by the writer."""
+    title = project.title if project else slug.capitalize()
+    frontmatter = {
+        "type": "Project",
+        "title": f"{title} recent",
+        "description": "Short-term memory: what the project's last few sessions were working with.",
+        "sources": [],
+        "aft": {"project": project_id or (project.id if project else f"p_{slug}")},
+    }
+    return f"---\n{yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)}---\n"
+
+
+def _short_term(
+    config: Config,
+    vault_path: Path,
+    slug: str,
+    to_lift: list[tuple[str, str]],
+    settle,
+    report: ProjectRunReport,
+    record_write,
+) -> None:
+    """Lift the short-term lines that became long-term, then roll off the lines whose
+    sessions have gone by (design 6, design 9 step 6, R10).
+
+    A line is lifted when a later session's long-term fact confirmed it (``to_lift``), or
+    when its sources are at least ``dream.short_term_sessions`` sessions apart. Lifting
+    takes the line off ``recent.md`` and puts it, with every source it gathered, to the
+    decision as a long-term fact through ``settle``; whatever that decides, the line has
+    left short-term memory. A line rolls off once its newest source has left the project's
+    last ``short_term_sessions`` sessions, whatever its state; a note under it moves to the
+    archive first, so nothing a person typed there is lost.
+    """
+    recent = vault_path / "projects" / slug / page.RECENT_PAGE
+    if not recent.exists():
+        return
+    window = config.settings.dream.short_term_sessions
+    order = shortterm.sessions(vault_path, slug)
+
+    doc = pagewrite.PageDoc.read(recent, vault=vault_path)
+    for fact in doc.page.facts:
+        if fact.state != page.ACTIVE or any(s == fact.statement for s, _ in to_lift):
+            continue
+        if shortterm.outlasted(shortterm.positions(fact, doc.sources, order, vault_path), window):
+            to_lift.append((fact.statement, LIFT_OUTLASTED))
+
+    # settle can lift a further line while one is decided, so the list grows as it is read.
+    done: set[str] = set()
+    index = 0
+    while index < len(to_lift):
+        statement, why = to_lift[index]
+        index += 1
+        if statement in done:
+            continue
+        done.add(statement)
+        doc = pagewrite.PageDoc.read(recent, vault=vault_path)
+        line = next(
+            (f for f in doc.page.facts if f.statement == statement and f.state == page.ACTIVE),
+            None,
+        )
+        if line is None or line.kind is None:
+            continue
+        sources = doc.sources
+        evidence_list = []
+        for ref in line.refs:
+            entry = sources.get(ref, {})
+            resource = str(entry.get("resource", ""))
+            verified, origin, when, yours = _lookup_evidence(
+                config,
+                resource,
+                str(entry.get("quote", "")),
+                fallback_date=line.date,
+                source_entry=entry,
+            )
+            evidence_list.append(
+                rules.Evidence(
+                    source=ref,
+                    resource=resource,
+                    origin=origin,
+                    date=when,
+                    verified=verified,
+                    yours=yours,
+                )
+            )
+        doc.remove_short_term(line)
+        record_write(recent)
+        recent.write_text(doc.render(), encoding="utf-8")
+        report.lifted.append(LiftedFact(statement=statement, why=why))
+        settle(
+            rules.NewFact(
+                statement=line.statement,
+                kind=line.kind,
+                source=line.source,
+                date=line.date,
+                term=rules.LONG,
+            ),
+            evidence_list,
+            sources,
+        )
+
+    doc = pagewrite.PageDoc.read(recent, vault=vault_path)
+    changed = False
+    while True:
+        sources = doc.sources
+        going = next(
+            (
+                f
+                for f in doc.page.facts
+                if shortterm.rolls_off(
+                    shortterm.positions(f, sources, order, vault_path), order, window
+                )
+            ),
+            None,
+        )
+        if going is None:
+            break
+        if going.callouts:
+            record_write(doc._archive_file())
+            doc.resolve_callout(going)
+            going = next(f for f in doc.page.facts if f.line == going.line)
+        doc.remove_short_term(going)
+        report.rolled_off.append(RolledOffLine(statement=going.statement, state=going.state))
+        changed = True
+    if changed:
+        record_write(recent)
+        recent.write_text(doc.render(), encoding="utf-8")
 
 
 def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:

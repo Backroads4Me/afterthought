@@ -29,6 +29,19 @@ KIND_SECTIONS = {
     "References": "reference",
 }
 CANDIDATES = "Candidates"
+# DESIGN 6: a project's short-term memory is the fact page of this name in its directory.
+RECENT_PAGE = "recent.md"
+# What short-term memory holds: what the user said or a session saw.
+SHORT_TERM_SOURCES = ("stated", "observed")
+
+
+def is_recent(rel: str | Path) -> bool:
+    """Whether a vault-relative path is a project's short-term page,
+    ``projects/<slug>/recent.md`` (DESIGN 6)."""
+    parts = Path(rel).parts
+    return len(parts) == 3 and parts[0] == "projects" and parts[2] == RECENT_PAGE
+
+
 # Sections of generated prose rather than facts, allowed only on the page types listed.
 PROSE_SECTIONS = {
     "Contents": {"Reference"},

@@ -183,7 +183,22 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
             add(line, message)
         _check_evidence(page, frontmatter, body, add)
         _check_scope(rel, frontmatter, registry, add)
+        if pagemod.is_recent(rel):
+            _check_short_term(page, add)
     return out
+
+
+def _check_short_term(page: pagemod.Page, add) -> None:
+    """A project's short-term page holds no candidates and only [stated] or [observed]
+    lines (DESIGN 6): a conclusion or an idea about current work belongs in a handoff."""
+    for fact in page.facts:
+        if fact.section == pagemod.CANDIDATES:
+            add(fact.line, "short-term memory has no Candidates section")
+        elif fact.source not in pagemod.SHORT_TERM_SOURCES:
+            add(
+                fact.line,
+                f"short-term memory holds [stated] and [observed] lines, not [{fact.source}]",
+            )
 
 
 def _check_okf(fm: dict, add) -> None:

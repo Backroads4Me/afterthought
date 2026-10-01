@@ -87,6 +87,11 @@ class Line:
     """The page's source entries for the footnotes this line cites, by id. The caller
     builds the line's ``rules.Evidence`` from them (``rules.Context.line_evidence``)."""
 
+    @property
+    def recent(self) -> bool:
+        """The line is short-term memory: it sits on the project's ``recent.md``."""
+        return page.is_recent(self.path)
+
 
 @dataclass(frozen=True)
 class Proposal:
@@ -123,6 +128,7 @@ class Proposal:
             run_project=run_project,
             page_project=self.page_project(run_project),
             line_evidence=line_evidence,
+            target_recent=self.target is not None and self.target.recent,
         )
 
     def check(self, context: rules.Context) -> rules.Outcome:
@@ -183,7 +189,7 @@ def ask(
 def render(new_fact: rules.NewFact, quote: str, lines: Sequence[Line]) -> str:
     """The user message: the fact, its quote, and the numbered lines."""
     parts = [
-        f"New fact ({new_fact.kind}): {new_fact.statement}",
+        f"New fact ({new_fact.kind}, {new_fact.term} term): {new_fact.statement}",
         f"Quote: {json.dumps(quote, ensure_ascii=False)}",
         "",
     ]
@@ -192,7 +198,8 @@ def render(new_fact: rules.NewFact, quote: str, lines: Sequence[Line]) -> str:
     else:
         parts.append("Existing lines:")
         parts.extend(
-            f"{line.label} ({line.fact.kind or 'candidate'}): {line.fact.statement}"
+            f"{line.label} ({line.fact.kind or 'candidate'}{', recent' if line.recent else ''}):"
+            f" {line.fact.statement}"
             for line in lines
         )
     return "\n".join(parts) + "\n"
