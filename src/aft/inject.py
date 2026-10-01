@@ -37,6 +37,8 @@ CUT_NOTE = "The rest was cut to fit this block: aft search or aft read reaches a
 # neither is a page the block points at (design 6).
 OVERVIEW = "overview.md"
 LISTING = "index.md"
+# Short-term memory has a layer of its own, so it is not pointed at either (design 6).
+RECENT = pagemod.RECENT_PAGE
 COLLECTION = "collection.md"
 PREFERENCES = Path("global/preferences.md")
 
@@ -58,14 +60,37 @@ def build(config: Config, resolution: Resolution) -> str:
     title: list[Part] = []
     own: list[Part] = []
     page_map: list[Part] = []
+    recent: list[Part] = []
     if project:
         directory = config.vault / "projects" / project.slug
         overview = _read_page(directory / OVERVIEW)
         title = [_heading(project, overview)]
         own = [_handoff_part(config, project.slug), *_section_parts(overview, OVERVIEW_SECTIONS)]
+        recent = [_recent_part(_read_page(directory / RECENT), config)]
         page_map = [_part("Pages", _pointers(config, project, directory))]
     preferences = _section_parts(_read_page(config.vault / PREFERENCES), None)
-    return _block(title, own, preferences, page_map, max_chars)
+    return _block(title, own, preferences, page_map, max_chars, recent)
+
+
+def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
+    """Short-term memory: the active lines of ``recent.md``, in the overview's section
+    order, under a heading that says how many sessions short term covers and the date of
+    its newest line, so an agent back after a long while can judge how current it is
+    (design 6, 10)."""
+    if page is None:
+        return ("", [])
+    facts = [
+        fact
+        for section in OVERVIEW_SECTIONS
+        for fact in page.facts
+        if fact.section == section and fact.state in INJECTED and not fact.struck
+    ]
+    if not facts:
+        return ("", [])
+    sessions = config.settings.dream.short_term_sessions
+    newest = max(fact.date for fact in facts if fact.date)
+    heading = f"Recent (last {sessions} sessions, newest {newest})"
+    return _part(heading, [f"- {_shown(fact)}" for fact in facts])
 
 
 def _heading(project: Project, overview: pagemod.Page | None) -> Part:
@@ -237,7 +262,7 @@ def _pointers(config: Config, project: Project, directory: Path) -> list[str]:
     lines = [
         _pointer(path, config.vault)
         for path in sorted(directory.rglob("*.md"))
-        if path.name not in (OVERVIEW, LISTING)
+        if path.name not in (OVERVIEW, LISTING, RECENT)
     ]
     return lines + _collection_lines(config, project)
 
@@ -311,6 +336,7 @@ def _block(
     preferences: list[Part],
     page_map: list[Part],
     max_chars: int,
+    recent: Iterable[Part] = (),
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
@@ -326,20 +352,27 @@ def _block(
     acceptable, a layer missing without a word is the defect (design 10).
     """
     closing: list[Part] = [("", [HOW_TO])]
+    recent = list(recent)
     head = _trim(title, max_chars)  # the title, as far as the budget can show it
     own_floor = _floors(own)
     preferences_floor = _floors(preferences)
+    recent_floor = _floors(recent)
     map_floor = _floors(page_map)
-    floors = [*head, *own_floor, *preferences_floor, *map_floor, *closing]
+    floors = [*head, *own_floor, *preferences_floor, *recent_floor, *map_floor, *closing]
     minimal = _trim(floors, max_chars)
     extra = (max_chars - _width(minimal)) // 2
     project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
     # Global preferences (layer 4) is ahead of page pointers (layer 5).
     # Reserve map_floor and closing so page pointers keep their floor.
     pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, max_chars))
-    room = max_chars - _width([*head, *project_layer, *pref_layer, *closing]) - 2
+    # Short-term memory (the recent layer) comes after long-term memory and takes only what
+    # the long-term layers leave, less the page map's floor, so it never crowds out what
+    # stays true (design 10).
+    room = max_chars - _width([*head, *project_layer, *pref_layer, *map_floor, *closing]) - 4
+    recent_layer = _trim(recent, max(0, room)) if recent_floor else []
+    room = max_chars - _width([*head, *project_layer, *pref_layer, *recent_layer, *closing]) - 2
     pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
-    body = [*project_layer, *pref_layer, *pages]
+    body = [*project_layer, *pref_layer, *recent_layer, *pages]
     cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
     parts = [*head, *cut, *body, *closing]
     return "\n\n".join(_blocks(_trim(parts, max_chars)))
