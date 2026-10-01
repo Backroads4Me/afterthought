@@ -171,11 +171,15 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
      stripped
   4. active and conflict/needs-you facts from `global/preferences.md`, marked the same way
      as in layer 3, since a preference stands until Ted changes it
-  5. one line per other page in `projects/<slug>/` and per reference collection whose
-     `aft.projects` includes the project: `- <title>: <description> (aft read <path>)`
-  6. `Search memory: aft search "<words>". Read a page: aft read <path>.`
+  5. recent: the active lines of `projects/<slug>/recent.md`, marked as in layer 3, under
+     `## Recent (last <dream.short_term_sessions> sessions, newest <date>)`, taking only
+     the room layers 1 to 4 leave (F32)
+  6. one line per other page in `projects/<slug>/` (not `recent.md`) and per reference
+     collection whose `aft.projects` includes the project:
+     `- <title>: <description> (aft read <path>)`
+  7. `Search memory: aft search "<words>". Read a page: aft read <path>.`
 
-  An unregistered or unresolved directory gets only layers 4 and 6. Candidates, stale,
+  An unregistered or unresolved directory gets only layers 4 and 7. Candidates, stale,
   superseded and withdrawn lines are never included.
 - **Tests:** layer order; the cap holds and never splits a line; excluded states stay out;
   an unregistered directory; 50 pages of 200 lines each build in under 150 ms on this host.

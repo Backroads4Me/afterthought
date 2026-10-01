@@ -1135,3 +1135,71 @@ def test_session_start_hook_without_transcript_path_still_injects(widget, capsys
     captured = capsys.readouterr()
     assert "- Prefer short commits." in captured.out
     assert inject.HOW_TO in captured.out
+
+
+# ------------------------------------------------------------- short-term memory (BUILD-PLAN F32)
+
+RECENT_PAGE = """\
+---
+type: Project
+title: Widget recent
+description: Short-term memory.
+sources: []
+aft:
+  project: p_widget
+---
+
+## Decisions
+
+- The bore change waits for the spec review. [stated] 2026-10-03 [^s1]
+
+## State
+
+- The test rig is on loan until Friday. [observed] 2026-10-04 [^s1]
+- ~~The test rig is in the lab.~~ [observed] 2026-10-01 [^s1] superseded 2026-10-04 by [^s1]
+"""
+
+
+def test_short_term_memory_follows_preferences_under_its_own_heading(widget, tmp_path):
+    write(widget.vault / "projects/widget/recent.md", RECENT_PAGE)
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    recent = "## Recent (last 5 sessions, newest 2026-10-04)"
+    assert recent in block
+    assert block.index("## Preferences") < block.index(recent) < block.index("## Pages")
+    lines = parts_of(block)[recent]
+    assert lines == [
+        "- The test rig is on loan until Friday.",
+        "- The bore change waits for the spec review.",
+    ]
+    assert "recent.md" not in block, "short-term memory is a layer, not a page to point at"
+
+
+def test_a_vault_with_no_short_term_memory_builds_the_block_it_did(widget, tmp_path):
+    assert inject.build(widget, resolve(widget, tmp_path / "widget")) == EXPECTED
+    empty = RECENT_PAGE.split("## Decisions")[0]
+    write(widget.vault / "projects/widget/recent.md", empty)
+    assert inject.build(widget, resolve(widget, tmp_path / "widget")) == EXPECTED
+
+
+def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
+    """Design 10: the recent layer takes only what long-term memory leaves."""
+    cap = dataclasses.replace(widget.settings.inject, max_chars=1200)
+    config = dataclasses.replace(widget, settings=dataclasses.replace(widget.settings, inject=cap))
+    without = parts_of(inject.build(config, resolve(config, tmp_path / "widget")))
+    many = "\n".join(
+        f"- Short-term line {n} about the current work. [observed] 2026-10-04 [^s1]"
+        for n in range(200)
+    )
+    write(
+        widget.vault / "projects/widget/recent.md",
+        RECENT_PAGE.split("## Decisions")[0] + "## State\n\n" + many + "\n",
+    )
+    block = inject.build(config, resolve(config, tmp_path / "widget"))
+    assert len(block) <= 1200
+    assert "- Short-term line 0 about the current work." in block, "the layer took no room"
+    assert "- Short-term line 199 about the current work." not in block
+    with_recent = parts_of(block)
+    for heading, lines in without.items():
+        if heading.startswith("## Pages") or heading == inject.HOW_TO:
+            continue
+        assert with_recent.get(heading) == lines, f"{heading} lost room to short-term memory"
