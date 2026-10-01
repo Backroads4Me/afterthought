@@ -29,14 +29,14 @@ afterthought needs Python 3.11 or later, [uv](https://docs.astral.sh/uv/), git, 
 OpenAI-compatible model endpoint.
 
 ```bash
-uv tool install git+https://github.com/Backroads4Me/afterthought
+uv tool install git+<repository URL>
 ```
 
 To work on afterthought itself, install from a checkout instead, so the `aft` command runs
 your working copy:
 
 ```bash
-git clone https://github.com/Backroads4Me/afterthought && cd afterthought
+git clone <repository URL> afterthought && cd afterthought
 uv tool install --editable .
 ```
 
