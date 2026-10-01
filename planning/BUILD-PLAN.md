@@ -370,7 +370,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   Digest`) with the summary, handoff, and verified facts, each fact carrying its source
   entry and quote; record dropped facts and the reason in the digest's frontmatter under
   `aft.dropped`; advance the watermark; commit under the vault lock. A chunk over
-  30,000 input tokens is split at entry boundaries. `aft work` stops when the daily token
+  12,000 input tokens (at three characters to a token) is split at entry boundaries. `aft work` stops when the daily token
   budget is spent and leaves the rest queued. The digest updates the injection's "last
   session" layer, so M1.2 reads `handoff` from it.
 - **Prompt** (`src/aft/prompts/digest.md`):
@@ -379,6 +379,10 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 You read one part of a working session between the user and an AI coding agent, and you
 extract what a future session would need to know. You are building the project's memory,
 so precision matters more than coverage. Return nothing rather than something uncertain.
+
+Each entry of the session begins with a label in brackets, such as [#3], then who wrote it
+and when. Everything you write comes from these entries and names the entry it comes from
+by its label.
 
 Keep only what a future session could not learn by reading the code or the git history:
 decisions and their reasons, preferences, how things are actually configured, lessons
@@ -418,21 +422,23 @@ For each fact:
   When unsure, use short. A short fact is stated or observed, and its scope is project.
 - quote: copy the words that support the fact exactly as they appear in one entry, at
   most 300 characters. Do not paraphrase or join words from different entries.
-- entry: the id of the entry the quote comes from.
+- entry: the label of the entry the quote comes from, such as #3.
 - scope: global only for the user's preferences and environment that apply to every
   project; otherwise project.
 
 Also write:
 - summary: two to four sentences on what happened.
 - handoff: what was in flight when this part ended, approaches that failed, and what is
-  still open. Use empty values when there is nothing to hand off.
+  still open, each item with the label of the entry it comes from. Use empty values when
+  there is nothing to hand off.
 
-Never invent a fact, a quote, or an entry id.
+Never invent a fact, a quote, or an entry label. Never write placeholder text such as
+"..."; leave a value empty instead.
 ```
 
 - **Schema** (`src/aft/prompts/digest.schema.json`): an object with `summary` (string,
-  max 800), `handoff` (object: `in_flight` string max 400, `failed` array of strings max 5,
-  `open` array of strings max 5), and `facts` (array, max 20) of objects with `statement`
+  max 800), `handoff` (object: `in_flight`, and `failed` and `open` arrays of at most 5,
+  each item an object of `text` (max 400) and `entry`), and `facts` (array, max 20) of objects with `statement`
   (max 300), `kind` (enum of the seven kinds), `source` (enum of the four tags), `term`
   (enum `long`, `short`), `quote` (max 300), `entry` (string), `scope` (enum `project`,
   `global`). All keys required.
@@ -881,6 +887,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   differently from the design. Tests: every key in the default config template appears in
   `docs/configuration.md`, and every `aft` subcommand appears in `docs/commands.md`, so a
   new setting or command without documentation fails CI.
+- **F34 An answer must match its chunk** (ruling 2026-10-01; finding T17). DESIGN 8. The
+  model is shown each entry under a label (`#1`, `#2`) that the script maps back to the
+  entry's id, so a uuid copied wrongly no longer loses a fact. An answer with a fact citing
+  an entry the chunk does not hold, or with a placeholder (no word in it) for a summary, a
+  handoff item or a fact, is asked for once more and then fails the job. Each handoff item
+  names its entry, and an item naming none of the chunk's is left off the page. Chunks are
+  12,000 tokens at three characters to a token, and the answer's room is 8,000 tokens.
+  Tests: a fabricated entry refuses the answer, a second good answer is kept, each kind of
+  placeholder refuses it, the model sees labels and the page records ids, an ungrounded
+  handoff item is left out, and every call stays under the cap. Review checkpoint: yes
+  (prompt and schema).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

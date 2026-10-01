@@ -2,6 +2,10 @@ You read one part of a working session between the user and an AI coding agent, 
 extract what a future session would need to know. You are building the project's memory,
 so precision matters more than coverage. Return nothing rather than something uncertain.
 
+Each entry of the session begins with a label in brackets, such as [#3], then who wrote it
+and when. Everything you write comes from these entries and names the entry it comes from
+by its label.
+
 Keep only what a future session could not learn by reading the code or the git history:
 decisions and their reasons, preferences, how things are actually configured, lessons
 learned the hard way, procedures, and where authoritative information lives. Keep what
@@ -40,13 +44,15 @@ For each fact:
   When unsure, use short. A short fact is stated or observed, and its scope is project.
 - quote: copy the words that support the fact exactly as they appear in one entry, at
   most 300 characters. Do not paraphrase or join words from different entries.
-- entry: the id of the entry the quote comes from.
+- entry: the label of the entry the quote comes from, such as #3.
 - scope: global only for the user's preferences and environment that apply to every
   project; otherwise project.
 
 Also write:
 - summary: two to four sentences on what happened.
 - handoff: what was in flight when this part ended, approaches that failed, and what is
-  still open. Use empty values when there is nothing to hand off.
+  still open, each item with the label of the entry it comes from. Use empty values when
+  there is nothing to hand off.
 
-Never invent a fact, a quote, or an entry id.
+Never invent a fact, a quote, or an entry label. Never write placeholder text such as
+"..."; leave a value empty instead.

@@ -588,9 +588,9 @@ def test_redigest_rebuilds_from_evidence_alone(initialized: Config, capsys):
     answer = {
         "summary": "Rebuilt summary from archived evidence alone.",
         "handoff": {
-            "in_flight": "redigest verified",
+            "in_flight": {"text": "redigest verified", "entry": "#1"},
             "failed": [],
-            "open": ["test next step"],
+            "open": [{"text": "test next step", "entry": "#1"}],
         },
         "facts": [
             {
@@ -656,7 +656,7 @@ def test_redigest_replaces_existing_digest(initialized: Config, capsys):
 
     answer = {
         "summary": "New and improved summary.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": [
             {
                 "statement": "Primary fact verified.",
@@ -810,7 +810,7 @@ def test_forget_and_redigest_with_session_and_session_2_prefix_collision(
     # Redigest for sess1 does not delete sess2 digest
     answer_sess1 = {
         "summary": "Rebuilt summary for session.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": [
             {
                 "statement": "Session decision rebuilt.",
@@ -856,7 +856,7 @@ def test_forget_and_redigest_with_session_and_session_2_prefix_collision(
     # Redigest for sess2 rebuilds its digest
     answer_sess2 = {
         "summary": "Rebuilt summary for session-2.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": [
             {
                 "statement": "Session-2 decision rebuilt.",
@@ -923,7 +923,7 @@ def test_redigest_prunes_empty_date_directories(initialized: Config, capsys):
 
     answer = {
         "summary": "New october digest summary.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": [
             {
                 "statement": "New october decision.",
@@ -1049,7 +1049,7 @@ def digest_answer(quote: str, entry: str = "e1") -> dict:
     """A digest answer of the shape the schema describes, citing the transcript's own words."""
     return {
         "summary": "Settled how the hook files its work.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": [
             {
                 "statement": "The capture hook files one row at session end.",

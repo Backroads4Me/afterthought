@@ -65,16 +65,24 @@ PAGE_TYPE = "Session Digest"
 PROMPT_FILE = "prompts/digest.md"
 SCHEMA_FILE = "prompts/digest.schema.json"
 
-# The per-chunk input cap of DESIGN 13, which the plan states as 30,000 input tokens.
-MAX_CHUNK_TOKENS = 30_000
+# The per-chunk input cap of DESIGN 13: 12,000 input tokens. A small model given a long
+# chunk loses track of it and writes about things the chunk never held (finding T17).
+MAX_CHUNK_TOKENS = 12_000
 # Nothing in the build counts tokens (BUILD-PLAN 1.6 allows no new dependency and no
-# tokenizer is vendored), so the cap is enforced on characters at four to a token, which
-# is the usual reading of English prose and the same estimate the output cap uses.
-CHARS_PER_TOKEN = 4
+# tokenizer is vendored), so the cap is enforced on characters at three to a token. A
+# session transcript is code, paths and ids as much as prose, and runs nearer three
+# characters to a token than four, so the estimate errs high and a chunk never runs over.
+CHARS_PER_TOKEN = 3
 # The answer's own room, from the schema's limits at the same estimate: a summary of 800
-# characters, a 400-character handoff and twenty facts of two 300-character fields plus
-# four short ones are about 14,000 characters, and the round-up covers the JSON around it.
-MAX_OUTPUT_TOKENS = 4_000
+# characters, a handoff of up to eleven items, and twenty facts of two 300-character fields
+# plus four short ones come to about 18,000 characters, and the round-up covers the JSON
+# around it. An answer cut off at its cap is lost whole, so the room is generous.
+MAX_OUTPUT_TOKENS = 8_000
+
+# An entry is shown to the model under a short label, #1 for the chunk's first entry, and
+# the script maps the label back to the entry. A session's own entry ids are long uuids
+# that a model copies wrongly, and a fact citing a wrong id is a fact lost.
+LABEL_PREFIX = "#"
 
 # A page's body is fact sections only (DESIGN 6), so a fact's kind is the heading it sits
 # under. A fact's scope is no part of that line, so it travels in the page's own record.
@@ -98,7 +106,8 @@ class DigestError(Exception):
 
 
 class AnswerRefused(DigestError):
-    """The endpoint answered this chunk and its answer failed the digest schema.
+    """The endpoint answered this chunk and its answer failed the digest schema, or twice
+    did not match the chunk it was given (``mismatch``).
 
     The endpoint is up and the fault is this chunk's, so the job is marked failed with the
     model's own words as its reason, its watermark stays where it was, and the run moves on
@@ -196,16 +205,27 @@ def tokens(text: str) -> int:
 
 
 def render(entries: Sequence[Entry]) -> str:
-    """The chunk as the prompt is told to read it: ``[<id>] <ROLE> <time>`` and its text.
+    """The chunk as the prompt is told to read it: ``[#<n>] <ROLE> <time>`` and its text.
 
-    The entry id leads each block because the schema asks the model to name the id each
+    The label leads each block because the schema asks the model to name the entry each
     quote came from, and the role and time because the prompt distinguishes the user's own
     commitments from the agent's, and dates a fact by when it was said.
     """
     return "\n\n".join(
-        f"[{entry.id}] {entry.role.upper()} {entry.time.isoformat()}:\n{entry.text}"
-        for entry in entries
+        f"[{label}] {entry.role.upper()} {entry.time.isoformat()}:\n{entry.text}"
+        for label, entry in labelled(entries).items()
     )
+
+
+def labelled(entries: Sequence[Entry]) -> dict[str, Entry]:
+    """Each entry of a part under the label ``render`` shows it by, in order."""
+    return {f"{LABEL_PREFIX}{n}": entry for n, entry in enumerate(entries, start=1)}
+
+
+def _cited(part: Sequence[Entry]) -> dict[str, Entry]:
+    """The entries of a part by every name an answer may cite one by: its label, and its
+    own id, which a model may copy from a quoted line instead."""
+    return {**{entry.id: entry for entry in part}, **labelled(part)}
 
 
 def split_parts(entries: Sequence[Entry], budget: int) -> list[list[Entry]]:
@@ -370,12 +390,12 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # the job's. Summaries are joined uncut: a page's description has no cap, so nothing is
     # truncated at the join, and a reader sees every part's own words.
     for part in parts(kept):
-        answer = _model_answer(config, prompt, render(part), schema)
+        answer = _matching_answer(config, prompt, part, schema)
         part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"], role=role)
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
-        handoffs.append(answer["handoff"])
+        handoffs.append(grounded_handoff(answer["handoff"], part))
 
     page, on_page, refused = _page(
         config,
@@ -545,6 +565,80 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     return archived
 
 
+# A value with no letter or digit in it, such as "..." or "-", is a placeholder: a model
+# that writes one instead of an answer did not read the chunk it was given.
+_WORDLESS = re.compile(r"\w")
+
+
+def placeholder(text: str) -> bool:
+    """Whether a value is written but holds no word, such as "..." (finding T17). Empty
+    text is not a placeholder: an empty handoff item means nothing to hand off."""
+    return bool(text.strip()) and not _WORDLESS.search(text)
+
+
+def mismatch(answer: dict, part: Sequence[Entry]) -> str | None:
+    """Why an answer does not match the chunk it was given, or None when it does.
+
+    A fact citing an entry the chunk does not hold, and a placeholder where a summary, a
+    handoff item or a fact should be, are the marks of a model writing about something
+    other than the chunk (finding T17). Its summary and handoff carry no quote a script
+    could check, so the whole answer goes, not only the facts that show it.
+    """
+    cited = _cited(part)
+    if not answer["summary"].strip() or placeholder(answer["summary"]):
+        # A chunk reaches the model only past the two-prompt floor, so it always has
+        # something to summarize; a summary of nothing is a model that did not read it.
+        return "the summary is empty or a placeholder"
+    for fact in answer["facts"]:
+        if fact["entry"] not in cited:
+            return f"a fact cites entry {fact['entry']!r}, which is not in the chunk"
+        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
+            return "a fact is empty or a placeholder"
+    handoff = answer["handoff"]
+    # An empty handoff item is how the prompt says nothing is left to hand off.
+    texts = [handoff["in_flight"]["text"]]
+    texts += [item["text"] for item in [*handoff["failed"], *handoff["open"]]]
+    if any(placeholder(text) for text in texts):
+        return "the handoff is a placeholder"
+    return None
+
+
+def grounded_handoff(handoff: dict, part: Sequence[Entry]) -> dict:
+    """The handoff as a page records it, keeping only items that name an entry of the chunk.
+
+    Each item of the answer names the entry it comes from; an item naming none of the
+    chunk's entries is not grounded in it and is left out (DESIGN 8). The page holds the
+    texts alone, the shape injection reads.
+    """
+    cited = _cited(part)
+
+    def grounded(item: dict) -> bool:
+        return bool(item["text"].strip()) and item["entry"] in cited
+
+    in_flight = handoff["in_flight"]
+    return {
+        "in_flight": in_flight["text"] if grounded(in_flight) else "",
+        "failed": [item["text"] for item in handoff["failed"] if grounded(item)],
+        "open": [item["text"] for item in handoff["open"] if grounded(item)],
+    }
+
+
+def _matching_answer(config: Config, prompt: str, part: Sequence[Entry], schema: dict) -> dict:
+    """One part's answer, asked again once when it does not match the chunk.
+
+    An answer that does not match twice is the chunk's own failure, as a refused schema is:
+    the job is marked failed with the reason and its watermark stays (finding T17).
+    """
+    problem = ""
+    for _ in range(2):
+        answer = _model_answer(config, prompt, render(part), schema)
+        found = mismatch(answer, part)
+        if found is None:
+            return answer
+        problem = found
+    raise AnswerRefused(f"the answer does not match its chunk: {problem}")
+
+
 def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict:
     """One digest call and its answer, with a refused answer told as this job's failure.
 
@@ -577,7 +671,7 @@ def verify(
     here judges what a fact is worth: that is the prompt's job, and a script that decided
     value as well would put its own taste into memory.
     """
-    by_id = {entry.id: entry for entry in part}
+    by_id = _cited(part)
     kept: list[Fact] = []
     dropped: list[Dropped] = []
     for fact in facts:
@@ -585,6 +679,8 @@ def verify(
         if entry is None:
             dropped.append(_refused(fact, f"entry {fact['entry']} is not an entry of this chunk"))
             continue
+        # A label is the prompt's name for the entry; what is recorded is the entry's own id.
+        fact = {**fact, "entry": entry.id}
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
             dropped.append(_refused(fact, f"the quote is not found in entry {entry.id}"))
             continue
@@ -1107,12 +1203,12 @@ def redigest(
             " digest to rebuild"
         )
     for part in parts(entries):
-        answer = _model_answer(config, prompt, render(part), schema)
+        answer = _matching_answer(config, prompt, part, schema)
         part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
         facts.extend(part_facts)
         dropped.extend(part_dropped)
         summaries.append(answer["summary"])
-        handoffs.append(answer["handoff"])
+        handoffs.append(grounded_handoff(answer["handoff"], part))
 
     page_text, on_page, refused = _page(
         config,

@@ -227,7 +227,11 @@ def answer(*facts: dict, summary: str = "Built the capture hook.", in_flight: st
     """One digest answer of the shape the schema describes."""
     return {
         "summary": summary,
-        "handoff": {"in_flight": in_flight, "failed": [], "open": []},
+        "handoff": {
+            "in_flight": {"text": in_flight, "entry": "#1" if in_flight else ""},
+            "failed": [],
+            "open": [],
+        },
         "facts": list(facts),
     }
 
@@ -657,14 +661,104 @@ def test_the_span_is_the_filters_to_decide(session: Session, monkeypatch: pytest
         assert words in asked, f"{words} went unasked though the filter kept it"
 
 
-def test_an_entry_the_chunk_never_held_is_dropped(session: Session):
-    """An id the model invents has no role to check and no text to quote."""
-    wrote = digest_once(session, answer(said(entry="e99")))
-    assert wrote.facts == ()
-    assert (
-        frontmatter(session.cfg, wrote.path)["aft"]["dropped"][0]["reason"]
-        == "entry e99 is not an entry of this chunk"
-    )
+def test_an_answer_citing_an_entry_the_chunk_never_held_is_refused(session: Session):
+    """An entry the model invents marks an answer about something other than the chunk, and
+    its summary and handoff carry no quote to check, so the whole answer goes: asked once
+    more, then the job fails with no page and the watermark where it was (finding T17)."""
+    fake, cfg = serve(session.cfg, answer(said(entry="e99")), answer(said(entry="e99")))
+    try:
+        with pytest.raises(digest.AnswerRefused, match="cites entry 'e99'"):
+            digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert len(fake.requests) == 2
+    assert pages(cfg) == []
+    assert watermark(cfg) is None
+
+
+def test_an_answer_that_matches_on_the_second_asking_is_kept(session: Session):
+    wrote = digest_once(session, answer(said(entry="e99")), answer(said()))
+    assert [fact.statement for fact in wrote.facts] == [
+        "Capture runs at session end, not per turn."
+    ]
+
+
+def with_handoff(key: str, text: str) -> dict:
+    bad = answer(said())
+    bad["handoff"][key] = [{"text": text, "entry": "#1"}]
+    return bad
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        answer(said(statement="...")),
+        answer(said(quote="…")),
+        answer(said(statement=" ")),
+        answer(said(), summary="..."),
+        answer(said(), summary=""),
+        answer(said(), in_flight="…"),
+        with_handoff("failed", "--"),
+        with_handoff("open", "..."),
+    ],
+)
+def test_a_placeholder_answer_is_refused_and_its_entries_stay_unread(session: Session, bad: dict):
+    fake, cfg = serve(session.cfg, bad, bad)
+    try:
+        with pytest.raises(digest.AnswerRefused, match="placeholder"):
+            digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert len(fake.requests) == 2
+    assert pages(cfg) == []
+    assert watermark(cfg) is None
+
+
+def test_the_chunk_is_counted_at_three_characters_and_the_answer_has_8000_tokens(
+    session: Session,
+):
+    """F34's sizing: a transcript runs nearer three characters to a token than four, and an
+    answer cut off at its cap is lost whole."""
+    assert digest.tokens("x" * 3_000) == 1_000
+    assert digest.MAX_CHUNK_TOKENS == 12_000
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert fake.requests[0]["max_tokens"] == 8_000
+
+
+def test_the_model_sees_short_labels_and_the_page_records_entry_ids(session: Session):
+    """A uuid copied wrongly loses its fact, so the model is shown #1, #2 and the script
+    maps the label back to the entry's own id."""
+    fake, cfg = serve(session.cfg, answer(said(entry="#1")))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    sent = fake.requests[0]["messages"][1]["content"]
+    assert sent.startswith("[#1] USER ")
+    assert "[e1]" not in sent
+    assert wrote is not None and [fact.entry for fact in wrote.facts] == ["e1"]
+    assert f"aft://session/claude/{SESSION}#e1" in (session.cfg.vault / wrote.path).read_text()
+
+
+def test_a_handoff_item_naming_no_entry_of_the_chunk_is_left_out(session: Session):
+    """DESIGN 8: each handoff item names the entry it comes from; one naming none of the
+    chunk's entries is not grounded in it."""
+    grounded = answer(said())
+    grounded["handoff"] = {
+        "in_flight": {"text": "the sweep, still to write", "entry": "#9999"},
+        "failed": [{"text": "a retry loop", "entry": "#1"}],
+        "open": [{"text": "where the cursor lives", "entry": "nowhere"}],
+    }
+    wrote = digest_once(session, grounded)
+    assert frontmatter(session.cfg, wrote.path)["aft"]["handoff"] == {
+        "in_flight": "",
+        "failed": ["a retry loop"],
+        "open": [],
+    }
 
 
 def test_every_refusal_is_readable_on_the_page(session: Session):
@@ -1354,8 +1448,8 @@ def test_the_split_never_cuts_an_entry_and_never_loses_one():
     assert [entry.id for entry in parts[-1]] == ["e6"]  # the oversized one stands alone
 
 
-def long_transcript(name: str, session: Session, turns: int = 120) -> Path:
-    """A session long enough that its chunk passes the 30,000-token cap.
+def long_transcript(name: str, session: Session, turns: int = 40) -> Path:
+    """A session long enough that its chunk passes the chunk cap, in two parts.
 
     A kept entry is at most 1,500 characters (`aft.filter`), so the cap is reached by a
     long conversation rather than by one huge turn - which is also the only way the cap
@@ -1387,12 +1481,14 @@ def test_a_chunk_over_the_cap_is_sent_in_parts_of_whole_entries(session: Session
         fake.stop()
     sent = [request["messages"][1]["content"] for request in fake.requests]
     assert len(sent) == 2, "the chunk went to the model in one call"
-    ids = [found for call in sent for found in re.findall(r"^\[(e\d+)\] ", call, re.MULTILINE)]
-    assert ids == [f"e{index}" for index in range(1, 121)], "an entry was lost, cut or repeated"
+    seen = [int(n) for call in sent for n in re.findall(r"entry (\d+) of the session", call)]
+    assert seen == list(range(1, 41)), "an entry was lost, cut or repeated"
     for call in sent:
-        for index in range(1, 121):
-            # An entry's words are all in the one call that names it, or all in neither.
-            assert call.count(turn(index)) == call.count(f"[e{index}] "), f"e{index} was cut"
+        assert digest.tokens(digest.prompt_text()) + digest.tokens(call) <= digest.MAX_CHUNK_TOKENS
+    for call in sent:
+        for index in range(1, 41):
+            # An entry's words are all in the one call that holds it, or all in neither.
+            assert call.count(turn(index)) == call.count(f"entry {index} of the session")
 
 
 def test_two_parts_make_one_page_whole(session: Session):
@@ -1737,7 +1833,9 @@ def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
     assert fact["properties"]["scope"]["enum"] == ["project", "global"]
     handoff = schema["properties"]["handoff"]
     assert handoff["required"] == ["in_flight", "failed", "open"]
-    assert handoff["properties"]["in_flight"]["maxLength"] == 400
+    assert handoff["properties"]["in_flight"]["properties"]["text"]["maxLength"] == 400
+    assert handoff["properties"]["in_flight"]["required"] == ["text", "entry"]
+    assert handoff["properties"]["open"]["items"]["required"] == ["text", "entry"]
     assert handoff["properties"]["failed"]["maxItems"] == 5
     assert handoff["properties"]["open"]["maxItems"] == 5
 
@@ -1751,7 +1849,7 @@ def test_the_schema_is_one_the_validator_reads():
         schema.validate(
             {
                 "summary": "x" * 801,
-                "handoff": {"in_flight": "", "failed": [], "open": []},
+                "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
                 "facts": [],
             },
             digest.digest_schema(),
