@@ -62,6 +62,10 @@ from aft.readers import USER, Entry
 # The page type a digest carries (BUILD-PLAN M2.6).
 PAGE_TYPE = "Session Digest"
 
+# The digests directory of sessions that belong to no project (DESIGN 7). No registered
+# slug can take this name: a slug starts with a letter or a digit.
+UNFILED = "_unfiled"
+
 PROMPT_FILE = "prompts/digest.md"
 SCHEMA_FILE = "prompts/digest.schema.json"
 
@@ -319,10 +323,11 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
             # outside the exclusion, so it is treated as inside it and leaves no queue row.
             queue.drop_job(config, job)
             return None
-    if resolution is not None and resolution.slug is None:
-        raise DigestError(
-            f"{job.cwd} resolves to no project, so this session has nowhere to be filed"
-        )
+    if resolution is None or resolution.slug is None:
+        # No project: a directory outside every registered project and every repository, or
+        # one gone with no record. The session is still digested, filed as unfiled, so what
+        # it says about the user and their machines reaches global memory (DESIGN 7).
+        resolution = keys.Resolution(kind=keys.NONE, cwd=job.cwd)
     if job.transcript_path is None:
         raise DigestError(f"job {job.id} names no transcript for session {job.session_id}")
 
@@ -336,8 +341,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     # left open at the end of this chunk holds over the next (DESIGN 12, M2.3). The parts
     # below are cut from what this one pass kept, so they share its state in order.
     kept, off_record = filtermod.filter_entries(read, config, job.off_record)
-    if resolution is not None:
-        kept = without_memory_echo(kept, memory_lines(config, resolution))
+    kept = without_memory_echo(kept, memory_lines(config, resolution))
     if not kept:
         # Nothing the filter left to digest: the entries were read and decided, so the
         # mark moves and the job closes. A page of nothing would stand as the session's
@@ -360,23 +364,17 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         config,
         job.agent,
         job.session_id,
-        None if resolution is None or resolution.project is None else resolution.project.id,
+        None if resolution.project is None else resolution.project.id,
         kept,
     )
     index.update(config)
-    if resolution is None:
-        # Unfiled: the directory is gone and nothing recorded its project. The words are in
-        # the archive and the index under no project, where `aft search --all` finds them. A
-        # digest page needs a project to stand under, so none is written and no model is
-        # asked; the mark moves, because these entries are stored and decided.
-        queue.complete(config, job, read[-1].id, off_record=off_record)
-        return None
 
     # The page's own name is taken here, before a token is spent on it, from what already
     # stands in the day's directory: a job writes the page it is given and never a page
     # another job wrote.
     when = read[-1].time.astimezone(UTC).date()
-    rel = _path(config, resolution.slug, job.agent, job.session_id, when)
+    slug = resolution.slug or UNFILED
+    rel = _path(config, slug, job.agent, job.session_id, when)
 
     role = rules.WORKER if is_worker(job.cwd, config) else rules.PRIMARY
     facts: list[Fact] = []
@@ -401,7 +399,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         config,
         job,
         rel,
-        resolution.slug,
+        slug,
         resolution,
         summaries,
         handoffs[-1],
@@ -412,9 +410,7 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         role=role,
     )
     dropped.extend(refused)
-    rel = _write(
-        config, rel, page, lambda: _path(config, resolution.slug, job.agent, job.session_id, when)
-    )
+    rel = _write(config, rel, page, lambda: _path(config, slug, job.agent, job.session_id, when))
     # The watermark is the last entry read, not the last one kept: what the filter threw
     # away has been decided, and reading it again would decide it again (DESIGN 8).
     queue.complete(config, job, read[-1].id, off_record=off_record)
@@ -968,7 +964,9 @@ def _words(fact: Fact) -> dict:
 
 
 def _title(resolution: keys.Resolution, slug: str) -> str:
-    return resolution.project.title if resolution.project is not None else slug
+    if resolution.project is not None:
+        return resolution.project.title
+    return "Unfiled" if slug == UNFILED else slug
 
 
 def _reap_orphans(directory: Path) -> None:
@@ -1168,11 +1166,16 @@ def redigest(
                         project = registry.by_slug(slug)
                         break
 
+    if slug is None and cwd is not None and Path(cwd).is_dir():
+        # An unregistered repository has a name of its own and no project id to record it.
+        try:
+            slug = keys.resolve(Path(cwd), registry, config.host).slug
+        except GitError:
+            slug = None
+
     if slug is None:
-        raise DigestError(
-            f"session {session_id!r} resolves to no project,"
-            " so this session has nowhere to be filed"
-        )
+        # A session of no project is digested as unfiled (DESIGN 7).
+        slug = UNFILED
 
     if agent is None:
         agent = "claude"
@@ -1180,13 +1183,17 @@ def redigest(
     when = entries[-1].time.astimezone(UTC).date()
     rel = f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
 
-    resolution = keys.Resolution(
-        kind=keys.PATH,
-        cwd=Path("."),
-        project=project,
-        slug=slug,
-        root=None,
-        alias_added=False,
+    resolution = (
+        keys.Resolution(kind=keys.NONE, cwd=Path("."))
+        if slug == UNFILED
+        else keys.Resolution(
+            kind=keys.PATH,
+            cwd=Path("."),
+            project=project,
+            slug=slug,
+            root=None,
+            alias_added=False,
+        )
     )
 
     facts: list[Fact] = []

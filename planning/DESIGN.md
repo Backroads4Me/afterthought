@@ -188,6 +188,7 @@ never includes runtime state.
     overview.md            the main page
     recent.md              short-term memory: the last few sessions' working facts
   digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>[-<n>].md
+                           (digests/_unfiled/... for a session of no project)
   archive/<page path>      a page's resolved notes and superseded lines older than 90 days,
                            at the page's own vault path (archive/projects/<slug>/overview.md)
   references/<name>/       reference pages for one library collection (section 11)
@@ -388,10 +389,18 @@ A working directory resolves to one project:
 A session's project is decided when the session starts, while its directory exists: the
 session-start hook resolves the directory to build the memory block, and records the answer
 beside the capture queue. A worktree is often removed before its session is digested, and
-the digest then files the session under the recorded project. A session with no record whose
-directory is gone is kept in the archive and the index under no project, with no digest
-page. When `capture.exclude_projects` names any project, such a session is dropped instead,
-because it cannot be shown to be outside the exclusion.
+the digest then files the session under the recorded project. When `capture.exclude_projects`
+names any project, a session with no record whose directory is gone is dropped, because it
+cannot be shown to be outside the exclusion.
+
+A session that belongs to no project, because its directory is outside every registered
+project and every repository or is gone with no record, is still captured. It is archived
+and indexed under no project and digested as unfiled, under `digests/_unfiled/`. Dreaming
+takes only its global facts into memory, under the usual rules: what you say about yourself
+and your machines counts wherever you say it. Its project facts have no project page, so
+they stay in the digest, where `aft search --all` finds them, and the report lists them.
+Nothing is made a project automatically, so a session in `~/Downloads` never creates one;
+`aft project add` registers a directory, git or not, that should be one.
 
 Each project has a stable id separate from its slug, so a rename rewrites nothing else.
 `aft project list`, `aft project rename` and `aft project forget` manage the registry.

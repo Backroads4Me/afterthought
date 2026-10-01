@@ -371,9 +371,9 @@ def page_path(session_id: str = SESSION) -> str:
     return f"digests/{below(session_id)}"
 
 
-def below(session_id: str = SESSION) -> str:
+def below(session_id: str = SESSION, slug: str = SLUG) -> str:
     """The same path as `pages` reports it: below the ``digests`` directory itself."""
-    return f"{SLUG}/{NOW:%Y}/{NOW:%m}/{NOW:%Y-%m-%d}-{CLAUDE}-{session_id}.md"
+    return f"{slug}/{NOW:%Y}/{NOW:%m}/{NOW:%Y-%m-%d}-{CLAUDE}-{session_id}.md"
 
 
 # ------------------------------------------------------- what may become memory, and what may not
@@ -1198,27 +1198,26 @@ def test_a_part_filed_while_the_model_answered_is_left_standing(
     assert watermark(cfg) == wrote.watermark
 
 
-def test_a_directory_that_is_no_project_at_all_is_never_sent_to_the_model(
-    session: Session, tmp_path
-):
-    """No project, no slug: the job is refused before the chunk is read or sent.
+def test_a_directory_that_is_no_project_is_digested_unfiled(session: Session, tmp_path):
+    """A session outside every project still reaches memory through its global facts.
 
-    DESIGN 7 draws the line at a directory that belongs to no project. A page filed
-    under a name nothing resolves to would be memory no session ever asks for, and the
-    model would have been asked to write it for free.
+    DESIGN 7: the session is digested and filed as unfiled, so what it says about the user
+    and their machines is kept, while its project facts stay in the digest. No job fails.
     """
     nowhere = (tmp_path / "just-a-directory").resolve()
     nowhere.mkdir()
     fake, cfg = serve(session.cfg, answer(said()))
     try:
-        with pytest.raises(digest.DigestError) as raised:
-            digest.digest_job(cfg, claim(cfg, session.transcript, nowhere))
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, nowhere))
     finally:
         fake.stop()
-    assert "no project" in str(raised.value)
-    assert fake.requests == [], "a session with nowhere to be filed was digested anyway"
-    assert pages(cfg) == []
-    assert watermark(cfg) is None
+    assert wrote is not None
+    assert len(fake.requests) == 1
+    assert pages(cfg) == [below(slug=digest.UNFILED)]
+    written = frontmatter(cfg, wrote.path)
+    assert "project" not in written["aft"]
+    assert written["title"].startswith("Unfiled session ")
+    assert watermark(cfg) is not None
 
 
 def test_an_unregistered_repository_is_digested_under_its_own_name(session: Session):
@@ -1293,37 +1292,33 @@ def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: 
     assert watermark(cfg, "gone-1") is None
 
 
-def test_a_directory_deleted_since_the_session_is_kept_unfiled(session: Session, tmp_path):
+def test_a_directory_deleted_since_the_session_is_digested_unfiled(session: Session, tmp_path):
     """A worktree cleaned up after its session is ordinary, and its words are still kept.
 
     Gate and orchestrator checkouts are made, worked in, and deleted by other processes, so by
     the time a run reaches such a session its directory cannot say which project it was. With
-    nothing recorded at session start either, the session is archived and indexed under no
-    project: no page, no model call, no failure, and the run goes on (DESIGN 7, DESIGN 14).
+    nothing recorded at session start either, the session is archived under no project and
+    digested as unfiled: no failure, and the run goes on (DESIGN 7, DESIGN 14).
     """
     gone = (tmp_path / "gate-worktree").resolve()
     gone.mkdir()
     here = session.transcript.with_name("here.jsonl")
     shutil.copy(session.transcript, here)
-    fake, cfg = serve(session.cfg, answer(said()))
+    fake, cfg = serve(session.cfg, answer(said()), answer(said()))
     try:
         queue.enqueue(cfg, event(session.transcript, gone, session_id="gone-cwd"))
         queue.enqueue(cfg, event(here, session.cwd, session_id="here-1"))
         shutil.rmtree(gone)
         report = work.run(cfg)
-        asked = len(fake.requests)
     finally:
         fake.stop()
     assert report.stopped == "", "a session-local path stopped the whole run"
     assert report.failures == ()
-    assert report.digested == 1
-    assert asked == 1, "the unfiled session was sent to the model"
+    assert report.digested == 2
     assert rows(cfg, queue.FAILED) == []
     assert sorted(rows(cfg, queue.DONE)) == ["gone-cwd", "here-1"]
-    assert watermark(cfg, "gone-cwd") is not None
-    assert evidence.entries(cfg, "gone-cwd"), "the session's words were not archived"
     assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, None)
-    assert pages(cfg) == [below("here-1")]
+    assert sorted(pages(cfg)) == sorted([below("here-1"), below("gone-cwd", slug=digest.UNFILED)])
 
 
 def test_a_deleted_directory_is_filed_under_the_project_its_session_started_in(
