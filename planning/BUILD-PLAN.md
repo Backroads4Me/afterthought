@@ -860,6 +860,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
 
   F30, F31 and F32 land in that order. The timer stays off until F31 merges, since a dream
   before it would file short-term facts as long-term.
+- **F33 User documentation** (ruling 2026-09-30; after F32). DESIGN.md is written for
+  whoever builds afterthought; a user needs pages written for using it. `README.md` says
+  what afterthought is and why, how to install it, a quick start (`aft init`, `aft project
+  add`, `aft install claude` and `pi`, `aft install timer`, opening the vault in Obsidian),
+  one paragraph on how it works, and links to `docs/`. `docs/concepts.md` explains, in plain
+  language, evidence, digests and curated facts, the source tags, short-term and long-term
+  memory, and what a user sees day to day. `docs/configuration.md` gives every
+  `config.toml` key with its default and when to change it. `docs/commands.md` gives every
+  `aft` command and flag. `docs/vault.md` covers the vault's layout, reading and editing
+  pages in Obsidian, `reports/needs-you.md`, reverting a dream, and forgetting. The docs
+  describe behavior and link to DESIGN.md for the reasons; they never restate a rule
+  differently from the design. Tests: every key in the default config template appears in
+  `docs/configuration.md`, and every `aft` subcommand appears in `docs/commands.md`, so a
+  new setting or command without documentation fails CI.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
