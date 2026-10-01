@@ -57,6 +57,11 @@
             "description": "Where the fact came from; a tentative remark is suggested, never stated.",
             "enum": ["stated", "observed", "inferred", "suggested"]
           },
+          "term": {
+            "type": "string",
+            "description": "Long if still true and useful a year from now; short if it will change as the work moves on.",
+            "enum": ["long", "short"]
+          },
           "quote": {
             "type": "string",
             "description": "Words copied from one entry, which the script finds in that entry or drops the fact.",
@@ -72,7 +77,7 @@
             "enum": ["project", "global"]
           }
         },
-        "required": ["statement", "kind", "source", "quote", "entry", "scope"]
+        "required": ["statement", "kind", "source", "term", "quote", "entry", "scope"]
       }
     }
   },

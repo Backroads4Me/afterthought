@@ -164,6 +164,7 @@ def said(statement: str, quote: str, entry: str) -> dict:
         "statement": statement,
         "kind": "decision",
         "source": "stated",
+        "term": "long",
         "quote": quote,
         "entry": entry,
         "scope": "project",
