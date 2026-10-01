@@ -1,6 +1,6 @@
 """pi hook payloads to normalized events.
 
-pi (0.87.1) has no shell hooks of its own: its lifecycle events reach the outside
+pi (0.99.1) has no shell hooks of its own: its lifecycle events reach the outside
 world through an extension (M1.4), which writes the payload for the event it handles
 to the stdin of `aft hook pi <event>`. The event names here are pi's own extension
 event names, and `reason` is pi's field for what set an event off: `session_start`
@@ -37,6 +37,7 @@ AGENT = "pi"
 EVENTS = {
     "session_start": (SESSION_START, "reason"),
     "session_before_compact": (COMPACTION, "reason"),
+    "session_compact": (COMPACTION, "reason"),
     "session_shutdown": (SESSION_END, "reason"),
 }
 
