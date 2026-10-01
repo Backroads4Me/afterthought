@@ -175,7 +175,7 @@ def digest_reply(*facts: dict) -> dict:
     """One digest answer of the shape the schema describes, carrying these facts."""
     return {
         "summary": "Chose where the queue keeps its state.",
-        "handoff": {"in_flight": "", "failed": [], "open": []},
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
         "facts": list(facts),
     }
 

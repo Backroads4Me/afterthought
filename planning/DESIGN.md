@@ -494,8 +494,19 @@ stopped goes in the summary and handoff, not in facts. Each fact carries a term:
 it would still be true and useful the next time someone opens the project, even a year from
 now, and `short` when it is true now but will change as the work moves on. When the model is
 unsure it says `short`, the cheaper mistake: a short-term line that keeps holding is promoted,
-while a wrong long-term line stays until something replaces it. The script then:
+while a wrong long-term line stays until something replaces it.
 
+A summary and a handoff carry no quote, so they are trusted only as far as the answer they
+came in matches its chunk. The chunk is at most 12,000 tokens, counted at three characters
+to a token so the estimate errs high: a small model given more loses track of it. Each
+entry is shown under a short label (`#1`, `#2`), which every fact and every handoff item
+names, and the script maps the label back to the entry's own id. An answer with a fact
+citing an entry the chunk does not hold, or a placeholder (text with no word in it, such as
+`...`) where a summary, a handoff item or a fact should be, is about something other than
+the chunk: it is asked for once more, and a second such answer fails the job, leaving its
+entries to be read again. The script then:
+
+- drops a handoff item whose entry is not one of the chunk's
 - drops any fact whose quote does not appear in the cited entry (whitespace-normalized)
 - drops `[stated]` unless the cited entry is one of your turns
 - drops a short-term fact that is `[inferred]` or `[suggested]`, or whose scope is global:
