@@ -28,6 +28,10 @@ DIGESTS = "digests"
 _PART = re.compile(r"^(?P<base>.+)-(?P<part>\d+)$")
 _SESSION_URI = re.compile(r"^aft://session/(?P<agent>[^/#]+)/(?P<session>[^/#]+)#")
 _EDIT_URI = re.compile(r"^aft://edit/(?P<sha>[0-9a-f]{7,40})$")
+# A dream run's id ends in the time it started (aft.dream.apply.run_project).
+_RUN_TIME = re.compile(
+    r"(?P<d>\d{4})(?P<m>\d{2})(?P<day>\d{2})T(?P<h>\d{2})(?P<mi>\d{2})(?P<s>\d{2})Z$"
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,10 @@ class Session:
     session_id: str
     at: str
     """When the session's first digest was written, as ``generated.at`` holds it."""
+
+    dreamed: str = ""
+    """When a dream run consumed that digest, from the run id its ``aft.consumed`` holds,
+    in the same form; empty while it waits."""
 
 
 def written_at(frontmatter: dict) -> str:
@@ -84,11 +92,20 @@ def sessions(vault: Path, slug: str) -> list[Session]:
         # A later part of one day is filed as <session>-2, and only beside its first part.
         if part and f"{named.group('date')}-{named.group('agent')}-{part.group('base')}" in stems:
             session = part.group("base")
-        found.append((written_at(frontmatter), str(path), named.group("agent"), session))
+        dreamed = _run_time(aft.get("consumed") if isinstance(aft, dict) else None)
+        found.append((written_at(frontmatter), str(path), named.group("agent"), session, dreamed))
     ordered: dict[tuple[str, str], Session] = {}
-    for at, _, agent, session in sorted(found):
-        ordered.setdefault((agent, session), Session(agent, session, at))
+    for at, _, agent, session, dreamed in sorted(found):
+        ordered.setdefault((agent, session), Session(agent, session, at, dreamed))
     return list(ordered.values())
+
+
+def _run_time(run_id: object) -> str:
+    """The start of the dream run a digest's ``aft.consumed`` names, or empty."""
+    match = _RUN_TIME.search(run_id) if isinstance(run_id, str) else None
+    if match is None:
+        return ""
+    return "{d}-{m}-{day}T{h}:{mi}:{s}Z".format(**match.groupdict())
 
 
 def positions(
@@ -100,9 +117,9 @@ def positions(
     """The places in ``order`` of the sessions this line's sources come from.
 
     A source from a session names it in its ``aft://session/<agent>/<id>#<entry>`` resource.
-    A source from a hand edit counts as the newest session written before the edit's
-    commit (DESIGN 6). A source naming neither, or a session the project has no digest
-    for, has no place.
+    A source from a hand edit counts as the newest session dreamed before the edit's
+    commit (DESIGN 6), and as coming before the first session when none was. A source
+    naming neither, or a session the project has no digest for, has no place.
     """
     index = {(s.agent, s.session_id): n for n, s in enumerate(order)}
     found: list[int] = []
@@ -134,7 +151,8 @@ def outlasted(places: list[int], window: int) -> bool:
 
 
 def _edit_place(vault: Path, sha: str, order: list[Session]) -> int | None:
-    """The newest session written before a hand edit's commit."""
+    """The newest session dreamed before a hand edit's commit, or -1, before the first
+    session, when no session was."""
     result = git(["show", "-s", "--format=%cI", "--end-of-options", sha], cwd=vault, check=False)
     if result.returncode != 0:
         return None
@@ -143,5 +161,5 @@ def _edit_place(vault: Path, sha: str, order: list[Session]) -> int | None:
     except ValueError:
         return None
     stamp = f"{when:%Y-%m-%dT%H:%M:%SZ}"
-    before = [n for n, s in enumerate(order) if s.at and s.at <= stamp]
-    return before[-1] if before else None
+    before = [n for n, s in enumerate(order) if s.dreamed and s.dreamed <= stamp]
+    return before[-1] if before else -1

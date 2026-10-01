@@ -20,6 +20,7 @@ from aft.dream import report as reportmod
 from aft.dream import rules, schedule, shortterm
 from aft.readers import USER, Entry
 from aft.registry import Registry
+from conftest import run_git
 from test_apply import NOW, TODAY, config_with_fake, fake, reply, seed_overview, write_digest
 
 __all__ = ["fake"]  # the fixture, imported so pytest finds it here
@@ -66,7 +67,8 @@ def session_digest(
         facts=facts or [],
         sources=sources or [],
         at=f"2026-10-{n:02d}T08:00:00Z",
-        consumed=None if waiting else f"dream-earlier-{n}",
+        # Earlier runs consumed them; a run id ends in the time the run started.
+        consumed=None if waiting else f"dream-{SLUG}-202609{n:02d}T090000Z",
     )
 
 
@@ -223,6 +225,8 @@ def test_a_line_rolls_off_once_its_newest_session_leaves_the_window(cfg, fake):
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert [r.statement for r in rep.rolled_off] == ["The hook rewrite is paused."]
+    assert "The hook rewrite is paused." not in (cfg.vault / RECENT).read_text()
+    assert lint.lint_vault(cfg.vault) == []
     section = reportmod.format_run_section(rep, cfg.vault, NOW)
     assert 'Rolled off: "The hook rewrite is paused."' in section
 
@@ -254,14 +258,24 @@ def test_the_window_is_the_configured_number_of_sessions(cfg, fake, home):
 
 
 def test_time_alone_rolls_nothing_off(cfg, fake):
-    """No session, no roll-off, however old the line: a year away keeps short term whole."""
-    session_digest(cfg, 1)
+    """No new session of the project, no roll-off, however much later the run is: a line at
+    the edge of the window stays while only a worker's digest arrives, a year on."""
+    for n in range(1, 6):
+        session_digest(cfg, n)
     paused_line(cfg, "s1")
-    unrelated_waiting(cfg, 2)
+    write_digest(
+        cfg,
+        SLUG,
+        "2026-10-06-c-w6",
+        facts=[short_fact("Lunch was late.", ref="s90")],
+        sources=[source("s90", "w6", "Lunch was late.")],
+        role="worker",
+        at="2026-10-06T08:00:00Z",
+    )
     fake.script = [reply("skip")]
-    far = NOW.replace(year=NOW.year + 1)
-    schedule.run(cfg, now=far)
+    rep = schedule.run(cfg, now=NOW.replace(year=NOW.year + 1)).reports[SLUG]
     assert "The hook rewrite is paused." in recent_text(cfg)
+    assert rep.rolled_off == []
 
 
 def test_a_rolled_off_line_is_still_found_in_its_digest(cfg, fake):
@@ -327,9 +341,17 @@ def test_a_line_whose_sources_span_the_window_becomes_long_term(cfg, fake):
     assert "- The hook rewrite is paused. [observed]" in overview_text(cfg)
     assert [lifted.why for lifted in rep.lifted] == ["its sources span the short-term window"]
     assert lint.lint_vault(cfg.vault) == []
+    section = reportmod.format_run_section(rep, cfg.vault, NOW)
+    assert 'To long-term memory: "The hook rewrite is paused."' in section
 
 
-def test_three_mentions_in_two_sessions_stay_short_term(cfg, fake):
+def test_three_mentions_in_two_sessions_stay_short_term(cfg, fake, home):
+    """With a window of two, three mentions would reach any count of mentions; only the
+    distance between sessions promotes."""
+    (home / "config.toml").write_text(
+        (home / "config.toml").read_text() + "[dream]\nshort_term_sessions = 2\n"
+    )
+    cfg = configmod.load()
     for n in range(1, 5):
         session_digest(cfg, n)
     paused_line(cfg, "s4", "s4")
@@ -492,3 +514,77 @@ def test_sessions_are_counted_once_each_in_session_order(cfg):
     )
     order = shortterm.sessions(cfg.vault, SLUG)
     assert [s.session_id for s in order] == ["s1", "s2"]
+
+
+def candidate_line() -> page.Fact:
+    text = (
+        "---\ntype: Project\ntitle: t\ndescription: d\nsources:\n"
+        "  - {id: s9, resource: 'aft://session/c/s0#e1', quote: q}\n---\n\n"
+        "## Candidates\n\n- The build runs on the GPU host. [observed] 2026-09-01 [^s9]"
+        " (signals 1/3, sessions 1/2)\n"
+    )
+    return page.parse(text, Path("p.md")).facts[0]
+
+
+def test_rules_let_a_short_fact_only_confirm_a_long_term_candidate():
+    """R10: confirming is all a short-term fact does to long-term memory, so a candidate it
+    confirms is not carried over the gate by it."""
+    fact = rules.NewFact("A fact.", "state", "observed", TODAY, term="short")
+    context = rules.Context(today=TODAY, evidence=quotes(), run_project="p", page_project="p")
+    outcome = rules.check(rules.Decision("confirm", "L1"), fact, candidate_line(), context)
+    assert outcome == rules.apply("confirm")
+
+
+def test_rules_refuse_a_short_global_fact():
+    fact = rules.NewFact("A fact.", "preference", "stated", TODAY, scope="global", term="short")
+    context = rules.Context(today=TODAY, evidence=quotes(), run_project="p", page_project=None)
+    assert rules.check(rules.Decision("add"), fact, None, context) == rules.reject("R10")
+
+
+def test_rules_hold_r4_on_recent():
+    """An older quote cannot replace a short-term line any more than a long-term one."""
+    fact = rules.NewFact("A fact.", "state", "observed", "2026-08-01", term="short")
+    old = (
+        rules.Evidence(
+            source="s1",
+            resource="aft://session/c/s1#e1",
+            origin=rules.PRIMARY,
+            date="2026-08-01",
+            verified=True,
+        ),
+    )
+    context = rules.Context(
+        today=TODAY, evidence=old, run_project="p", page_project="p", target_recent=True
+    )
+    outcome = rules.check(rules.Decision("supersede", "L1"), fact, a_line(), context)
+    assert outcome == rules.downgrade("conflict", "R4")
+
+
+def test_lint_refuses_an_empty_candidates_heading_on_recent(cfg):
+    seed_recent(
+        cfg,
+        ["- The hook rewrite is paused. [observed] 2026-10-01 [^r0]", "", "## Candidates"],
+        [source("r0", "s1", "The hook rewrite is paused.")],
+    )
+    messages = [f.message for f in lint.lint_vault(cfg.vault) if f.path == RECENT]
+    assert "short-term memory has no Candidates section" in messages
+
+
+def test_a_hand_edit_counts_as_the_newest_session_dreamed_before_it(cfg):
+    session_digest(cfg, 1)
+    session_digest(cfg, 2)
+    edit = run_git(["rev-parse", "HEAD"], cfg.vault)
+    session_digest(cfg, 3, waiting=True)
+    order = shortterm.sessions(cfg.vault, SLUG)
+    sources = {"s9": {"resource": f"aft://edit/{edit}", "quote": "q"}}
+    # Sessions 1 and 2 were dreamed in September 2026, before the edit's commit, and
+    # session 3 waits: the edit is placed at session 2.
+    assert shortterm.positions(a_line(), sources, order, cfg.vault) == [1]
+
+
+def test_a_hand_edit_before_any_dreamed_session_comes_before_the_first(cfg):
+    session_digest(cfg, 1, waiting=True)
+    edit = run_git(["rev-parse", "HEAD"], cfg.vault)
+    order = shortterm.sessions(cfg.vault, SLUG)
+    sources = {"s9": {"resource": f"aft://edit/{edit}", "quote": "q"}}
+    assert shortterm.positions(a_line(), sources, order, cfg.vault) == [-1]

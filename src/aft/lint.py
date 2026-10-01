@@ -157,7 +157,7 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
     def add(line: int, message: str) -> None:
         out.append(Finding(name, line, message))
 
-    frontmatter, body, _, error = pagemod.split_frontmatter(text)
+    frontmatter, body, body_start, error = pagemod.split_frontmatter(text)
     if error:
         add(1, error)
         return out
@@ -184,17 +184,18 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
         _check_evidence(page, frontmatter, body, add)
         _check_scope(rel, frontmatter, registry, add)
         if pagemod.is_recent(rel):
-            _check_short_term(page, add)
+            _check_short_term(page, body, body_start, add)
     return out
 
 
-def _check_short_term(page: pagemod.Page, add) -> None:
+def _check_short_term(page: pagemod.Page, body: str, body_start: int, add) -> None:
     """A project's short-term page holds no candidates and only [stated] or [observed]
     lines (DESIGN 6): a conclusion or an idea about current work belongs in a handoff."""
+    for number, text in enumerate(body.split("\n"), start=body_start):
+        if text.strip() == f"## {pagemod.CANDIDATES}":
+            add(number, "short-term memory has no Candidates section")
     for fact in page.facts:
-        if fact.section == pagemod.CANDIDATES:
-            add(fact.line, "short-term memory has no Candidates section")
-        elif fact.source not in pagemod.SHORT_TERM_SOURCES:
+        if fact.section != pagemod.CANDIDATES and fact.source not in pagemod.SHORT_TERM_SOURCES:
             add(
                 fact.line,
                 f"short-term memory holds [stated] and [observed] lines, not [{fact.source}]",

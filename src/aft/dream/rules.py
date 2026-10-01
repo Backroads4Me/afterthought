@@ -89,12 +89,12 @@ HALF_WEIGHT_AFTER_DAYS = 30
 """A signal older than this counts half toward R3's gate (design 9 R3)."""
 
 MODEL_ACTIONS = ("add", "confirm", "supersede", "conflict", "skip")
+"""The decisions the model may name (design 9 step 3, M4.3's schema)."""
 
 LONG = "long"
 SHORT = "short"
 """A fact's term (design 6): long-term memory is what stays true, short-term memory what the
 project's last few sessions were working with."""
-"""The decisions the model may name (design 9 step 3, M4.3's schema)."""
 
 
 AUTHORITY = {
@@ -337,8 +337,9 @@ def check(
 
     if new_fact.term == SHORT:
         # R10: short-term memory holds only what you said or a session saw, from a primary
-        # session; the digest refuses anything else, and the rule holds it here as well.
-        if new_fact.source not in page.SHORT_TERM_SOURCES:
+        # session, for a project; the digest refuses anything else, and the rule holds it
+        # here as well.
+        if new_fact.source not in page.SHORT_TERM_SOURCES or new_fact.scope == "global":
             return reject("R10")
         if not _primary(context.evidence):
             return reject(WORKER_RULE if _only_worker(context.evidence) else LIBRARY_RULE)
@@ -388,6 +389,10 @@ def check(
         # A line under an open note waits for the note to close and is confirmed meanwhile,
         # since the note is the dispute a person has still to settle (design 6).
         outcome: Outcome = apply("confirm") if target_line.callouts else apply("lift")
+    elif decision.action == "confirm" and new_fact.term == SHORT and not context.target_recent:
+        # R10: a short-term fact confirms a long-term line and does no more; a candidate it
+        # confirms gathers the source and waits for long-term evidence to carry it over.
+        outcome = apply("confirm")
     elif decision.action == "confirm":
         outcome = _confirm(new_fact, target_line, context)
     elif decision.action == "conflict":

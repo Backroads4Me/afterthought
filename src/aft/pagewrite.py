@@ -188,6 +188,9 @@ def _archive_header(rel: Path) -> list[str]:
     ]
 
 
+_CITED = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+
+
 class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
@@ -649,7 +652,52 @@ class PageDoc:
         line_content = self.lines[at]
         with self._atomic():
             self._apply(at, at + 1, [])
+            self._drop_uncited_sources()
         return line_content
+
+    def _drop_uncited_sources(self) -> None:
+        """Remove the source entries no footnote on the page cites any more.
+
+        Only a short-term page gives up lines, and its evidence stays in the digests and
+        the evidence archive, so a source left behind would only grow the page.
+        """
+        bounds = self._fm_bounds()
+        if bounds is None:
+            return
+        key = self._key_line("sources", bounds)
+        if key is None:
+            return
+        last = self._sources_end(key, bounds)
+        cited = set(_CITED.findall("\n".join(self.lines[bounds[1] + 1 :])))
+        indent = next(
+            (
+                match.group("indent")
+                for line in self.lines[key + 1 : last + 1]
+                if (match := _ENTRY_LINE.match(line))
+            ),
+            "  ",
+        )
+        starts = [
+            idx
+            for idx in range(key + 1, last + 1)
+            if (m := _ENTRY_LINE.match(self.lines[idx])) and m.group("indent") == indent
+        ]
+        spans = [
+            (start, starts[k + 1] if k + 1 < len(starts) else last + 1)
+            for k, start in enumerate(starts)
+        ]
+        kept = 0
+        for start, stop in reversed(spans):
+            entry = yaml.safe_load(
+                "\n".join(line[len(indent) :] for line in self.lines[start:stop])
+            )
+            ident = entry[0].get("id") if isinstance(entry, list) and entry else None
+            if ident is not None and str(ident) not in cited:
+                self._apply(start, stop, [])
+            else:
+                kept += 1
+        if not kept:
+            self._apply(key, key + 1, ["sources: []"])
 
     def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
         """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).
