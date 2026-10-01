@@ -513,8 +513,13 @@ names, and the script maps the label back to the entry's own id; the label's num
 without its `#`, and an entry's id copied exactly, are accepted too. An answer with a fact citing an entry the chunk does not hold, an
 empty summary, fact statement or quote, or a placeholder (written text with no word in it,
 such as `...`) where a summary, a handoff item or a fact should be, is about something
-other than the chunk: it is asked for once more, and a second such answer fails the job, leaving its
-entries to be read again. The script then:
+other than the chunk: it is asked for once more. A part answered that way twice gives the
+page nothing, neither summary, handoff nor fact, and the page records it under
+`aft.refused_parts` with its first and last entry and the reason; the job's other parts are
+kept, so one part the model cannot read does not lose a long session, and `aft redigest`
+can read the part again later. When the last part is refused, the handoff is empty, since
+nothing says where the work stood at the end. A job whose every part is refused fails,
+leaving its entries to be read again.  The script then:
 
 - drops a handoff item whose entry is not one of the chunk's
 - drops any fact whose quote does not appear in the cited entry (whitespace-normalized)

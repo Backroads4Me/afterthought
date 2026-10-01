@@ -381,23 +381,8 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     rel = _path(config, slug, job.agent, job.session_id, when)
 
     role = rules.WORKER if is_worker(job.cwd, config) else rules.PRIMARY
-    facts: list[Fact] = []
-    dropped: list[Dropped] = []
-    summaries: list[str] = []
-    handoffs: list[dict[str, object]] = []
-    prompt = prompt_text()
-    schema = digest_schema()
-    # One page per job, whatever the number of parts: the parts of one job are one digest,
-    # and a handoff is what stood at the end of the part that read it, so the last part's is
-    # the job's. Summaries are joined uncut: a page's description has no cap, so nothing is
-    # truncated at the join, and a reader sees every part's own words.
-    for part in parts(kept):
-        answer = _matching_answer(config, prompt, part, schema)
-        part_facts, part_dropped = verify(config, job.session_id, part, answer["facts"], role=role)
-        facts.extend(part_facts)
-        dropped.extend(part_dropped)
-        summaries.append(answer["summary"])
-        handoffs.append(grounded_handoff(answer["handoff"], part))
+    digested = _digest_parts(config, job.session_id, parts(kept), role)
+    facts, dropped = digested.facts, digested.dropped
 
     page, on_page, refused = _page(
         config,
@@ -405,13 +390,14 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         rel,
         slug,
         resolution,
-        summaries,
-        handoffs[-1],
+        digested.summaries,
+        digested.handoff,
         facts,
         dropped,
         when,
         now or datetime.now(UTC),
         role=role,
+        refused_parts=digested.refused_parts,
     )
     dropped.extend(refused)
     rel = _write(config, rel, page, lambda: _path(config, slug, job.agent, job.session_id, when))
@@ -623,11 +609,66 @@ def grounded_handoff(handoff: dict, part: Sequence[Entry]) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class Digested:
+    """What one job's parts gave, part by part, before the page is written."""
+
+    facts: list[Fact]
+    dropped: list[Dropped]
+    summaries: list[str]
+    handoff: dict
+    refused_parts: list[dict]
+
+
+def _digest_parts(
+    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+) -> Digested:
+    """Ask for, check and verify each part of one job (DESIGN 8).
+
+    One page per job, whatever the number of parts. Summaries are joined uncut: a page's
+    description has no cap, so a reader sees every part's own words. A handoff is what
+    stood at the end of the part that read it, so the last part's is the job's.
+
+    A part whose answer is refused twice gives the page nothing, neither summary, handoff
+    nor fact, and is recorded under ``aft.refused_parts`` with its first and last entry and
+    why; the other parts are kept, so one part the model cannot read does not lose a long
+    session. Its entries stay in the evidence archive, where ``aft redigest`` reads them
+    again. When the last part is refused, nothing says where the work stood at the end, so
+    the handoff is empty. A job whose every part is refused has nothing to file: it fails,
+    and its watermark stays.
+    """
+    prompt = prompt_text()
+    schema = digest_schema()
+    result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
+    last_refused = False
+    for part in chunks:
+        try:
+            answer = _matching_answer(config, prompt, part, schema)
+        except AnswerRefused as exc:
+            result.refused_parts.append(
+                {"first": part[0].id, "last": part[-1].id, "reason": str(exc)}
+            )
+            last_refused = True
+            continue
+        part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
+        result.facts.extend(part_facts)
+        result.dropped.extend(part_dropped)
+        result.summaries.append(answer["summary"])
+        handoff = grounded_handoff(answer["handoff"], part)
+        last_refused = False
+        result = replace(result, handoff=handoff)
+    if not result.summaries:
+        raise AnswerRefused(result.refused_parts[-1]["reason"])
+    if last_refused:
+        result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
+    return result
+
+
 def _matching_answer(config: Config, prompt: str, part: Sequence[Entry], schema: dict) -> dict:
     """One part's answer, asked again once when it does not match the chunk.
 
-    An answer that does not match twice is the chunk's own failure, as a refused schema is:
-    the job is marked failed with the reason and its watermark stays (finding T17).
+    An answer that does not match twice is that part's failure, as a refused schema is
+    (finding T17); ``_digest_parts`` decides what the job keeps.
     """
     problem = ""
     for _ in range(2):
@@ -785,6 +826,7 @@ def _page(
     when: date,
     stamp: datetime,
     role: str = rules.PRIMARY,
+    refused_parts: Sequence[dict] = (),
 ) -> tuple[str, tuple[Fact, ...], tuple[Dropped, ...]]:
     """The digest page: the frontmatter, then the fact lines the script kept.
 
@@ -799,7 +841,17 @@ def _page(
     what ``aft.facts`` names, so the record beside a page and the lines on it cannot part.
     """
     frontmatter = _frontmatter(
-        config, resolution, slug, summaries, handoff, facts, dropped, when, stamp, role=role
+        config,
+        resolution,
+        slug,
+        summaries,
+        handoff,
+        facts,
+        dropped,
+        when,
+        stamp,
+        role=role,
+        refused_parts=refused_parts,
     )
     text, written, refused = _written(frontmatter, rel, session, facts)
     if refused:
@@ -816,6 +868,7 @@ def _page(
             when,
             stamp,
             role=role,
+            refused_parts=refused_parts,
         )
         text, written, _ = _written(frontmatter, rel, session, facts)
     return text, tuple(written), tuple(refused)
@@ -832,6 +885,7 @@ def _frontmatter(
     when: date,
     stamp: datetime,
     role: str = rules.PRIMARY,
+    refused_parts: Sequence[dict] = (),
 ) -> dict:
     """The page's OKF frontmatter, with afterthought's own fields under one ``aft`` key.
 
@@ -853,6 +907,8 @@ def _frontmatter(
         aft["facts"] = [_verified(fact) for fact in kept]
     if dropped:
         aft["dropped"] = [_record(fact) for fact in dropped]
+    if refused_parts:
+        aft["refused_parts"] = [dict(part) for part in refused_parts]
     return {
         "type": PAGE_TYPE,
         "title": f"{_title(resolution, slug)} session {when:%Y-%m-%d}",
@@ -1200,26 +1256,14 @@ def redigest(
         )
     )
 
-    facts: list[Fact] = []
-    dropped: list[Dropped] = []
-    summaries: list[str] = []
-    handoffs: list[dict[str, object]] = []
-    prompt = prompt_text()
-    schema = digest_schema()
-
     entries = without_memory_echo(entries, memory_lines(config, resolution))
     if not entries:
         raise DigestError(
             f"session {session_id!r} holds nothing but the memory it was given, so it has no"
             " digest to rebuild"
         )
-    for part in parts(entries):
-        answer = _matching_answer(config, prompt, part, schema)
-        part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
-        facts.extend(part_facts)
-        dropped.extend(part_dropped)
-        summaries.append(answer["summary"])
-        handoffs.append(grounded_handoff(answer["handoff"], part))
+    digested = _digest_parts(config, session_id, parts(entries), role)
+    facts, dropped = digested.facts, digested.dropped
 
     page_text, on_page, refused = _page(
         config,
@@ -1227,13 +1271,14 @@ def redigest(
         rel,
         slug,
         resolution,
-        summaries,
-        handoffs[-1],
+        digested.summaries,
+        digested.handoff,
         facts,
         dropped,
         when,
         now or datetime.now(UTC),
         role=role,
+        refused_parts=digested.refused_parts,
     )
     dropped.extend(refused)
 

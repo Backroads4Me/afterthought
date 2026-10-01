@@ -908,6 +908,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   project and a deleted one are digested unfiled with no failure; an unfiled dream adds the
   global fact and skips the project fact; redigest files unfiled; the quiet period sees
   unfiled activity.
+- **F36 A refused part costs only itself** (ruling 2026-10-01). DESIGN 8. A part whose
+  answer is refused twice (by the schema or by F34's match) gives the page no summary,
+  handoff or fact, and is recorded under `aft.refused_parts` (`first`, `last`, `reason`);
+  the job's other parts are kept and the watermark moves. A refused last part leaves the
+  handoff empty. A job whose every part is refused fails as before. `aft redigest` does the
+  same. Tests: a refused first part, a refused last part, every part refused, and a
+  redigest with one refused part.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
