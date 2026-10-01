@@ -82,6 +82,14 @@ SCOPES = frozenset({"project", "global"})
 # DESIGN 9 R6: why dreaming passes over a global fact the user did not commit to. The
 # digest records it beside the fact, so the skip is reported and the fact stays written.
 GLOBAL_NOT_STATED = "a global page changes only from [stated]"
+# DESIGN 6: long-term memory is what stays true; short-term is what the project's last few
+# sessions were working with. A fact recorded with no term (a library or memory-import
+# digest) is long-term.
+LONG = "long"
+SHORT = "short"
+TERMS = frozenset({LONG, SHORT})
+# Short-term memory holds only what the user said or a session saw, and only for a project.
+SHORT_SOURCES = frozenset({"stated", "observed"})
 
 
 class DigestError(Exception):
@@ -139,6 +147,7 @@ class Fact:
     scope: str
     date: str  # the day of that entry, which is the line's date last evidenced
     role: str = rules.PRIMARY
+    term: str = LONG
 
 
 @dataclass(frozen=True)
@@ -592,6 +601,19 @@ def verify(
         if fact["scope"] not in SCOPES:
             dropped.append(_refused(fact, f"unknown scope {fact['scope']!r}"))
             continue
+        if fact["term"] not in TERMS:
+            dropped.append(_refused(fact, f"unknown term {fact['term']!r}"))
+            continue
+        if fact["term"] == SHORT and fact["source"] not in SHORT_SOURCES:
+            dropped.append(
+                _refused(
+                    fact, f"a short-term fact is [stated] or [observed], not [{fact['source']}]"
+                )
+            )
+            continue
+        if fact["term"] == SHORT and fact["scope"] == "global":
+            dropped.append(_refused(fact, "a short-term fact belongs to a project, never global"))
+            continue
         kept.append(
             Fact(
                 statement=fact["statement"],
@@ -602,6 +624,7 @@ def verify(
                 scope=fact["scope"],
                 date=entry.time.astimezone(UTC).date().isoformat(),
                 role=role,
+                term=fact["term"],
             )
         )
     return kept, dropped
@@ -821,12 +844,21 @@ def _verified(fact: Fact) -> dict:
         "source": fact.source,
         "entry": fact.entry,
         "scope": fact.scope,
+        "term": fact.term,
     }
     if fact.role == rules.WORKER:
         record["role"] = rules.WORKER
     if fact.scope == "global" and fact.source != "stated":
         record["skip"] = GLOBAL_NOT_STATED
     return record
+
+
+def term_of(record: dict) -> str:
+    """The term of one fact as a digest page records it under ``aft.facts`` (DESIGN 6).
+
+    A record with no term, from a library or memory-import digest, is long-term.
+    """
+    return SHORT if record.get("term") == SHORT else LONG
 
 
 def _words(fact: Fact) -> dict:

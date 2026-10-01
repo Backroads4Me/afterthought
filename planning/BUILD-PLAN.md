@@ -377,8 +377,8 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 
 ```text
 You read one part of a working session between the user and an AI coding agent, and you
-extract what a future session would need to know. You are building long-term memory, so
-precision matters more than coverage. Return nothing rather than something uncertain.
+extract what a future session would need to know. You are building the project's memory,
+so precision matters more than coverage. Return nothing rather than something uncertain.
 
 Keep only what a future session could not learn by reading the code or the git history:
 decisions and their reasons, preferences, how things are actually configured, lessons
@@ -386,26 +386,41 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
-The session began with a block of long-term memory, and the agent may repeat it. A fact
-whose only support is that memory being restated is already known: skip it. Extract a fact
-from memory's subject only when the session adds something new, such as a change, a
+What this part of the session did and where the work stood when it ended (the task in
+progress, what was merged or run, what comes next) is not a fact. It goes in the summary
+and the handoff.
+
+The session began with a block of memory, and the agent may repeat it. A fact whose only
+support is that memory being restated is already known: skip it. Extract a fact from
+memory's subject only when the session adds something new, such as a change, a
 correction, or fresh evidence.
 
 For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
 - source:
-  - stated: the user said it and committed to it.
+  - stated: the user asserted it in their own words: a fact, a choice, a preference, or
+    a standing rule such as "never push to main".
   - observed: seen in a file, a command's output, a log, or an error.
   - inferred: your own conclusion from the session.
   - suggested: an idea, a question, or a tentative remark nobody committed to.
-  A tentative remark from the user ("I think I'll switch to X", "maybe we should") is suggested,
-  not stated.
+  These are never stated. A tentative remark from the user ("I think I'll switch to X",
+  "maybe we should") is suggested. A request for the task at hand ("run the tests") is not
+  a fact at all. Text the user pasted, such as a prompt, a document, a log or another
+  agent's message, is not the user's own words: what it shows about the machine or the
+  code is observed, and any other claim in it is inferred.
+- term:
+  - long: it will still be true and useful the next time someone opens this project,
+    even a year from now.
+  - short: it is true now and matters for the next few sessions, but will change as the
+    work moves on, such as who is working on what, what is paused, or a temporary
+    setting.
+  When unsure, use short. A short fact is stated or observed, and its scope is project.
 - quote: copy the words that support the fact exactly as they appear in one entry, at
   most 300 characters. Do not paraphrase or join words from different entries.
 - entry: the id of the entry the quote comes from.
-- scope: global only for the user's preferences and environment that apply to every project;
-  otherwise project.
+- scope: global only for the user's preferences and environment that apply to every
+  project; otherwise project.
 
 Also write:
 - summary: two to four sentences on what happened.
@@ -418,8 +433,9 @@ Never invent a fact, a quote, or an entry id.
 - **Schema** (`src/aft/prompts/digest.schema.json`): an object with `summary` (string,
   max 800), `handoff` (object: `in_flight` string max 400, `failed` array of strings max 5,
   `open` array of strings max 5), and `facts` (array, max 20) of objects with `statement`
-  (max 300), `kind` (enum of the seven kinds), `source` (enum of the four tags), `quote`
-  (max 300), `entry` (string), `scope` (enum `project`, `global`). All keys required.
+  (max 300), `kind` (enum of the seven kinds), `source` (enum of the four tags), `term`
+  (enum `long`, `short`), `quote` (max 300), `entry` (string), `scope` (enum `project`,
+  `global`). All keys required.
 - **Tests:** with the fake endpoint: a fabricated quote is dropped; `stated` on an
   assistant entry is dropped; the digest page lints; a rerun on the same session produces
   no new digest; the budget stops work and leaves jobs queued.
@@ -805,63 +821,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `long`, `short`, required); the script drops a short fact that is `inferred` or
   `suggested`, or whose scope is `global`, with the reason under `aft.dropped`; the digest
   page records each fact's term, and a fact with none (library and memory-import digests,
-  and digests written before this task) is read as `long`. M2.6's copy of the prompt is
-  updated with `src/aft/prompts/digest.md`. The prompt becomes:
-
-  ```text
-  You read one part of a working session between the user and an AI coding agent, and you
-  extract what a future session would need to know. You are building the project's memory,
-  so precision matters more than coverage. Return nothing rather than something uncertain.
-
-  Keep only what a future session could not learn by reading the code or the git history:
-  decisions and their reasons, preferences, how things are actually configured, lessons
-  learned the hard way, procedures, and where authoritative information lives. Keep what
-  was surprising or decided. Skip routine steps, file listings, code, and anything already
-  recorded in git.
-
-  What this part of the session did and where the work stood when it ended (the task in
-  progress, what was merged or run, what comes next) is not a fact. It goes in the summary
-  and the handoff.
-
-  The session began with a block of memory, and the agent may repeat it. A fact whose only
-  support is that memory being restated is already known: skip it. Extract a fact from
-  memory's subject only when the session adds something new, such as a change, a
-  correction, or fresh evidence.
-
-  For each fact:
-  - statement: one sentence, in plain present tense, that stands on its own.
-  - kind: preference, decision, state, fact, lesson, procedure, or reference.
-  - source:
-    - stated: the user asserted it in their own words: a fact, a choice, a preference, or
-      a standing rule such as "never push to main".
-    - observed: seen in a file, a command's output, a log, or an error.
-    - inferred: your own conclusion from the session.
-    - suggested: an idea, a question, or a tentative remark nobody committed to.
-    These are never stated. A tentative remark from the user ("I think I'll switch to X",
-    "maybe we should") is suggested. A request for the task at hand ("run the tests") is not
-    a fact at all. Text the user pasted, such as a prompt, a document, a log or another
-    agent's message, is not the user's own words: what it shows about the machine or the
-    code is observed, and any other claim in it is inferred.
-  - term:
-    - long: it will still be true and useful the next time someone opens this project,
-      even a year from now.
-    - short: it is true now and matters for the next few sessions, but will change as the
-      work moves on, such as who is working on what, what is paused, or a temporary
-      setting.
-    When unsure, use short. A short fact is stated or observed, and its scope is project.
-  - quote: copy the words that support the fact exactly as they appear in one entry, at
-    most 300 characters. Do not paraphrase or join words from different entries.
-  - entry: the id of the entry the quote comes from.
-  - scope: global only for the user's preferences and environment that apply to every
-    project; otherwise project.
-
-  Also write:
-  - summary: two to four sentences on what happened.
-  - handoff: what was in flight when this part ended, approaches that failed, and what is
-    still open. Use empty values when there is nothing to hand off.
-
-  Never invent a fact, a quote, or an entry id.
-  ```
+  and digests written before this task) is read as `long`. M2.6 holds the prompt's text.
 
   Tests: with the fake endpoint, a short `inferred` fact, a short `suggested` fact and a
   short global fact are dropped with their reasons; a long and a short fact are both written

@@ -209,12 +209,14 @@ def said(
     kind: str = "decision",
     source: str = "stated",
     scope: str = "project",
+    term: str = "long",
 ) -> dict:
     """One fact of the shape the schema describes, citing a real entry of the transcript."""
     return {
         "statement": statement,
         "kind": kind,
         "source": source,
+        "term": term,
         "quote": quote,
         "entry": entry,
         "scope": scope,
@@ -809,6 +811,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
             "source": "stated",
             "entry": "e1",
             "scope": "global",
+            "term": "long",
         }
     ]
     assert "Ted prefers a plain hyphen. [stated]" in body(session.cfg, wrote.path)
@@ -1712,7 +1715,8 @@ def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
     facts = schema["properties"]["facts"]
     assert facts["maxItems"] == 20
     fact = facts["items"]
-    assert fact["required"] == ["statement", "kind", "source", "quote", "entry", "scope"]
+    assert fact["required"] == ["statement", "kind", "source", "term", "quote", "entry", "scope"]
+    assert fact["properties"]["term"]["enum"] == ["long", "short"]
     assert fact["properties"]["statement"]["maxLength"] == 300
     assert fact["properties"]["quote"]["maxLength"] == 300
     assert fact["properties"]["kind"]["enum"] == [
@@ -2843,8 +2847,76 @@ def test_a_session_repeating_its_memory_is_not_evidence_for_it(session: Session)
     assert [entry.text for entry in archived if entry.id == "e6"] == ["From memory:"]
 
 
+def prompt_words() -> str:
+    """The prompt with its line breaks folded, so a test reads sentences, not wrapping."""
+    return " ".join(digest.prompt_text().split())
+
+
 def test_the_digest_prompt_says_restated_memory_is_not_a_fact():
-    assert "A fact\nwhose only support is that memory being restated" in digest.prompt_text()
+    assert "A fact whose only support is that memory being restated" in prompt_words()
+
+
+def test_the_digest_prompt_narrows_stated_to_the_users_own_assertions():
+    """DESIGN 6: requests, questions and pasted text are never [stated]."""
+    words = prompt_words()
+    assert "stated: the user asserted it in their own words" in words
+    assert 'A request for the task at hand ("run the tests") is not a fact at all.' in words
+    assert "Text the user pasted" in words and "is not the user's own words" in words
+
+
+def test_the_digest_prompt_sends_session_progress_to_the_handoff():
+    """DESIGN 6: what a session did is no fact; the summary and handoff carry it."""
+    assert "is not a fact. It goes in the summary and the handoff." in prompt_words()
+
+
+def test_the_digest_prompt_defines_both_terms_and_defaults_to_short():
+    words = prompt_words()
+    assert (
+        "long: it will still be true and useful the next time someone opens this project" in words
+    )
+    assert "When unsure, use short." in words
+
+
+@pytest.mark.parametrize(
+    ("fact", "reason"),
+    [
+        (said(source="inferred", term="short"), "not [inferred]"),
+        (said(source="suggested", term="short"), "not [suggested]"),
+        (said(term="short", scope="global", kind="preference"), "never global"),
+    ],
+)
+def test_a_short_term_fact_outside_what_short_term_holds_is_dropped(
+    session: Session, fact: dict, reason: str
+):
+    """DESIGN 8: short-term memory holds only what the user said or a session saw, and only
+    for a project; anything else is refused with its reason on the page."""
+    wrote = digest_once(session, answer(fact))
+    aft = frontmatter(session.cfg, wrote.path)["aft"]
+    assert "facts" not in aft
+    assert [d["statement"] for d in aft["dropped"]] == [fact["statement"]]
+    assert reason in aft["dropped"][0]["reason"]
+
+
+def test_a_long_and_a_short_fact_are_written_with_their_terms(session: Session):
+    wrote = digest_once(
+        session,
+        answer(
+            said(),
+            said(statement="The hook rewrite is paused.", source="observed", term="short"),
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["term"]) for f in kept] == [
+        ("Capture runs at session end, not per turn.", "long"),
+        ("The hook rewrite is paused.", "short"),
+    ]
+    assert "The hook rewrite is paused. [observed]" in body(session.cfg, wrote.path)
+
+
+def test_a_fact_recorded_without_a_term_reads_as_long():
+    """Library and memory-import digests carry no term (DESIGN 6)."""
+    assert digest.term_of({"statement": "s"}) == digest.LONG
+    assert digest.term_of({"statement": "s", "term": "short"}) == digest.SHORT
 
 
 def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
