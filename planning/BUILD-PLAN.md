@@ -38,7 +38,7 @@ These rules apply to every task and every pull request.
    ends, from the checklists in section 6.
 10. **One review round, then merge.** A PR gets one fix round from its gate review. Only
     blocking findings hold the merge: privacy (text reaching the archive, index or model
-    that must not), data loss, the trust rules (R1 to R9, the authority table, quote
+    that must not), data loss, the trust rules (R1 to R10, the authority table, quote
     verification), or a broken interface that other tasks build against. They are fixed in
     that round, and a second round only verifies those fixes. Every other finding is listed
     in the PR description and collected into one follow-up task per module, dispatched
@@ -102,7 +102,7 @@ does not guess. It writes the question and the options it sees, and sorts it:
   the milestone's rulings at its end. Rulings Ted accepts are folded into this plan.
 - **A design change** goes to Ted: anything that contradicts the design or changes
   behavior it states, changes an interface other tasks depend on, adds or drops scope, adds
-  a dependency, or touches the trust rules (R1 to R9, the authority table, quote
+  a dependency, or touches the trust rules (R1 to R10, the authority table, quote
   verification). When it is unclear which kind a question is, it goes to Ted.
 
 ## 5. Tasks
@@ -597,7 +597,7 @@ Give a reason of at most 200 characters that a person can check against the quot
   `Outcome` is one of `apply(action)`, `downgrade(to_action, rule)` or `reject(rule)`, and
   `context` carries the fact's origin (primary or worker session), dates, and recurrence
   counts. Pure functions only: no I/O.
-- **Behavior:** R1 to R9 exactly as DESIGN 9 states them, with the authority table. In
+- **Behavior:** R1 to R10 exactly as DESIGN 9 states them, with the authority table. In
   particular: `[inferred]` and `[suggested]` never replace a line; `[observed]` never
   replaces a `preference` or `decision`, and contradicting one produces `needs you`;
   replacing requires evidence newer than the target's date; an inferred fact stays a
@@ -797,6 +797,109 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   worker archiving and `aft redigest` do the same. The digest prompt tells the model a fact supported only by restated memory is
   already known. Tests: the echo reaches neither the model nor the archive, the rest of the
   entry does, and the prompt says so.
+- **F30 What the digest calls stated, and the term of each fact** (ruling 2026-09-30; the
+  first real dream). DESIGN 6 (source tags; short-term and long-term memory), 8 (the digest).
+  `[stated]` is an assertion in the user's own words; a request for the task at hand, a
+  question and pasted text are not. What the session did goes in the summary and handoff,
+  not in facts. Every fact carries `term: long | short`. The schema adds `term` (enum
+  `long`, `short`, required); the script drops a short fact that is `inferred` or
+  `suggested`, or whose scope is `global`, with the reason under `aft.dropped`; the digest
+  page records each fact's term, and a fact with none (library and memory-import digests,
+  and digests written before this task) is read as `long`. M2.6's copy of the prompt is
+  updated with `src/aft/prompts/digest.md`. The prompt becomes:
+
+  ```text
+  You read one part of a working session between the user and an AI coding agent, and you
+  extract what a future session would need to know. You are building the project's memory,
+  so precision matters more than coverage. Return nothing rather than something uncertain.
+
+  Keep only what a future session could not learn by reading the code or the git history:
+  decisions and their reasons, preferences, how things are actually configured, lessons
+  learned the hard way, procedures, and where authoritative information lives. Keep what
+  was surprising or decided. Skip routine steps, file listings, code, and anything already
+  recorded in git.
+
+  What this part of the session did and where the work stood when it ended (the task in
+  progress, what was merged or run, what comes next) is not a fact. It goes in the summary
+  and the handoff.
+
+  The session began with a block of memory, and the agent may repeat it. A fact whose only
+  support is that memory being restated is already known: skip it. Extract a fact from
+  memory's subject only when the session adds something new, such as a change, a
+  correction, or fresh evidence.
+
+  For each fact:
+  - statement: one sentence, in plain present tense, that stands on its own.
+  - kind: preference, decision, state, fact, lesson, procedure, or reference.
+  - source:
+    - stated: the user asserted it in their own words: a fact, a choice, a preference, or
+      a standing rule such as "never push to main".
+    - observed: seen in a file, a command's output, a log, or an error.
+    - inferred: your own conclusion from the session.
+    - suggested: an idea, a question, or a tentative remark nobody committed to.
+    These are never stated. A tentative remark from the user ("I think I'll switch to X",
+    "maybe we should") is suggested. A request for the task at hand ("run the tests") is not
+    a fact at all. Text the user pasted, such as a prompt, a document, a log or another
+    agent's message, is not the user's own words: what it shows about the machine or the
+    code is observed, and any other claim in it is inferred.
+  - term:
+    - long: it will still be true and useful the next time someone opens this project,
+      even a year from now.
+    - short: it is true now and matters for the next few sessions, but will change as the
+      work moves on, such as who is working on what, what is paused, or a temporary
+      setting.
+    When unsure, use short. A short fact is stated or observed, and its scope is project.
+  - quote: copy the words that support the fact exactly as they appear in one entry, at
+    most 300 characters. Do not paraphrase or join words from different entries.
+  - entry: the id of the entry the quote comes from.
+  - scope: global only for the user's preferences and environment that apply to every
+    project; otherwise project.
+
+  Also write:
+  - summary: two to four sentences on what happened.
+  - handoff: what was in flight when this part ended, approaches that failed, and what is
+    still open. Use empty values when there is nothing to hand off.
+
+  Never invent a fact, a quote, or an entry id.
+  ```
+
+  Tests: with the fake endpoint, a short `inferred` fact, a short `suggested` fact and a
+  short global fact are dropped with their reasons; a long and a short fact are both written
+  with their terms; a digest page without terms reads as long; the schema requires `term`.
+  Review checkpoint: yes (prompt and schema). Once merged, Ted runs `aft redigest` on the
+  sessions digested since the timer started, before anything dreams them.
+- **F31 Short-term memory in the dream** (ruling 2026-09-30). DESIGN 6 (short-term and
+  long-term memory), 9 (a run, R10, the report). Depends on F30. `config.toml` gains
+  `dream.short_term_sessions` (integer, default 5; below 1 is a config error), shown in the
+  config template. `projects/<slug>/recent.md` is a reserved fact page: lint refuses a
+  Candidates section or an `[inferred]` or `[suggested]` line on it. The decision call's
+  related lines include `recent.md`'s active lines, each marked `(recent)` in the numbered
+  list, and `decide.md` says whether the new fact is long or short term; its `skip` becomes
+  "routine, re-derivable from the code or git history, or too vague to act on, and for a
+  long-term fact, not durable". `rules.py` routes a short fact as DESIGN 9 states (an `add`,
+  or a `supersede` or `conflict` naming a long-term line, becomes an add on `recent.md`; a
+  long-term line is only ever confirmed) with R4
+  applied on `recent.md` as anywhere else, and a short fact from a worker session is skipped
+  and reported. `apply.py` creates `recent.md` on its first line, promotes a line confirmed
+  by a long-term fact, and in maintenance promotes lines whose sources are at least
+  `short_term_sessions` sessions apart (each through the decision call as a long-term fact
+  carrying all its sources) and then removes every line whose newest source has left the
+  window. A project's sessions are its primary sessions with a digest, in the order the dream
+  processes them; a source from a hand edit counts as the newest session dreamed before the
+  edit's checkpoint commit. The report gains its Short term section (added, promoted, rolled
+  off) before Revert. Tests: the DESIGN 15 M4 cases for short term; a rolled-off line is
+  still found by `aft search` in its digest; a run with no new session for the project
+  removes nothing; a promotion whose decision is `skip` leaves `recent.md` and is reported.
+  Review checkpoint: yes (`rules.py`, `apply.py`, the decide prompt).
+- **F32 Short-term memory in the block** (ruling 2026-09-30). DESIGN 10. Depends on F31.
+  Injection gains the recent layer after global preferences: `recent.md`'s active lines,
+  marked like layer 3, under a heading naming how many sessions they cover and the date of
+  the newest. `recent.md` gets no page-pointer line. Tests: layer order; a vault with no
+  `recent.md` builds the same block as before; the long-term layers keep their space when
+  `recent.md` alone would fill the cap; the F21 benchmark still holds.
+
+  F30, F31 and F32 land in that order. The timer stays off until F31 merges, since a dream
+  before it would file short-term facts as long-term.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

@@ -100,6 +100,13 @@ flowchart TB
 - **A curated fact is trusted because it passed the rules**, and it stays active until
   newer evidence with enough authority replaces it.
 
+Curated facts are long-term or short-term memory (section 6). Long-term memory is what stays
+true: it never ages, and a line leaves it only when newer evidence replaces it or you ask
+`aft forget` to remove it. Short-term memory is what the project's last few sessions were
+working with. It sits on its own page and rolls off as new sessions arrive, counted in
+sessions and never in days, so a project left alone for a year comes back with its memory
+whole.
+
 ## 5. Architecture
 
 Four parts, with agent-specific adapters at the edge:
@@ -179,6 +186,7 @@ never includes runtime state.
   projects/<slug>/
     index.md               generated list of the project's pages
     overview.md            the main page
+    recent.md              short-term memory: the last few sessions' working facts
   digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>[-<n>].md
   archive/<page path>      a page's resolved notes and superseded lines older than 90 days,
                            at the page's own vault path (archive/projects/<slug>/overview.md)
@@ -272,9 +280,15 @@ aft:
   confidence score is stored.
 - **Project pages** name their project by id in `aft.project`, so renaming a project's slug
   changes no page.
-- **Source tags** follow markdown-agent-memory: `[stated]` you said it as a commitment,
-  `[observed]` seen in a file, tool result or log, `[inferred]` the model's conclusion,
-  `[suggested]` an idea or a musing nobody committed to.
+- **Source tags** follow markdown-agent-memory: `[stated]` you asserted it in your own
+  words, `[observed]` seen in a file, tool result or log, `[inferred]` the model's
+  conclusion, `[suggested]` an idea or a musing nobody committed to. `[stated]` is an
+  assertion: a fact, a choice, a preference, or a standing rule ("never push to main"). A
+  request for the task at hand ("run the tests"), a question, and a tentative remark are not
+  `[stated]`, and neither is text you pasted. A paste is not your own words: what it shows
+  about the machine or the code (a log, an error, a command's output) is `[observed]`, and any
+  other claim in it (a prompt, a document, another agent's message) is `[inferred]`, so it
+  must recur before it is trusted.
 - **Sources** use OKF's `sources` list, with an extra `quote` field holding the verbatim
   evidence and a `resource` URI naming the session and entry.
 - **Anchors** tie a fact about code to a file, words that must appear in it, and the commit
@@ -301,6 +315,61 @@ markdown:
 | Needs you | Active line followed by a `[!question]` callout | Yes, with the question noted |
 | Stale | Line ending `(stale <date>: <reason>)` | No |
 | Withdrawn | Struck through, with `withdrawn <date>` after `aft forget` | No |
+
+### Short-term and long-term memory
+
+Memory has two terms, short and long (st and lt where an abbreviation is needed). The
+difference is what a fact is about, never how old it is.
+
+- **Long-term memory** is every fact page except `recent.md`: what would still be true and
+  useful the next time someone opens the project, even a year from now. Decisions and their
+  reasons, preferences, how things are configured, lessons, procedures. A long-term line
+  never ages. It leaves memory only when newer evidence supersedes it, an anchor marks it
+  stale, or you withdraw it with `aft forget`.
+- **Short-term memory** is `projects/<slug>/recent.md`: what is true now and matters for the
+  next few sessions, but will change as the work moves on. Who is working on what, what is
+  paused and why, a setting changed for a test. The page uses the same sections and line
+  grammar as any fact page, has no Candidates section, and holds only `[stated]` and
+  `[observed]` lines: a conclusion or an idea about the current work belongs in the session's
+  handoff, not in memory.
+
+What a session did and where it stopped (the task in progress, what was merged or run, what
+comes next) is neither. It goes in the digest's summary and handoff (section 8), and
+injection shows the newest handoff as the last session (section 10).
+
+**Short term is counted in sessions.** A project's sessions are its primary sessions that
+have a digest, in session order, whatever happened in them. A line on `recent.md` stays while
+its newest source comes from one of the project's last `dream.short_term_sessions` sessions
+(5 by default, at least 1). When a newer session pushes that source out of the window, the
+line rolls off the page. A project with no new sessions keeps its short-term memory as it
+was, however long it waits; injection shows the date of the newest session beside it, so
+the reader can judge.
+
+**Rolling off is not forgetting.** The line's evidence stays in its digest, the evidence
+archive and git, and `aft search` still finds it there. Superseded and stale lines leave
+`recent.md` the same way, when their newest source rolls out, rather than moving to
+`archive/`. A note under a line that rolls off moves, verbatim, to the archive, as a resolved
+note does, so an answer you typed there is never lost.
+
+**A short-term line becomes long-term** in two ways:
+
+- **It outlasts the window.** A line confirmed in session 1 and again in session 6 of a
+  five-session window has stayed true through more than a full window, which is what
+  long-term means. A line is promoted when the sessions of its oldest and newest sources
+  are at least `short_term_sessions` apart.
+- **A later session labels it long term.** A long-term fact from a digest that matches a
+  line on `recent.md` promotes that line.
+
+Promotion submits the line, with every source it has gathered, as a long-term fact to the
+next decision (section 9), so it is checked against long-term memory like any new fact. The
+line leaves `recent.md` whatever the decision, and a skip is reported. Recurrence alone does
+not promote: three mentions within two sessions show the work is busy, not that the fact
+will last. A promoted state that later changes is superseded by the newer evidence, as any
+long-term state is.
+
+You can manage the page by hand like any other: move a line to a long-term page to promote
+it, or delete it to drop it. A line you add to `recent.md` counts as a source from the
+project's newest session at the time of the edit.
 
 ## 7. Project identity
 
@@ -407,6 +476,7 @@ structured output:
       "statement": "Capture runs at session end, not per turn.",
       "kind": "decision",
       "source": "stated",
+      "term": "long",
       "quote": "exact words copied from the transcript",
       "entry": "entry-148",
       "scope": "project",
@@ -418,11 +488,18 @@ structured output:
 
 The prompt asks only for facts a future session could not get from the code or git
 history, and for what was decided, surprising, or learned the hard way. It tags tentative
-statements ("I think I'll switch to SGLang") as `[suggested]`, not `[stated]`. The script
-then:
+statements ("I think I'll switch to SGLang") as `[suggested]`, and requests, questions and
+pasted text as section 6 describes, never as `[stated]`. What the session did and where it
+stopped goes in the summary and handoff, not in facts. Each fact carries a term: `long` when
+it would still be true and useful the next time someone opens the project, even a year from
+now, and `short` when it is true now but will change as the work moves on. When the model is
+unsure it says `short`, the cheaper mistake: a short-term line that keeps holding is promoted,
+while a wrong long-term line stays until something replaces it. The script then:
 
 - drops any fact whose quote does not appear in the cited entry (whitespace-normalized)
 - drops `[stated]` unless the cited entry is one of your turns
+- drops a short-term fact that is `[inferred]` or `[suggested]`, or whose scope is global:
+  short-term memory holds only what you said or a session saw, and only for a project
 - writes the digest as an OKF file (`type: Session Digest`) under `digests/`: one page
   per job. The first job for a session on a day writes `<date>-<agent>-<session>.md`, and
   later jobs that day add `-2`, `-3` before `.md`. A digest's content changes only when
@@ -448,8 +525,8 @@ so later evidence is applied after earlier evidence.
    period, skip this project for now; you may still be editing. Older uncommitted changes
    are committed first as a separate `checkpoint: human edits` commit, and lines you added
    are tagged `[stated]`.
-2. For each candidate fact, find related lines on the project's pages with a keyword
-   search.
+2. For each candidate fact, find related lines on the project's pages, `recent.md`
+   included, with a keyword search.
 3. Ask the model for one decision per candidate, as JSON:
 
 | Decision | Meaning |
@@ -458,14 +535,24 @@ so later evidence is applied after earlier evidence.
 | `confirm` | Already known. Add the new source and date, and count it toward recurrence. |
 | `supersede` | Replaces an existing line, which is struck through, dated and linked. |
 | `conflict` | Contradicts an existing line without the authority to replace it. |
-| `skip` | Not durable, re-derivable from code or git, or not worth keeping. |
+| `skip` | Routine, re-derivable from code or git, too vague to act on, or, for a long-term fact, not durable. |
+
+A short-term fact goes only to `recent.md`. Its `add` adds a line there; its `confirm`
+adds the source to the line it names, on `recent.md` or a long-term page; its
+`supersede` or `conflict` applies only to a line on `recent.md`, and against a long-term
+line it becomes an `add` on `recent.md`, so a passing state never edits long-term memory.
+A long-term fact whose `confirm` names a line on `recent.md` promotes that line
+(section 6).
 
 4. Check every decision against the rules. A decision that fails is downgraded (a refused
    `supersede` becomes `conflict` or needs you) or rejected, and the reason goes in the
    report.
 5. Apply the surviving edits with the script, never the model.
-6. Run maintenance: anchor checks, moving superseded lines older than 90 days to the
-   archive, and flagging pages over their size cap.
+6. Run maintenance: anchor checks, moving superseded lines older than 90 days on long-term
+   pages to the archive, and flagging pages over their size cap. On `recent.md`, promote each
+   line whose sources are at least `dream.short_term_sessions` sessions apart through steps 3
+   to 5, then remove every line whose newest source has left the project's last
+   `short_term_sessions` sessions.
 7. Regenerate each `index.md`, append to `log.md`, lint every page, and make one commit.
 8. Write the report.
 
@@ -474,7 +561,7 @@ so later evidence is applied after earlier evidence.
 | Rule | What it enforces | Checked by |
 |---|---|---|
 | **R1 Provenance** | Every fact line carries one source tag and at least one source with a verified quote. | Script |
-| **R2 Stated means you committed to it** | `[stated]` requires a quote from one of your turns (or your own edit), and the digest must not have judged it tentative. | Script, model |
+| **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). | Script, model |
 | **R3 Recurrence gate** | An `[inferred]` or `[suggested]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
 | **R4 Authority by kind** | Replacing a line needs a verified quote newer than the line's latest evidence, and the authority the table below gives. Without it the result is a conflict, and the old line stands. | Script |
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
@@ -482,6 +569,7 @@ so later evidence is applied after earlier evidence.
 | **R7 Size caps** | Pages over their cap are flagged in the report. Condensing and splitting come after v1. | Script |
 | **R8 Anchors** | An anchored fact whose words no longer appear in its file on the default branch is marked stale, not deleted. When the words appear again, the check clears the stale mark and reports it; the line keeps its date, since matching words are not a verified quote. A line with an open conflict or question keeps its note, and a broken anchor is only reported until the note is closed; a question to you is never closed automatically. Anchors verified on an unmerged branch are not checked until that commit reaches the default branch. | Script (ripgrep, git) |
 | **R9 No free-form writes** | Model output is schema-constrained JSON. Only the script edits files. | Script |
+| **R10 Short term stays short** | A short-term fact edits only `recent.md`, except to confirm a long-term line. A line leaves `recent.md` when its newest source leaves the project's last `dream.short_term_sessions` sessions, and becomes long-term only when its sources are that many sessions apart or a later session's long-term fact confirms it. Nothing in memory ages by time. | Script |
 
 ### Authority to replace a fact
 
@@ -522,7 +610,8 @@ over time:
 6. **Rejected**: what the model proposed and the rule that refused it
 7. **Stale**: facts whose anchors stopped matching
 8. **Candidates**: progress toward the gate
-9. **Revert**: `git revert <sha>`, and the separate checkpoint commit if one was made
+9. **Short term**: lines added to `recent.md`, promoted from it, and rolled off it
+10. **Revert**: `git revert <sha>`, and the separate checkpoint commit if one was made
 
 Every run also regenerates `reports/needs-you.md`: one list of every open conflict and
 question across all projects, each linking to its line and to the report section that
@@ -540,13 +629,16 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
 2. **last session**: in flight, what failed, and what is open, from the newest digest
 3. the project's active state, decisions and lessons, with conflicts and questions noted
 4. your global preferences
-5. one line per page from the project's `index.md`, and one line per reference page
+5. **recent**: the active lines on `recent.md`, headed with the number of sessions they cover
+   and the date of the newest
+6. one line per other page from the project's `index.md`, and one line per reference page
    linked to the project
-6. two lines on how to search and read
+7. two lines on how to search and read
 
-Candidates, stale, superseded and withdrawn lines, and dream reports are left out, and nothing is
-injected per tool call. agentmemory found that injecting context into every tool turn burned tokens and
-turned it off by default. The cap is a starting point; M5 tunes it by usefulness.
+Short-term memory comes after long-term memory, so it never crowds out what stays true when
+the block reaches its cap. Candidates, stale, superseded and withdrawn lines, and dream
+reports are left out, and nothing is injected per tool call. agentmemory found that
+injecting context into every tool turn burned tokens and turned it off by default. The cap is a starting point; M5 tunes it by usefulness.
 
 ### Search
 
@@ -791,7 +883,7 @@ behavior, and this document changes only when a design decision changes.
 | **M1 Recall** | Adapter boundary, `aft inject`, the Claude Code hook, the pi extension, hand-written pages for afterthought | A cold session in each agent receives the same block, under the cap, in under 150 ms. |
 | **M2 Capture** | Capture queue, sweep, transcript readers, filter with off-the-record and redaction, evidence archive, worker classification, digest through the model endpoint with handoff, `aft forget`, `aft redigest` | Scripted sessions in both agents produce digests whose quotes all verify. A rerun adds nothing. An off-the-record span and planted secrets never reach the archive, the index or the model. Capture returns in under 50 ms. Evidence older than the retention window is purged. |
 | **M3 Search** | FTS5 over pages, digests and evidence; `aft search`, `aft read`, `aft trace`, `aft reindex` | Known-answer queries return the expected file in the top five. A rebuilt index matches the original. |
-| **M4 Dream** | Timer, quiet period, lock, hand-edit checkpoint, decisions, rules R1 to R9 with the authority table, daily report, `needs-you.md`, vault settings, commit | A fixture suite covers: no-op run makes no commit; add; confirm; allowed supersede for each kind; refused supersede becomes conflict or needs you; tentative statement stays suggested; inferred fact stays a candidate below the gate; worker-only fact stays a candidate; cross-project edit refused; bad quote rejected; broken anchor marked stale; mid-edit project skipped; older hand edit checkpointed; a second run on the same day appends to that day's report; reports never reach injection, default search, or the dream's own input. |
+| **M4 Dream** | Timer, quiet period, lock, hand-edit checkpoint, decisions, rules R1 to R10 with the authority table, daily report, `needs-you.md`, vault settings, commit | A fixture suite covers: no-op run makes no commit; add; confirm; allowed supersede for each kind; refused supersede becomes conflict or needs you; tentative statement stays suggested; inferred fact stays a candidate below the gate; worker-only fact stays a candidate; cross-project edit refused; bad quote rejected; broken anchor marked stale; mid-edit project skipped; older hand edit checkpointed; a second run on the same day appends to that day's report; reports never reach injection, default search, or the dream's own input; a short-term fact lands on `recent.md` and never edits a long-term line except to confirm it; a short-term line rolls off after the configured number of sessions and stays put while no sessions arrive; a line whose sources span the window is promoted, and one confirmed three times in two sessions is not. |
 | **M5 Use and evaluate** | Two weeks on afterthought plus one real project; `aft eval` over a golden set you write | The golden set passes positive and negative cases: expected memory found, irrelevant memory not injected, a known fact survives contradicting noise, and an attractive weak inference is not promoted. You find the injected map useful, and reports show no corrupted facts. |
 | **M6 Switch-over** | Import Claude Code's `MEMORY.md` files as `[inferred]` digests; turn off Claude Code's automatic memory; add a short memory section to `~/AGENTS.md` | Afterthought is the only memory the agents use. |
 | **M7 Library** | `aft library survey` and `aft library import`, the manifest validator, file roles and relations, text extraction, the generated map with verification of imported maps, reference pages, the import skill, the Library search collection, the `library.commit` setting, collection authority; import two real documentation collections | Both collections import with every file accounted for, every reference quote verified, and no instruction file, tooling or git history retained. A claim planted in an imported index that does not match its document is rejected. Facts from an authoritative collection enter as `[observed]` and from a reference collection as candidates. Known-answer queries about a specification return the right document and page. |
