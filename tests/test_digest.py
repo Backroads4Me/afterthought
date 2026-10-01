@@ -1517,6 +1517,81 @@ def test_two_parts_make_one_page_whole(session: Session):
     assert pages(cfg) == [below()]
 
 
+def refused() -> dict:
+    """An answer about something other than the chunk: it cites an entry it never held."""
+    return answer(said(entry="e99"))
+
+
+def test_a_part_refused_twice_is_recorded_and_the_rest_of_the_job_is_kept(session: Session):
+    """F36: one part the model cannot read does not lose a long session. The refused part
+    gives the page nothing and is named with its entries; the watermark moves past it, and
+    its words stay in the archive for a redigest."""
+    wide = long_transcript("wide-refused.jsonl", session)
+    fake, cfg = serve(session.cfg, refused(), refused(), answer(summary="The second part."))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, wide, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    written = frontmatter(cfg, wrote.path)
+    assert written["description"] == "The second part."
+    [part] = written["aft"]["refused_parts"]
+    assert part["first"] == "e1"
+    assert "cites entry 'e99'" in part["reason"]
+    assert watermark(cfg) == "e40"
+    assert evidence.entries(cfg, SESSION)[0].id == "e1"
+
+
+def test_a_refused_last_part_leaves_the_handoff_empty(session: Session):
+    """The handoff says where the work stood at the end; a refused last part leaves nothing
+    to say it, so an earlier part's handoff is not passed off as the end."""
+    wide = long_transcript("wide-refused-last.jsonl", session)
+    fake, cfg = serve(
+        session.cfg, answer(summary="The first part.", in_flight="early work"), refused(), refused()
+    )
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, wide, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    written = frontmatter(cfg, wrote.path)
+    assert written["description"] == "The first part."
+    assert written["aft"]["handoff"] == {"in_flight": "", "failed": [], "open": []}
+    assert written["aft"]["refused_parts"][0]["last"] == "e40"
+
+
+def test_redigest_keeps_the_parts_it_can_and_records_the_one_it_cannot(session: Session):
+    wide = long_transcript("wide-redigest.jsonl", session)
+    fake, cfg = serve(
+        session.cfg,
+        answer(summary="First."),
+        answer(summary="Second."),
+        refused(),
+        refused(),
+        answer(summary="Second, rebuilt."),
+    )
+    try:
+        digest.digest_job(cfg, claim(cfg, wide, session.cwd))
+        rebuilt = digest.redigest(cfg, SESSION, now=NOW)
+    finally:
+        fake.stop()
+    written = frontmatter(cfg, rebuilt.path)
+    assert written["description"] == "Second, rebuilt."
+    assert written["aft"]["refused_parts"][0]["first"] == "e1"
+
+
+def test_a_job_whose_every_part_is_refused_fails(session: Session):
+    wide = long_transcript("wide-all-refused.jsonl", session)
+    fake, cfg = serve(session.cfg, refused(), refused(), refused(), refused())
+    try:
+        with pytest.raises(digest.AnswerRefused):
+            digest.digest_job(cfg, claim(cfg, wide, session.cwd))
+    finally:
+        fake.stop()
+    assert pages(cfg) == []
+    assert watermark(cfg) is None
+
+
 # ---------------------------------------------------------------- aft work
 
 
