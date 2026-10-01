@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 
-SHIPPED_DIRS = ("src", "integrations", "scripts")
+SHIPPED_DIRS = ("src", "integrations", "scripts", "docs")
 SHIPPED_FILES = ("README.md", "pyproject.toml")
 TEXT_SUFFIXES = {".py", ".md", ".json", ".ts", ".toml"}
 
