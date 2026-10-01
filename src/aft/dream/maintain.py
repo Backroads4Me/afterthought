@@ -233,7 +233,8 @@ def archive_superseded(
     archived: list[ArchivedLine] = []
 
     for page_path in sorted(project_dir.rglob("*.md")):
-        if page_path.name == "index.md":
+        # Short-term lines leave recent.md when their sessions roll by, never by age.
+        if page_path.name == "index.md" or page.is_recent(page_path.relative_to(vault)):
             continue
         rel = page_path.relative_to(vault).as_posix()
         try:

@@ -44,6 +44,13 @@ and the caller writes with the page writer's operation of the same name:
   becomes when the new evidence cannot replace it (design 9's authority table).
 * ``promote`` - the writer's ``promote`` operation (M4.2), when corroborated evidence
   carries a candidate over R3's gate; the page writer leaves promotion to these rules.
+* ``lift`` - a long-term fact confirms a line of short-term memory, which takes the line
+  off ``recent.md`` and puts it to the next decision as a long-term fact (design 6, R10).
+
+**R10** short term stays short is checked here for what one decision may do: a
+short-term fact edits only ``recent.md`` except to confirm a long-term line. When a line
+rolls off ``recent.md``, and when its sessions carry it to long-term memory, are counted
+over the project's sessions, which is the caller's (``aft.dream.apply``).
 """
 
 from __future__ import annotations
@@ -83,6 +90,11 @@ HALF_WEIGHT_AFTER_DAYS = 30
 
 MODEL_ACTIONS = ("add", "confirm", "supersede", "conflict", "skip")
 """The decisions the model may name (design 9 step 3, M4.3's schema)."""
+
+LONG = "long"
+SHORT = "short"
+"""A fact's term (design 6): long-term memory is what stays true, short-term memory what the
+project's last few sessions were working with."""
 
 
 AUTHORITY = {
@@ -175,6 +187,10 @@ class NewFact:
     """``project`` or ``global`` (design 8). R6 holds it to the page the decision would
     edit: a global fact goes only to a global page, and only when it is ``[stated]``."""
 
+    term: str = LONG
+    """``long`` or ``short`` (design 6). A short-term fact goes only to ``recent.md`` and
+    edits a long-term line only to confirm it (R10)."""
+
     explicit_correction: bool = False
     """You corrected the record yourself. It counts only on a ``[stated]`` fact backed by a
     verified quote of yours from a primary session, and then it skips R3's gate, which
@@ -220,6 +236,10 @@ class Context:
     """The target line's own quotes, one per footnote it carries. Only R3's gate reads
     them, and only a verified quote from a primary session counts: a footnote without one
     here adds nothing to the count."""
+
+    target_recent: bool = False
+    """The line the decision names sits on the project's ``recent.md``, its short-term
+    memory (R10)."""
 
 
 @dataclass(frozen=True)
@@ -315,6 +335,24 @@ def check(
     if _derivable(new_fact.statement):
         return reject("R5")
 
+    if new_fact.term == SHORT:
+        # R10: short-term memory holds only what you said or a session saw, from a primary
+        # session, for a project; the digest refuses anything else, and the rule holds it
+        # here as well.
+        if new_fact.source not in page.SHORT_TERM_SOURCES or new_fact.scope == "global":
+            return reject("R10")
+        if not _primary(context.evidence):
+            return reject(WORKER_RULE if _only_worker(context.evidence) else LIBRARY_RULE)
+        if decision.action == "add":
+            return apply("add")
+        if (
+            decision.action in ("supersede", "conflict")
+            and target_line is not None
+            and not context.target_recent
+        ):
+            # A passing state never edits long-term memory: it is a new short-term line.
+            return downgrade("add", "R10")
+
     # A fact resting only on worker sessions is evidence of a lower rank: it stays a
     # candidate until a primary session corroborates it, whatever its tag, and it never
     # confirms a line, so it adds no source and no date to one (design 8).
@@ -346,7 +384,16 @@ def check(
         # Confirming a candidate is how it gathers evidence toward its gate.
         return reject("R4")
 
-    if decision.action == "confirm":
+    if decision.action == "confirm" and context.target_recent and new_fact.term == LONG:
+        # A later session labels the line long term: it leaves short-term memory (R10).
+        # A line under an open note waits for the note to close and is confirmed meanwhile,
+        # since the note is the dispute a person has still to settle (design 6).
+        outcome: Outcome = apply("confirm") if target_line.callouts else apply("lift")
+    elif decision.action == "confirm" and new_fact.term == SHORT and not context.target_recent:
+        # R10: a short-term fact confirms a long-term line and does no more; a candidate it
+        # confirms gathers the source and waits for long-term evidence to carry it over.
+        outcome = apply("confirm")
+    elif decision.action == "confirm":
         outcome = _confirm(new_fact, target_line, context)
     elif decision.action == "conflict":
         outcome = _note(new_fact, target_line)

@@ -188,6 +188,9 @@ def _archive_header(rel: Path) -> list[str]:
     ]
 
 
+_CITED = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+
+
 class PageDoc:
     """A page's text and its parse, with the page writer's operations.
 
@@ -626,6 +629,75 @@ class PageDoc:
         with self._atomic():
             self._apply(at, at + 1, [])
         return True
+
+    def remove_short_term(self, fact: page.Fact) -> str:
+        """Take a line off a project's short-term page, returning its text (design 6).
+
+        A short-term line leaves when it rolls off or becomes long-term, whatever its state;
+        its evidence stays in its digest, the evidence archive and git. A note under the line
+        is closed first with ``resolve_callout``, which archives it, so text a person typed
+        there is never lost: a line still carrying one is refused.
+        """
+        if self.path.name != page.RECENT_PAGE or self.path.parent.parent.name != "projects":
+            raise WriteError(f"only a line of short-term memory can be removed; {self.path} is not")
+        found = self._resolve(fact)
+        at = found.line - 1
+        below = at + 1
+        while below < len(self.lines) and not self.lines[below].strip():
+            below += 1
+        if found.callouts or (
+            below < len(self.lines) and self.lines[below].lstrip().startswith(">")
+        ):
+            raise WriteError("a line with a note under it cannot be removed; close the note first")
+        line_content = self.lines[at]
+        with self._atomic():
+            self._apply(at, at + 1, [])
+            self._drop_uncited_sources()
+        return line_content
+
+    def _drop_uncited_sources(self) -> None:
+        """Remove the source entries no footnote on the page cites any more.
+
+        Only a short-term page gives up lines, and its evidence stays in the digests and
+        the evidence archive, so a source left behind would only grow the page.
+        """
+        bounds = self._fm_bounds()
+        if bounds is None:
+            return
+        key = self._key_line("sources", bounds)
+        if key is None:
+            return
+        last = self._sources_end(key, bounds)
+        cited = set(_CITED.findall("\n".join(self.lines[bounds[1] + 1 :])))
+        indent = next(
+            (
+                match.group("indent")
+                for line in self.lines[key + 1 : last + 1]
+                if (match := _ENTRY_LINE.match(line))
+            ),
+            "  ",
+        )
+        starts = [
+            idx
+            for idx in range(key + 1, last + 1)
+            if (m := _ENTRY_LINE.match(self.lines[idx])) and m.group("indent") == indent
+        ]
+        spans = [
+            (start, starts[k + 1] if k + 1 < len(starts) else last + 1)
+            for k, start in enumerate(starts)
+        ]
+        kept = 0
+        for start, stop in reversed(spans):
+            entry = yaml.safe_load(
+                "\n".join(line[len(indent) :] for line in self.lines[start:stop])
+            )
+            ident = entry[0].get("id") if isinstance(entry, list) and entry else None
+            if ident is not None and str(ident) not in cited:
+                self._apply(start, stop, [])
+            else:
+                kept += 1
+        if not kept:
+            self._apply(key, key + 1, ["sources: []"])
 
     def add_callout(self, fact: page.Fact, type: str, text: str, date: str) -> bool:
         """Put a ``[!conflict]`` or ``[!question]`` note under a line (design 6, fact state).

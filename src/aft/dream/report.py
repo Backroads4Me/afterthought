@@ -2,7 +2,7 @@
 
 Each day has one report file, reports/<yyyy>/<mm>/<date>.md (type: Dream Report),
 and each run that changes anything appends one section to it. Each run's section has
-a fixed format of 9 sections in fixed order:
+a fixed format of 10 sections in fixed order:
 1. Summary: counts per decision, tokens used, digests processed, backlog remaining
 2. Needs you: lines waiting on your decision
 3. Superseded: old line, new line, the quote that justified it
@@ -11,7 +11,8 @@ a fixed format of 9 sections in fixed order:
 6. Rejected: what the model proposed and the rule that refused it
 7. Stale: facts whose anchors stopped matching
 8. Candidates: progress toward the gate
-9. Revert: git revert <sha>, and the separate checkpoint commit if one was made
+9. Short term: lines added to recent.md, promoted from it, and rolled off it
+10. Revert: git revert <sha>, and the separate checkpoint commit if one was made
 
 Every run also regenerates reports/needs-you.md: one list of every open conflict and
 question across all projects, each linking to its line and to the report section that
@@ -81,7 +82,7 @@ def format_run_section(
     tokens_used: int = 0,
     backlog: int = 0,
 ) -> str:
-    """Format one run's section in the fixed 9-section order from DESIGN 9."""
+    """Format one run's section in the fixed 10-section order from DESIGN 9."""
     now = now or datetime.now(UTC)
     time_str = f"{now:%H:%M:%SZ}"
     lines: list[str] = [f"# {report.project} {time_str}", ""]
@@ -231,7 +232,21 @@ def format_run_section(
         lines.append("None.")
     lines.append("")
 
-    # 9. Revert
+    # 9. Short term
+    lines.append("## Short term")
+    added_short = [a for a in report.added if page.is_recent(a.path)]
+    if added_short or report.lifted or report.rolled_off:
+        for a in added_short:
+            lines.append(f'- Added: "{a.statement}" [{a.source}]')
+        for lifted in report.lifted:
+            lines.append(f'- To long-term memory: "{lifted.statement}" ({lifted.why})')
+        for rolled in report.rolled_off:
+            lines.append(f'- Rolled off: "{rolled.statement}"')
+    else:
+        lines.append("None.")
+    lines.append("")
+
+    # 10. Revert
     lines.append("## Revert")
     has_revert = False
     if report.commit:
@@ -311,6 +326,8 @@ def has_changes(rep: apply.ProjectRunReport) -> bool:
         or rep.broken_anchors
         or rep.cleared_anchors
         or rep.archived_lines
+        or rep.lifted
+        or rep.rolled_off
     )
 
 

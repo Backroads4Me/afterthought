@@ -261,7 +261,7 @@ def test_the_call_sends_the_prompt_the_schema_and_the_numbered_lines(home, vault
     assert body["response_format"]["json_schema"]["schema"] == json.loads(
         decide.SCHEMA_PATH.read_text()
     )
-    assert "New fact (state): The GPU host runs SGLang for the digest model." in user
+    assert "New fact (state, long term): The GPU host runs SGLang for the digest model." in user
     assert 'Quote: "switched to \\"sglang\\""' in user
     for line in proposal.lines:
         kind = line.fact.kind or "candidate"
