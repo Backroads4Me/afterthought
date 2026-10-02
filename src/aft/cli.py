@@ -122,6 +122,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="run once even while paused")
     p.set_defaults(handler=cmd_work)
 
+    p = sub.add_parser("budget", help="show today's token use against the daily budget")
+    bsub = p.add_subparsers(metavar="action")
+    p.set_defaults(handler=cmd_budget)
+    q = bsub.add_parser("reset", help="start today's token count again from now")
+    q.set_defaults(handler=cmd_budget_reset)
+
     p = sub.add_parser("pause", help="pause background work; sessions are still queued")
     p.add_argument("reason", nargs="*", help="why, shown while the pause stands")
     p.set_defaults(handler=cmd_pause)
@@ -553,6 +559,7 @@ def cmd_work(args) -> int:
     if stopped is not None:
         print(f"aft work: {stopped.line()}")
         return 0
+    _budget_note(config, "work")
     report = work.run(config)
     print(f"aft work: {report.line()}")
     for failure in report.failures:
@@ -584,8 +591,43 @@ def cmd_dream(args) -> int:
     if stopped is not None:
         print(f"aft dream: {stopped.line()}")
         return 0
+    _budget_note(config, "dream")
     _dream(config)
     return 0
+
+
+def cmd_budget(args) -> int:
+    """Today's token use against the daily budget (BUILD-PLAN F40)."""
+    from aft import model
+
+    config = load()
+    budget = config.settings.work.daily_token_budget
+    used = model.tokens_used_today(config)
+    start = model.budget_day_start(config)
+    since = f"a reset at {start:%H:%M}Z" if start == model.budget_reset_at(config) else "00:00Z"
+    left = max(0, budget - used)
+    print(f"aft budget: {used:,} of {budget:,} tokens used since {since}; {left:,} left")
+    print("aft budget: the count starts again at 00:00Z, or now with: aft budget reset")
+    return 0
+
+
+def cmd_budget_reset(args) -> int:
+    """Start today's token count again from now (BUILD-PLAN F40)."""
+    from aft import model
+
+    config = load()
+    moment = model.reset_budget(config)
+    print(f"aft budget: reset at {moment:%H:%M}Z; today's count starts again from 0")
+    return 0
+
+
+def _budget_note(config: Config, command: str) -> None:
+    """Say when a reset is in effect, so a day that spent more than its budget reads why."""
+    from aft import model
+
+    start = model.budget_day_start(config)
+    if start == model.budget_reset_at(config):
+        print(f"aft {command}: the day's budget was reset at {start:%H:%M}Z")
 
 
 def cmd_pause(args) -> int:

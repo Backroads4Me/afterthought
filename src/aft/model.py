@@ -150,10 +150,40 @@ def tokens_used(config: Config, since: datetime | None = None) -> int:
 
 
 def tokens_used_today(config: Config, now: datetime | None = None) -> int:
-    """Tokens used since midnight UTC, the day the daily cap is counted over."""
+    """Tokens counted against today's cap: used since midnight UTC, or since the user last
+    reset the budget when that was later (BUILD-PLAN F40)."""
+    return tokens_used(config, since=budget_day_start(config, now))
+
+
+def budget_day_start(config: Config, now: datetime | None = None) -> datetime:
+    """Where today's count starts: midnight UTC, or a reset made since then."""
     moment = _utc(now) if now is not None else datetime.now(UTC)
     midnight = moment.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    return tokens_used(config, since=midnight)
+    reset = budget_reset_at(config)
+    return reset if reset is not None and midnight < reset <= moment else midnight
+
+
+def budget_reset_at(config: Config) -> datetime | None:
+    """When the user last reset the budget, or None. The ledger itself is never changed
+    by a reset: it is the record of what was spent."""
+    path = config.home / BUDGET_RESET
+    try:
+        return _time(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return None
+
+
+def reset_budget(config: Config, now: datetime | None = None) -> datetime:
+    """Start today's count again from now (BUILD-PLAN F40). Midnight UTC still starts the
+    next day as usual."""
+    moment = _utc(now) if now is not None else datetime.now(UTC)
+    config.home.mkdir(parents=True, exist_ok=True)
+    (config.home / BUDGET_RESET).write_text(moment.isoformat() + "\n", encoding="utf-8")
+    return moment
+
+
+# The marker a budget reset leaves: the moment today's count starts again from.
+BUDGET_RESET = "budget-reset"
 
 
 def usage_path(config: Config) -> Path:
