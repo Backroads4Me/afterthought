@@ -92,7 +92,7 @@
         "properties": {
           "statement": {
             "type": "string",
-            "description": "One sentence, in plain present tense, that stands on its own.",
+            "description": "One sentence, in plain present tense, that stands on its own, calling the user \"the user\", never by name or pronoun.",
             "maxLength": 300
           },
           "kind": {

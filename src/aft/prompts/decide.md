@@ -23,6 +23,7 @@ Choose one action:
 Two lines say the same thing when an agent reading either would act the same way, even if
 the wording differs. Before naming a line for supersede or conflict, check that it is about
 the same thing as the new fact. A fact about something else, or one that can be true at the
-same time as the line, is new: choose add.
+same time as the line, is not a supersede or a conflict: choose confirm if a line already
+says the same thing, and add otherwise.
 
 Give a reason of at most 200 characters that a person can check against the quote.

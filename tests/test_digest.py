@@ -3185,5 +3185,5 @@ def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
 def test_the_digest_prompt_names_no_one_and_guesses_no_pronoun():
     """Memory lines say "the user" and "the agent", never a name or a guessed pronoun."""
     words = prompt_words()
-    assert 'Call the user "the user" and the agent "the agent"' in words
-    assert "never with he, she or another pronoun" in words
+    assert 'the summary and handoff as much as each fact, calls the user "the user"' in words
+    assert "never by name, and never with he, she or another pronoun" in words

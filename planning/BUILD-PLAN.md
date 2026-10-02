@@ -403,10 +403,12 @@ support is that memory being restated is already known: skip it. Extract a fact 
 memory's subject only when the session adds something new, such as a change, a
 correction, or fresh evidence.
 
+Everything you write, the summary and handoff as much as each fact, calls the user "the
+user" and the agent "the agent": never by name, and never with he, she or another pronoun
+that guesses who they are. Other people may be named as the session names them.
+
 For each fact:
-- statement: one sentence, in plain present tense, that stands on its own. Call the user
-  "the user" and the agent "the agent": never by name, and never with he, she or another
-  pronoun that guesses who they are. Other people may be named as the session names them.
+- statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
 - source:
   - stated: the user asserted it in their own words: a fact, a choice, a preference, or
@@ -619,7 +621,8 @@ Choose one action:
 Two lines say the same thing when an agent reading either would act the same way, even if
 the wording differs. Before naming a line for supersede or conflict, check that it is about
 the same thing as the new fact. A fact about something else, or one that can be true at the
-same time as the line, is new: choose add.
+same time as the line, is not a supersede or a conflict: choose confirm if a line already
+says the same thing, and add otherwise.
 
 Give a reason of at most 200 characters that a person can check against the quote.
 ```
@@ -959,8 +962,9 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   midnight still starts the next day, work runs again after a reset, and `aft budget` reports
   before and after.
 - **F41 Who a line names, and what a conflict is** (ruling 2026-10-02). DESIGN 8, 9. The
-  digest prompt has statements call the user "the user" and the agent "the agent", never by
-  name or with a guessed pronoun; the first real memory had lines saying "himself". The
+  digest prompt has everything it writes, statements, summary and handoff, call the user
+  "the user" and the agent "the agent", never by name or with a guessed pronoun; the first
+  real memory had lines saying "himself". The
   decide prompt defines a conflict as two claims about the same thing that cannot both be
   true, and has the model check a named line is about the same thing before choosing
   supersede or conflict; the first real dream paired unrelated lines as conflicts. M2.6
