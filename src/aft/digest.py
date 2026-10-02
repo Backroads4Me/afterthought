@@ -643,14 +643,15 @@ def _digest_parts(
     last_refused = False
     for part in chunks:
         try:
-            answer = _matching_answer(config, prompt, part, schema)
+            answer, part_facts, part_dropped = _matching_answer(
+                config, prompt, part, schema, session_id, role
+            )
         except AnswerRefused as exc:
             result.refused_parts.append(
                 {"first": part[0].id, "last": part[-1].id, "reason": str(exc)}
             )
             last_refused = True
             continue
-        part_facts, part_dropped = verify(config, session_id, part, answer["facts"], role=role)
         result.facts.extend(part_facts)
         result.dropped.extend(part_dropped)
         result.summaries.append(answer["summary"])
@@ -664,18 +665,47 @@ def _digest_parts(
     return result
 
 
-def _matching_answer(config: Config, prompt: str, part: Sequence[Entry], schema: dict) -> dict:
-    """One part's answer, asked again once when it does not match the chunk.
+# An answer of at least this many facts, every one of whose quotes is missing from the
+# entry it cites, was written about something other than its chunk (finding T17): a model
+# that read the chunk finds at least one of its own quotes in it.
+MIN_FACTS_ALL_UNQUOTED = 2
+QUOTE_NOT_FOUND = "the quote is not found in entry"
 
-    An answer that does not match twice is that part's failure, as a refused schema is
-    (finding T17); ``_digest_parts`` decides what the job keeps.
+
+def unquoted(facts: Sequence[dict], kept: Sequence[Fact], dropped: Sequence[Dropped]) -> bool:
+    """Whether an answer's facts are all ones whose quotes the chunk does not hold."""
+    return (
+        len(facts) >= MIN_FACTS_ALL_UNQUOTED
+        and not kept
+        and all(fact.reason.startswith(QUOTE_NOT_FOUND) for fact in dropped)
+    )
+
+
+def _matching_answer(
+    config: Config,
+    prompt: str,
+    part: Sequence[Entry],
+    schema: dict,
+    session_id: str,
+    role: str,
+) -> tuple[dict, list[Fact], list[Dropped]]:
+    """One part's answer and its verified facts, asked again once when it does not match
+    the chunk.
+
+    An answer does not match when ``mismatch`` names a problem, or when every one of two or
+    more facts quotes words its entry does not hold: its summary and handoff, which carry no
+    quote, came from the same reading. Two such answers are that part's failure, as a
+    refused schema is (finding T17); ``_digest_parts`` decides what the job keeps.
     """
     problem = ""
     for _ in range(2):
         answer = _model_answer(config, prompt, render(part), schema)
         found = mismatch(answer, part)
         if found is None:
-            return answer
+            kept, dropped = verify(config, session_id, part, answer["facts"], role=role)
+            if not unquoted(answer["facts"], kept, dropped):
+                return answer, kept, dropped
+            found = "no fact's quote is in the entry it cites"
         problem = found
     raise AnswerRefused(f"the answer does not match its chunk: {problem}")
 
@@ -723,7 +753,7 @@ def verify(
         # A label is the prompt's name for the entry; what is recorded is the entry's own id.
         fact = {**fact, "entry": entry.id}
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
-            dropped.append(_refused(fact, f"the quote is not found in entry {entry.id}"))
+            dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
         if fact["source"] == "stated" and entry.role != USER:
             dropped.append(

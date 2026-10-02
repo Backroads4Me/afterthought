@@ -431,10 +431,14 @@ For each fact:
   project; otherwise project.
 
 Also write:
-- summary: two to four sentences on what happened.
+- summary: one to four sentences on what happened.
 - handoff: what was in flight when this part ended, approaches that failed, and what is
   still open, each item with the label of the entry it comes from. Use empty values when
   there is nothing to hand off.
+
+Write only about what the entries say. When a part holds little worth keeping, say so in
+a one-sentence summary and leave the facts and the handoff empty: an answer with nothing
+in it is a good answer when nothing happened.
 
 Never invent a fact, a quote, or an entry label. Never write placeholder text such as
 "..."; leave a value empty instead.
@@ -919,6 +923,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   handoff empty. A job whose every part is refused fails as before. `aft redigest` does the
   same. Tests: a refused first part, a refused last part, every part refused, and a
   redigest with one refused part.
+- **F37 An answer about another session is refused** (ruling 2026-10-01; finding T17). DESIGN 8.
+  An answer with two or more facts, every one dropped because its quote is not in the entry
+  it cites, is refused like any answer that does not match its chunk: asked once more, then
+  the part is refused (F36). Its summary and handoff carry no quote and came from the same
+  reading. One missing quote, or facts dropped for another reason, only drop those facts.
+  The prompt tells the model to write only about what the entries say, and that an empty
+  answer is a good one when nothing happened. A check that the summary's words appear in the
+  chunk was measured on real digests and refused: honest summaries scored as low as 0.35 of
+  their words found, below an invented one's 0.60. Tests: an invented answer is refused, a
+  real one after it is kept, one unquoted fact and a misattributed `[stated]` refuse nothing,
+  and the prompt's words. Review checkpoint: yes (prompt).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
