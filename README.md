@@ -74,6 +74,9 @@ uv tool install --editable .
    `reports/needs-you.md` now and then: it lists every question memory is waiting on you
    for.
 
+`aft pause` stops background work at any time without losing anything, since sessions are
+still queued, and `aft resume` picks them up.
+
 Start a new session in a registered project and the agent's first context is its memory
 block. `aft inject` prints the same block from the command line.
 

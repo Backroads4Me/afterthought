@@ -541,7 +541,10 @@ leaving its entries to be read again.  The script then:
 
 Dreaming turns digests into curated facts. It runs from a systemd user timer every 30
 minutes (configurable), and capture can start it early. A run exits immediately when no
-digests are waiting. It works one project at a time, only after that project has been
+digests are waiting. `aft pause` stops background work until `aft resume`: while a pause
+stands, `aft work` and `aft dream` exit at once whatever started them, and capture starts
+no run, but sessions are still captured and queued, so a pause loses nothing. The pause is
+a marker in the home directory, state rather than configuration. It works one project at a time, only after that project has been
 quiet for 15 minutes (configurable), holds a lock, and processes digests in session order
 so later evidence is applied after earlier evidence.
 
@@ -893,6 +896,7 @@ explains how to do but never does on its own.
 | The model returns malformed output | Schema-constrained decoding prevents it; a response that still fails validation is retried once, then left queued and reported. |
 | A dream run makes a bad edit | `git revert` the run's commit. The report names it. |
 | You are mid-edit in Obsidian | Dreaming skips that project until the quiet period passes. |
+| Something in the pipeline looks wrong, or the endpoint is down for a while | `aft pause` stops digesting and dreaming; sessions keep being queued, and `aft resume` picks them up. |
 | The index is corrupt | `aft reindex` rebuilds it from files. |
 | A transcript or its archived evidence expires | Digests and pages keep their verbatim quotes; `aft trace` shows the quote and says the full context is gone. |
 | A library file is edited or deleted | `aft lint` reports the hash mismatch; restore it from git or re-import the collection. |
