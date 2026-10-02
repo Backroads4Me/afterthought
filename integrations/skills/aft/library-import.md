@@ -1,8 +1,3 @@
----
-name: aft-library-import
-description: Import reference documentation and collections into the afterthought library. Use when asked to import or add reference documents, specifications, or documentation collections into afterthought (e.g. "add this protocol documentation to the library"). Drives aft library survey, validate, check-map, import, describe, and propose commands.
----
-
 # Library Import
 
 Import reference documentation and specification collections into the afterthought vault.

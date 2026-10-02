@@ -16,10 +16,11 @@ def test_skill_source_exists_and_matches_text():
     source = skill_install.skill_source()
     assert source.is_file()
     assert skill_install.skill_text() == source.read_text(encoding="utf-8")
-    assert "name: aft-library-import" in skill_install.skill_text()
-    assert "aft library survey" in skill_install.skill_text()
-    assert "aft library validate" in skill_install.skill_text()
-    assert "aft library import" in skill_install.skill_text()
+    assert "name: aft" in skill_install.skill_text()
+    procedure = skill_install.file_text("library-import.md")
+    assert "aft library survey" in procedure
+    assert "aft library validate" in procedure
+    assert "aft library import" in procedure
 
 
 def test_install_creates_skill_in_empty_directory(tmp_path):
@@ -91,7 +92,7 @@ def test_uninstall_removes_file_and_empty_container(tmp_path):
     assert not target.exists()
     assert not target.parent.exists()
     assert skills.is_dir()
-    assert set(change.removed) == {target, target.parent}
+    assert set(change.removed) == {target, target.parent / "library-import.md", target.parent}
 
 
 def test_uninstall_leaves_container_if_other_files_exist(tmp_path):
@@ -107,7 +108,7 @@ def test_uninstall_leaves_container_if_other_files_exist(tmp_path):
     assert not target.exists()
     assert target.parent.is_dir()
     assert other.is_file()
-    assert change.removed == (target,)
+    assert change.removed == (target, target.parent / "library-import.md")
 
 
 def test_uninstall_preserves_custom_content_in_backup(tmp_path):
@@ -135,7 +136,7 @@ def test_uninstall_dry_run_removes_nothing(tmp_path):
     assert change.changed is True
     assert target.is_file()
     assert target.parent.is_dir()
-    assert set(change.removed) == {target, target.parent}
+    assert set(change.removed) == {target, target.parent / "library-import.md", target.parent}
 
 
 def test_refuses_when_path_is_not_directory(tmp_path):
@@ -211,28 +212,79 @@ def legacy_text() -> str:
     return fixture.read_text(encoding="utf-8")
 
 
-def test_the_last_shipped_legacy_skill_is_known():
+def test_the_last_shipped_legacy_skills_are_known():
     import hashlib
 
     digest = hashlib.sha256(legacy_text().encode("utf-8")).hexdigest()
-    assert digest in skill_install.LEGACY_SHA256
+    assert digest in skill_install.LEGACY["library-import"]
+    assert len(skill_install.LEGACY["aft-library-import"]) == 1
 
 
-def test_installing_retires_a_shipped_copy_under_the_old_name(tmp_path):
-    old = tmp_path / "library-import" / "SKILL.md"
+@pytest.mark.parametrize("old_name", ["library-import", "aft-library-import"])
+def test_installing_retires_a_shipped_copy_under_an_old_name(tmp_path, old_name, monkeypatch):
+    import hashlib
+
+    text = legacy_text()
+    monkeypatch.setitem(
+        skill_install.LEGACY, old_name, frozenset({hashlib.sha256(text.encode()).hexdigest()})
+    )
+    old = tmp_path / old_name / "SKILL.md"
     old.parent.mkdir()
-    old.write_text(legacy_text(), encoding="utf-8")
-    assert skill_install.retire_legacy(tmp_path, dry_run=True).startswith("would remove")
+    old.write_text(text, encoding="utf-8")
+    assert skill_install.retire_legacy(tmp_path, dry_run=True) == [
+        f"would remove the old skill {old.parent}"
+    ]
     assert old.exists(), "a dry run removed the old skill"
-    assert skill_install.retire_legacy(tmp_path).startswith("removed the old skill")
+    assert skill_install.retire_legacy(tmp_path) == [f"removed the old skill {old.parent}"]
     assert not old.parent.exists()
-    assert skill_install.retire_legacy(tmp_path) is None
+    assert skill_install.retire_legacy(tmp_path) == []
 
 
 def test_a_library_import_skill_afterthought_did_not_ship_is_kept(tmp_path):
     old = tmp_path / "library-import" / "SKILL.md"
     old.parent.mkdir()
     old.write_text(legacy_text() + "\nA line someone added.\n", encoding="utf-8")
-    line = skill_install.retire_legacy(tmp_path)
-    assert line is not None and line.startswith("kept")
+    [line] = skill_install.retire_legacy(tmp_path)
+    assert line.startswith("kept")
     assert old.exists()
+
+
+def test_a_custom_procedure_file_is_backed_up_before_it_is_replaced(tmp_path):
+    skills = tmp_path / "skills"
+    procedure = skills / "aft" / "library-import.md"
+    procedure.parent.mkdir(parents=True)
+    procedure.write_text("# My own import notes\n", encoding="utf-8")
+    change = skill_install.install(skills)
+    assert [backup.name.split(".aft-")[0] for backup in change.backups] == ["library-import.md"]
+    assert change.backups[0].read_text(encoding="utf-8") == "# My own import notes\n"
+    assert procedure.read_text(encoding="utf-8") == skill_install.file_text("library-import.md")
+
+
+def test_the_skill_names_every_aft_command():
+    """An agent asked for any of afterthought's commands finds it in the skill."""
+    import argparse
+
+    from aft import cli
+
+    text = skill_install.skill_text() + skill_install.file_text("library-import.md")
+
+    def names(parser, prefix):
+        """Each command as the alternatives it can be typed as: its name and its aliases."""
+        found = []
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                spelled: dict[int, list[str]] = {}
+                for name, sub in action.choices.items():
+                    spelled.setdefault(id(sub), []).append(f"{prefix} {name}")
+                for spellings in spelled.values():
+                    found.append(spellings)
+                    sub = action.choices[spellings[0].rsplit(" ", 1)[1]]
+                    found += names(sub, spellings[0])
+        return found
+
+    missing = [
+        spellings[0]
+        for spellings in names(cli._parser(), "aft")
+        if not any(f"`{name}" in text for name in spellings)
+    ]
+    assert missing == [], f"commands the aft skill does not name: {missing}"

@@ -30,15 +30,22 @@ def setting_names(cls: type = config.Settings, prefix: str = "") -> list[str]:
     return names
 
 
-def command_names(parser: argparse.ArgumentParser | None = None, prefix: str = "aft") -> list[str]:
-    """Every command and subcommand `aft` takes, as the user types it."""
+def command_names(
+    parser: argparse.ArgumentParser | None = None, prefix: str = "aft"
+) -> list[list[str]]:
+    """Every command and subcommand `aft` takes, each as the spellings a user may type:
+    its name, then any aliases."""
     parser = parser or cli._parser()
-    names = []
+    names: list[list[str]] = []
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
+            spelled: dict[int, list[str]] = {}
             for name, sub in action.choices.items():
-                names.append(f"{prefix} {name}")
-                names += command_names(sub, f"{prefix} {name}")
+                spelled.setdefault(id(sub), []).append(f"{prefix} {name}")
+            for spellings in spelled.values():
+                names.append(spellings)
+                sub = action.choices[spellings[0].rsplit(" ", 1)[1]]
+                names += command_names(sub, spellings[0])
     return names
 
 
@@ -53,8 +60,10 @@ def test_every_setting_is_documented():
 def test_every_command_is_documented():
     text = (DOCS / "commands.md").read_text()
     names = command_names()
-    assert "aft project add" in names and "aft library describe" in names
-    missing = [name for name in names if f"`{name}" not in text]
+    assert ["aft project add"] in names and ["aft library describe"] in names
+    missing = [
+        spellings[0] for spellings in names if not any(f"`{name}" in text for name in spellings)
+    ]
     assert missing == [], f"commands with no entry in docs/commands.md: {missing}"
 
 
