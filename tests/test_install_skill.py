@@ -288,3 +288,30 @@ def test_the_skill_names_every_aft_command():
         if not any(f"`{name}" in text for name in spellings)
     ]
     assert missing == [], f"commands the aft skill does not name: {missing}"
+
+
+def test_every_shipped_file_is_in_the_list_of_shipped_versions():
+    """Changing a skill file means adding its sha256 to SHIPPED_SHA256, so an installed copy
+    of it is later recognized as afterthought's and replaced without a backup."""
+    import hashlib
+
+    for name in skill_install.FILES:
+        digest = hashlib.sha256(skill_install.file_text(name).encode("utf-8")).hexdigest()
+        assert digest in skill_install.SHIPPED_SHA256[name], f"add {digest} for {name}"
+
+
+def test_an_earlier_shipped_version_is_replaced_without_a_backup(tmp_path, monkeypatch):
+    import hashlib
+
+    skills = tmp_path / "skills"
+    target = skill_install.target_path(skills)
+    target.parent.mkdir(parents=True)
+    earlier = "---\nname: aft\n---\nAn earlier release.\n"
+    target.write_text(earlier, encoding="utf-8")
+    digest = hashlib.sha256(earlier.encode("utf-8")).hexdigest()
+    shipped = {**skill_install.SHIPPED_SHA256}
+    shipped["SKILL.md"] = shipped["SKILL.md"] | {digest}
+    monkeypatch.setattr(skill_install, "SHIPPED_SHA256", shipped)
+    change = skill_install.install(skills)
+    assert change.changed and change.backups == ()
+    assert list(target.parent.glob("*.bak")) == []
