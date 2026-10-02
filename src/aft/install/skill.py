@@ -8,6 +8,7 @@ The skill drives only the `aft library` commands.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import os
 import stat
 import tempfile
@@ -15,8 +16,25 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-SKILL_NAME = "library-import"
+SKILL_NAME = "aft-library-import"
 SKILL_FILE = "SKILL.md"
+
+# The name the skill was installed under before its aft- prefix, and the sha256 of every
+# SKILL.md afterthought shipped under it. A copy that matches one is ours to remove; a copy
+# that matches none is someone else's skill, or one edited by hand, and is left alone.
+LEGACY_NAME = "library-import"
+LEGACY_SHA256 = frozenset(
+    {
+        "00c93e86a7ce66b9170d0ae6876c63bb9ffaa8d6ab00f1295f72ed5186c1c323",
+        "143169eb9f929dbad8a90615f47151ec63330d746740b4a0a76397eec7e7737c",
+        "2309510bcc4a8f435719269a89836fd3f25ea83eaa2431aef8f33fa6c6c7c5fa",
+        "3678abbfde72260e90034b67e0963b6356d9550d0d8364b39834bf1420352e3a",
+        "794c9dfdb9f27a1d690a4471a0e1905a5352691ad6517b9189e2dc87ef8cb737",
+        "80c12ad615a62d8d6ea2b7e2a8cec701e5896a0ca691e466e706a051f2c28b1a",
+        "a3260210d8775f68a43d4304cd374105241c7efb2f5a3c5eb4761ca4264cf972",
+        "e10586af1a1e9c75eda84f507b674435d81da4eb6484ece65092d7d781a2fd93",
+    }
+)
 
 SOURCE = Path("integrations") / "skills" / SKILL_NAME / SKILL_FILE
 
@@ -66,8 +84,36 @@ def target_path(skills_dir: Path) -> Path:
     return skills_dir / SKILL_NAME / SKILL_FILE
 
 
+def retire_legacy(skills_dir: Path, *, dry_run: bool = False) -> str | None:
+    """Remove the skill afterthought installed before its aft- prefix, and say so.
+
+    Only a copy afterthought shipped is removed, with its directory when nothing else is in
+    it; a ``library-import`` skill with other content is kept and named, so a person can
+    decide. Returns the line to print, or None when there is no old copy.
+    """
+    container = skills_dir / LEGACY_NAME
+    target = container / SKILL_FILE
+    if not target.is_file() or target.is_symlink():
+        return None
+    try:
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise InstallError(f"cannot read {target}: {exc}") from exc
+    if digest not in LEGACY_SHA256:
+        return f"kept {target}: it is not a copy afterthought shipped"
+    if dry_run:
+        return f"would remove the old skill {container}"
+    try:
+        target.unlink()
+        if not any(container.iterdir()):
+            container.rmdir()
+    except OSError as exc:
+        raise InstallError(f"cannot remove the old skill {container}: {exc}") from exc
+    return f"removed the old skill {container}"
+
+
 def install(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
-    """Install the library-import skill into ``skills_dir``."""
+    """Install the aft-library-import skill into ``skills_dir``."""
     try:
         target = _target(skills_dir)
         text = skill_text()
@@ -96,7 +142,7 @@ def check_target(skills_dir: Path) -> Path:
 
 
 def uninstall(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
-    """Remove the library-import skill from ``skills_dir``."""
+    """Remove the aft-library-import skill from ``skills_dir``."""
     try:
         target = _target(skills_dir)
         container = target.parent

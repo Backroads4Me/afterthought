@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from aft.install import claude as claude_install
@@ -14,7 +16,7 @@ def test_skill_source_exists_and_matches_text():
     source = skill_install.skill_source()
     assert source.is_file()
     assert skill_install.skill_text() == source.read_text(encoding="utf-8")
-    assert "name: library-import" in skill_install.skill_text()
+    assert "name: aft-library-import" in skill_install.skill_text()
     assert "aft library survey" in skill_install.skill_text()
     assert "aft library validate" in skill_install.skill_text()
     assert "aft library import" in skill_install.skill_text()
@@ -201,3 +203,36 @@ def test_install_with_backup_then_uninstall_keeps_the_persons_text(tmp_path):
     assert change.backup.is_file()
     assert change.backup.read_text(encoding="utf-8") == custom_text
     assert target.parent.is_dir()
+
+
+def legacy_text() -> str:
+    """The skill as afterthought last shipped it under its name before the aft- prefix."""
+    fixture = Path(__file__).parent / "fixtures" / "legacy-library-import-SKILL.md"
+    return fixture.read_text(encoding="utf-8")
+
+
+def test_the_last_shipped_legacy_skill_is_known():
+    import hashlib
+
+    digest = hashlib.sha256(legacy_text().encode("utf-8")).hexdigest()
+    assert digest in skill_install.LEGACY_SHA256
+
+
+def test_installing_retires_a_shipped_copy_under_the_old_name(tmp_path):
+    old = tmp_path / "library-import" / "SKILL.md"
+    old.parent.mkdir()
+    old.write_text(legacy_text(), encoding="utf-8")
+    assert skill_install.retire_legacy(tmp_path, dry_run=True).startswith("would remove")
+    assert old.exists(), "a dry run removed the old skill"
+    assert skill_install.retire_legacy(tmp_path).startswith("removed the old skill")
+    assert not old.parent.exists()
+    assert skill_install.retire_legacy(tmp_path) is None
+
+
+def test_a_library_import_skill_afterthought_did_not_ship_is_kept(tmp_path):
+    old = tmp_path / "library-import" / "SKILL.md"
+    old.parent.mkdir()
+    old.write_text(legacy_text() + "\nA line someone added.\n", encoding="utf-8")
+    line = skill_install.retire_legacy(tmp_path)
+    assert line is not None and line.startswith("kept")
+    assert old.exists()

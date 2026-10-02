@@ -1,6 +1,6 @@
 """The commands shipped text tells an agent to run are commands the CLI has.
 
-The library-import skill and the procedure ``aft library survey`` prints are instructions an
+The aft-library-import skill and the procedure ``aft library survey`` prints are instructions an
 agent follows to the letter, so a command either of them names has to be one ``aft`` parses.
 Each ``aft ...`` code span in both texts is checked against the real parser, the one
 ``aft.cli.main`` builds.
@@ -26,7 +26,7 @@ from aft import cli
 from aft.library import survey
 
 REPO = Path(__file__).resolve().parents[1]
-SKILL = REPO / "integrations" / "skills" / "library-import" / "SKILL.md"
+SKILL = REPO / "integrations" / "skills" / "aft-library-import" / "SKILL.md"
 
 _SPAN = re.compile(r"`(aft(?: [^`]*)?)`")
 _PLACEHOLDER = re.compile(r"<[^<>\s]+>")
@@ -68,7 +68,7 @@ def _actions(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentPars
 
 
 SHIPPED = {
-    "the library-import skill": SKILL.read_text(encoding="utf-8"),
+    "the aft-library-import skill": SKILL.read_text(encoding="utf-8"),
     "the survey procedure": survey.IMPORT_PROCEDURE,
 }
 

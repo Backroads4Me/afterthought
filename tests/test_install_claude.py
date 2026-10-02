@@ -926,7 +926,7 @@ def test_main_install_claude_on_symlinked_skill_returns_2_and_leaves_settings_un
     settings.write_text(initial_text, encoding="utf-8")
 
     skills = claude_install.skills_dir(settings)
-    skill_container = skills / "library-import"
+    skill_container = skills / "aft-library-import"
     skill_container.mkdir(parents=True, exist_ok=True)
     symlink_target = tmp_path / "somewhere_else.md"
     symlink_target.write_text("some external text", encoding="utf-8")

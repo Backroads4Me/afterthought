@@ -802,6 +802,9 @@ def cmd_install_claude(args) -> int:
         if args.uninstall
         else claude_install.install_skill(skills, dry_run=args.dry_run)
     )
+    retired = skill_install.retire_legacy(skills, dry_run=args.dry_run)
+    if retired:
+        print(retired)
     if args.dry_run:
         preview_lines = []
         if change.preview:
@@ -867,6 +870,9 @@ def cmd_install_pi(args) -> int:
         if args.uninstall
         else pi_install.install_skill(skills, dry_run=args.dry_run)
     )
+    retired = skill_install.retire_legacy(skills, dry_run=args.dry_run)
+    if retired:
+        print(retired)
     target = pi_install.target_path(extensions)
     if not change.changed and not skill_change.changed:
         if args.uninstall:
