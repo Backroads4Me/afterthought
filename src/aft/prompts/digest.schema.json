@@ -4,7 +4,7 @@
   "properties": {
     "summary": {
       "type": "string",
-      "description": "Two to four sentences on what happened.",
+      "description": "One to four sentences on what happened.",
       "maxLength": 800
     },
     "handoff": {

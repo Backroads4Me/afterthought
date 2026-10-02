@@ -431,7 +431,7 @@ For each fact:
   project; otherwise project.
 
 Also write:
-- summary: two to four sentences on what happened.
+- summary: one to four sentences on what happened.
 - handoff: what was in flight when this part ended, approaches that failed, and what is
   still open, each item with the label of the entry it comes from. Use empty values when
   there is nothing to hand off.

@@ -753,7 +753,7 @@ def verify(
         # A label is the prompt's name for the entry; what is recorded is the entry's own id.
         fact = {**fact, "entry": entry.id}
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
-            dropped.append(_refused(fact, f"the quote is not found in entry {entry.id}"))
+            dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
         if fact["source"] == "stated" and entry.role != USER:
             dropped.append(

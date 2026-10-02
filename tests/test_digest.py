@@ -774,6 +774,21 @@ def test_an_invented_answer_then_a_real_one_keeps_the_real_one(session: Session)
     ]
 
 
+def test_a_part_about_another_session_is_refused_and_the_rest_kept(session: Session):
+    """F37 hands an invented part to F36: the part is recorded and refused, the others stay."""
+    wide = long_transcript("wide-made-up.jsonl", session)
+    fake, cfg = serve(session.cfg, made_up(), made_up(), answer(summary="The second part."))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, wide, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    written = frontmatter(cfg, wrote.path)
+    assert written["description"] == "The second part."
+    [part] = written["aft"]["refused_parts"]
+    assert "no fact's quote is in the entry it cites" in part["reason"]
+
+
 def test_one_unquoted_fact_is_only_dropped(session: Session):
     """One missing quote is a fact the model got wrong, not an answer about another
     session: the fact is dropped and the answer stands."""

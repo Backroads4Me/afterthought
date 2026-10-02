@@ -474,7 +474,7 @@ structured output:
 
 ```json
 {
-  "summary": "2-4 sentences on what happened",
+  "summary": "1-4 sentences on what happened",
   "handoff": {
     "in_flight": {"text": "what was being worked on when the session ended", "entry": "#41"},
     "failed": [{"text": "an approach tried that did not work", "entry": "#17"}],
