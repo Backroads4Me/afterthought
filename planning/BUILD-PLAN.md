@@ -975,7 +975,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `aft notes [path] [--all] [--json]` lists the open notes with their lines and quotes;
   `aft settle <page>:<line> --keep|--withdraw|--replace "<statement>"` settles one, moves
   the note verbatim to the archive, regenerates `needs-you.md` and commits. A replacement
-  cites the note's verified sources only. The memory block opens with "Needs your decision"
+  cites the note's verified, non-worker sources only, and a refused settle restores the
+  archive. The memory block opens with "Needs your decision"
   when notes wait, telling the agent to raise them first and ask whether to settle now or
   skip; the session-start hook prints JSON carrying a notice the interface shows the user
   (Claude Code `systemMessage`, pi `ctx.ui.notify`). The aft skill holds the settle

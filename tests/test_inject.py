@@ -1259,3 +1259,25 @@ def test_with_no_notes_waiting_the_hook_prints_the_plain_block(
     assert not out.startswith("{")
     assert inject.NOTES_HEADING not in out
     assert out.startswith("# Memory: Widget\n")
+
+
+@pytest.mark.parametrize("cap", [800, 1200, 8000])
+def test_notes_waiting_come_first_and_the_layers_make_their_room(widget, tmp_path, cap):
+    """The part sits under the title, inside the cap: its room comes out of the layers."""
+    config = dataclasses.replace(
+        widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(cap))
+    )
+    block = inject.build(config, resolve(config, tmp_path / "widget"))
+    assert len(block) <= cap
+    head = "# Memory: Widget\nA widget that turns water into widgets."
+    assert block.startswith(f"{head}\n\n## {inject.NOTES_HEADING}\n\n{inject.notes_line(2)}\n\n")
+    assert block.endswith(inject.HOW_TO)
+
+
+def test_a_cap_too_small_for_the_notes_says_the_rest_was_cut(widget, tmp_path):
+    config = dataclasses.replace(
+        widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(300))
+    )
+    parts = parts_of(inject.build(config, resolve(config, tmp_path / "widget")))
+    assert f"## {inject.NOTES_HEADING}" not in parts
+    assert parts[f"## {inject.CUT_HEADING}"] == [inject.CUT_NOTE]

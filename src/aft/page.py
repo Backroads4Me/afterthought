@@ -19,6 +19,9 @@ import yaml
 
 SOURCES = ("stated", "observed", "inferred", "suggested")
 
+# The vault's directories whose pages hold curated facts and follow the fact-line grammar.
+FACT_DIRS = ("projects", "global", "references")
+
 KIND_SECTIONS = {
     "Preferences": "preference",
     "Decisions": "decision",

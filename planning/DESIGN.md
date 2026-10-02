@@ -321,7 +321,8 @@ A conflict or a question waits on the user, and the dream never settles one. `af
 <page>:<line>` does, with the user's choice: `--keep` leaves the line standing,
 `--withdraw` strikes it, and `--replace "<statement>"` supersedes it with a line citing the
 note's own sources, tagged `[stated]` when one of them is the user's words and `[observed]`
-otherwise, and refused when none still verifies (R1). Whichever it is, the note moves
+otherwise, and refused when none still verifies or the only ones that do come from worker
+sessions (R1, DESIGN 8). Whichever it is, the note moves
 verbatim to the archive, `needs-you.md` is regenerated, and the change is one commit.
 `aft notes` lists the open notes with the quotes behind each, for an agent to explain them.
 
@@ -663,7 +664,7 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
 2,000 tokens) to start, built in this order:
 
 1. the project name and its one-line description, then **needs your decision** when notes
-   wait on the user in the project's pages or the global ones: how many, and an instruction
+   wait on the user in the project's pages or the global and reference ones: how many, and an instruction
    to tell the user before anything else and ask whether to settle them now or skip for now.
    The session-start hook also hands the agent's interface a notice it shows the user
    directly: Claude Code's `systemMessage`, and a pi notification. Skipping records nothing,

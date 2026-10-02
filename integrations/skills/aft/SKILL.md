@@ -84,7 +84,8 @@ To settle them:
    - Keep: the line stands as it is.
    - Replace: a new statement takes the line's place, resting on the note's quotes. Draft
      the statement from those quotes and let the user change it. Replace is refused when
-     none of the note's quotes still verifies; offer keep or withdraw then.
+     none of the note's quotes still verifies, or only a worker session's do; offer keep
+     or withdraw then.
    - Withdraw: the line is struck through, and nothing replaces it.
 3. Run `aft settle <where> --keep`, `aft settle <where> --withdraw`, or
    `aft settle <where> --replace <statement>`, using the `where` field of the note the user

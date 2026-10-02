@@ -88,7 +88,7 @@ lines, candidate progress, short-term changes, and the command to revert the run
 
 `reports/needs-you.md` is regenerated on every run and every `aft settle`: one list of every
 open conflict and question across all projects. Sessions raise the same notes for their
-project and the global pages, and `aft settle` closes them: the note moves word for word to
+project and the global and reference pages, and `aft settle` closes them: the note moves word for word to
 `archive/<page path>`, and the line is kept, withdrawn, or superseded by a statement that
 rests on the note's own quotes.
 

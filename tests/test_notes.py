@@ -110,15 +110,34 @@ def test_open_notes_give_the_line_the_note_and_the_quotes_behind_both(widget):
     assert page_text(widget).splitlines()[note.line - 1].startswith("- The daemon listens on 8123.")
 
 
-def test_count_reads_the_project_and_global_pages_only(widget):
+def test_count_reads_the_project_and_the_shared_pages_only(widget):
     assert notes.count(widget, "widget") == 1
     assert notes.count(widget, None) == 0
-    global_page = widget.vault / "global/preferences.md"
-    global_page.parent.mkdir(parents=True, exist_ok=True)
-    global_page.write_text(BODY.replace("[^s", "[^g"))
-    assert notes.count(widget, None) == 1
-    assert notes.count(widget, "widget") == 2
-    assert notes.count(widget, "elsewhere") == 1
+    for shared in ("global/preferences.md", "references/spec/power.md"):
+        page = widget.vault / shared
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(BODY.replace("[^s", "[^g"))
+    other = widget.vault / "projects/other/nested/page.md"
+    other.parent.mkdir(parents=True)
+    other.write_text(BODY)
+    assert notes.count(widget, None) == 2
+    assert notes.count(widget, "widget") == 3
+    assert notes.count(widget, "other") == 3
+    assert notes.count(widget, None, everywhere=True) == 4
+
+
+def test_every_note_needs_you_lists_is_one_aft_notes_lists(widget):
+    """The notes a user is asked about are the notes reports/needs-you.md holds."""
+    from aft.dream import report
+
+    nested = widget.vault / "references/spec/power.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text(BODY)
+    needs_you = report.regenerate_needs_you(widget.vault).read_text()
+    listed = notes.open_notes(widget, None, everywhere=True)
+    assert sorted(n.page for n in listed) == [OVERVIEW, "references/spec/power.md"]
+    for note in listed:
+        assert note.page in needs_you
 
 
 def test_keep_closes_the_note_and_leaves_the_line(widget):
@@ -205,6 +224,8 @@ def test_replace_without_a_verified_quote_is_refused_and_changes_nothing(widget)
         (f"{OVERVIEW}:3", notes.KEEP, None, "no note under line 3"),
         ("projects/widget/missing.md:1", notes.KEEP, None, "no page"),
         (OVERVIEW, notes.KEEP, None, "is not <page>:<line>"),
+        ("reports/needs-you.md:3", notes.KEEP, None, "is not a fact page"),
+        ("projects/../reports/x.md:3", notes.KEEP, None, "is not a fact page"),
         (f"{OVERVIEW}:1", "drop", None, "unknown choice"),
         (f"{OVERVIEW}:1", notes.REPLACE, " ", "--replace takes the new statement"),
         (f"{OVERVIEW}:1", notes.KEEP, "text", "--replace takes the new statement"),
@@ -236,3 +257,63 @@ def test_the_commands_list_and_settle(widget, capsys, monkeypatch, tmp_path):
 
     assert main(["settle", where, "--keep"]) == 2
     assert "no note under line" in capsys.readouterr().err
+
+
+def test_a_refused_statement_puts_the_archive_back(widget):
+    """Closing a note writes the archive at once. A statement the writer refuses comes
+    after that, and the settle still leaves no trace."""
+    before = page_text(widget)
+    head = run_git(["rev-parse", "HEAD"], widget.vault)
+    with pytest.raises(notes.NoteError, match="cannot settle"):
+        notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port ~~9000~~.", now=NOW)
+    assert page_text(widget) == before
+    assert not (widget.vault / "archive" / OVERVIEW).exists()
+    assert run_git(["rev-parse", "HEAD"], widget.vault) == head
+    assert run_git(["status", "--porcelain", "projects", "archive"], widget.vault) == ""
+
+    notes.settle(widget, the_note(widget).where, notes.KEEP, now=NOW)
+    archive = (widget.vault / "archive" / OVERVIEW).read_text()
+    assert archive.count("[!conflict]") == 1
+
+
+def test_a_refused_statement_keeps_an_archive_that_was_there(widget):
+    archive = widget.vault / "archive" / OVERVIEW
+    write_overview(
+        widget,
+        Registry.load(widget.registry_path).by_slug("widget").id,
+        [
+            {"id": "s1", "resource": "aft://session/c/1#e1", "quote": "listens on 8123"},
+            {"id": "s2", "resource": "aft://session/c/2#e1", "quote": "listens on 9000"},
+        ],
+        body=BODY + "\n- The lid is blue. [observed] 2026-09-20 [^s1]\n\n"
+        "> [!question] 2026-10-05\n> Is it green now? ([^s2])\n",
+    )
+    first, second = notes.open_notes(widget, "widget")
+    notes.settle(widget, second.where, notes.KEEP, now=NOW)
+    kept = archive.read_bytes()
+    with pytest.raises(notes.NoteError, match="cannot settle"):
+        notes.settle(widget, first.where, notes.REPLACE, "Port ~~9000~~.", now=NOW)
+    assert archive.read_bytes() == kept
+
+
+def test_a_worker_session_s_quote_cannot_carry_a_replacement(widget):
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    evidence.store(
+        widget,
+        agent="c",
+        session_id="w",
+        project_id=project.id,
+        entries=[entry("e1", 5, "worker", "the port is 9000 now")],
+    )
+    write_overview(
+        widget,
+        project.id,
+        [
+            {"id": "s1", "resource": "aft://session/c/1#e1", "quote": "listens on 8123"},
+            {"id": "s2", "resource": "aft://session/c/w#e1", "quote": "the port is 9000"},
+        ],
+    )
+    [source] = the_note(widget).note_sources
+    assert (source.verified, source.origin) == (True, "worker")
+    with pytest.raises(notes.NoteError, match="no quote that still verifies"):
+        notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port 9000.", now=NOW)

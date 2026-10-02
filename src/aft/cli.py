@@ -618,7 +618,7 @@ def cmd_notes(args) -> int:
     """The notes waiting on the user's decision, with what explains each (BUILD-PLAN F42)."""
     import dataclasses
 
-    from aft import keys, notes
+    from aft import gitutil, keys, notes
 
     config = load()
     slug = None
@@ -626,7 +626,7 @@ def cmd_notes(args) -> int:
         registry = Registry.load(config.registry_path)
         try:
             slug = keys.resolve(Path(args.path).resolve(), registry, config.host).slug
-        except Exception:
+        except gitutil.GitError:
             slug = None
     found = notes.open_notes(config, slug, everywhere=args.all)
     if args.json:

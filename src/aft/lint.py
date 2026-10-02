@@ -12,8 +12,7 @@ from pathlib import Path
 from aft import page as pagemod
 from aft.registry import Registry, RegistryError
 
-# Directories whose pages hold curated facts and follow the fact-line grammar.
-FACT_DIRS = ("projects", "global", "references")
+FACT_DIRS = pagemod.FACT_DIRS
 # Directories that are not pages at all.
 SKIP_DIRS = {".git", ".obsidian", "library"}
 RESERVED = {"index.md", "log.md"}
