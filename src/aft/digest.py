@@ -1139,8 +1139,13 @@ def _is_session_resource(resource: str, session_id: str) -> bool:
     return False
 
 
-def _is_session_digest(path: Path, session_id: str) -> bool:
-    """Whether ``path`` is a digest file belonging to ``session_id``."""
+def _is_session_digest(path: Path, session_id: str, config: Config | None = None) -> bool:
+    """Whether ``path`` is a digest file belonging to ``session_id``.
+
+    A page's own sources name its session. A page with none, a part that kept no fact,
+    is read from its name: ``<session>-<n>`` is a later part of ``session_id`` unless the
+    archive holds a separate session with that longer id, which ``config`` lets this ask.
+    """
     if not path.is_file() or path.suffix != ".md":
         return False
     match = _DIGEST_NAME.match(path.stem)
@@ -1170,7 +1175,9 @@ def _is_session_digest(path: Path, session_id: str) -> bool:
     except OSError:
         pass
 
-    return is_exact
+    if is_exact:
+        return True
+    return config is not None and evidence.session_info(config, sess) is None
 
 
 def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
@@ -1249,7 +1256,7 @@ def redigest(
         digests_root = config.vault / "digests"
         if digests_root.exists():
             for f in digests_root.rglob("*.md"):
-                if _is_session_digest(f, session_id):
+                if _is_session_digest(f, session_id, config):
                     rel_parts = f.relative_to(config.vault).parts
                     if len(rel_parts) >= 2:
                         slug = rel_parts[1]
@@ -1332,7 +1339,7 @@ def redigest(
         old_paths: list[str] = []
         if digests_root.exists():
             for f in list(digests_root.rglob("*.md")):
-                if _is_session_digest(f, session_id) and f != target_path:
+                if _is_session_digest(f, session_id, config) and f != target_path:
                     old_paths.append(f.relative_to(config.vault).as_posix())
                     f.unlink()
                     parent = f.parent
