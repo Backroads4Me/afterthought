@@ -85,6 +85,14 @@ is added under it, and the disagreement shows in `reports/needs-you.md`. When so
 you observed contradicts one of your own decisions, the line gets a `[!question]` for you
 to answer.
 
+A line under a note waits on your decision, and memory does not decide for you. When notes
+wait, a session starts with a "Needs your decision" section at the top of its block, and
+the agent is told to say how many and ask whether to settle them now or skip for now. The
+hook also shows you a short notice directly: Claude Code displays it as a hook message, and
+pi as a notification. To settle a note, the agent explains it, recommends keep, replace or
+withdraw, and runs `aft settle` with your choice. Skipping changes nothing; the next session
+asks again.
+
 ## Projects
 
 A session belongs to the project of the directory it started in. A registered path wins,
@@ -116,7 +124,8 @@ at the very start of a prompt, so talking about them triggers nothing.
 - The timer digests finished sessions and dreams once a project has been quiet for
   `dream.quiet_minutes`. Work stops for the day when `work.daily_token_budget` is spent
   and resumes after midnight UTC.
-- Read the day's dream report in `reports/` to see what changed, and `reports/needs-you.md`
-  for anything waiting on you.
+- Read the day's dream report in `reports/` to see what changed. Notes waiting on you are
+  raised at the start of every session until settled; `aft notes` lists them, and
+  `reports/needs-you.md` holds them all.
 - `aft pause` stops background work without losing anything: sessions keep being queued,
   and `aft resume` works through them.

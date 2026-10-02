@@ -200,6 +200,10 @@ PAGES = """\
 EXPECTED = f"""# Memory: Widget
 A widget that turns water into widgets.
 
+## Needs your decision
+
+{inject.notes_line(2)}
+
 ## Last session
 
 - In flight: the block
@@ -812,7 +816,7 @@ SESSION_START_IDS = [name.removesuffix(".json") for name, _, _ in SESSION_STARTS
 CLAUDE_START = ("claude", "SessionStart")
 
 
-def run_session_start(monkeypatch, capsys, name: str, agent: str, event: str, cwd: Path) -> str:
+def hook_output(monkeypatch, capsys, name: str, agent: str, event: str, cwd: Path) -> str:
     """What `aft hook <agent> <event>` prints for one captured payload, started in ``cwd``."""
     payload = json.loads((HOOK_FIXTURES / name).read_text(encoding="utf-8"))
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload | {"cwd": str(cwd)})))
@@ -820,6 +824,21 @@ def run_session_start(monkeypatch, capsys, name: str, agent: str, event: str, cw
     captured = capsys.readouterr()
     assert captured.err == ""
     return captured.out
+
+
+def run_session_start(monkeypatch, capsys, name: str, agent: str, event: str, cwd: Path) -> str:
+    """The block a session-start hook gives the agent, whether it went out as plain text or
+    inside the JSON that also carries a notice for the user."""
+    out = hook_output(monkeypatch, capsys, name, agent, event, cwd)
+    if not out.startswith("{"):
+        return out
+    printed = json.loads(out)
+    block = (
+        printed["hookSpecificOutput"]["additionalContext"]
+        if agent == "claude"
+        else printed["block"]
+    )
+    return block + "\n"
 
 
 def hook_log(config: Config) -> list[str]:
@@ -957,7 +976,7 @@ def test_a_failing_injection_exits_zero_and_prints_nothing(
     the session its memory and nothing else: exit 0, no output, one line in the hook log."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
 
-    def broken(config, resolution):
+    def broken(config, resolution, waiting=None):
         raise RuntimeError("the vault is unreadable")
 
     monkeypatch.setattr(inject, "build", broken)
@@ -1203,3 +1222,40 @@ def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
         if heading.startswith("## Pages") or heading == inject.HOW_TO:
             continue
         assert with_recent.get(heading) == lines, f"{heading} lost room to short-term memory"
+
+
+@pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
+def test_notes_waiting_on_the_user_reach_the_user_as_well_as_the_agent(
+    name, agent, event, widget, tmp_path, capsys, monkeypatch
+):
+    """The widget's pages hold two notes. The block asks the agent to raise them, and the
+    hook also hands the agent's interface a notice it shows the user directly (F42)."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    printed = json.loads(hook_output(monkeypatch, capsys, name, agent, event, tmp_path / "widget"))
+    notice = "afterthought: 2 notes in memory wait on your decision. Ask the agent to settle them."
+    if agent == "claude":
+        assert printed == {
+            "systemMessage": notice,
+            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": EXPECTED},
+        }
+    else:
+        assert printed == {"block": EXPECTED, "notice": notice}
+    assert f"## {inject.NOTES_HEADING}\n\n{inject.notes_line(2)}" in EXPECTED
+
+
+def test_with_no_notes_waiting_the_hook_prints_the_plain_block(
+    widget, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    for page in ("overview.md", "api.md"):
+        path = widget.vault / "projects/widget" / page
+        kept = [
+            line for line in path.read_text().splitlines(keepends=True) if not line.startswith(">")
+        ]
+        path.write_text("".join(kept))
+    out = hook_output(
+        monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, tmp_path / "widget"
+    )
+    assert not out.startswith("{")
+    assert inject.NOTES_HEADING not in out
+    assert out.startswith("# Memory: Widget\n")

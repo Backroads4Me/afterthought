@@ -108,3 +108,74 @@ console.log(JSON.stringify(event.systemPromptOptions.sections));
     assert res.returncode == 0, res.stderr
     sections = json.loads(res.stdout)
     assert sections.get("afterthought") == "REFRESHED_MEMORY_BLOCK"
+
+
+def run_session_start(tmp_path: Path, printed: str, has_ui: bool = True) -> dict:
+    """Start a pi session against an `aft` that prints ``printed``, and report the section
+    the model is given and every notice the user is shown."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "printed").write_text(printed, encoding="utf-8")
+    aft_stub = bin_dir / "aft"
+    aft_stub.write_text(f'#!/bin/sh\ncat "{tmp_path / "printed"}"\nexit 0\n', encoding="utf-8")
+    aft_stub.chmod(0o755)
+    script = f"""
+import extension from "{EXTENSION_TS}";
+
+const handlers = {{}};
+extension({{ on(event, handler) {{ handlers[event] = handler; }} }});
+
+const notices = [];
+const session = {{
+  getSessionId() {{ return "session-123"; }},
+  getCwd() {{ return "/tmp"; }},
+  getSessionFile() {{ return undefined; }},
+}};
+const ctx = {{
+  sessionManager: session,
+  hasUI: {"true" if has_ui else "false"},
+  ui: {{ notify(message, type) {{ notices.push([message, type]); }} }},
+}};
+await handlers["session_start"]({{ reason: "startup" }}, ctx);
+const event = {{ systemPromptOptions: {{ sections: {{}} }} }};
+handlers["before_agent_start"](event);
+console.log(JSON.stringify({{ sections: event.systemPromptOptions.sections, notices }}));
+"""
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    res = subprocess.run(
+        [NODE, "--experimental-strip-types", "-e", script],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not available")
+def test_pi_extension_shows_the_user_the_notice_for_notes_waiting(tmp_path: Path) -> None:
+    """A session start with notes waiting prints JSON: the block goes to the model and the
+    notice to the user (BUILD-PLAN F42)."""
+    printed = json.dumps({"block": "# Memory: Widget", "notice": "2 notes wait on you."})
+    seen = run_session_start(tmp_path, printed)
+    assert seen == {
+        "sections": {"afterthought": "# Memory: Widget"},
+        "notices": [["2 notes wait on you.", "warning"]],
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not available")
+def test_pi_extension_without_an_interface_still_gives_the_model_the_block(
+    tmp_path: Path,
+) -> None:
+    printed = json.dumps({"block": "# Memory: Widget", "notice": "2 notes wait on you."})
+    seen = run_session_start(tmp_path, printed, has_ui=False)
+    assert seen == {"sections": {"afterthought": "# Memory: Widget"}, "notices": []}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not available")
+def test_pi_extension_takes_a_plain_block_as_it_is(tmp_path: Path) -> None:
+    seen = run_session_start(tmp_path, "# Memory: Widget\n\n- A fact.")
+    assert seen == {"sections": {"afterthought": "# Memory: Widget\n\n- A fact."}, "notices": []}

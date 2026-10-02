@@ -28,6 +28,7 @@ INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on the user)"}
 
 HOW_TO = 'Search memory: aft search "<words>". Read a page: aft read <path>.'
+NOTES_HEADING = "Needs your decision"
 
 # What the block says when the budget leaves no room for a layer's first line (design 10).
 CUT_HEADING = "Cut"
@@ -47,13 +48,14 @@ PREFERENCES = Path("global/preferences.md")
 Part = tuple[str, list[str]]
 
 
-def build(config: Config, resolution: Resolution) -> str:
+def build(config: Config, resolution: Resolution, waiting: int | None = None) -> str:
     """The block for ``resolution``.
 
     A registered project gets its name and description, the newest digest's handoff, its
     overview's facts, the pages and collections that cover it, and the lines on how to
     search and read. An unregistered or unresolved directory gets only global preferences
-    and those lines.
+    and those lines. Either way, notes waiting on the user's decision come first:
+    ``waiting`` of them, counted here when the caller has not counted them already.
     """
     max_chars = config.settings.inject.max_chars
     project = resolution.project
@@ -69,7 +71,29 @@ def build(config: Config, resolution: Resolution) -> str:
         recent = [_recent_part(_read_page(directory / RECENT), config)]
         page_map = [_part("Pages", _pointers(config, project, directory))]
     preferences = _section_parts(_read_page(config.vault / PREFERENCES), None)
-    return _block(title, own, preferences, page_map, max_chars, recent)
+    slug = project.slug if project else None
+    if waiting is None:
+        from aft import notes
+
+        waiting = notes.count(config, slug)
+    return _block(title, own, preferences, page_map, max_chars, recent, notes_part(waiting))
+
+
+def notes_part(waiting: int) -> list[Part]:
+    """The notes waiting on the user's decision, as the block tells the agent about them:
+    how many, and what to do (BUILD-PLAN F42). Nothing when none wait."""
+    if not waiting:
+        return []
+    return [(NOTES_HEADING, [notes_line(waiting)])]
+
+
+def notes_line(waiting: int) -> str:
+    """What the block asks the agent to do about ``waiting`` notes."""
+    noun = "note in memory waits" if waiting == 1 else "notes in memory wait"
+    return (
+        f"{waiting} {noun} on the user's decision. Before anything else, tell the user and ask"
+        " whether to settle them now or skip for now. To settle them, follow the aft skill."
+    )
 
 
 def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
@@ -337,6 +361,7 @@ def _block(
     page_map: list[Part],
     max_chars: int,
     recent: Iterable[Part] = (),
+    waiting: Iterable[Part] = (),
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
@@ -353,12 +378,15 @@ def _block(
     """
     closing: list[Part] = [("", [HOW_TO])]
     recent = list(recent)
-    head = _trim(title, max_chars)  # the title, as far as the budget can show it
+    head = _trim(title, max_chars)
+    # Notes waiting on the user come straight under the title, ahead of every layer, so an
+    # agent reads them first and no layer can take their room (BUILD-PLAN F42).
+    waiting = _trim(list(waiting), max(0, max_chars - _width(head) - 2))
     own_floor = _floors(own)
     preferences_floor = _floors(preferences)
     recent_floor = _floors(recent)
     map_floor = _floors(page_map)
-    floors = [*head, *own_floor, *preferences_floor, *recent_floor, *map_floor, *closing]
+    floors = [*head, *waiting, *own_floor, *preferences_floor, *recent_floor, *map_floor, *closing]
     minimal = _trim(floors, max_chars)
     extra = (max_chars - _width(minimal)) // 2
     project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
@@ -368,13 +396,19 @@ def _block(
     # Short-term memory (the recent layer) comes after long-term memory and takes only what
     # the long-term layers leave, less the page map's floor, so it never crowds out what
     # stays true (design 10).
-    room = max_chars - _width([*head, *project_layer, *pref_layer, *map_floor, *closing]) - 4
+    room = (
+        max_chars - _width([*head, *waiting, *project_layer, *pref_layer, *map_floor, *closing]) - 4
+    )
     recent_layer = _trim(recent, max(0, room)) if recent_floor else []
-    room = max_chars - _width([*head, *project_layer, *pref_layer, *recent_layer, *closing]) - 2
+    room = (
+        max_chars
+        - _width([*head, *waiting, *project_layer, *pref_layer, *recent_layer, *closing])
+        - 2
+    )
     pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
     body = [*project_layer, *pref_layer, *recent_layer, *pages]
     cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
-    parts = [*head, *cut, *body, *closing]
+    parts = [*head, *cut, *waiting, *body, *closing]
     return "\n\n".join(_blocks(_trim(parts, max_chars)))
 
 
