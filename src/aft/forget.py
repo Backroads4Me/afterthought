@@ -106,7 +106,7 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         digests_dir = config.vault / "digests"
         if digests_dir.exists():
             for p in list(digests_dir.rglob("*.md")):
-                if _is_session_digest(p, session_id):
+                if _is_session_digest(p, session_id, config):
                     # What the page carried goes with it: a dream report quotes a
                     # digest's facts, including the ones the verifier refused, and the
                     # page is the only place those sentences are written down.

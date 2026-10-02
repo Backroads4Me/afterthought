@@ -1743,3 +1743,78 @@ def test_forget_pattern_rewrites_the_vault_under_the_vault_lock(
     monkeypatch.setattr(forget, "_redact_pages", probe)
     assert cli.main(["forget", "pattern", SECRET_PATTERN]) == 0
     assert held == [True], "the pattern redaction rewrote the vault's pages without its lock"
+
+
+def factless_part(vault: Path, rel: str, project_id: str) -> None:
+    """A later part of a session that kept no fact, so its frontmatter cites no source."""
+    create_curated_page(
+        vault,
+        rel,
+        (
+            "---\n"
+            "type: Session Digest\n"
+            "title: Widget session, a part with nothing kept\n"
+            "description: Nothing worth keeping happened.\n"
+            "aft:\n"
+            f"  project: {project_id}\n"
+            "  handoff: {in_flight: an older handoff, failed: [], open: []}\n"
+            "---\n"
+        ),
+    )
+
+
+def test_redigest_replaces_a_later_part_that_kept_no_fact(initialized: Config):
+    """A part page with no sources is still the session's own: a rebuild that left it would
+    keep an old handoff standing beside the new page."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    entries = [
+        Entry("e1", NOW, "user", "entry one of the session", False),
+        Entry("e2", NOW, "user", "entry two of the session", False),
+    ]
+    evidence.store(initialized, "claude", "sess-a", prj.id, entries)
+    stale = "digests/widget/2026/10/2026-10-01-claude-sess-a-4.md"
+    factless_part(initialized.vault, stale, prj.id)
+    answer = {
+        "summary": "Rebuilt.",
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+        "facts": [],
+    }
+    fake, cfg = serve(initialized, answer)
+    try:
+        assert cli.main(["redigest", "sess-a"]) == 0
+    finally:
+        fake.stop()
+    assert not (cfg.vault / stale).exists()
+
+
+def test_redigest_keeps_a_factless_page_of_a_session_with_the_longer_id(initialized: Config):
+    """``session-2`` with no sources is another session's page when the archive holds a
+    session of that id, not part 2 of ``session``."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    evidence.store(
+        initialized,
+        "claude",
+        "session",
+        prj.id,
+        [Entry("e1", NOW, "user", "one of session", False)],
+    )
+    evidence.store(
+        initialized, "claude", "session-2", prj.id, [Entry("e2", NOW, "user", "one of two", False)]
+    )
+    other = "digests/widget/2026/10/2026-10-02-claude-session-2.md"
+    factless_part(initialized.vault, other, prj.id)
+    answer = {
+        "summary": "Rebuilt.",
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+        "facts": [],
+    }
+    fake, cfg = serve(initialized, answer)
+    try:
+        assert cli.main(["redigest", "session"]) == 0
+    finally:
+        fake.stop()
+    assert (cfg.vault / other).exists()
