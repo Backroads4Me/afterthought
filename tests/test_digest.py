@@ -744,6 +744,61 @@ def test_the_model_sees_short_labels_and_the_page_records_entry_ids(session: Ses
     assert f"aft://session/claude/{SESSION}#e1" in (session.cfg.vault / wrote.path).read_text()
 
 
+def made_up() -> dict:
+    """An answer about a session that never happened: every fact quotes words no entry
+    holds (finding T17)."""
+    return answer(
+        invented("The grader scores look-alike pairs.", "5/8 on look-alike pairs"),
+        invented("The dataset run was deferred.", "deferred to a future session"),
+        summary="Validated the multiple-choice design against the full dataset.",
+    )
+
+
+def test_an_answer_whose_every_quote_is_missing_is_refused(session: Session):
+    fake, cfg = serve(session.cfg, made_up(), made_up())
+    try:
+        with pytest.raises(digest.AnswerRefused, match="no fact's quote is in the entry"):
+            digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert len(fake.requests) == 2
+    assert pages(cfg) == []
+
+
+def test_an_invented_answer_then_a_real_one_keeps_the_real_one(session: Session):
+    wrote = digest_once(session, made_up(), answer(said(), summary="Built the capture hook."))
+    written = frontmatter(session.cfg, wrote.path)
+    assert written["description"] == "Built the capture hook."
+    assert [fact.statement for fact in wrote.facts] == [
+        "Capture runs at session end, not per turn."
+    ]
+
+
+def test_one_unquoted_fact_is_only_dropped(session: Session):
+    """One missing quote is a fact the model got wrong, not an answer about another
+    session: the fact is dropped and the answer stands."""
+    wrote = digest_once(session, answer(invented()))
+    assert wrote.facts == ()
+    assert frontmatter(session.cfg, wrote.path)["description"] == "Built the capture hook."
+
+
+def test_facts_dropped_for_another_reason_do_not_refuse_the_answer(session: Session):
+    """Only quotes missing from their entries mark an invented answer; a [stated] fact on
+    the agent's own turn is a misreading of who spoke, with real words behind it."""
+    on_the_agents_turn = said(
+        statement="The hook writes one row and returns.",
+        quote="the hook writes one row and returns without calling a model",
+        entry="e2",
+        source="stated",
+    )
+    wrote = digest_once(session, answer(invented(), on_the_agents_turn))
+    assert frontmatter(session.cfg, wrote.path)["description"] == "Built the capture hook."
+
+
+def test_the_digest_prompt_says_an_empty_answer_is_a_good_one():
+    assert "an answer with nothing in it is a good answer when nothing happened" in prompt_words()
+
+
 def test_a_label_written_without_its_hash_is_read_as_the_label(session: Session):
     """A model writes "1" for "#1" as often as not; that names the entry, not a new one."""
     wrote = digest_once(session, answer(said(entry="1")))

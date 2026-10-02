@@ -511,9 +511,9 @@ to a token so the estimate errs high: a small model given more loses track of it
 entry is shown under a short label (`#1`, `#2`), which every fact and every handoff item
 names, and the script maps the label back to the entry's own id; the label's number
 without its `#`, and an entry's id copied exactly, are accepted too. An answer with a fact citing an entry the chunk does not hold, an
-empty summary, fact statement or quote, or a placeholder (written text with no word in it,
-such as `...`) where a summary, a handoff item or a fact should be, is about something
-other than the chunk: it is asked for once more. A part answered that way twice gives the
+empty summary, fact statement or quote, a placeholder (written text with no word in it,
+such as `...`) where a summary, a handoff item or a fact should be, or two or more facts
+none of whose quotes is in the entry it cites, is about something other than the chunk: it is asked for once more. A part answered that way twice gives the
 page nothing, neither summary, handoff nor fact, and the page records it under
 `aft.refused_parts` with its first and last entry and the reason; the job's other parts are
 kept, so one part the model cannot read does not lose a long session, and `aft redigest`

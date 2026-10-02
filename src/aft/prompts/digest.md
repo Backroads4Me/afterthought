@@ -54,5 +54,9 @@ Also write:
   still open, each item with the label of the entry it comes from. Use empty values when
   there is nothing to hand off.
 
+Write only about what the entries say. When a part holds little worth keeping, say so in
+a one-sentence summary and leave the facts and the handoff empty: an answer with nothing
+in it is a good answer when nothing happened.
+
 Never invent a fact, a quote, or an entry label. Never write placeholder text such as
 "..."; leave a value empty instead.

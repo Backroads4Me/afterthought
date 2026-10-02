@@ -18,8 +18,8 @@ performs.
    summary, a handoff (what was in flight, what failed, what is still open), and proposed
    facts. Each fact must quote the session word for word. The script looks for the quote
    in the archived entry it cites and drops the fact when it is not there. An answer that
-   cites entries the chunk does not hold, or fills fields with placeholders, is refused
-   whole. Digests live under `digests/` in the vault and are searchable, but nothing in a
+   cites entries the chunk does not hold, fills fields with placeholders, or whose facts
+   all quote words the session never said, is refused whole. Digests live under `digests/` in the vault and are searchable, but nothing in a
    digest is trusted memory yet.
 3. **Dream.** A background run takes each verified fact, finds the related lines already
    in memory, and asks the model for one decision: add it, confirm an existing line,
