@@ -46,6 +46,21 @@ LEGACY = {
     ),
 }
 
+# The sha256 of every version of each file afterthought shipped. An installed copy that
+# matches one is ours and is replaced or removed without a backup; any other text is
+# someone's own and is kept first. A test holds every file's current text to this list.
+SHIPPED_SHA256 = {
+    "SKILL.md": frozenset(
+        {
+            "89c53d21ee9d4a213882ab0c919720ffe37c2728f53a91f98bfb93526ca30849",
+            "fe30cf9c9356880bd562b199d2a800b3ec5c99f713d0ec277a34777ece274a38",
+        }
+    ),
+    "library-import.md": frozenset(
+        {"373576f3ed44da7aa988cf0baf7cba9291cc10b0912c4948c9f96b28800572f9"}
+    ),
+}
+
 # A file holding someone's own text is kept beside it as <file>.aft-<time>.bak.
 BACKUP_INFIX = ".aft-"
 BACKUP_SUFFIX = ".bak"
@@ -150,7 +165,7 @@ def install(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
                 continue
             changed = True
             diffs.append(_diff(target, original, text))
-            backup = _backup(target, original, dry_run=dry_run)
+            backup = _backup(target, _own(name, original), dry_run=dry_run)
             if backup is not None:
                 backups.append(backup)
             if not dry_run:
@@ -193,8 +208,7 @@ def uninstall(skills_dir: Path, *, dry_run: bool = False) -> SkillChange:
                 continue
             removed.append(target)
             diffs.append(_diff(target, original, ""))
-            keep = original if original != _shipped(name) else None
-            backup = _backup(target, keep, dry_run=dry_run)
+            backup = _backup(target, _own(name, original), dry_run=dry_run)
             if backup is not None:
                 backups.append(backup)
         will_be_empty = container.is_dir() and not any(
@@ -253,6 +267,15 @@ def _text(target: Path) -> str | None:
         return target.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
         raise InstallError(f"{target} is not UTF-8 text ({exc}); nothing was written") from exc
+
+
+def _own(name: str, text: str | None) -> str | None:
+    """The text, when it is someone's own rather than a version afterthought shipped."""
+    if not text:
+        return None
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    shipped = SHIPPED_SHA256.get(name, frozenset())
+    return None if digest in shipped or text == _shipped(name) else text
 
 
 def _shipped(name: str) -> str | None:
