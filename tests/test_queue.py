@@ -352,6 +352,9 @@ def test_the_sweep_chunks_a_long_session_that_outgrew_its_watermark(
 ) -> None:
     """DESIGN 8: a running session is digested in chunks, not all at the end."""
     sessions = tmp_path / "agent-sessions"
+    # The queue stamps a job's claim from its own clock; pin it before the file was last
+    # touched, as a running session's is, so the test holds on any date.
+    monkeypatch.setattr(queue, "_now", lambda: NOW - timedelta(minutes=5))
     padding = [{"uuid": f"pad-{i}", "text": "x" * 900} for i in range(300)]
     path = session_file(
         sessions,
@@ -554,6 +557,9 @@ def test_a_watermark_quoted_only_as_a_parent_is_no_watermark_at_all(
 ) -> None:
     """A later record that names the watermark's entry proves the file grew."""
     sessions = tmp_path / "agent-sessions"
+    # The queue stamps a job's claim from its own clock; pin it before the file was last
+    # touched, as a running session's is, so the test holds on any date.
+    monkeypatch.setattr(queue, "_now", lambda: NOW - timedelta(minutes=5))
     padding = [{"uuid": f"pad-{i}", "text": "x" * 900} for i in range(300)]
     # A pi session resumed with /tree goes back to an entry already digested and appends
     # a new child of it, so the watermark's id survives as that child's parent.
