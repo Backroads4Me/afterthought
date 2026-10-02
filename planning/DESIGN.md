@@ -877,7 +877,8 @@ explains how to do but never does on its own.
 - Afterthought calls the endpoint over HTTP. It never runs an agent harness from inside a
   hook, which avoids a loop where memory work creates sessions to capture.
 - Budgets: a per-chunk input cap for digests, a per-run token budget for dreaming, and a
-  daily cap. When a budget runs out, work waits in the queue and the report shows the
+  daily cap that digests and dreaming count against alike: once it is spent, a dream run
+  leaves its projects' digests waiting for the next day. When a budget runs out, work waits in the queue and the report shows the
   backlog. Worker digests only use budget left over.
 - Expected load at today's volume is about 55,000 input tokens a day for digests plus a
   smaller amount for dreaming.

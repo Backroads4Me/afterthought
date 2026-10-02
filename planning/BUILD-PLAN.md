@@ -934,6 +934,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   their words found, below an invented one's 0.60. Tests: an invented answer is refused, a
   real one after it is kept, one unquoted fact and a misattributed `[stated]` refuse nothing,
   and the prompt's words. Review checkpoint: yes (prompt).
+- **F39 The dream keeps to the daily budget** (ruling 2026-10-01; finding T20). DESIGN 13.
+  Before each project, a dream run checks the day's token use against
+  `work.daily_token_budget`; once it is spent, the project's digests wait for the next day
+  and `aft dream` says so. Tests: a spent budget leaves digests waiting with no model call;
+  a budget with room runs.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
