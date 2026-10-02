@@ -587,6 +587,8 @@ def _dream(config: Config) -> None:
         print(f"aft dream: {slug}: skipped, a session was active within the quiet period")
     for slug in result.edited:
         print(f"aft dream: {slug}: skipped, the vault has hand edits within the quiet period")
+    for slug in result.over_budget:
+        print(f"aft dream: {slug}: waits, the day's token budget is spent")
 
 
 def cmd_forget_session(args) -> int:

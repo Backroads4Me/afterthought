@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aft import digest, keys, page, pagewrite, queue, vault
+from aft import digest, keys, model, page, pagewrite, queue, vault
 from aft.config import Config
 from aft.dream import shortterm
 from aft.dream.apply import ProjectRunReport
@@ -73,6 +73,9 @@ class Run:
     failures: dict[str, str] = field(default_factory=dict)
     """Projects that failed this run, each mapped to the error that stopped it."""
 
+    over_budget: list[str] = field(default_factory=list)
+    """Projects left waiting because the day's token budget was spent (DESIGN 13)."""
+
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
     """Run the dream once: every quiet project with waiting digests, one at a time."""
@@ -102,7 +105,13 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if result.tagged:
                 result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
         checkpoint_reported = False
+        budget = config.settings.work.daily_token_budget
         for slug in ready:
+            # The daily cap counts the dream's model calls with the digests' (DESIGN 13): a
+            # project waits for the next day once it is spent, its digests still waiting.
+            if model.tokens_used_today(config, now) >= budget:
+                result.over_budget.append(slug)
+                continue
             # Any failure in one project is that project's own: its writes are rolled back by
             # run_project, its error reaches the day's report, and the other projects still run
             # (DESIGN 9, and BUILD-PLAN M4 follow-up).
