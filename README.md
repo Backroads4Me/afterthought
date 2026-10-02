@@ -57,7 +57,10 @@ uv tool install --editable .
    aft project add ~/src/my-project
    ```
 
-4. Hook it into your agents. Each command has `--dry-run` to show the change first:
+4. Hook it into your agents. This adds the hooks that capture sessions and inject memory,
+   and the `aft` skill, which lets you ask an agent to search memory, pause background
+   work, import documentation and the rest in plain words. Each command has `--dry-run` to
+   show the change first:
 
    ```bash
    aft install claude
