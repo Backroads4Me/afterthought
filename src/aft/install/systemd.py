@@ -330,19 +330,26 @@ def trigger_early(
     *,
     now: datetime | None = None,
     runner: Callable[[list[str]], Any] | None = None,
+    force: bool = False,
 ) -> bool:
     """Start aft-work.service early if at least 5 minutes have elapsed since the last trigger.
 
-    A run with AFT_HOME set to a directory that is not the default never calls the user's
-    systemd (BUILD-PLAN F23, M1 review 8).
+    ``force`` starts it whatever the last trigger was, as `aft resume` does. Paused
+    background work is never started (BUILD-PLAN F38). A run with AFT_HOME set to a
+    directory that is not the default never calls the user's systemd (BUILD-PLAN F23, M1
+    review 8).
     """
+    from aft import pause
+
+    if pause.paused(config) is not None:
+        return False
     if runner is None and not is_default_home(config.home):
         return False
 
     current_time = now if now is not None else datetime.now(UTC)
     trigger_file = config.home / RATE_LIMIT_FILE
 
-    if trigger_file.is_file():
+    if trigger_file.is_file() and not force:
         try:
             content = trigger_file.read_text(encoding="utf-8").strip()
             last_time = datetime.fromisoformat(content)
