@@ -354,7 +354,7 @@ def skill_target(skills: Path) -> Path:
 
 
 def install_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
-    """Install the library-import skill into pi's skills directory."""
+    """Install the aft-library-import skill into pi's skills directory."""
     return skill_install.install(skills, dry_run=dry_run)
 
 
@@ -364,5 +364,5 @@ def check_skill_target(skills: Path) -> Path:
 
 
 def uninstall_skill(skills: Path, *, dry_run: bool = False) -> skill_install.SkillChange:
-    """Remove the library-import skill from pi's skills directory."""
+    """Remove the aft-library-import skill from pi's skills directory."""
     return skill_install.uninstall(skills, dry_run=dry_run)

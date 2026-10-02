@@ -37,8 +37,8 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
             f"expected aft/integrations/pi/afterthought.ts in wheel: {namelist}"
         )
         assert any(
-            name == "aft/integrations/skills/library-import/SKILL.md" for name in namelist
-        ), f"expected aft/integrations/skills/library-import/SKILL.md in wheel: {namelist}"
+            name == "aft/integrations/skills/aft-library-import/SKILL.md" for name in namelist
+        ), f"expected aft/integrations/skills/aft-library-import/SKILL.md in wheel: {namelist}"
 
     # 2. Create isolated virtualenv and install the wheel
     venv_dir = tmp_path / "venv"
@@ -85,7 +85,7 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
     )
     assert res_claude.returncode == 0, res_claude.stderr
     assert (fake_user_home / ".claude" / "settings.json").is_file()
-    assert (fake_user_home / ".claude" / "skills" / "library-import" / "SKILL.md").is_file()
+    assert (fake_user_home / ".claude" / "skills" / "aft-library-import" / "SKILL.md").is_file()
 
     res_pi = subprocess.run(
         [str(aft_bin), "install", "pi"],
