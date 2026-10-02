@@ -116,3 +116,5 @@ at the very start of a prompt, so talking about them triggers nothing.
   and resumes after midnight UTC.
 - Read the day's dream report in `reports/` to see what changed, and `reports/needs-you.md`
   for anything waiting on you.
+- `aft pause` stops background work without losing anything: sessions keep being queued,
+  and `aft resume` works through them.

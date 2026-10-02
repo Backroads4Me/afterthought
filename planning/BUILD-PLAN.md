@@ -934,6 +934,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   their words found, below an invented one's 0.60. Tests: an invented answer is refused, a
   real one after it is kept, one unquoted fact and a misattributed `[stated]` refuse nothing,
   and the prompt's words. Review checkpoint: yes (prompt).
+- **F38 Pause and resume** (ruling 2026-10-01; finding T19). `aft pause [reason]` writes a
+  marker, `~/.afterthought/paused`, with its time and reason; an existing pause is kept as
+  it was. While it stands, `aft work` and `aft dream` print the pause and exit 0, whatever
+  started them, unless given `--force`, and a session's end does not start the work service.
+  Capture and injection are untouched. `aft resume` removes the marker and starts a run,
+  past the five-minute trigger limit. A marker that cannot be read still pauses. Tests: each
+  entry point respects the pause, `--force` runs once and keeps it, capture still queues,
+  resume ends it and starts a run.
 - **F39 The dream keeps to the daily budget** (ruling 2026-10-01; finding T20). DESIGN 13.
   Before each project, a dream run checks the day's token use against
   `work.daily_token_budget`; once it is spent, the project's digests wait for the next day

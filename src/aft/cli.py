@@ -119,12 +119,21 @@ def _parser() -> argparse.ArgumentParser:
         "work",
         help="sweep for missed sessions and digest queued work within the day's budget",
     )
+    p.add_argument("--force", action="store_true", help="run once even while paused")
     p.set_defaults(handler=cmd_work)
+
+    p = sub.add_parser("pause", help="pause background work; sessions are still queued")
+    p.add_argument("reason", nargs="*", help="why, shown while the pause stands")
+    p.set_defaults(handler=cmd_pause)
+
+    p = sub.add_parser("resume", help="resume background work and start a run")
+    p.set_defaults(handler=cmd_resume)
 
     p = sub.add_parser("reindex", help="rebuild the search index from the vault and the archive")
     p.set_defaults(handler=cmd_reindex)
 
     p = sub.add_parser("dream", help="turn waiting digests into curated facts")
+    p.add_argument("--force", action="store_true", help="run once even while paused")
     p.set_defaults(handler=cmd_dream)
 
     p = sub.add_parser("forget", help="remove session evidence or redact patterns")
@@ -538,8 +547,12 @@ def cmd_work(args) -> int:
     the run's own log holds; the work it could not do stays queued either way (DESIGN 14).
     """
     config = load()
-    from aft import work
+    from aft import pause, work
 
+    stopped = None if args.force else pause.paused(config)
+    if stopped is not None:
+        print(f"aft work: {stopped.line()}")
+        return 0
     report = work.run(config)
     print(f"aft work: {report.line()}")
     for failure in report.failures:
@@ -564,7 +577,42 @@ def cmd_reindex(args) -> int:
 
 def cmd_dream(args) -> int:
     """Run the dream once. Everything it does is `aft.dream.schedule`'s."""
-    _dream(load())
+    from aft import pause
+
+    config = load()
+    stopped = None if args.force else pause.paused(config)
+    if stopped is not None:
+        print(f"aft dream: {stopped.line()}")
+        return 0
+    _dream(config)
+    return 0
+
+
+def cmd_pause(args) -> int:
+    """Pause background work (BUILD-PLAN F38)."""
+    from aft import pause
+
+    config = load()
+    made, new = pause.pause(config, " ".join(args.reason))
+    if new:
+        print(f"aft: background work {made.line()}")
+        print("aft: sessions are still captured and queued; nothing is lost")
+    else:
+        print(f"aft: already {made.line()}")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    """Resume background work and start a run for the backlog (BUILD-PLAN F38)."""
+    from aft import pause
+    from aft.install import systemd as systemd_install
+
+    config = load()
+    if not pause.resume(config):
+        print("aft: background work was not paused")
+        return 0
+    started = systemd_install.trigger_early(config, force=True)
+    print("aft: background work resumed" + ("; a run has started" if started else ""))
     return 0
 
 
