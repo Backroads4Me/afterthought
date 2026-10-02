@@ -19,8 +19,10 @@ performs.
    facts. Each fact must quote the session word for word. The script looks for the quote
    in the archived entry it cites and drops the fact when it is not there. An answer that
    cites entries the chunk does not hold, fills fields with placeholders, or has two or
-   more facts whose quotes the session never said, is refused whole. Digests live under `digests/` in the vault and are searchable, but nothing in a
-   digest is trusted memory yet.
+   more facts whose quotes the session never said, is asked for again and then refused
+   whole: that part of the session adds nothing, and the page records it as refused,
+   while the rest of the session is kept. Digests live under `digests/` in the vault and
+   are searchable, but nothing in a digest is trusted memory yet.
 3. **Dream.** A background run takes each verified fact, finds the related lines already
    in memory, and asks the model for one decision: add it, confirm an existing line,
    supersede one, mark a conflict, or skip it. Fixed rules then decide whether that

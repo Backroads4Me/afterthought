@@ -92,6 +92,22 @@ question across all projects. It is the one page worth checking regularly.
 Reports describe memory; they are never memory. Agents are not shown them, default search
 skips them, and the dream never reads them.
 
+## Digests
+
+A digest page records one session's part as the model read it: its `description` is the
+summary, `aft.handoff` is what the next session is told was in flight, failed or open,
+and its lines are the facts that passed quote verification. Two records explain what it
+left out:
+
+- `aft.dropped`: each proposed fact the script refused, with the reason (a quote not in its
+  entry, `[stated]` on the agent's own turn, and so on).
+- `aft.refused_parts`: each part of the session whose answer was refused twice because it
+  did not match the text it was given, with that part's first and last entry. The rest of
+  the session is kept; `aft redigest` reads a refused part again.
+
+A digest is evidence of what a session said, not memory: the dream decides what becomes
+memory, and a digest's content changes only when you run `aft redigest` or `aft forget`.
+
 ## Reverting
 
 Every dream run is one git commit in the vault, and its report section names it. To undo a
@@ -102,9 +118,8 @@ git -C ~/afterthought revert <commit>
 ```
 
 Reverting a run also clears the consumed mark on the digests it took up, so the next run
-dreams them again. To stop that, stop the timer first (`systemctl --user stop
-aft-work.timer`) and decide what should happen to those digests: `aft redigest` rebuilds
-one from its evidence.
+dreams them again. To stop that, run `aft pause` first, decide what should happen to those
+digests (`aft redigest` rebuilds one from its evidence), then `aft resume`.
 
 ## Forgetting
 
