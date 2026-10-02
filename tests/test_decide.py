@@ -453,3 +453,10 @@ def test_a_page_is_global_by_its_path(vault):
     lines = decide.related(vault, _fact(RGB, kind="preference", scope="global"), "widget")
 
     assert next(x for x in lines if x.fact.statement == RGB).project is None
+
+
+def test_the_decide_prompt_keeps_conflict_to_the_same_thing():
+    """A conflict is two claims about one thing that cannot both hold; anything else is new."""
+    words = " ".join(decide.prompt().split())
+    assert "say different things about the same thing, so both cannot be true" in words
+    assert "or one that can be true at the same time as the line, is new: choose add" in words

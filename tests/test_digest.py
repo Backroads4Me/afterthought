@@ -3180,3 +3180,10 @@ def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
     assert archived, "the worker's other words are archived"
     assert all(REMEMBERED not in entry.text for entry in archived)
     assert "e6" not in [entry.id for entry in archived]
+
+
+def test_the_digest_prompt_names_no_one_and_guesses_no_pronoun():
+    """Memory lines say "the user" and "the agent", never a name or a guessed pronoun."""
+    words = prompt_words()
+    assert 'Call the user "the user" and the agent "the agent"' in words
+    assert "never with he, she or another pronoun" in words

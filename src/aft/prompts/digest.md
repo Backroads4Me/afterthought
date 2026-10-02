@@ -22,7 +22,9 @@ memory's subject only when the session adds something new, such as a change, a
 correction, or fresh evidence.
 
 For each fact:
-- statement: one sentence, in plain present tense, that stands on its own.
+- statement: one sentence, in plain present tense, that stands on its own. Call the user
+  "the user" and the agent "the agent": never by name, and never with he, she or another
+  pronoun that guesses who they are. Other people may be named as the session names them.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
 - source:
   - stated: the user asserted it in their own words: a fact, a choice, a preference, or
