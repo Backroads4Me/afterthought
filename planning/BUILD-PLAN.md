@@ -947,6 +947,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `work.daily_token_budget`; once it is spent, the project's digests wait for the next day
   and `aft dream` says so. Tests: a spent budget leaves digests waiting with no model call;
   a budget with room runs.
+- **F40 Resetting the budget** (ruling 2026-10-02). DESIGN 13. `aft budget` prints today's
+  use against `work.daily_token_budget` and what is left; `aft budget reset` writes the
+  moment to `~/.afterthought/budget-reset`, and the day's count runs from midnight UTC or
+  that moment, whichever is later. `usage.jsonl` is never changed. `aft work` and `aft dream`
+  say when a reset is in effect. Tests: a reset clears the count and keeps the ledger,
+  midnight still starts the next day, work runs again after a reset, and `aft budget` reports
+  before and after.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

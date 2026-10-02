@@ -53,7 +53,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 
 | Setting | Default | What it does |
 |---|---|---|
-| `work.daily_token_budget` | `200000` | Tokens one day of background work, digests and dreaming alike, may spend, counted from midnight UTC in `~/.afterthought/usage.jsonl`. When it is spent, the rest of the queue waits for the next day. `aft redigest` counts against it too. |
+| `work.daily_token_budget` | `200000` | Tokens one day of background work, digests and dreaming alike, may spend, counted from midnight UTC in `~/.afterthought/usage.jsonl`. When it is spent, the rest of the queue waits for the next day, or for `aft budget reset`. `aft redigest` counts against it too. |
 
 ## `[inject]`
 

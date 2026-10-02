@@ -881,7 +881,9 @@ explains how to do but never does on its own.
   hook, which avoids a loop where memory work creates sessions to capture.
 - Budgets: a per-chunk input cap for digests, a per-run token budget for dreaming, and a
   daily cap that digests and dreaming count against alike: once it is spent, a dream run
-  leaves its projects' digests waiting for the next day. When a budget runs out, work waits in the queue and the report shows the
+  leaves its projects' digests waiting for the next day. `aft budget` shows the day's use,
+  and `aft budget reset` starts the count again from now, for when the budget was spent by
+  something since fixed; the usage log that records every call is never changed. When a budget runs out, work waits in the queue and the report shows the
   backlog. Worker digests only use budget left over.
 - Expected load at today's volume is about 55,000 input tokens a day for digests plus a
   smaller amount for dreaming.
