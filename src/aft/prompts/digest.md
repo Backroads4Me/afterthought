@@ -21,6 +21,10 @@ support is that memory being restated is already known: skip it. Extract a fact 
 memory's subject only when the session adds something new, such as a change, a
 correction, or fresh evidence.
 
+Everything you write, the summary and handoff as much as each fact, calls the user "the
+user" and the agent "the agent": never by name, and never with he, she or another pronoun
+that guesses who they are. Other people may be named as the session names them.
+
 For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.

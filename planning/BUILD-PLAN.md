@@ -403,6 +403,10 @@ support is that memory being restated is already known: skip it. Extract a fact 
 memory's subject only when the session adds something new, such as a change, a
 correction, or fresh evidence.
 
+Everything you write, the summary and handoff as much as each fact, calls the user "the
+user" and the agent "the agent": never by name, and never with he, she or another pronoun
+that guesses who they are. Other people may be named as the session names them.
+
 For each fact:
 - statement: one sentence, in plain present tense, that stands on its own.
 - kind: preference, decision, state, fact, lesson, procedure, or reference.
@@ -607,15 +611,18 @@ Choose one action:
 - confirm: an existing line already says the same thing. Name it.
 - supersede: the fact replaces an existing line because the thing it describes has
   changed. Name the line.
-- conflict: the fact contradicts an existing line, and it is not clear that the thing has
-  changed. Name the line.
+- conflict: the fact and an existing line say different things about the same thing, so
+  both cannot be true, and it is not clear that the thing has changed. Name the line.
 - skip: the fact is not worth keeping: it is routine, re-derivable from the code or git
   history, or too vague to act on. A long-term fact that will not stay true is not worth
   keeping either. A short-term fact is meant to be temporary, so that alone is no reason
   to skip it.
 
 Two lines say the same thing when an agent reading either would act the same way, even if
-the wording differs. A fact about a different part of the system is new, not a conflict.
+the wording differs. Before naming a line for supersede or conflict, check that it is about
+the same thing as the new fact. A fact about something else, or one that can be true at the
+same time as the line, is not a supersede or a conflict: choose confirm if a line already
+says the same thing, and add otherwise.
 
 Give a reason of at most 200 characters that a person can check against the quote.
 ```
@@ -954,6 +961,15 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   say when a reset is in effect. Tests: a reset clears the count and keeps the ledger,
   midnight still starts the next day, work runs again after a reset, and `aft budget` reports
   before and after.
+- **F41 Who a line names, and what a conflict is** (ruling 2026-10-02). DESIGN 8, 9. The
+  digest prompt has everything it writes, statements, summary and handoff, call the user
+  "the user" and the agent "the agent", never by name or with a guessed pronoun; the first
+  real memory had lines saying "himself". The
+  decide prompt defines a conflict as two claims about the same thing that cannot both be
+  true, and has the model check a named line is about the same thing before choosing
+  supersede or conflict; the first real dream paired unrelated lines as conflicts. M2.6
+  and M4.3 hold the prompts' text. Tests: the prompts' words. Review checkpoint: yes
+  (prompts).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

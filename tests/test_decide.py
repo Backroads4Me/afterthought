@@ -453,3 +453,22 @@ def test_a_page_is_global_by_its_path(vault):
     lines = decide.related(vault, _fact(RGB, kind="preference", scope="global"), "widget")
 
     assert next(x for x in lines if x.fact.statement == RGB).project is None
+
+
+def test_the_decide_prompt_keeps_conflict_to_the_same_thing():
+    """A conflict is two claims about one thing that cannot both hold; anything else is new."""
+    words = " ".join(decide.prompt().split())
+    assert "say different things about the same thing, so both cannot be true" in words
+    assert "Before naming a line for supersede or conflict, check that it is about" in words
+    assert "is not a supersede or a conflict: choose confirm if a line already" in words
+
+
+def test_the_decide_prompt_shipped_is_the_plans_text():
+    """The plan's own words are the prompt (BUILD-PLAN M4.3), as for the digest prompt."""
+    from pathlib import Path
+
+    plan = Path(__file__).resolve().parents[1] / "planning" / "BUILD-PLAN.md"
+    lines = plan.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if "(`src/aft/prompts/decide.md`)" in line)
+    fences = [i for i in range(start, len(lines)) if lines[i].strip() in ("```text", "```")][:2]
+    assert decide.prompt() == "".join(lines[fences[0] + 1 : fences[1]])

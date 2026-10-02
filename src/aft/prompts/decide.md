@@ -13,14 +13,17 @@ Choose one action:
 - confirm: an existing line already says the same thing. Name it.
 - supersede: the fact replaces an existing line because the thing it describes has
   changed. Name the line.
-- conflict: the fact contradicts an existing line, and it is not clear that the thing has
-  changed. Name the line.
+- conflict: the fact and an existing line say different things about the same thing, so
+  both cannot be true, and it is not clear that the thing has changed. Name the line.
 - skip: the fact is not worth keeping: it is routine, re-derivable from the code or git
   history, or too vague to act on. A long-term fact that will not stay true is not worth
   keeping either. A short-term fact is meant to be temporary, so that alone is no reason
   to skip it.
 
 Two lines say the same thing when an agent reading either would act the same way, even if
-the wording differs. A fact about a different part of the system is new, not a conflict.
+the wording differs. Before naming a line for supersede or conflict, check that it is about
+the same thing as the new fact. A fact about something else, or one that can be true at the
+same time as the line, is not a supersede or a conflict: choose confirm if a line already
+says the same thing, and add otherwise.
 
 Give a reason of at most 200 characters that a person can check against the quote.
