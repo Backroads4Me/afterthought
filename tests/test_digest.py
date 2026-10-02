@@ -1341,18 +1341,18 @@ def test_a_session_id_that_is_not_a_name_is_refused_before_a_path_is_made(
     assert watermark(cfg, escaped) is None
 
 
-def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: Session):
-    """A session end whose file is gone is that job's failure, told with the path.
+def test_a_transcript_that_vanished_closes_its_job_and_the_run_moves_on(session: Session):
+    """T21: a session end whose file is gone has nothing more to read.
 
-    The queue keeps the path the hook reported, and a run that reached it later finds it
-    deleted or unmounted. That is one session's loss, not the queue's, and the reason a
-    person needs is the path that was not there.
+    The queue keeps the path the hook reported, and a run that reaches it later finds it
+    deleted. Its job closes as having nothing to digest, with no model call and no failure,
+    so it does not fail every later run; the other sessions are digested as usual.
     """
     vanished = session.transcript.with_name("gone.jsonl")
     shutil.copy(session.transcript, vanished)
     good = session.transcript.with_name("still-here.jsonl")
     shutil.copy(session.transcript, good)
-    fake, cfg = serve(session.cfg, answer(said()), answer(said()))
+    fake, cfg = serve(session.cfg, answer(said()))
     try:
         queue.enqueue(cfg, event(vanished, session.cwd, session_id="gone-1"))
         vanished.unlink()
@@ -1361,11 +1361,10 @@ def test_a_transcript_that_vanished_fails_its_job_and_the_run_moves_on(session: 
     finally:
         fake.stop()
     assert report.digested == 1
-    assert len(report.failures) == 1
-    assert "gone.jsonl" in report.failures[0]
-    assert rows(cfg, queue.FAILED) == ["gone-1"]
-    assert rows(cfg, queue.DONE) == ["here-1"]
-    assert watermark(cfg, "gone-1") is None
+    assert report.failures == ()
+    assert len(fake.requests) == 1
+    assert rows(cfg, queue.FAILED) == []
+    assert sorted(rows(cfg, queue.DONE)) == ["gone-1", "here-1"]
 
 
 def test_a_directory_deleted_since_the_session_is_digested_unfiled(session: Session, tmp_path):
@@ -1797,7 +1796,6 @@ def test_a_claim_lost_while_failing_a_job_reaches_the_command_too(
     """
     gone = session.transcript.with_name("gone.jsonl")
     shutil.copy(session.transcript, gone)
-    real = digest.digest_job
 
     def digest_after_it_is_taken(config, job, moment=None):
         conn = sqlite3.connect(config.home / queue.QUEUE_NAME)
@@ -1807,11 +1805,10 @@ def test_a_claim_lost_while_failing_a_job_reaches_the_command_too(
         )
         conn.commit()
         conn.close()
-        return real(config, job, moment)
+        raise digest.DigestError(f"cannot read {gone}")
 
     fake, cfg = serve(session.cfg, answer(said()))
     queue.enqueue(cfg, event(gone, session.cwd, session_id="lost-1"))
-    gone.unlink()
     monkeypatch.setattr(digest, "digest_job", digest_after_it_is_taken)
     try:
         code = cli.main(["work"])
@@ -3180,21 +3177,3 @@ def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
     assert archived, "the worker's other words are archived"
     assert all(REMEMBERED not in entry.text for entry in archived)
     assert "e6" not in [entry.id for entry in archived]
-
-
-def test_a_transcript_deleted_after_its_job_was_queued_closes_the_job(session: Session):
-    """T21: nothing more can be read from a transcript that is gone, so its job closes as
-    having nothing to digest, rather than failing on every run and failing `aft work`."""
-    gone = session.transcript.with_name("gone.jsonl")
-    shutil.copy(session.transcript, gone)
-    fake, cfg = serve(session.cfg, answer(said()))
-    try:
-        queue.enqueue(cfg, event(gone, session.cwd, session_id="gone-1"))
-        gone.unlink()
-        report = work.run(cfg)
-    finally:
-        fake.stop()
-    assert report.failures == ()
-    assert fake.requests == []
-    assert rows(cfg, queue.FAILED) == []
-    assert rows(cfg, queue.DONE) == ["gone-1"]
