@@ -3180,3 +3180,21 @@ def test_a_worker_repeating_its_memory_archives_no_echo(session: Session):
     assert archived, "the worker's other words are archived"
     assert all(REMEMBERED not in entry.text for entry in archived)
     assert "e6" not in [entry.id for entry in archived]
+
+
+def test_a_transcript_deleted_after_its_job_was_queued_closes_the_job(session: Session):
+    """T21: nothing more can be read from a transcript that is gone, so its job closes as
+    having nothing to digest, rather than failing on every run and failing `aft work`."""
+    gone = session.transcript.with_name("gone.jsonl")
+    shutil.copy(session.transcript, gone)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        queue.enqueue(cfg, event(gone, session.cwd, session_id="gone-1"))
+        gone.unlink()
+        report = work.run(cfg)
+    finally:
+        fake.stop()
+    assert report.failures == ()
+    assert fake.requests == []
+    assert rows(cfg, queue.FAILED) == []
+    assert rows(cfg, queue.DONE) == ["gone-1"]

@@ -334,6 +334,12 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         resolution = keys.Resolution(kind=keys.NONE, cwd=job.cwd)
     if job.transcript_path is None:
         raise DigestError(f"job {job.id} names no transcript for session {job.session_id}")
+    if not job.transcript_path.exists():
+        # The transcript was deleted after the job was queued: nothing more can be read
+        # from it, so the job closes as having nothing to digest instead of failing on every
+        # run. What earlier jobs archived stays in the evidence archive (DESIGN 14).
+        queue.complete(config, job, None, off_record=job.off_record)
+        return None
 
     read = list(readers.read(job.agent, job.transcript_path, job.watermark))
     if not read:
@@ -512,7 +518,12 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     if job.transcript_path is None:
         return False
     vault.require(config)
-    read = list(readers.read(job.agent, job.transcript_path, job.watermark))
+    # A transcript deleted since the job was queued has nothing left to read.
+    read = (
+        list(readers.read(job.agent, job.transcript_path, job.watermark))
+        if job.transcript_path.exists()
+        else []
+    )
     kept, _ = filtermod.filter_entries(read, config, job.off_record) if read else ([], False)
     if kept and not _past_the_floor(job, kept):
         # The same floor as a primary session: below it the worker's words reach no archive
