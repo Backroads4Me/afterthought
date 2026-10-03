@@ -681,7 +681,8 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
 
 1. the project name and its one-line description, then **needs your decision** when notes
    wait on the user in the project's pages or the global and reference ones: how many, and an instruction
-   to tell the user before anything else and ask whether to settle them now or skip for now.
+   to tell the user before anything else that replying "settle" goes through them now and any
+   other reply skips them.
    The session-start hook also hands the agent's interface a notice it shows the user
    directly: Claude Code's `systemMessage`, and a pi notification. Skipping records nothing,
    so the next session asks again.
