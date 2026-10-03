@@ -309,7 +309,6 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         queue.drop_job(config, job)
         return None
     _require_session_id(job.session_id)
-    _require_session_id(job.session_id)
     vault.require(config)
     registry = registrymod.Registry.load(config.registry_path)
     resolution: keys.Resolution | None
@@ -488,7 +487,6 @@ def _recorded_resolution(
     either way, and the directory the session ran in (DESIGN 7). A project registered since
     then is found by that id, or by the recorded path when the id names nothing; a record an
     earlier build wrote kept no directory, and is matched by its slug, which is all it named.
-    What is still unregistered keeps the name its directory resolved to, and the directory,
     What is still unregistered keeps the name its record settled and the directory it names,
     which is what the digest files under and the dream registers from (DESIGN 7, F49).
     """

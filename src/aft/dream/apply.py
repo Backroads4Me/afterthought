@@ -410,9 +410,9 @@ def run_project(
                 run_project_id = project.id
                 page_slug = project.slug
                 # The pages this run writes from here stand under the project the registry
-                # made, and the run id and the report name it, so the commit, the consumed
-                # markers and the report section all speak of the same project (DESIGN 7, F49).
-                run_id = f"dream-{page_slug}-{now:%Y%m%dT%H%M%SZ}"
+                # made, and the report names it (DESIGN 7, F49). The run id is not made
+                # again: the digests consumed before the registration already carry it, and
+                # one run keeps one id, the one its commit names.
                 report.project = page_slug
                 # The records of the sessions this group was digested from name the project
                 # they became, so a later digest of the same session finds it (DESIGN 7, F49).
@@ -745,18 +745,27 @@ def run_project(
                 digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
             report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
 
-        # What the newest session this run applied shows about the short-term lines: a
-        # line it showed done, false or replaced is withdrawn on its verified quote
-        # (BUILD-PLAN F47).
-        reconcile.run(config, vault_path, slug, digests, today, report, record_write, now=now)
+        # The short-term machinery edits ``projects/<page_slug>/recent.md``. Until the run
+        # registers a project, that name is the group's pending one, which the project
+        # takes at its first project fact; when a registered project already holds it, the
+        # page there belongs to that project and not to this group, and the run leaves it
+        # alone (DESIGN 7, F49).
+        if project is not None or registry.by_slug(page_slug) is None:
+            # What the newest session this run applied shows about the short-term lines: a
+            # line it showed done, false or replaced is withdrawn on its verified quote
+            # (BUILD-PLAN F47).
+            reconcile.run(
+                config, vault_path, page_slug, digests, today, report, record_write, now=now
+            )
 
-        # Short-term memory: lift the lines that became long-term, then roll off the lines
-        # whose sessions have gone by, and expire the ones their days have left behind
-        # (design 6, design 9 step 6). The session order is counted over the digests the
-        # group was filed under, and the page it edits is the project's (DESIGN 6, F49).
-        _short_term(
-            config, vault_path, slug, page_slug, to_lift, settle, report, record_write, today
-        )
+            # Short-term memory: lift the lines that became long-term, then roll off the
+            # lines whose sessions have gone by, and expire the ones their days have left
+            # behind (design 6, design 9 step 6). The session order is counted over the
+            # digests the group was filed under, and the page it edits is the project's
+            # (DESIGN 6, F49).
+            _short_term(
+                config, vault_path, slug, page_slug, to_lift, settle, report, record_write, today
+            )
         # Maintenance
         broken, cleared = maintain.check_anchors(
             vault_path, project, today, config.host, record_write=record_write

@@ -75,7 +75,7 @@ class RefusedWithdrawal:
 def run(
     config: Config,
     vault_path: Path,
-    slug: str,
+    page_slug: str,
     digests: Sequence[Path],
     today: str,
     report: ProjectRunReport,
@@ -88,9 +88,11 @@ def run(
     session among them is the one the short-term lines are read against. Makes no call
     and changes nothing when the project has no ``recent.md``, no active line on it, or
     no primary session applied, when that session's entries are not in the evidence
-    archive, or when the day's token budget is spent.
+    archive, or when the day's token budget is spent. ``page_slug`` is the project's slug,
+    which is where ``recent.md`` lives; it and the directory the digests were filed under
+    are the same unless the project was registered under another name (DESIGN 7, F49).
     """
-    recent = vault_path / "projects" / slug / page.RECENT_PAGE
+    recent = vault_path / "projects" / page_slug / page.RECENT_PAGE
     if not recent.exists():
         return
     doc = pagewrite.PageDoc.read(recent, vault=vault_path)
@@ -124,7 +126,7 @@ def run(
             config,
             agent,
             session_id,
-            slug,
+            page_slug,
             doc,
             recent,
             numbered,
@@ -173,7 +175,7 @@ def _apply_answers(
     config: Config,
     agent: str,
     session_id: str,
-    slug: str,
+    page_slug: str,
     doc: pagewrite.PageDoc,
     recent: Path,
     numbered: Sequence[page.Fact],
@@ -233,7 +235,7 @@ def _apply_answers(
             # An answer may name a line an earlier item already withdrew; the withdrawal
             # is counted once, where it happened.
             continue
-        refused = _refused_withdrawal(current, entry, agent, session_id, slug, today)
+        refused = _refused_withdrawal(current, entry, agent, session_id, page_slug, today)
         if refused is not None:
             report.refused.append(refused)
             continue
@@ -264,7 +266,7 @@ def _refused_withdrawal(
     entry: digest.Entry,
     agent: str,
     session_id: str,
-    slug: str,
+    page_slug: str,
     today: str,
 ) -> RefusedWithdrawal | None:
     """Why the rules refuse to withdraw ``current`` on ``entry``'s words, or None when
@@ -291,7 +293,7 @@ def _refused_withdrawal(
     outcome = rules._supersede(
         rules.NewFact(current.statement, current.kind or "", tagged, quote_date, term=rules.SHORT),
         current,
-        rules.Context(today=today, evidence=(quote,), run_project=slug, target_recent=True),
+        rules.Context(today=today, evidence=(quote,), run_project=page_slug, target_recent=True),
     )
     if isinstance(outcome, rules.Apply):
         return None

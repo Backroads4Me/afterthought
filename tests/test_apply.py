@@ -922,6 +922,170 @@ def test_unregistered_project_with_only_skips_is_not_registered(initialized, hom
     assert not (cfg.vault / "projects" / "transient-widget" / "overview.md").exists()
 
 
+def test_a_registration_midrun_keeps_one_run_id(initialized, home, fake, tmp_path):
+    """A registration that renames the group mid-run makes no new run id: the digests
+    consumed before it and the run's commit name the same id (DESIGN 9)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    # The group's two sessions ran in yard/widget, and their records carry the path; they
+    # were written while the name widget was free.
+    yard_widget = tmp_path / "yard" / "widget"
+    for session in ("1", "2"):
+        queue.record_project(
+            cfg,
+            "c",
+            session,
+            None,
+            "widget",
+            yard_widget,
+            registry=Registry.load(cfg.registry_path),
+        )
+    # Another directory registered the name in the meantime.
+    registry = Registry.load(cfg.registry_path)
+    other = registry.add("widget", "Widget")
+    registry.add_path(other, path_key(cfg.host, tmp_path / "elsewhere" / "widget"))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "aft: register widget")
+
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-1",
+        facts=[
+            {
+                "statement": "The user prefers the morning standup at nine.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "standup at nine"}],
+        at="2026-10-05T08:00:00Z",
+    )
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-2",
+        facts=[
+            {
+                "statement": "The yard build runs on the GPU host.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+                "scope": "project",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s2", "resource": "aft://session/c/2#e1", "quote": "runs on the GPU host"}],
+        at="2026-10-05T09:00:00Z",
+    )
+    fake.script = [reply("add", None, "preference"), reply("add", None, "state")]
+    res = schedule.run(cfg, now=NOW)
+    assert res.failures == {}
+
+    # The first project fact registered the directory under the name the registry had
+    # free, and the run id stayed the one the group filed its digests under.
+    reg = Registry.load(cfg.registry_path)
+    project = reg.by_path_key(path_key(cfg.host, yard_widget))
+    assert project is not None and project.slug == "yard-widget"
+
+    consumed = page.split_frontmatter(
+        (cfg.vault / "digests/widget/2026/10/2026-10-05-c-1.md").read_text()
+    )[0]["aft"]["consumed"]
+    named = run_git(["log", "--grep", consumed, "--format=%H"], cwd=cfg.vault)
+    assert named, f"no commit's message names the consumed id {consumed}"
+    trailer = run_git(["log", "--grep", "Run: dream-widget", "--format=%B", "-1"], cwd=cfg.vault)
+    assert f"Run: {consumed}" in trailer
+
+
+def test_a_contested_group_slug_leaves_the_holding_projects_pages_alone(
+    initialized, home, fake, tmp_path
+):
+    """A group whose slug a registered project holds writes no short-term line of that
+    project's: the page under the group slug belongs to the holder, and the run neither
+    reconciles nor lifts from it (DESIGN 7, F49)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    from aft import evidence
+    from aft.readers import USER, Entry
+
+    # Session c/8 spoke the line the holder's recent.md carries.
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="8",
+        project_id=None,
+        entries=[
+            Entry(id="e1", time=NOW, role=USER, text="The hook rewrite is paused.", is_error=False)
+        ],
+    )
+    # The contested group's session c/9 ran in work/widget, and its record was written
+    # while the name was free.
+    work_widget = tmp_path / "work" / "widget"
+    queue.record_project(
+        cfg, "c", "9", None, "widget", work_widget, registry=Registry.load(cfg.registry_path)
+    )
+    # Another directory registered the name, and its recent.md carries an active line.
+    registry = Registry.load(cfg.registry_path)
+    holder = registry.add("widget", "Widget")
+    registry.add_path(holder, path_key(cfg.host, tmp_path / "elsewhere" / "widget"))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "aft: register widget")
+    holder_id = Registry.load(cfg.registry_path).by_slug("widget").id
+    holder_recent = cfg.vault / "projects/widget/recent.md"
+    holder_recent.parent.mkdir(parents=True, exist_ok=True)
+    fm = {
+        "type": "Project",
+        "title": "Widget recent",
+        "description": "Short-term memory.",
+        "sources": [
+            {"id": "r0", "resource": "aft://session/c/8#e1", "quote": "The hook rewrite is paused."}
+        ],
+        "aft": {"project": holder_id},
+    }
+    holder_recent.write_text(
+        f"---\n{yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).strip()}\n---\n\n"
+        "## State\n\n- The hook rewrite is paused. [observed] 2026-10-04 [^r0]\n"
+    )
+    vault.commit(cfg.vault, ["projects/widget/recent.md"], "seed holder recent")
+
+    # The contested group's digest holds only a global fact, so the run registers no
+    # project of its own and its slug stays the held name.
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-9",
+        facts=[
+            {
+                "statement": "The user prefers the morning standup at nine.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s9",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s9", "resource": "aft://session/c/9#e1", "quote": "standup at nine"}],
+        at="2026-10-05T08:00:00Z",
+    )
+    fake.script = [reply("add", None, "preference")]
+    res = schedule.run(cfg, now=NOW)
+    assert res.failures == {}
+
+    # The holder's line stands untouched: the newest session of the contested group never
+    # withdraws it, and no lift moves it into a project of the group's own.
+    body = holder_recent.read_text()
+    assert "~~The hook rewrite is paused.~~" not in body
+    assert "- The hook rewrite is paused. [observed] 2026-10-04 [^r0]" in body
+    # No project was registered for the group's directory: the run registered nothing,
+    # because its digests held only a global fact.
+    reg = Registry.load(cfg.registry_path)
+    assert reg.by_path_key(path_key(cfg.host, work_widget)) is None
+
+
 def test_broken_anchor_cleared_when_words_appear_again(initialized, home, fake, tmp_path):
     cfg = config_with_fake(home, initialized.vault, fake)
     repo = make_repo(tmp_path / "widget")
