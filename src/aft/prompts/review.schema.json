@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "properties": {
+    "withdraw": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "string",
+            "enum": [
+              "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9", "L10",
+              "L11", "L12", "L13", "L14", "L15", "L16", "L17", "L18", "L19", "L20"
+            ],
+            "description": "The numbered line to withdraw. A line that passes is left out."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "required": ["line", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["withdraw"],
+  "additionalProperties": false
+}

@@ -44,6 +44,7 @@ _CLI_ERROR_NAMES = {
     "EvidenceError",
     "ImportError",
     "ProposeError",
+    "ReviewError",
     "BadPattern",
     "NoteError",
     "WriteError",
@@ -139,6 +140,18 @@ def _parser() -> argparse.ArgumentParser:
         "--replace", metavar="STATEMENT", help="the line is replaced by this statement"
     )
     p.set_defaults(handler=cmd_settle)
+
+    p = sub.add_parser(
+        "review",
+        help="ask the model which lines of a project's memory it would withdraw",
+    )
+    p.add_argument("scope", help="a registered project's slug, or 'global'")
+    p.add_argument(
+        "--withdraw",
+        metavar="N,N,...|all",
+        help="strike the chosen lines of the saved review list, instead of listing",
+    )
+    p.set_defaults(handler=cmd_review)
 
     p = sub.add_parser("budget", help="show today's token use against the daily budget")
     bsub = p.add_subparsers(metavar="action")
@@ -659,6 +672,46 @@ def cmd_settle(args) -> int:
     choice = notes.KEEP if args.keep else notes.WITHDRAW if args.withdraw else notes.REPLACE
     message = notes.settle(config, args.where, choice, args.replace)
     print(f"aft settle: committed {message!r}; the note is in the page's archive")
+    return 0
+
+
+def cmd_review(args) -> int:
+    """Review what memory keeps, or withdraw the chosen lines (BUILD-PLAN F48)."""
+    from aft import review
+
+    config = load()
+    if args.withdraw is None:
+        outcome = review.review(config, args.scope)
+        if outcome.report is None:
+            print(f"aft review: no active memory lines in {args.scope}; nothing to review")
+        else:
+            print(
+                f"aft review: the model would withdraw {len(outcome.findings)} of"
+                f" {outcome.reviewed} line(s); see {outcome.report.relative_to(config.vault)}"
+            )
+            for finding in outcome.findings:
+                print(f"  {finding.number}. {finding.page}:{finding.line} {finding.reason}")
+            if outcome.waiting:
+                print(
+                    f"aft review: {outcome.waiting} part(s) wait, the day's token budget is spent"
+                )
+            if outcome.failure:
+                print(f"aft review: {outcome.failure}")
+            if outcome.unshown:
+                print(
+                    "aft review: ignored label(s) the model named but no part showed:"
+                    f" {', '.join(outcome.unshown)}"
+                )
+    else:
+        outcome = review.withdraw(config, args.scope, args.withdraw)
+        for finding in outcome.withdrawn:
+            print(f"  {finding.number}. {finding.page}:{finding.line} withdrawn")
+        for finding, why in outcome.skipped:
+            print(f"  {finding.number}. {finding.page}:{finding.line} skipped: {why}")
+        if outcome.message:
+            print(f"aft review: committed {outcome.message!r}")
+        else:
+            print("aft review: nothing to withdraw; the list stands as it is")
     return 0
 
 
