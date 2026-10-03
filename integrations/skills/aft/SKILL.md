@@ -75,8 +75,9 @@ When newer evidence disagrees with a line in memory and has no authority to repl
 memory keeps the line and writes a note under it: a conflict, or a question. The line then
 waits on the user's decision. When notes wait, the memory block a session starts with says
 how many under "Needs your decision". Before anything else in that session, tell the user
-how many notes wait and ask whether to settle them now or skip for now. Skipping changes
-nothing; the next session asks again.
+how many notes wait, and that replying "settle" goes through them now and any other reply
+skips them. "settle" is the whole answer: start step 1. Skipping changes nothing; the next
+session asks again.
 
 To settle them:
 

@@ -96,8 +96,9 @@ def notes_line(waiting: int) -> str:
     """What the block asks the agent to do about ``waiting`` notes."""
     noun = "note in memory waits" if waiting == 1 else "notes in memory wait"
     return (
-        f"{waiting} {noun} on the user's decision. Before anything else, tell the user and ask"
-        " whether to settle them now or skip for now. To settle them, follow the aft skill."
+        f"{waiting} {noun} on the user's decision. Before anything else, tell the user, and say"
+        ' that replying "settle" goes through them now and any other reply skips them. When'
+        ' the user replies "settle", follow the aft skill.'
     )
 
 
@@ -412,7 +413,9 @@ def _block(
         waiting_layer = _trim(waiting_list, rem_room)
 
         body_room = max(0, max_chars - _width([*head, *cut, *waiting_layer, *closing]) - 2)
-        body_floors = [*own_floor, *preferences_floor, *recent_floor, *map_floor]
+        # Short-term memory takes only what the long-term layers leave (design 10), so its
+        # floor has no share in the room they divide.
+        body_floors = [*own_floor, *preferences_floor, *map_floor]
         minimal = _trim(body_floors, body_room)
         extra = max(0, (body_room - _width(minimal)) // 2)
 

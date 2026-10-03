@@ -1251,7 +1251,9 @@ def test_notes_waiting_on_the_user_reach_the_user_as_well_as_the_agent(
     hook also hands the agent's interface a notice it shows the user directly (F42)."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
     printed = json.loads(hook_output(monkeypatch, capsys, name, agent, event, tmp_path / "widget"))
-    notice = "afterthought: 2 notes in memory wait on your decision. Ask the agent to settle them."
+    notice = (
+        'afterthought: 2 notes in memory wait on your decision. Reply "settle" to go through them.'
+    )
     if agent == "claude":
         assert printed == {
             "systemMessage": notice,
@@ -1426,3 +1428,10 @@ def test_block_closing_markers_and_cut_notice_across_budgets(max_chars, with_wai
             assert present or cut_present, (
                 f"layer {name} missing and no Cut under mc={max_chars}, waiting={with_waiting}"
             )
+
+
+def test_the_notes_line_names_the_one_word_reply():
+    """F51: one word, "settle", goes through the notes; any other reply skips them."""
+    line = inject.notes_line(1)
+    assert 'replying "settle" goes through them now' in line
+    assert "any other reply skips them" in line
