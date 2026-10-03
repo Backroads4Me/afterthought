@@ -1440,6 +1440,8 @@ def test_the_notes_line_names_the_one_word_reply():
     line = inject.notes_line(1)
     assert 'replying "settle" goes through them now' in line
     assert "any other reply skips them" in line
+
+
 def test_an_archived_projects_directory_gets_the_global_pages_alone(widget, tmp_path):
     """An archived project's directory is given the global pages alone (DESIGN 7, F49):
     its block is the one a session of no project gets, until the person unarchives it.
