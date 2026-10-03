@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "description": "What one part of the newest session shows about the numbered short-term lines (BUILD-PLAN F47).",
+  "properties": {
+    "lines": {
+      "type": "array",
+      "description": "One item per numbered line this part shows is done, false or replaced; empty when it shows none.",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "integer",
+            "description": "The number of the short-term line the part shows is done, false or replaced."
+          },
+          "quote": {
+            "type": "string",
+            "description": "The words of one entry that show it, copied exactly.",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "entry": {
+            "type": "string",
+            "description": "The label of the entry the quote comes from, such as #3.",
+            "minLength": 1
+          }
+        },
+        "required": ["line", "quote", "entry"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["lines"],
+  "additionalProperties": false
+}

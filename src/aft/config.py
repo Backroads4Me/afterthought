@@ -60,6 +60,9 @@ class DreamConfig:
     quiet_minutes: int = 15
     # DESIGN 6: how many of a project's sessions its short-term memory covers.
     short_term_sessions: int = 5
+    # BUILD-PLAN F47: short-term memory is also bounded in days, so a project that stops
+    # having sessions does not keep a stale line for good at its next dream run.
+    short_term_days: int = 7
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,8 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         raise ConfigError(f"{path}: dream.interval_minutes must be positive")
     if settings.dream.short_term_sessions < 1:
         raise ConfigError(f"{path}: dream.short_term_sessions must be at least 1")
+    if settings.dream.short_term_days < 1:
+        raise ConfigError(f"{path}: dream.short_term_days must be at least 1")
     host = settings.host or default_host()
     return Config(home=home, vault=vault, host=host, settings=settings)
 
@@ -308,6 +313,10 @@ quiet_minutes = 15
 # the project's sessions, counted in sessions and never in days, and becomes long-term
 # memory once its sources are this many sessions apart.
 short_term_sessions = 5
+# Short-term memory also expires by age, so a project that stops having sessions does not
+# keep what it was last working with for good: a line whose newest source is older than
+# this many days rolls off at the project's next dream run.
+short_term_days = 7
 
 [work]
 # Tokens one day of "aft work" may spend before the rest of the queue waits for

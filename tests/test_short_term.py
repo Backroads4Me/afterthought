@@ -9,6 +9,7 @@ it.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,9 +22,13 @@ from aft.dream import rules, schedule, shortterm
 from aft.readers import USER, Entry
 from aft.registry import Registry
 from conftest import run_git
+from fakes.model_server import Reply
 from test_apply import NOW, TODAY, config_with_fake, fake, reply, seed_overview, write_digest
 
 __all__ = ["fake"]  # the fixture, imported so pytest finds it here
+
+LINES_REPLY = Reply(content={"lines": []})
+
 
 SLUG = "widget"
 RECENT = f"projects/{SLUG}/recent.md"
@@ -126,7 +131,7 @@ def test_a_short_term_fact_lands_on_recent_and_not_on_the_overview(cfg, fake):
         sources=[source("s10", "s1", "The hook rewrite is paused for review.")],
         waiting=True,
     )
-    fake.script = [reply("add")]
+    fake.script = [reply("add"), LINES_REPLY]
     run = schedule.run(cfg, now=NOW)
     rep = run.reports[SLUG]
     assert "- The hook rewrite is paused for review. [observed]" in recent_text(cfg)
@@ -163,7 +168,7 @@ def test_a_short_term_fact_contradicting_a_long_term_line_is_added_to_recent(cfg
         sources=[source("s10", "s1", "The build runs on the laptop while the GPU host is down.")],
         waiting=True,
     )
-    fake.script = [reply("supersede", "L1")]
+    fake.script = [reply("supersede", "L1"), LINES_REPLY]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert overview_text(cfg) == before
     assert "The build runs on the laptop while the GPU host is down." in recent_text(cfg)
@@ -187,12 +192,13 @@ def test_a_short_term_fact_confirms_a_long_term_line(cfg, fake):
 # --------------------------------------------------------------------- rolling off
 
 
-def paused_line(cfg, *sessions: str) -> None:
-    """The line on recent.md, one source per session it was seen in, each quote archived."""
+def paused_line(cfg, *sessions: str, at: datetime = NOW) -> None:
+    """The line on recent.md, one source per session it was seen in, each quote archived
+    at ``at``, so a test can place the sources in the past."""
     refs = " ".join(f"[^r{n}]" for n in range(len(sessions)))
     for n, session in enumerate(sessions):
         entry = Entry(
-            id=f"e7{n}", time=NOW, role=USER, text="The hook rewrite is paused.", is_error=False
+            id=f"e7{n}", time=at, role=USER, text="The hook rewrite is paused.", is_error=False
         )
         evidence.store(cfg, agent="c", session_id=session, project_id=None, entries=[entry])
     seed_recent(
@@ -221,8 +227,13 @@ def test_a_line_rolls_off_once_its_newest_session_leaves_the_window(cfg, fake):
     for n in range(2, 6):
         session_digest(cfg, n)
     unrelated_waiting(cfg, 6)
-    fake.script = [reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    print("REP.ERROR:", rep.error)
+    print("REP.ROLLED:", rep.rolled_off)
+    print("REP.EXPIRED:", rep.expired)
+    print("REP.WITHDRAWN:", rep.withdrawn)
+    print("REP.REFUSED:", rep.refused)
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert [r.statement for r in rep.rolled_off] == ["The hook rewrite is paused."]
     assert "The hook rewrite is paused." not in (cfg.vault / RECENT).read_text()
@@ -237,7 +248,7 @@ def test_a_line_stays_while_its_session_is_in_the_window(cfg, fake):
     for n in range(2, 5):
         session_digest(cfg, n)
     unrelated_waiting(cfg, 5)
-    fake.script = [reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "The hook rewrite is paused." in recent_text(cfg)
     assert rep.rolled_off == []
@@ -252,14 +263,14 @@ def test_the_window_is_the_configured_number_of_sessions(cfg, fake, home):
     paused_line(config, "s1")
     session_digest(config, 2)
     unrelated_waiting(config, 3)
-    fake.script = [reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY]
     schedule.run(config, now=NOW)
     assert "The hook rewrite is paused." not in recent_text(config)
 
 
 def test_time_alone_rolls_nothing_off(cfg, fake):
-    """No new session of the project, no roll-off, however much later the run is: a line at
-    the edge of the window stays while only a worker's digest arrives, a year on."""
+    """No new session of the project, no roll-off: a line at the edge of the window stays
+    while only a worker's digest arrives, days on, and the day backstop leaves it too."""
     for n in range(1, 6):
         session_digest(cfg, n)
     paused_line(cfg, "s1")
@@ -273,9 +284,50 @@ def test_time_alone_rolls_nothing_off(cfg, fake):
         at="2026-10-06T08:00:00Z",
     )
     fake.script = [reply("skip")]
-    rep = schedule.run(cfg, now=NOW.replace(year=NOW.year + 1)).reports[SLUG]
+    rep = schedule.run(cfg, now=NOW + timedelta(days=3)).reports[SLUG]
     assert "The hook rewrite is paused." in recent_text(cfg)
     assert rep.rolled_off == []
+    assert rep.expired == []
+
+
+def test_a_line_expires_once_its_days_are_spent(cfg, fake):
+    """The day backstop (BUILD-PLAN F47): counted in sessions, a line of a project that
+    stops having sessions never leaves by count, so what time has left behind expires the
+    same way roll-off does."""
+    session_digest(cfg, 1)
+    paused_line(cfg, "s1", at=NOW - timedelta(days=10))
+    unrelated_waiting(cfg, 6)
+    fake.script = [reply("skip"), LINES_REPLY]
+    rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    assert "The hook rewrite is paused." not in recent_text(cfg)
+    assert [e.statement for e in rep.expired] == ["The hook rewrite is paused."]
+    assert rep.rolled_off == []
+    assert lint.lint_vault(cfg.vault) == []
+    section = reportmod.format_run_section(rep, cfg.vault, NOW)
+    assert 'Expired: "The hook rewrite is paused."' in section
+
+
+def test_a_line_its_days_are_not_yet_spent_stays(cfg, fake):
+    session_digest(cfg, 1)
+    paused_line(cfg, "s1", at=NOW - timedelta(days=7))
+    unrelated_waiting(cfg, 6)
+    fake.script = [reply("skip"), LINES_REPLY]
+    rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    assert "The hook rewrite is paused." in recent_text(cfg)
+    assert rep.expired == []
+
+
+def test_the_backstop_is_the_configured_number_of_days(cfg, fake, home):
+    (home / "config.toml").write_text(
+        (home / "config.toml").read_text() + "[dream]\nshort_term_days = 10\n"
+    )
+    config = configmod.load()
+    session_digest(config, 1)
+    paused_line(config, "s1", at=NOW - timedelta(days=10))
+    unrelated_waiting(config, 6)
+    fake.script = [reply("skip"), LINES_REPLY]
+    schedule.run(config, now=NOW)
+    assert "The hook rewrite is paused." in recent_text(config)
 
 
 def test_a_rolled_off_line_is_still_found_in_its_digest(cfg, fake):
@@ -289,7 +341,7 @@ def test_a_rolled_off_line_is_still_found_in_its_digest(cfg, fake):
     for n in range(2, 6):
         session_digest(cfg, n)
     unrelated_waiting(cfg, 6)
-    fake.script = [reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY]
     schedule.run(cfg, now=NOW)
     assert "The hook rewrite is paused." not in recent_text(cfg)
     hits = search.search(cfg, "hook rewrite paused", all_projects=True)
@@ -312,7 +364,7 @@ def test_a_rolled_off_line_takes_its_note_to_the_archive(cfg, fake):
     for n in range(2, 6):
         session_digest(cfg, n)
     unrelated_waiting(cfg, 6)
-    fake.script = [reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY]
     schedule.run(cfg, now=NOW)
     assert "The hook rewrite is paused." not in recent_text(cfg)
     archived = (cfg.vault / "archive" / RECENT).read_text()
@@ -335,7 +387,7 @@ def test_a_line_whose_sources_span_the_window_becomes_long_term(cfg, fake):
         waiting=True,
     )
     # The session-6 fact confirms the line; the line then spans s1 to s6 and is lifted.
-    fake.script = [reply("confirm", "L1"), reply("add")]
+    fake.script = [reply("confirm", "L1"), LINES_REPLY, reply("add")]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert "- The hook rewrite is paused. [observed]" in overview_text(cfg)
@@ -362,7 +414,7 @@ def test_three_mentions_in_two_sessions_stay_short_term(cfg, fake, home):
         sources=[source("s60", "s5", "The hook rewrite is still paused.")],
         waiting=True,
     )
-    fake.script = [reply("confirm", "L1")]
+    fake.script = [reply("confirm", "L1"), LINES_REPLY]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "The hook rewrite is paused." in recent_text(cfg)
     assert rep.lifted == []
@@ -381,7 +433,7 @@ def test_a_later_long_term_fact_lifts_the_line_it_confirms(cfg, fake):
         waiting=True,
     )
     # The recent line shares the most words with the new fact, so it is L1.
-    fake.script = [reply("confirm", "L1"), reply("add")]
+    fake.script = [reply("confirm", "L1"), LINES_REPLY, reply("add")]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "L1 (state, recent): The hook rewrite is paused." in str(fake.requests[0])
     assert "The hook rewrite is paused." not in recent_text(cfg)
@@ -395,7 +447,7 @@ def test_a_lifted_line_the_decision_skips_leaves_recent_and_is_reported(cfg, fak
         session_digest(cfg, n)
     paused_line(cfg, "s1", "s6")
     unrelated_waiting(cfg, 6)
-    fake.script = [reply("skip"), reply("skip")]
+    fake.script = [reply("skip"), LINES_REPLY, reply("skip")]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert "The hook rewrite is paused." not in overview_text(cfg)

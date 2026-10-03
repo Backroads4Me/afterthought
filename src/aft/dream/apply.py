@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import yaml
@@ -26,7 +26,7 @@ import yaml
 from aft import digest, evidence, lint, page, pagewrite
 from aft import vault as vaultmod
 from aft.config import Config
-from aft.dream import decide, maintain, rules, shortterm
+from aft.dream import decide, maintain, reconcile, rules, shortterm
 from aft.gitutil import git
 from aft.registry import Registry
 
@@ -142,6 +142,13 @@ class RolledOffLine:
     state: str
 
 
+@dataclass(frozen=True)
+class ExpiredLine:
+    """A short-term line whose newest source is older than ``dream.short_term_days``."""
+
+    statement: str
+
+
 UNFILED_SKIP = "a session of no project: only its global facts become memory"
 
 LIFT_CONFIRMED = "a later session's long-term fact confirms it"
@@ -171,6 +178,12 @@ class ProjectRunReport:
     oversize_pages: list[str] = field(default_factory=list)
     lifted: list[LiftedFact] = field(default_factory=list)
     rolled_off: list[RolledOffLine] = field(default_factory=list)
+    withdrawn: list[reconcile.WithdrawnLine] = field(default_factory=list)
+    """Short-term lines the newest session applied showed done, false, or replaced."""
+    expired: list[ExpiredLine] = field(default_factory=list)
+    """Short-term lines rolled off by the ``dream.short_term_days`` backstop."""
+    refused: list[reconcile.RefusedWithdrawal] = field(default_factory=list)
+    """Recent lines the reconcile was asked to withdraw and the script refused."""
     error: str | None = None
 
 
@@ -647,10 +660,15 @@ def run_project(
                 digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
             report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
 
-        # Short-term memory: lift the lines that became long-term, then roll off the lines
-        # whose sessions have gone by (design 6, design 9 step 6).
-        _short_term(config, vault_path, slug, to_lift, settle, report, record_write)
+        # What the newest session this run applied shows about the short-term lines: a
+        # line it showed done, false or replaced is withdrawn on its verified quote
+        # (BUILD-PLAN F47).
+        reconcile.run(config, vault_path, slug, digests, today, report, record_write, now=now)
 
+        # Short-term memory: lift the lines that became long-term, then roll off the lines
+        # whose sessions have gone by, and expire the ones their days have left behind
+        # (design 6, design 9 step 6).
+        _short_term(config, vault_path, slug, to_lift, settle, report, record_write, today)
         # Maintenance
         broken, cleared = maintain.check_anchors(
             vault_path, project, today, config.host, record_write=record_write
@@ -754,9 +772,11 @@ def _short_term(
     settle,
     report: ProjectRunReport,
     record_write,
+    today: str,
 ) -> None:
     """Lift the short-term lines that became long-term, then roll off the lines whose
-    sessions have gone by (design 6, design 9 step 6, R10).
+    sessions have gone by, and expire the ones their days have left behind (design 6,
+    design 9 step 6, R10).
 
     A line is lifted when a later session's long-term fact confirmed it (``to_lift``), or
     when its sources are at least ``dream.short_term_sessions`` sessions apart. Lifting
@@ -764,7 +784,9 @@ def _short_term(
     decision as a long-term fact through ``settle``; whatever that decides, the line has
     left short-term memory. A line rolls off once its newest source has left the project's
     last ``short_term_sessions`` sessions, whatever its state; a note under it moves to the
-    archive first, so nothing a person typed there is lost.
+    archive first, so nothing a person typed there is lost. A project that stops having
+    sessions never rolls a line off by count, so a line whose newest source is older than
+    ``dream.short_term_days`` days expires the same way roll-off does.
     """
     recent = vault_path / "projects" / slug / page.RECENT_PAGE
     if not recent.exists():
@@ -856,9 +878,68 @@ def _short_term(
         doc.remove_short_term(going)
         report.rolled_off.append(RolledOffLine(statement=going.statement, state=going.state))
         changed = True
+    # The day backstop (F47): counted in sessions, a line of a project that stops having
+    # sessions never leaves by count, so what time has left behind expires the same way.
+    while True:
+        going = next(
+            (f for f in doc.page.facts if _expired(config, f, doc.sources, vault_path, today)),
+            None,
+        )
+        if going is None:
+            break
+        if going.callouts:
+            record_write(doc._archive_file())
+            doc.resolve_callout(going)
+            going = next(f for f in doc.page.facts if f.line == going.line)
+        doc.remove_short_term(going)
+        report.expired.append(ExpiredLine(statement=going.statement))
+        changed = True
     if changed:
         record_write(recent)
         recent.write_text(doc.render(), encoding="utf-8")
+
+
+def _expired(
+    config: Config,
+    fact: page.Fact,
+    sources: dict[str, dict],
+    vault_path: Path,
+    today: str,
+) -> bool:
+    """Whether the line's newest source is older than ``dream.short_term_days`` days.
+
+    A source's date is the day its evidence entry was said, or the commit's for a hand
+    edit, or the line's own day when the archive no longer holds the entry (DESIGN 14
+    keeps the quote on the page); a line whose sources carry no date at all stays, as a
+    line no source can place stays for roll-off.
+    """
+    newest = _newest_source_date(config, fact, sources, vault_path)
+    if not newest:
+        return False
+    try:
+        age = (date.fromisoformat(today) - date.fromisoformat(newest)).days
+    except ValueError:
+        return False
+    return age > config.settings.dream.short_term_days
+
+
+def _newest_source_date(
+    config: Config, fact: page.Fact, sources: dict[str, dict], vault_path: Path
+) -> str:
+    """The newest date among the line's sources, as their evidence carries it."""
+    dates = []
+    for ref in fact.refs:
+        entry = sources.get(ref, {})
+        _, _, when, _ = _lookup_evidence(
+            config,
+            str(entry.get("resource", "")),
+            str(entry.get("quote", "")),
+            fallback_date=fact.date,
+            source_entry=entry,
+        )
+        if when:
+            dates.append(when)
+    return max(dates) if dates else ""
 
 
 def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
