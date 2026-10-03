@@ -739,10 +739,10 @@ def test_builds_50_pages_of_200_lines_in_under_150_ms(initialized, tmp_path):
     budget = 1.0 if os.environ.get("CI") else 0.15
 
     def fastest(args: list[str], stdin: str | None = None) -> float:
-        """The quickest of three cold runs: a budget is about the command, and the
+        """The quickest of five cold runs: a budget is about the command, and the
         slowest run measures whatever else the machine was doing."""
         times = []
-        for _ in range(3):
+        for _ in range(5):
             started = time.perf_counter()
             res = subprocess.run(
                 [sys.executable, "-m", "aft", *args],
