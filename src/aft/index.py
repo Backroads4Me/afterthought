@@ -474,9 +474,9 @@ def update(config: Config) -> list[str]:
     This is the incremental path BUILD-PLAN M3.1 names: a file is rebuilt only when its
     content hash moved or when the project registry the rows were filed against moved,
     an evidence row is read only when the index has not seen its stored bytes or the archive
-    row beside them changed what the index row copies, and whatever has disappeared from
-    either loses its rows. Nothing here waits for a model or a git commit; it reads the files
-    as they are.
+    row beside them changed what the index row copies - of which the collection the entry
+    answers from is a part - and whatever has disappeared from either loses its rows. Nothing
+    here waits for a model or a git commit; it reads the files as they are.
 
     Whether any of that has to happen at all is asked of `_moved` first, from a read connection
     that takes no write lock - which is the difference between a search that checks the index
@@ -500,13 +500,8 @@ def update(config: Config) -> list[str]:
         # moved and asks again (`_moved`).
         archive = _archive_state(config) or ""
         projects = _project_registry(config)
-        # Which collection an evidence row answers from is the registry's archived flag, so
-        # a registry that moved asks its evidence rows to be re-homed as much as it asks the
-        # file rows to be re-derived (DESIGN 10, F49).
-        filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
-        rehome = filed_by is None or filed_by[0] != projects.digest
         report = _sync_files(conn, config, projects)
-        _sync_evidence(conn, config, projects.registry, rehome=rehome)
+        _sync_evidence(conn, config, projects.registry)
         report.extend(_sync_library(conn, config))
         conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
@@ -1275,9 +1270,7 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
     return report
 
 
-def _sync_evidence(
-    conn: sqlite3.Connection, config: Config, registry: Registry, *, rehome: bool = False
-) -> None:
+def _sync_evidence(conn: sqlite3.Connection, config: Config, registry: Registry) -> None:
     """Index the archive rows this index has not seen, and stop holding the ones it dropped.
 
     The row identity is the archive's ``(session_id, entry_id)`` primary key, which the
@@ -1296,19 +1289,12 @@ def _sync_evidence(
     entries go where they went (DESIGN 10, F49). An entry whose project is unknown is every
     project's memory, and stays in the ordinary evidence collection.
 
-    ``rehome`` says the registry moved since the rows were filed, so every session row goes
-    and the scan rebuilds them: the rows' copied state cannot say which side of the archived
-    flag they were filed under, because that flag is what moved.
-
     Nothing is removed that was never recorded: a row and the state that says it was read land
     in the same transaction, so a key the index holds no state for is a key with no row to
     drop. What does go - rows whose archive row is gone, and rows whose copied state moved -
     goes out after the scan, each named by the key it was stored under, which is why a rebuild
     over an empty index deletes nothing at all (`_unindex`).
     """
-    if rehome:
-        for collection in (EVIDENCE, ARCHIVE):
-            conn.execute(f"DELETE FROM {collection} WHERE path LIKE '{SESSION_RESOURCE}%'")
     recorded = {
         (session_id, entry_id): (digest, agent, project_id, moment, home)
         for session_id, entry_id, digest, agent, project_id, moment, home in conn.execute(

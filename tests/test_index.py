@@ -768,6 +768,26 @@ def test_an_archived_projects_entries_leave_the_default_search(initialized: Conf
     assert search(initialized, "archive", "flange") == []
 
 
+def test_a_registry_change_that_moves_no_archived_flag_rewrites_no_evidence_row(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry that moves for another reason than the archived flag - a project added, a
+    project's directory registered (DESIGN 7, F49) - re-derives the file rows and leaves the
+    session rows where they were filed: the copied state beside each row already says which
+    collection it answers from, so the scan has no reason to name its rows again."""
+    widget = register(initialized, "widget")
+    evidence.store(initialized, "claude", "abc", widget.id, entries("ship the flange"))
+    assert index.update(initialized) == []
+    removals = watch(monkeypatch, "DELETE FROM evidence")
+
+    # A registry change that carries no archived flag: a second project is registered.
+    register(initialized, "other")
+    assert index.update(initialized) == []
+
+    assert removals == [], "the scan threw the session rows out to rebuild them"
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+
+
 def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config) -> None:
     """The index reads the archive row by row and decompresses what it finds, so its rows are
     checked against the archive's own reader: wherever the two disagree about what a row holds,
