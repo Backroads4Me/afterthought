@@ -17,6 +17,7 @@ leaf to the root.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -40,6 +41,30 @@ ROLES = {"user": USER, "assistant": ASSISTANT, "toolResult": TOOL}
 
 # The record type pi uses for one side of the conversation.
 CONVERSATION = ("message",)
+
+# A skill call recorded by pi expands /skill:<name> <args> to include the skill's file
+# body inside a <skill> block, followed by any arguments (BUILD-PLAN F45). The reader renders
+# the skill call without the skill body as /<name> <args>, keeping text typed alongside it
+# and leaving ordinary prompts byte-identical.
+_SKILL_CALL = re.compile(
+    r"^\s*<skill\b(?=[^>]*\bname=[\"']([^\"']+)[\"'])[^>]*>[\s\S]*<\/skill>(?:\s*([\s\S]*))?$",
+    re.IGNORECASE,
+)
+
+
+def _render_skill_call(text: str) -> str:
+    """Render a skill call as /<name> <args>, without the skill body."""
+    if "<skill" not in text:
+        return text
+    match = _SKILL_CALL.match(text)
+    if not match:
+        return text
+    name = match.group(1).strip().lstrip("/")
+    if not name:
+        return text
+    args = match.group(2).strip() if match.group(2) else ""
+    return f"/{name} {args}" if args else f"/{name}"
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +108,8 @@ def _record_entries(record: dict) -> Iterator[Entry]:
     # thought or called tools, or a tool result that returned nothing.
     if not text:
         return
+    if role == USER:
+        text = _render_skill_call(text)
     yield Entry(entry_id, time, role, text, bool(message.get("isError")))
 
 

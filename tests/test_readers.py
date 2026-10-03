@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from aft import readers
+from aft import evidence, readers
+from aft import filter as filtermod
 
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
 CLAUDE = readers.CLAUDE
@@ -545,3 +546,517 @@ def test_an_entry_is_a_frozen_record_of_the_pinned_fields():
     entry = read(CLAUDE, "claude-session.jsonl")[0]
     with pytest.raises(dataclasses.FrozenInstanceError):
         entry.text = "changed"
+
+
+def test_claude_slash_command_prompt_renders_as_typed(tmp_path):
+    # F45: The Claude Code reader renders a slash-command prompt as the text typed, /<name> <args>.
+    records = [
+        # The exact Claude Code prompt text that failed
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>aft</command-message>\n"
+                    "<command-name>/aft</command-name>\n"
+                    "<command-args>off</command-args>"
+                ),
+            },
+        },
+        # The exact on prompt
+        {
+            "type": "user",
+            "uuid": "u2",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>aft</command-message>\n"
+                    "<command-name>/aft</command-name>\n"
+                    "<command-args>on</command-args>"
+                ),
+            },
+        },
+        # Command without arguments
+        {
+            "type": "user",
+            "uuid": "u3",
+            "timestamp": "2026-10-03T10:02:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-name>/clear</command-name>\n"
+                    "            <command-message>clear</command-message>\n"
+                    "            <command-args></command-args>"
+                ),
+            },
+        },
+        # Command with other arguments
+        {
+            "type": "user",
+            "uuid": "u4",
+            "timestamp": "2026-10-03T10:03:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-name>/plan</command-name>\n"
+                    "<command-args>rewrite scheduler</command-args>"
+                ),
+            },
+        },
+        # Text typed alongside command is not dropped
+        {
+            "type": "user",
+            "uuid": "u5",
+            "timestamp": "2026-10-03T10:04:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "before command\n"
+                    "<command-name>/aft</command-name>\n"
+                    "<command-args>off</command-args>\n"
+                    "after command"
+                ),
+            },
+        },
+        # Ordinary prompt is byte-identical
+        {
+            "type": "user",
+            "uuid": "u6",
+            "timestamp": "2026-10-03T10:05:00.000Z",
+            "message": {
+                "role": "user",
+                "content": "ordinary prompt without slash command",
+            },
+        },
+    ]
+    path = tmp_path / "claude-slash-commands.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    entries = list(readers.read(CLAUDE, path))
+    assert [e.text for e in entries] == [
+        "/aft off",
+        "/aft on",
+        "/clear",
+        "/plan rewrite scheduler",
+        "before command\n/aft off\nafter command",
+        "ordinary prompt without slash command",
+    ]
+
+
+def test_pi_skill_call_renders_without_skill_body(tmp_path):
+    # F45: The pi reader renders a skill call as /<name> <args>, without the skill body.
+    records = [
+        # Skill call for off
+        {
+            "type": "message",
+            "id": "m1",
+            "parentId": None,
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    "# aft\nTurn capture on or off.\n"
+                    "</skill>\n\n"
+                    "off"
+                ),
+            },
+        },
+        # Skill call for on
+        {
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    "# aft\nTurn capture on or off.\n"
+                    "</skill>\n\n"
+                    "on"
+                ),
+            },
+        },
+        # Skill call without arguments
+        {
+            "type": "message",
+            "id": "m3",
+            "parentId": "m2",
+            "timestamp": "2026-10-03T10:02:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    "# aft\nTurn capture on or off.\n"
+                    "</skill>"
+                ),
+            },
+        },
+        # Skill call with other arguments
+        {
+            "type": "message",
+            "id": "m4",
+            "parentId": "m3",
+            "timestamp": "2026-10-03T10:03:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="summarize" location="/path/to/SKILL.md">\n'
+                    "References are relative to /path/to.\n\n"
+                    "# summarize\nSummary skill\n"
+                    "</skill>\n\n"
+                    "src/aft/filter.py"
+                ),
+            },
+        },
+        # Multiline args alongside skill call
+        {
+            "type": "message",
+            "id": "m5",
+            "parentId": "m4",
+            "timestamp": "2026-10-03T10:04:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/path/to/SKILL.md">\n'
+                    "body\n"
+                    "</skill>\n\n"
+                    "off\nand also keep this line"
+                ),
+            },
+        },
+        # Ordinary prompt is byte-identical
+        {
+            "type": "message",
+            "id": "m6",
+            "parentId": "m5",
+            "timestamp": "2026-10-03T10:05:00.000Z",
+            "message": {
+                "role": "user",
+                "content": "ordinary prompt without skill",
+            },
+        },
+        # Ordinary prompt mentioning <skill name="foo"> mid-sentence is byte-identical
+        {
+            "type": "message",
+            "id": "m7",
+            "parentId": "m6",
+            "timestamp": "2026-10-03T10:06:00.000Z",
+            "message": {
+                "role": "user",
+                "content": 'referencing <skill name="foo">bar</skill> in text',
+            },
+        },
+    ]
+    path = tmp_path / "pi-skill-calls.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    entries = list(readers.read(PI, path))
+    assert [e.text for e in entries] == [
+        "/aft off",
+        "/aft on",
+        "/aft",
+        "/summarize src/aft/filter.py",
+        "/aft off\nand also keep this line",
+        "ordinary prompt without skill",
+        'referencing <skill name="foo">bar</skill> in text',
+    ]
+
+
+def test_claude_slash_markers_open_and_close_span(tmp_path, cfg):
+    # F45: Exact Claude Code markup for off and for on opens and closes a span.
+    records = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {"role": "user", "content": "the plan"},
+        },
+        {
+            "type": "user",
+            "uuid": "u2",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>aft</command-message>\n"
+                    "<command-name>/aft</command-name>\n"
+                    "<command-args>off</command-args>"
+                ),
+            },
+        },
+        {
+            "type": "user",
+            "uuid": "u3",
+            "timestamp": "2026-10-03T10:02:00.000Z",
+            "message": {"role": "user", "content": "the staging host is bellwether"},
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-03T10:02:05.000Z",
+            "message": {"role": "assistant", "content": "noted"},
+        },
+        {
+            "type": "user",
+            "uuid": "u4",
+            "timestamp": "2026-10-03T10:03:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-message>aft</command-message>\n"
+                    "<command-name>/aft</command-name>\n"
+                    "<command-args>on</command-args>"
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a2",
+            "timestamp": "2026-10-03T10:03:05.000Z",
+            "message": {"role": "assistant", "content": "back to it"},
+        },
+    ]
+    path = tmp_path / "claude-markers.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    entries = list(readers.read(CLAUDE, path))
+    kept, off = filtermod.filter_entries(entries, cfg)
+    assert not off
+    assert [e.text for e in kept] == ["the plan", "back to it"]
+
+
+def test_pi_skill_markers_open_and_close_span(tmp_path, cfg):
+    # F45: Exact pi skill call for off and for on opens and closes a span.
+    records = [
+        {
+            "type": "message",
+            "id": "m1",
+            "parentId": None,
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {"role": "user", "content": "the plan"},
+        },
+        {
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    "# aft\nControl capture.\n"
+                    "</skill>\n\n"
+                    "off"
+                ),
+            },
+        },
+        {
+            "type": "message",
+            "id": "m3",
+            "parentId": "m2",
+            "timestamp": "2026-10-03T10:02:00.000Z",
+            "message": {"role": "user", "content": "the staging host is bellwether"},
+        },
+        {
+            "type": "message",
+            "id": "m4",
+            "parentId": "m3",
+            "timestamp": "2026-10-03T10:02:05.000Z",
+            "message": {"role": "assistant", "content": "noted"},
+        },
+        {
+            "type": "message",
+            "id": "m5",
+            "parentId": "m4",
+            "timestamp": "2026-10-03T10:03:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    "# aft\nControl capture.\n"
+                    "</skill>\n\n"
+                    "on"
+                ),
+            },
+        },
+        {
+            "type": "message",
+            "id": "m6",
+            "parentId": "m5",
+            "timestamp": "2026-10-03T10:03:05.000Z",
+            "message": {"role": "assistant", "content": "back to it"},
+        },
+    ]
+    path = tmp_path / "pi-markers.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    entries = list(readers.read(PI, path))
+    kept, off = filtermod.filter_entries(entries, cfg)
+    assert not off
+    assert [e.text for e in kept] == ["the plan", "back to it"]
+
+
+def test_slash_aft_offline_and_other_args_do_not_start_a_span(tmp_path, cfg):
+    # F45: /aft offline and a slash command with other arguments do not start a span.
+    claude_records = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-name>/aft</command-name>\n<command-args>offline</command-args>"
+                ),
+            },
+        },
+        {
+            "type": "user",
+            "uuid": "u2",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-name>/plan</command-name>\n<command-args>write docs</command-args>"
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-03T10:01:05.000Z",
+            "message": {"role": "assistant", "content": "working on docs"},
+        },
+    ]
+    c_path = tmp_path / "claude-offline.jsonl"
+    c_path.write_text("\n".join(json.dumps(r) for r in claude_records) + "\n")
+    c_entries = list(readers.read(CLAUDE, c_path))
+    c_kept, c_off = filtermod.filter_entries(c_entries, cfg)
+    assert not c_off
+    assert [e.text for e in c_kept] == [
+        "/aft offline",
+        "/plan write docs",
+        "working on docs",
+    ]
+
+    pi_records = [
+        {
+            "type": "message",
+            "id": "m1",
+            "parentId": None,
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="aft" location="/path/to/SKILL.md">\nbody\n</skill>\n\noffline'
+                ),
+            },
+        },
+        {
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-10-03T10:01:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="summarize" location="/path/to/SKILL.md">\n'
+                    "body\n"
+                    "</skill>\n\n"
+                    "README.md"
+                ),
+            },
+        },
+        {
+            "type": "message",
+            "id": "m3",
+            "parentId": "m2",
+            "timestamp": "2026-10-03T10:01:05.000Z",
+            "message": {"role": "assistant", "content": "summarized"},
+        },
+    ]
+    p_path = tmp_path / "pi-offline.jsonl"
+    p_path.write_text("\n".join(json.dumps(r) for r in pi_records) + "\n")
+    p_entries = list(readers.read(PI, p_path))
+    p_kept, p_off = filtermod.filter_entries(p_entries, cfg)
+    assert not p_off
+    assert [e.text for e in p_kept] == [
+        "/aft offline",
+        "/summarize README.md",
+        "summarized",
+    ]
+
+
+def test_archived_slash_command_prompt_reads_as_slash_name_args(tmp_path, cfg):
+    # F45: An archived slash-command prompt reads as /<name> <args>.
+    c_records = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<command-name>/plan</command-name>\n"
+                    "<command-args>rewrite scheduler</command-args>"
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "timestamp": "2026-10-03T10:00:05.000Z",
+            "message": {"role": "assistant", "content": "planning rewrite"},
+        },
+    ]
+    c_path = tmp_path / "claude-archived-cmd.jsonl"
+    c_path.write_text("\n".join(json.dumps(r) for r in c_records) + "\n")
+    c_entries = list(readers.read(CLAUDE, c_path))
+    c_kept, _ = filtermod.filter_entries(c_entries, cfg)
+    evidence.store(cfg, "claude", "sess-c", None, c_kept)
+
+    archived_c = evidence.entries(cfg, "sess-c")
+    assert archived_c[0].text == "/plan rewrite scheduler"
+
+    p_records = [
+        {
+            "type": "message",
+            "id": "m1",
+            "parentId": None,
+            "timestamp": "2026-10-03T10:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<skill name="summarize" location="/path/to/SKILL.md">\n'
+                    "body\n"
+                    "</skill>\n\n"
+                    "src/aft/filter.py"
+                ),
+            },
+        },
+        {
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-10-03T10:00:05.000Z",
+            "message": {"role": "assistant", "content": "summarized"},
+        },
+    ]
+    p_path = tmp_path / "pi-archived-cmd.jsonl"
+    p_path.write_text("\n".join(json.dumps(r) for r in p_records) + "\n")
+    p_entries = list(readers.read(PI, p_path))
+    p_kept, _ = filtermod.filter_entries(p_entries, cfg)
+    evidence.store(cfg, "pi", "sess-p", None, p_kept)
+
+    archived_p = evidence.entries(cfg, "sess-p")
+    assert archived_p[0].text == "/summarize src/aft/filter.py"

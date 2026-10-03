@@ -15,6 +15,7 @@ non-answers as assistant entries, recognizable only by their markers.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,32 @@ SYNTHETIC_MODEL = "<synthetic>"
 
 # The record types Claude Code uses for one side of the conversation.
 CONVERSATION = (USER, ASSISTANT)
+
+# A slash command recorded by Claude Code carries its command name, message, and arguments
+# in XML-like tags (BUILD-PLAN F45). The reader renders the command as typed (/<name> <args>),
+# keeping text typed alongside it and leaving ordinary prompts byte-identical.
+_COMMAND_TAG = r"<command-(?:name|message|args)>[\s\S]*?</command-(?:name|message|args)>"
+_COMMAND_BLOCK = re.compile(rf"{_COMMAND_TAG}(?:\s*{_COMMAND_TAG})*", re.IGNORECASE)
+
+
+def _render_slash_command(text: str) -> str:
+    """Render a slash-command prompt as the text typed: /<name> <args>."""
+    if "<command-name>" not in text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        block = match.group(0)
+        name_match = re.search(r"<command-name>([\s\S]*?)</command-name>", block)
+        if not name_match:
+            return block
+        name = name_match.group(1).strip().lstrip("/")
+        if not name:
+            return block
+        args_match = re.search(r"<command-args>([\s\S]*?)</command-args>", block)
+        args = args_match.group(1).strip() if args_match else ""
+        return f"/{name} {args}" if args else f"/{name}"
+
+    return _COMMAND_BLOCK.sub(_replace, text)
 
 
 def read(path: Path) -> Iterator[Entry]:
@@ -75,6 +102,8 @@ def _record_entries(record: dict) -> Iterator[Entry]:
     # A turn that only thought or called tools has no text of its own.
     text = blocks_text(content)
     if text:
+        if kind == USER:
+            text = _render_slash_command(text)
         yield Entry(entry_id, time, kind, text, False)
     if kind == USER:
         yield from _tool_results(entry_id, time, content)

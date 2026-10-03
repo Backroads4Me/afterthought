@@ -56,15 +56,16 @@ FLAG_HEAD_CHARS = 500
 
 # An off-the-record marker, matched only at the start of a prompt's text: discussing the
 # markers never triggers them (DESIGN 12). The phrase is the one the design names, with
-# its words spaced; leading whitespace and case do not matter, and trailing punctuation
-# is fine because the lookahead asks only that the phrase ends here. A word joined on
-# after it makes a different word instead ("aft offline", "off-the-record").
+# its words spaced; a leading slash from a slash command, leading whitespace, and case
+# do not matter, and trailing punctuation is fine because the lookahead asks only that
+# the phrase ends here. A word joined on after it makes a different word instead ("aft offline",
+# "off-the-record").
 OFF_MARKER = re.compile(
-    r"^\s*(?:aft off|off the record)(?![\w-])",
+    r"^\s*(?:/?aft off|off the record)(?![\w-])",
     re.IGNORECASE,
 )
 ON_MARKER = re.compile(
-    r"^\s*(?:aft on|on the record)(?![\w-])",
+    r"^\s*(?:/?aft on|on the record)(?![\w-])",
     re.IGNORECASE,
 )
 
