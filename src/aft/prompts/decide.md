@@ -4,8 +4,8 @@ means for memory. You only judge meaning; rules applied after you decide whether
 changes.
 
 Memory has two terms. A long-term fact should still be true and useful a year from now. A
-short-term fact is what the project's last few sessions were working with, and it is meant
-to change. The new fact says which term it is, and an existing line marked recent is
+short-term fact is a temporary condition that changes how an agent should act (something
+paused, a temporary setting, a freeze), not progress on the work, and it is meant to change. The new fact says which term it is, and an existing line marked recent is
 short-term memory.
 
 A fact earns its place in memory only when a future session would make a mistake, or ask

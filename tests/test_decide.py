@@ -489,3 +489,11 @@ def test_the_decide_prompt_skips_by_the_value_test_and_the_never_a_fact_list():
     ):
         assert item in words
     assert "it fails that test, is on the never-a-fact list above" in words
+
+
+def test_the_decide_prompt_defines_short_term_as_a_temporary_condition():
+    """F46: short-term memory is a temporary condition, not progress on the work."""
+    words = " ".join(decide.prompt().split())
+    assert "a temporary condition that changes how an agent should act" in words
+    assert "not progress on the work" in words
+    assert "last few sessions were working with" not in words
