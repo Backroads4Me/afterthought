@@ -29,6 +29,7 @@ import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -56,8 +57,8 @@ class Run:
     """Every project with waiting digests, by slug, each list in session order."""
 
     taken: dict[str, int] = field(default_factory=dict)
-    """The digests each project was given, summed over the runs one slug splits into
-    (DESIGN 7, F49), when the dream ran it."""
+    """The digests each project's runs consumed, summed over the runs one slug splits into
+    (DESIGN 7, F49): a run that failed consumed nothing, and its digests wait again."""
 
     ran: list[str] = field(default_factory=list)
     active: list[str] = field(default_factory=list)
@@ -76,7 +77,8 @@ class Run:
     """The pages whose hand-typed bullets this run tagged ``[stated]``."""
 
     reports: dict[str, Any] = field(default_factory=dict)
-    """Structured report data from each project run (M4.5, M4.6)."""
+    """Structured report data from each project's run (M4.5, M4.6): one report per slug,
+    which names every group's work when one slug ran as several (DESIGN 7, F49)."""
 
     failures: dict[str, str] = field(default_factory=dict)
     """Projects that failed this run, each mapped to the error that stopped it."""
@@ -145,7 +147,8 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             # over the claim, or a record from before paths were kept), so they are run by
             # the project each digest's own record names (DESIGN 7, F49).
             groups = apply.digest_groups(config, registry, slug, result.waiting[slug])
-            result.taken[slug] = sum(len(group) for group in groups)
+            taken = 0
+            reports: list[Any] = []
             for group in groups:
                 # Any failure in one project is that project's own: its writes are rolled back
                 # by run_project, its error reaches the day's report, and the other projects
@@ -159,9 +162,11 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                 except Exception as exc:
                     result.failures[slug] = str(exc)
                     rep = ProjectRunReport(project=slug, error=str(exc))
+                else:
+                    taken += len(group)
                 if rep is None:
                     continue
-                result.reports[slug] = rep
+                reports.append(rep)
                 # A failed run has nothing to revert of its own, but it still names the checkpoint
                 # and tag commits, so the run's Revert item is never lost (DESIGN 9 item 9).
                 if getattr(rep, "commit", None) is not None or slug in result.failures:
@@ -179,7 +184,10 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                         )
                     else:
                         result.failures[slug] = f"report not written: {failure}"
-        # Projects with nothing new in 90 days and projects whose recorded paths are all
+            if taken:
+                result.taken[slug] = taken
+            if reports:
+                result.reports[slug] = _merge_reports(slug, reports)
         # gone are named in the report; nothing is archived or forgotten without the
         # person's go-ahead (DESIGN 7, F49).
         try:
@@ -188,6 +196,37 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             result.failures["idle-gone report"] = str(exc)
 
         return result
+
+
+def _merge_reports(slug: str, reports: Sequence[Any]) -> Any:
+    """One slug's group reports as one, in group order (DESIGN 7, F49).
+
+    One slug may run as several groups - two directories that once claimed one name - and
+    each group's run reports what it did. The day's report takes every group's section as
+    the run reaches it; what the run hands back is one report per slug that names every
+    group's work: the lists carry all the groups' items, and the commit and the error are
+    the first group's that has one. A report this run did not build is kept as the first
+    group left it.
+    """
+    first = reports[0]
+    if len(reports) == 1 or not all(isinstance(rep, ProjectRunReport) for rep in reports):
+        return first
+    merged = ProjectRunReport(project=slug)
+    for name in _REPORT_LIST_FIELDS:
+        value = getattr(merged, name)
+        for rep in reports:
+            value.extend(getattr(rep, name))
+    for rep in reports:
+        if merged.commit is None and rep.commit is not None:
+            merged.commit = rep.commit
+        if merged.error is None and rep.error is not None:
+            merged.error = rep.error
+    return merged
+
+
+_REPORT_LIST_FIELDS = tuple(
+    f.name for f in dataclass_fields(ProjectRunReport) if str(f.type).startswith("list")
+)
 
 
 def _expire_short_term(
@@ -471,13 +510,17 @@ def last_activity(config: Config) -> dict[str, datetime]:
             # The project the directory answers for is where its sessions' digests file,
             # even when a record wrote an earlier, unregistered name (DESIGN 7, F49).
             slug = resolution.project.slug
-        else:
+            slug = resolution.project.slug
+        elif resolution.root is not None:
             # A record is the name its session's digest files under, and a fresh answer for
             # an unregistered directory is not: the record's settled name decides (DESIGN 7,
             # F49). A directory of no record and of no project files its sessions as unfiled
             # (DESIGN 7); one capture excludes resolves to none, and files them as unfiled
             # too.
             slug = settled.get(resolution.root) or resolution.slug or digest.UNFILED
+        else:
+            # A directory that resolves to no root has no record standing in it to look up.
+            slug = resolution.slug or digest.UNFILED
         if slug not in newest or moment > newest[slug]:
             newest[slug] = moment
     return newest

@@ -155,6 +155,73 @@ def test_one_slugs_digests_run_once_per_directory_their_records_name(widget, ini
     assert result.taken == {"widget": 2}
 
 
+def _split_slug_setup(initialized, tmp_path) -> None:
+    """One project's slug holding digests of two directories' sessions, so its digests run
+    as two groups (DESIGN 7, F49)."""
+    second = (tmp_path / "yard" / "widget").resolve()
+    second.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-w1", "p_1", "widget")
+    assert queue.record_project(initialized, "claude", "s-w2", None, "widget", second)
+    digest(initialized, "widget", "2026-09-29-claude-s-w1", "2026-09-29T08:00:00Z")
+    digest(initialized, "widget", "2026-09-29-claude-s-w2", "2026-09-29T07:00:00Z")
+
+
+def test_one_slugs_group_reports_come_out_together(widget, initialized, tmp_path):
+    """One slug that runs as several groups keeps every group's work (DESIGN 7, F49): the
+    run hands back one report per slug with all the groups' items named, and the commit the
+    first group's run made is still the run's."""
+    _split_slug_setup(initialized, tmp_path)
+
+    def process(cfg, slug, digests):
+        return apply.ProjectRunReport(
+            project=slug,
+            commit="sha123",
+            added=[
+                apply.AddedFact(
+                    statement=f"fact from {digests[0].stem}",
+                    kind="state",
+                    source="observed",
+                    date="2026-09-29",
+                    refs=(),
+                    path="projects/widget/overview.md",
+                )
+            ],
+        )
+
+    result = schedule.run(initialized, process, now=NOW)
+
+    report = result.reports["widget"]
+    assert [fact.statement for fact in report.added] == [
+        "fact from 2026-09-29-claude-s-w2",
+        "fact from 2026-09-29-claude-s-w1",
+    ]
+    assert report.commit == "sha123"
+    assert result.taken == {"widget": 2}
+
+
+def test_a_failing_group_consumes_nothing_and_its_error_reaches_the_report(
+    widget, initialized, tmp_path
+):
+    """A slug whose groups split across directories counts only the digests the runs
+    actually consumed (DESIGN 7, F49): a group whose run failed consumed none of its
+    digests, so they wait again, and its error stands beside the group that went through."""
+    _split_slug_setup(initialized, tmp_path)
+
+    def process(cfg, slug, digests):
+        if "s-w1" in digests[0].name:
+            return apply.ProjectRunReport(project=slug, commit="sha123")
+        raise apply.ApplyError("the model endpoint said no")
+
+    result = schedule.run(initialized, process, now=NOW)
+
+    assert result.taken == {"widget": 1}
+    assert result.ran == ["widget"]
+    assert result.failures["widget"] == "the model endpoint said no"
+    report = result.reports["widget"]
+    assert report.commit == "sha123"
+    assert report.error == "the model endpoint said no"
+
+
 def test_recent_hand_edit_skips_the_project(widget, initialized):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
     hand_edit(initialized, NOW - timedelta(minutes=5))
