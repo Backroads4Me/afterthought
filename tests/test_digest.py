@@ -1963,17 +1963,18 @@ def test_the_work_reports_a_failure_as_a_nonzero_exit(session: Session, capsys):
 # --------------------------------------------------------- the prompt and the schema shipped
 
 
-def test_the_prompt_shipped_is_the_blessed_text():
-    """The shipped prompt is the blessed copy, byte for byte; a quiet rewrite is a new system.
-
-    The plan's M2.6 block held these words until F46 moved the prompt past it, and
-    planning/ is read-only for builders, so the copy that must match is held in the
-    fixtures and changes only when a ruling changes the prompt.
-    """
-    blessed = (Path(__file__).resolve().parent / "fixtures" / "digest-prompt.md").read_text(
-        encoding="utf-8"
-    )
-    assert digest.prompt_text() == blessed
+def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
+    """The plan's own words are the prompt; a quietly rewritten prompt is a new system."""
+    lines = PLAN.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(index for index, line in enumerate(lines) if line.startswith("- **Prompt**"))
+    stop = next(index for index, line in enumerate(lines) if line.startswith("- **Schema**"))
+    fences = [
+        index
+        for index, line in enumerate(lines[start:stop], start=start)
+        if line.strip() in ("```text", "```")
+    ]
+    assert len(fences) == 2, "the plan's prompt block is not the fenced pair this reads"
+    assert digest.prompt_text() == "".join(lines[fences[0] + 1 : fences[1]])
 
 
 def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
