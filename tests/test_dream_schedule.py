@@ -611,3 +611,54 @@ def test_a_recorded_directory_is_dated_under_the_name_its_record_settled(
     result = schedule.run(initialized, process, now=NOW)
     assert result.active == ["loose-widgets"]
     assert process.calls == [], "a session recorded under one name hid behind a fresh one"
+
+
+def test_a_session_below_the_root_dates_the_name_its_record_settled(widget, initialized, tmp_path):
+    """A session that runs below the root its digests file under, in a linked worktree, or
+    through a symlink is dated under the name its directory's session-start record settled
+    (DESIGN 7, F49): the record's name is looked up by the resolved root, so a session one
+    level deep holds back the right group instead of hiding behind a fresh answer."""
+    from aft.registry import Registry
+
+    claimer = tmp_path / "fieldwork" / "widgets"
+    claimer.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s0",
+        None,
+        "widgets",
+        claimer,
+        registry=Registry.load(initialized.registry_path),
+    )
+    # The directory the digest files under is a repository; another same-named directory
+    # claimed the plain name first, so the record settled its parent's name.
+    repo = make_repo(tmp_path / "elsewhere" / "widgets")
+    queue.record_project(
+        initialized,
+        "claude",
+        "s1",
+        None,
+        "widgets",
+        repo,
+        registry=Registry.load(initialized.registry_path),
+    )
+    assert queue.recorded_project(initialized, "claude", "s1").slug == "elsewhere-widgets"
+    run_git(["worktree", "add", "--detach", str(tmp_path / "tree"), "HEAD"], cwd=repo)
+    linked = tmp_path / "alias"
+    linked.symlink_to(repo, target_is_directory=True)
+    (repo / "src").mkdir()
+
+    digest(initialized, "elsewhere-widgets", "c", "2026-09-29T08:00:00Z")
+    moment = NOW - timedelta(minutes=3)
+    queue.enqueue(initialized, event(repo / "src", moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+    queue.enqueue(initialized, event(tmp_path / "tree", moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+    queue.enqueue(initialized, event(linked, moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+    assert result.active == ["elsewhere-widgets"]
+    assert process.calls == [], "a session below the root hid behind a fresh one"

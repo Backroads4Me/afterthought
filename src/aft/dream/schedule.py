@@ -451,9 +451,12 @@ def last_activity(config: Config) -> dict[str, datetime]:
     A directory is dated under the name its sessions' digests file under: the project it
     answers for when one exists, the name its session-start records settled when it answers
     for none and a record stands there, and a fresh answer the way the digest resolves it
-    when no record does (DESIGN 7, F49). The lookup records no alias: scheduling only
-    reads the registry. A directory that no longer exists, such as a removed worktree, has
-    no session left running in it and nothing to resolve, so it is passed over.
+    when no record does (DESIGN 7, F49). The record's name is looked up by the resolved
+    root, not the raw cwd: a session below the root, in a linked worktree, or reached
+    through a symlink holds back the group its digests file under. The lookup records no
+    alias: scheduling only reads the registry. A directory that no longer exists, such as
+    a removed worktree, has no session left running in it and nothing to resolve, so it
+    is passed over.
     """
     registry = Registry.load(config.registry_path)
     settled = queue.settled_slugs(config, registry)
@@ -474,7 +477,7 @@ def last_activity(config: Config) -> dict[str, datetime]:
             # F49). A directory of no record and of no project files its sessions as unfiled
             # (DESIGN 7); one capture excludes resolves to none, and files them as unfiled
             # too.
-            slug = settled.get(cwd) or resolution.slug or digest.UNFILED
+            slug = settled.get(resolution.root) or resolution.slug or digest.UNFILED
         if slug not in newest or moment > newest[slug]:
             newest[slug] = moment
     return newest
