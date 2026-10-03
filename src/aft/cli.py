@@ -1271,7 +1271,7 @@ def _start_output(agent: str, block: str, waiting: int) -> str:
     if not waiting or not block:
         return block
     noun = "note in memory waits" if waiting == 1 else "notes in memory wait"
-    notice = f"afterthought: {waiting} {noun} on your decision. Ask the agent to settle them."
+    notice = f'afterthought: {waiting} {noun} on your decision. Reply "settle" to go through them.'
     if agent == "claude":
         return json.dumps(
             {
