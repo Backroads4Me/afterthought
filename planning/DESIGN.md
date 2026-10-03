@@ -445,7 +445,10 @@ A deterministic filter turns each transcript chunk into evidence:
 - from tool output, keep only error and failure lines and `file:line` references
 - cap each message at about 1,500 characters
 - drop anything you marked off the record (section 12)
-- redact secrets (keys, tokens, private keys, credentials in URLs) and your own patterns
+- redact secrets whose shape alone says they are live credentials (private key blocks,
+  provider-prefixed tokens, `Authorization:` headers, bearer tokens, credentials in URLs)
+  and your own patterns; a value is never redacted for the name beside it, so a test
+  password or a token count stays
 - skip sessions with fewer than two prompts, and excluded paths
 - drop any line that repeats the project's memory block, which the session was given at
   start: memory reflected back is not new evidence, and counting it would confirm memory
@@ -867,6 +870,10 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
 - **Exclusions.** Paths and projects listed in `~/.afterthought/config.toml` are never
   captured.
 - **Redaction.** Built-in secret patterns plus your own patterns, applied before archiving.
+  The built-in patterns recognize a credential by its shape, never by a name such as
+  `password` or `token`; `capture.builtin_redaction = false` turns them off and leaves
+  your own patterns applied. It is on by default, because what capture keeps is copied
+  into the vault's git history and injected into later sessions.
 - **`aft forget session <id>`** removes the session from the evidence archive, the capture
   queue, the index and the digests, withdraws curated lines that rested only on it, and
   scrubs its quotes wherever afterthought copied them: page sources, reports and

@@ -317,7 +317,7 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
   `FAILED`, non-zero exit) and `path:line` references; cap each entry at 1,500 characters
   on a word boundary with ` [...]`; redact. Built-in redaction covers private key blocks,
   `sk-`/`ghp_`/`github_pat_`/`xox[bp]-`/AWS key ids, `Authorization:` headers,
-  `password=`-style assignments, and credentials in URLs, plus `capture.redact_patterns`.
+  and credentials in URLs, plus `capture.redact_patterns` (F43).
   Redacted text becomes `[redacted]`.
 - **Tests:** each marker form; a marker mid-sentence does nothing; an unclosed span runs to
   the end; a span opened in one chunk stays closed to capture in the next; each secret
@@ -984,6 +984,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   choice, a replacement refused without verified quotes and leaving no trace, the commands,
   the block's part and its cap, the hook's JSON for both agents and plain text with no notes,
   and the pi extension's notice. Review checkpoint: yes (injection, trust).
+- **F43 Redaction by shape only** (ruling 2026-10-03; FINDINGS T15). DESIGN 8, 12. The
+  name=value rule redacted any value whose name held password, secret, token, key or
+  credential, so token counts (`max_tokens`, `daily_token_budget`) and test passwords were
+  lost. Delete that rule and the mysql `-p` rule; the built-in patterns keep only shapes
+  that are credentials on their own (private key blocks, the prefixed token families,
+  `Authorization:` headers, bearer tokens, URL credentials). New setting
+  `capture.builtin_redaction` (bool, default true): false applies only
+  `capture.redact_patterns`, everywhere redaction runs (filter, worker digest, Claude
+  memory import). `aft forget pattern` is unchanged. Tests: `password = hunter2`,
+  `"max_tokens": 4000` and `daily_token_budget = 200_000` survive; every prefixed token,
+  key block, header and URL credential is still redacted; with the setting false a
+  `ghp_` token survives and a configured pattern still redacts; the setting loads,
+  defaults to true and refuses a non-boolean. Existing tests that relied on the deleted
+  rules change to assert the value survives. Review checkpoint: no (lead reads it).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
