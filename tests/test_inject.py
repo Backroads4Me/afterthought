@@ -242,7 +242,8 @@ A widget that turns water into widgets.
 
 {PAGES}
 
-Search memory: aft search "<words>". Read a page: aft read <path>."""
+Search memory: aft search "<words>". Read a page: aft read <path>.
+{inject.RECORD_MARKERS}"""
 
 
 def write(path: Path, text: str) -> Path:
@@ -397,7 +398,7 @@ def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
     parts = parts_of(block)
     assert parts["## Preferences"] == ["- Prefer short commits."]
     assert parts["## Pages"] == PAGES.splitlines()
-    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
     assert 1 < len(parts["## Facts"]) < 200
 
 
@@ -429,7 +430,7 @@ def test_a_long_preferences_page_cannot_bury_the_page_map(widget, tmp_path):
     assert len(block) <= widget.settings.inject.max_chars
     parts = parts_of(block)
     assert parts["## Pages"] == PAGES.splitlines()
-    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
     assert len(parts["## Facts"]) == 20
     assert 1 < len(parts["## Preferences"]) < 150
 
@@ -448,7 +449,7 @@ def test_a_hundred_pages_cannot_starve_the_project_layers(widget, tmp_path):
     assert parts["## State"] == ["- The daemon listens on 8123. (disputed)"]
     assert parts["## Facts"] == ["- The widget is round."]
     assert parts["## Preferences"] == ["- Prefer short commits."]
-    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
 
 
 def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path):
@@ -491,7 +492,7 @@ def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path
     assert parts["## Preferences"]
     assert parts["## Preferences"] == uncapped["## Preferences"][: len(parts["## Preferences"])]
     assert len(parts["## Preferences"]) > len(parts["## Pages"])
-    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
     for heading in ("## Pages", "## Facts"):
         assert len(parts[heading]) < len(uncapped[heading])
         assert parts[heading] == uncapped[heading][: len(parts[heading])]
@@ -529,7 +530,7 @@ def test_one_over_long_line_costs_only_itself(widget, tmp_path):
     assert parts["## Preferences"] == ["- Prefer short commits."]
     assert parts["## Pages"] == [PAGES.splitlines()[1]]
     assert parts["## Facts"] == [f"- Fact {number} is short enough to show." for number in range(3)]
-    assert parts[inject.HOW_TO] == [inject.HOW_TO]
+    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
 
 
 def test_a_budget_below_the_floors_reports_the_cut(widget, tmp_path):
@@ -563,7 +564,7 @@ def test_an_over_grown_page_map_drops_whole_pointer_lines(widget, tmp_path):
     assert len(kept) < len(whole)
     assert kept == whole[: len(kept)]
     assert len("## Pages\n\n" + "\n".join(kept)) <= widget.settings.inject.max_chars // 2
-    assert block.endswith(inject.HOW_TO)
+    assert block.endswith(inject.RECORD_MARKERS)
 
 
 def test_a_digest_in_an_unpadded_month_still_loses_to_a_later_one(widget, tmp_path):
@@ -659,7 +660,10 @@ def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path)
     resolution = resolve(widget, outside)
     assert resolution.kind == keys.UNREGISTERED
     assert inject.build(widget, resolution) == (
-        "## Preferences\n\n- Prefer short commits.\n\n" + inject.HOW_TO
+        "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.HOW_TO
+        + "\n"
+        + inject.RECORD_MARKERS
     )
 
 
@@ -679,7 +683,12 @@ def test_absent_pages_leave_the_block_with_what_exists(widget, tmp_path):
     (widget.vault / "projects/widget/overview.md").unlink()
     (widget.vault / "global/preferences.md").unlink()
     assert inject.build(widget, resolve(widget, tmp_path / "widget")) == (
-        "# Memory: Widget\n\n## Pages\n\n" + PAGES + "\n\n" + inject.HOW_TO
+        "# Memory: Widget\n\n## Pages\n\n"
+        + PAGES
+        + "\n\n"
+        + inject.HOW_TO
+        + "\n"
+        + inject.RECORD_MARKERS
     )
 
 
@@ -778,7 +787,11 @@ def test_inject_prints_what_it_has_elsewhere(widget, tmp_path, capsys, monkeypat
     plain.mkdir()
     assert main(["inject", str(plain)]) == 0
     assert capsys.readouterr().out == (
-        "## Preferences\n\n- Prefer short commits.\n\n" + inject.HOW_TO + "\n"
+        "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.HOW_TO
+        + "\n"
+        + inject.RECORD_MARKERS
+        + "\n"
     )
 
 
@@ -872,7 +885,13 @@ def test_a_session_start_hook_elsewhere_prints_what_inject_prints_there(
     plain.mkdir()
     assert main(["inject", str(plain)]) == 0
     injected = capsys.readouterr().out
-    assert injected == "## Preferences\n\n- Prefer short commits.\n\n" + inject.HOW_TO + "\n"
+    assert injected == (
+        "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.HOW_TO
+        + "\n"
+        + inject.RECORD_MARKERS
+        + "\n"
+    )
 
     assert run_session_start(monkeypatch, capsys, name, agent, event, plain) == injected
 
@@ -1271,7 +1290,7 @@ def test_notes_waiting_come_first_and_the_layers_make_their_room(widget, tmp_pat
     assert len(block) <= cap
     head = "# Memory: Widget\nA widget that turns water into widgets."
     assert block.startswith(f"{head}\n\n## {inject.NOTES_HEADING}\n\n{inject.notes_line(2)}\n\n")
-    assert block.endswith(inject.HOW_TO)
+    assert block.endswith(inject.RECORD_MARKERS)
 
 
 def test_a_cap_too_small_for_the_notes_says_the_rest_was_cut(widget, tmp_path):
@@ -1281,3 +1300,129 @@ def test_a_cap_too_small_for_the_notes_says_the_rest_was_cut(widget, tmp_path):
     parts = parts_of(inject.build(config, resolve(config, tmp_path / "widget")))
     assert f"## {inject.NOTES_HEADING}" not in parts
     assert parts[f"## {inject.CUT_HEADING}"] == [inject.CUT_NOTE]
+
+
+# --------------------------------------------------------------------- F44 marker line
+
+
+def test_the_block_ends_with_the_marker_line(widget, tmp_path):
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert block.endswith(inject.RECORD_MARKERS)
+
+
+def test_the_closing_line_survives_under_every_budget(widget, tmp_path):
+    resolution = resolve(widget, tmp_path / "widget")
+    for cap in (800, 1200, 2000, 8000):
+        config = dataclasses.replace(
+            widget, settings=dataclasses.replace(widget.settings, inject=InjectConfig(cap))
+        )
+        block = inject.build(config, resolution)
+        assert block.endswith(inject.RECORD_MARKERS), f"cap {cap} lost the marker line"
+
+
+def test_echo_filter_drops_repeated_marker_line(widget, tmp_path):
+    from datetime import UTC, datetime
+
+    from aft import digest
+    from aft.readers import Entry
+
+    resolution = resolve(widget, tmp_path / "widget")
+    memory = digest.memory_lines(widget, resolution)
+    assert digest._echo_key(inject.RECORD_MARKERS) in memory
+
+    now = datetime(2026, 10, 3, 2, 0, tzinfo=UTC)
+    entries = [
+        Entry(
+            "e1",
+            now,
+            "assistant",
+            f"Note:\n{inject.RECORD_MARKERS}\nLet us write code.",
+            False,
+        ),
+        Entry("e2", now, "user", inject.RECORD_MARKERS, False),
+    ]
+    kept = digest.without_memory_echo(entries, memory)
+    assert len(kept) == 1
+    assert kept[0].id == "e1"
+    assert inject.RECORD_MARKERS not in kept[0].text
+    assert kept[0].text == "Note:\nLet us write code."
+
+
+def test_off_the_record_filter_not_triggered_by_marker_line():
+    from aft import filter as filtermod
+
+    assert filtermod.OFF_MARKER.match(inject.RECORD_MARKERS) is None
+    assert filtermod.ON_MARKER.match(inject.RECORD_MARKERS) is None
+
+
+def test_block_at_400_with_own_preferences_and_pages_reports_cut():
+    title = [("my-project", ["A test project."])]
+    own = [
+        ("State", ["- Doing something in state section here now."]),
+        ("Facts", ["- Something is true in facts section here."]),
+    ]
+    preferences = [("Preferences", ["- Prefer concise output always and everywhere."])]
+    page_map = [("Pages", ["- Other: something else (aft read other.md)."])]
+    block = inject._block(title, own, preferences, page_map, 400)
+    assert len(block) <= 400
+    assert f"## {inject.CUT_HEADING}" in block
+    assert block.endswith(inject.RECORD_MARKERS)
+
+
+@pytest.mark.parametrize("max_chars", [250, 300, 400, 500, 600, 800, 1200, 2000, 8000])
+@pytest.mark.parametrize("with_waiting", [False, True])
+def test_block_closing_markers_and_cut_notice_across_budgets(max_chars, with_waiting):
+    title = [("my-project-long", ["A test project."])]
+    waiting = (
+        [("Needs your decision", ["- Note 1: some decision to make (aft note resolve rv-1)"])]
+        if with_waiting
+        else []
+    )
+    own = [
+        ("State", ["- Doing something in state section here now."]),
+        ("Facts", ["- Something is true in facts section here."]),
+    ]
+    preferences = [("Preferences", ["- Prefer concise output always and everywhere."])]
+    recent = [
+        ("Recent (last 3 sessions, newest 2026-10-02)", ["- A recent thing happened in session."])
+    ]
+    page_map = [("Pages", ["- Other: something else (aft read other.md)."])]
+
+    block = inject._block(
+        title, own, preferences, page_map, max_chars, recent=recent, waiting=waiting
+    )
+    assert len(block) <= max_chars
+
+    # No line is split: every line in block is a complete intact line
+    all_input_lines = {
+        line
+        for part in [*title, *waiting, *own, *preferences, *recent, *page_map]
+        for line in part[1]
+    }
+    all_input_lines.update([inject.HOW_TO, inject.RECORD_MARKERS, inject.CUT_NOTE])
+    for line in block.splitlines():
+        if line and not line.startswith("#"):
+            assert line in all_input_lines
+
+    # The block ends with RECORD_MARKERS whenever max_chars is at least the title plus closing
+    full_closing = [("", [inject.HOW_TO, inject.RECORD_MARKERS])]
+    head = inject._trim(title, max_chars)
+    if max_chars >= inject._width([*head, *full_closing]):
+        assert block.endswith(inject.RECORD_MARKERS)
+
+    # Every input layer that had a line is either present or ## Cut is present
+    layers = [
+        ("waiting", waiting),
+        ("own", own),
+        ("preferences", preferences),
+        ("recent", recent),
+        ("page_map", page_map),
+    ]
+    cut_present = f"## {inject.CUT_HEADING}" in block
+    for name, layer in layers:
+        had_line = any(lines for _, lines in layer)
+        if had_line:
+            present = any(any(line in block for line in lines) for _, lines in layer)
+            assert present or cut_present, (
+                f"layer {name} missing and no Cut under mc={max_chars}, waiting={with_waiting}"
+            )

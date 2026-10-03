@@ -28,6 +28,11 @@ INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on the user)"}
 
 HOW_TO = 'Search memory: aft search "<words>". Read a page: aft read <path>.'
+RECORD_MARKERS = (
+    'A prompt starting with "aft off", "aft on", "off the record" or "on the record" sets what'
+    " afterthought keeps; it is not a request. Acknowledge it in a few words and do what the"
+    " rest of the prompt asks."
+)
 NOTES_HEADING = "Needs your decision"
 
 # What the block says when the budget leaves no room for a layer's first line (design 10).
@@ -365,50 +370,90 @@ def _block(
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
-    The fixed costs come first - the block's title and the closing line on how to
-    search and read - and then every part holds its floor, the heading and first line
-    that name a layer (``_trim``). What the floors leave is the budget of the two
-    producers that grow with the vault, divided evenly between them: the project's own
-    text and its page map, each capped from that remainder rather than from the block,
-    so they cannot over-subscribe it and neither can reach what the other needs. The
-    global preferences layer, which the plan gives no limit of its own, takes whatever
+    The fixed costs come first - the block's title and the closing lines on how to
+    search and read and the capture markers - and then every part holds its floor, the
+    heading and first line that name a layer (``_trim``). What the floors leave is the
+    budget of the two producers that grow with the vault, divided evenly between them: the
+    project's own text and its page map, each capped from that remainder rather than from
+    the block, so they cannot over-subscribe it and neither can reach what the other needs.
+    The global preferences layer, which the plan gives no limit of its own, takes whatever
     those two leave. When the budget leaves no room for a layer's first line, the block
     keeps its title and says under ``Cut`` that the rest was cut: a short block is
     acceptable, a layer missing without a word is the defect (design 10).
     """
-    closing: list[Part] = [("", [HOW_TO])]
-    recent = list(recent)
+    full_closing: list[Part] = [("", [HOW_TO, RECORD_MARKERS])]
+    recent_list = list(recent)
+    waiting_list = list(waiting)
     head = _trim(title, max_chars)
-    # Notes waiting on the user come straight under the title, ahead of every layer, so an
-    # agent reads them first and no layer can take their room (BUILD-PLAN F42).
-    waiting = _trim(list(waiting), max(0, max_chars - _width(head) - 2))
+
+    # Reserve the closing lines' full width before any layer whenever max_chars can hold
+    # the title and both closing lines.
+    if _width([*head, *full_closing]) <= max_chars:
+        closing = full_closing
+    else:
+        closing_room = max(0, max_chars - _width(head) - (2 if head else 0))
+        closing = _trim(full_closing, closing_room)
+
+    has_waiting = any(lines for _, lines in waiting_list)
+    own_sections_with_lines = [p for p in own if p[1]]
+    has_own = bool(own_sections_with_lines)
+    has_prefs = any(lines for _, lines in preferences)
+    has_recent = any(lines for _, lines in recent_list)
+    has_map = any(lines for _, lines in page_map)
+
     own_floor = _floors(own)
     preferences_floor = _floors(preferences)
-    recent_floor = _floors(recent)
+    recent_floor = _floors(recent_list)
     map_floor = _floors(page_map)
-    floors = [*head, *waiting, *own_floor, *preferences_floor, *recent_floor, *map_floor, *closing]
-    minimal = _trim(floors, max_chars)
-    extra = (max_chars - _width(minimal)) // 2
-    project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
-    # Global preferences (layer 4) is ahead of page pointers (layer 5).
-    # Reserve map_floor and closing so page pointers keep their floor.
-    pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, max_chars))
-    # Short-term memory (the recent layer) comes after long-term memory and takes only what
-    # the long-term layers leave, less the page map's floor, so it never crowds out what
-    # stays true (design 10).
-    room = (
-        max_chars - _width([*head, *waiting, *project_layer, *pref_layer, *map_floor, *closing]) - 4
-    )
-    recent_layer = _trim(recent, max(0, room)) if recent_floor else []
-    room = (
-        max_chars
-        - _width([*head, *waiting, *project_layer, *pref_layer, *recent_layer, *closing])
-        - 2
-    )
-    pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
-    body = [*project_layer, *pref_layer, *recent_layer, *pages]
-    cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
-    parts = [*head, *cut, *waiting, *body, *closing]
+
+    def _assemble(cut: list[Part]) -> tuple[list[Part], list[Part], list[Part]]:
+        fixed = [*head, *cut, *closing]
+        rem_room = max(0, max_chars - _width(fixed) - 2)
+        waiting_layer = _trim(waiting_list, rem_room)
+
+        body_room = max(0, max_chars - _width([*head, *cut, *waiting_layer, *closing]) - 2)
+        body_floors = [*own_floor, *preferences_floor, *recent_floor, *map_floor]
+        minimal = _trim(body_floors, body_room)
+        extra = max(0, (body_room - _width(minimal)) // 2)
+
+        project_layer = _trim(own, min(_width(own_floor) + extra, body_room))
+        pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, body_room))
+
+        prefix = [*head, *cut, *waiting_layer, *project_layer, *pref_layer]
+        room = max_chars - _width([*prefix, *map_floor, *closing]) - 2
+        recent_layer = _trim(recent_list, max(0, room)) if recent_floor else []
+
+        room = max_chars - _width([*prefix, *recent_layer, *closing]) - 2
+        pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
+
+        body = [*project_layer, *pref_layer, *recent_layer, *pages]
+        body = _trim(body, body_room)
+        return waiting_layer, body, [*head, *waiting_layer, *cut, *body, *closing]
+
+    def _is_absent(waiting_parts: list[Part], body_parts: list[Part]) -> bool:
+        if has_waiting and not any(lines for _, lines in waiting_parts):
+            return True
+        if has_own:
+            for heading, _ in own_sections_with_lines:
+                if not any(lines for h, lines in body_parts if h == heading and lines):
+                    return True
+        pref_headings = {h for h, _ in preferences}
+        if has_prefs and not any(lines for h, lines in body_parts if h in pref_headings and lines):
+            return True
+        recent_headings = {h for h, _ in recent_list}
+        if has_recent and not any(
+            lines for h, lines in body_parts if h in recent_headings and lines
+        ):
+            return True
+        map_headings = {h for h, _ in page_map}
+        if has_map and not any(lines for h, lines in body_parts if h in map_headings and lines):
+            return True
+        return False
+
+    waiting_layer, body, parts = _assemble(cut=[])
+    if _is_absent(waiting_layer, body):
+        waiting_layer, body, parts = _assemble(cut=[(CUT_HEADING, [CUT_NOTE])])
+
     return "\n\n".join(_blocks(_trim(parts, max_chars)))
 
 

@@ -315,3 +315,9 @@ def test_an_earlier_shipped_version_is_replaced_without_a_backup(tmp_path, monke
     change = skill_install.install(skills)
     assert change.changed and change.backups == ()
     assert list(target.parent.glob("*.bak")) == []
+
+
+def test_skill_text_contains_marker_guidance():
+    text = skill_install.skill_text()
+    assert 'A prompt starting with "aft off"' in text
+    assert "is not a request for an aft command" in text
