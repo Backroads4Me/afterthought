@@ -71,10 +71,25 @@ OFF_FORMS = [
     "aft off.",
     "aft off: ",
     "  aft off",
+    "/aft off",
+    "/AFT OFF",
+    "/aft off.",
+    "/aft off: ",
+    "  /aft off",
     "off the record",
     "Off The Record!",
 ]
-ON_FORMS = ["aft on", "AFT ON", "aft on.", "on the record", "On The Record?"]
+ON_FORMS = [
+    "aft on",
+    "AFT ON",
+    "aft on.",
+    "/aft on",
+    "/AFT ON",
+    "/aft on.",
+    "  /aft on",
+    "on the record",
+    "On The Record?",
+]
 
 
 @pytest.mark.parametrize("marker", OFF_FORMS)
@@ -100,6 +115,36 @@ def test_each_on_marker_form_ends_a_span(marker, cfg):
         answered("back to it", "e5"),
     ]
     assert kept(entries, cfg) == ["the plan", "back to it"]
+
+
+def test_slash_off_the_record_is_not_a_marker(cfg):
+    # /off the record is not a form anyone types and need not match (BUILD-PLAN F45).
+    entries = [
+        said("/off the record", "e1"),
+        said("still on the record", "e2"),
+    ]
+    assert kept(entries, cfg) == ["/off the record", "still on the record"]
+
+
+def test_slash_aft_offline_does_not_start_a_span(cfg):
+    entries = [
+        said("/aft offline", "e1"),
+        said("still on the record", "e2"),
+    ]
+    assert kept(entries, cfg) == ["/aft offline", "still on the record"]
+
+
+def test_slash_command_with_other_arguments_does_not_start_a_span(cfg):
+    entries = [
+        said("/aft status", "e1"),
+        said("/plan rewrite scheduler", "e2"),
+        said("still on the record", "e3"),
+    ]
+    assert kept(entries, cfg) == [
+        "/aft status",
+        "/plan rewrite scheduler",
+        "still on the record",
+    ]
 
 
 def test_a_hyphen_joined_marker_phrase_changes_nothing(cfg):
