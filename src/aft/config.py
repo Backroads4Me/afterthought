@@ -309,13 +309,13 @@ retention_days = 90
 interval_minutes = 30
 quiet_minutes = 15
 # Short-term memory (projects/<slug>/recent.md) holds what the project's last few sessions
-# were working with. A line rolls off once its newest source is older than this many of
-# the project's sessions, counted in sessions and never in days, and becomes long-term
-# memory once its sources are this many sessions apart.
+# were working with. A line leaves once its newest source has left this many of the
+# project's sessions, and becomes long-term memory once its sources are this many
+# sessions apart.
 short_term_sessions = 5
 # Short-term memory also expires by age, so a project that stops having sessions does not
 # keep what it was last working with for good: a line whose newest source is older than
-# this many days rolls off at the project's next dream run.
+# this many days expires at a dream run, whether or not the project has digests waiting.
 short_term_days = 7
 
 [work]

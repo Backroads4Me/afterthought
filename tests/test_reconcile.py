@@ -10,7 +10,7 @@ session's words do not back changes nothing and is reported.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -518,6 +518,37 @@ def test_a_part_per_cap_two_calls_two_withdrawals(cfg, fake):
     ]
     body = (cfg.vault / RECENT).read_text()
     assert body.count("withdrawn 2026-10-05") == 2
+
+
+def test_the_budget_stops_the_parts_left(cfg, fake, home):
+    """The budget is checked before each part, not once for the whole step: a session of
+    many parts stops at the day's last affordable call, and the parts after it wait for
+    the next day instead of spending into a budget already used up."""
+    two_lines(cfg)
+    long_entries(
+        cfg,
+        FILLER * 300 + "The hook rewrite is paused.",
+        FILLER * 300 + "The flaky test is quarantined.",
+    )
+    config = budget_config(cfg, home)
+    # The ledger stamps every call with the real clock, so the run's clock here is the
+    # real day's start: the pre-spend and the first call's own tokens both count within
+    # it, and the check before the second part sees the budget already used up.
+    now = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    spend(config, 100)
+    fake.script = [
+        answer(1, "The hook rewrite is paused.", "e50"),
+        answer(2, "The flaky test is quarantined.", "e51"),
+    ]
+    rep = apply.ProjectRunReport(project=SLUG)
+    digest = session_digest(cfg, 10, waiting=True)
+    reconcile.run(config, config.vault, SLUG, [digest], TODAY, rep, lambda p: None, now=now)
+    assert len(fake.requests) == 1, "the day's last affordable call, not every part"
+    assert [w.statement for w in rep.withdrawn] == ["The hook rewrite is paused."]
+    assert (
+        "The flaky test is quarantined. [observed] 2026-10-02 [^r1]"
+        in (config.vault / RECENT).read_text()
+    )
 
 
 def test_the_lines_hold_their_numbers_across_parts(cfg, fake):

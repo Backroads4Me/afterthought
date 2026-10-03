@@ -884,6 +884,66 @@ def _short_term(
     # stands struck as the record of what the newest session showed, and the backstop
     # would strike the same line again in one run and list it twice in the report.
     settled = {line.statement for line in report.withdrawn}
+    if _expired_lines(config, vault_path, doc, report, today, settled, record_write):
+        changed = True
+    if changed:
+        record_write(recent)
+        recent.write_text(doc.render(), encoding="utf-8")
+
+
+def expire_short_term(
+    config: Config, slug: str, now: datetime | None = None
+) -> tuple[ProjectRunReport, list[str]] | None:
+    """Expire one project's short-term lines whose days are spent, and write the page.
+
+    The same expiry a project's own run applies, for a project with nothing waiting: its
+    sessions stopped, so no run applies its digests, and its stale lines would wait for a
+    digest that never comes (DESIGN 6, R10). A note under an expiring line moves to the
+    archive first, the way roll-off moves one. Returns the report and the vault-relative
+    paths it wrote, or None when the page has nothing to expire.
+    """
+    vault_path = config.vault.resolve()
+    recent = vault_path / "projects" / slug / page.RECENT_PAGE
+    if not recent.exists():
+        return None
+    now = now or datetime.now(UTC)
+    report = ProjectRunReport(project=slug)
+    written: list[str] = []
+
+    def record_write(p: Path) -> None:
+        rel = p.relative_to(vault_path).as_posix()
+        if rel not in written:
+            written.append(rel)
+
+    doc = pagewrite.PageDoc.read(recent, vault=vault_path)
+    if not _expired_lines(
+        config, vault_path, doc, report, now.date().isoformat(), set(), record_write
+    ):
+        return None
+    record_write(recent)
+    recent.write_text(doc.render(), encoding="utf-8")
+    return report, written
+
+
+def _expired_lines(
+    config: Config,
+    vault_path: Path,
+    doc: pagewrite.PageDoc,
+    report: ProjectRunReport,
+    today: str,
+    settled: set[str],
+    record_write,
+) -> bool:
+    """Take every line whose newest source is older than ``dream.short_term_days`` off the
+    page ``doc`` holds, and say whether anything went.
+
+    One line at a time, its dates read from the page as it stands, so a line's leaving does
+    not disturb the dates the rest are judged by. A note under an expiring line moves to
+    the archive first, the way roll-off moves one, so nothing a person typed there is lost.
+    A line the caller names in ``settled`` stays: the reconcile withdrew it in this run
+    already, and the report must not list it twice.
+    """
+    changed = False
     while True:
         going = next(
             (
@@ -895,7 +955,7 @@ def _short_term(
             None,
         )
         if going is None:
-            break
+            return changed
         if going.callouts:
             record_write(doc._archive_file())
             doc.resolve_callout(going)
@@ -903,9 +963,6 @@ def _short_term(
         doc.remove_short_term(going)
         report.expired.append(ExpiredLine(statement=going.statement))
         changed = True
-    if changed:
-        record_write(recent)
-        recent.write_text(doc.render(), encoding="utf-8")
 
 
 def _expired(

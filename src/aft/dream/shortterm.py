@@ -1,14 +1,15 @@
 """Where a line of short-term memory stands in its project's sessions (DESIGN 6, R10).
 
-Short-term memory is counted in sessions, never in days. A project's sessions are its
-primary sessions that have a digest, in session order, whatever happened in them. Each
-line's sources name the sessions it was said or seen in, and two numbers follow from them:
+Short-term memory is counted in sessions, with a day backstop: a line whose newest source
+is older than ``dream.short_term_days`` days expires too, so a project with no new
+sessions does not keep stale short-term memory. A project's sessions are its primary
+sessions that have a digest, in session order, whatever happened in them. Each line's
+sources name the sessions it was said or seen in, and two numbers follow from them:
 
 * the line stays on ``recent.md`` while its newest source is one of the project's last
   ``dream.short_term_sessions`` sessions, and rolls off once it is not;
 * the line becomes long-term memory once its oldest and newest sources are at least that
   many sessions apart: it stayed true through more than a full window.
-
 Everything here reads files only; ``aft.dream.apply`` makes the edits.
 """
 

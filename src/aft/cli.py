@@ -790,6 +790,10 @@ def _dream(config: Config) -> None:
         print(f"aft dream: committed hand edits as {result.checkpoint[:12]}")
     if result.tagged:
         print(f"aft dream: tagged hand-typed lines [stated] in {', '.join(result.tagged)}")
+    for slug in result.expired:
+        rep = result.reports.get(slug)
+        n = len(rep.expired) if rep is not None else 0
+        print(f"aft dream: {slug}: expired {n} short-term line(s)")
     for slug in result.ran:
         print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
     for slug, err in result.failures.items():

@@ -104,8 +104,6 @@ def run(
     entries = evidence.entries(config, session_id, agent=agent)
     if not entries:
         return
-    if model.tokens_used_today(config, now) >= config.settings.work.daily_token_budget:
-        return
     system = prompt()
     preamble = _numbered(numbered)
     answer_schema = schema()
@@ -114,6 +112,11 @@ def run(
     budget = max(1, digest.MAX_CHUNK_TOKENS - digest.tokens(system) - digest.tokens(preamble))
     cap = max_tokens(answer_schema)
     for part in digest.split_parts(entries, budget):
+        # The daily cap counts the reconcile's calls with the digests' (DESIGN 13), so it
+        # is checked before each part: a session of many parts stops at the day's last
+        # affordable call instead of spending into a budget it has already used up.
+        if model.tokens_used_today(config, now) >= config.settings.work.daily_token_budget:
+            break
         answer = model.complete_json(
             config, system, _user_message(preamble, part), answer_schema, cap
         )

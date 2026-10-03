@@ -1,10 +1,10 @@
-"""Short-term memory in the dream (BUILD-PLAN F31; DESIGN 6, DESIGN 9 R10).
+"""Short-term memory in the dream (BUILD-PLAN F31, F47; DESIGN 6, DESIGN 9 R10).
 
 A short-term fact lands on ``projects/<slug>/recent.md`` and edits long-term memory only to
 confirm it. A short-term line rolls off once its newest source leaves the project's last
-``dream.short_term_sessions`` sessions, counted in sessions and never in days, and becomes
-long-term when its sources are that many sessions apart or a later long-term fact confirms
-it.
+``dream.short_term_sessions`` sessions, expires once its newest source is older than
+``dream.short_term_days`` days, and becomes long-term when its sources are that many
+sessions apart or a later long-term fact confirms it.
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ def cfg(initialized, home, fake) -> configmod.Config:
     registry = Registry.load(config.registry_path)
     registry.add(SLUG, "Widget")
     registry.save()
+    # The real `aft project add` commits the registry, so the vault is clean here too.
+    vault.commit(config.vault, ["registry.yaml"], f"aft: register {SLUG}")
     seed_overview(
         config,
         SLUG,
@@ -229,11 +231,6 @@ def test_a_line_rolls_off_once_its_newest_session_leaves_the_window(cfg, fake):
     unrelated_waiting(cfg, 6)
     fake.script = [reply("skip"), LINES_REPLY]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
-    print("REP.ERROR:", rep.error)
-    print("REP.ROLLED:", rep.rolled_off)
-    print("REP.EXPIRED:", rep.expired)
-    print("REP.WITHDRAWN:", rep.withdrawn)
-    print("REP.REFUSED:", rep.refused)
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert [r.statement for r in rep.rolled_off] == ["The hook rewrite is paused."]
     assert "The hook rewrite is paused." not in (cfg.vault / RECENT).read_text()
@@ -330,6 +327,40 @@ def test_the_backstop_is_the_configured_number_of_days(cfg, fake, home):
     assert "The hook rewrite is paused." in recent_text(config)
 
 
+def test_a_project_with_nothing_waiting_expires_its_spent_line(cfg, fake):
+    """The backstop as maintenance (BUILD-PLAN F47): a project whose sessions stopped gets
+    no dream run, so a run with nothing waiting expires its lines all the same, through the
+    same expiry, in its own commit, reported under the project's name."""
+    session_digest(cfg, 1)
+    paused_line(cfg, "s1", at=NOW - timedelta(days=10))
+    fake.script = []
+    run = schedule.run(cfg, now=NOW)
+    assert fake.requests == [], "nothing waits, so nothing is decided or reconciled"
+    assert run.expired == [SLUG]
+    assert "The hook rewrite is paused." not in recent_text(cfg)
+    subjects = run_git(["log", "--format=%s"], cfg.vault).splitlines()
+    assert subjects[0] == f"aft: report {SLUG}"
+    assert "aft: expire short-term memory widget" in subjects
+    assert lint.lint_vault(cfg.vault) == []
+    section = (cfg.vault / "reports" / "2026" / "10" / "2026-10-05.md").read_text()
+    assert "# widget" in section
+    assert 'Expired: "The hook rewrite is paused."' in section
+    assert "git revert" in section
+
+
+def test_a_project_with_nothing_waiting_keeps_its_fresh_line(cfg, fake):
+    """The backstop expires by days, not by idleness: a line whose days are not spent stays
+    on a project nothing is waiting for, and the run writes nothing for it."""
+    session_digest(cfg, 1)
+    paused_line(cfg, "s1", at=NOW - timedelta(days=7))
+    fake.script = []
+    before = run_git(["rev-parse", "HEAD"], cfg.vault)
+    run = schedule.run(cfg, now=NOW)
+    assert run.expired == []
+    assert "The hook rewrite is paused." in recent_text(cfg)
+    assert run_git(["rev-parse", "HEAD"], cfg.vault) == before
+
+
 def test_a_rolled_off_line_is_still_found_in_its_digest(cfg, fake):
     session_digest(
         cfg,
@@ -369,6 +400,46 @@ def test_a_rolled_off_line_takes_its_note_to_the_archive(cfg, fake):
     assert "The hook rewrite is paused." not in recent_text(cfg)
     archived = (cfg.vault / "archive" / RECENT).read_text()
     assert "My answer: it stays paused." in archived
+
+
+def test_an_expiring_line_takes_its_note_to_the_archive(cfg, fake):
+    """The note under an expiring line moves to the archive before the line goes, the way
+    roll-off moves one: an answer typed there is never lost, and the conflict it recorded
+    is closed off needs-you."""
+    session_digest(cfg, 1)
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="s1",
+        project_id=None,
+        entries=[
+            Entry(
+                id="e70",
+                time=NOW - timedelta(days=10),
+                role=USER,
+                text="The hook rewrite is paused.",
+                is_error=False,
+            )
+        ],
+    )
+    seed_recent(
+        cfg,
+        [
+            "- The hook rewrite is paused. [observed] 2026-10-01 [^r0]",
+            "",
+            "> [!conflict] 2026-10-01",
+            "> Another session says it resumed.",
+            "> My answer: it stays paused.",
+        ],
+        [source("r0", "s1", "The hook rewrite is paused.", entry="e70")],
+    )
+    fake.script = []
+    schedule.run(cfg, now=NOW)
+    assert "The hook rewrite is paused." not in recent_text(cfg)
+    archived = (cfg.vault / "archive" / RECENT).read_text()
+    assert "My answer: it stays paused." in archived
+    assert "Nothing is waiting on you." in (cfg.vault / "reports" / "needs-you.md").read_text()
+    assert lint.lint_vault(cfg.vault) == []
 
 
 # --------------------------------------------------------------------- to long-term memory

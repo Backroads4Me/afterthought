@@ -61,10 +61,10 @@ three signals across two separate sessions. They never replace a line on their o
 - **Short-term memory** is what the project's last few sessions were working with: who is
   doing what, what is paused and why, a setting changed for a test. It lives on
   `projects/<slug>/recent.md` and is shown in its own "Recent" section of the memory block.
-  It is counted in sessions, never in days: a line rolls off once it has not come up in
-  the project's last `dream.short_term_sessions` sessions (5 by default). A line also
-  expires when its newest source is older than `dream.short_term_days` days (7 by
-  default), so a project you leave alone does not greet the next session with stale
+  A line rolls off once it has not come up in the project's last
+  `dream.short_term_sessions` sessions (5 by default), and a line whose newest source is
+  older than `dream.short_term_days` days (7 by default) expires too, so a project you
+  leave alone does not greet the next session with stale
   short-term memory. Rolling off and expiring are not forgetting: the line's evidence
   stays in its digest and in the archive, where search still finds it. The block shows
   the date of the newest session beside the lines, so the agent can judge them.
