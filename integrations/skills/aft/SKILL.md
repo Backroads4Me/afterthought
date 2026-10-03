@@ -1,6 +1,6 @@
 ---
 name: aft
-description: Afterthought, the user's shared memory for coding agents, run through the aft command. Use when the user asks what memory holds or what agents remember, to search or read memory, to settle the notes memory has waiting on the user's decision, to forget a session or redact text, to rebuild a digest, to pause or resume background work, to check or reset the token budget, to register, rename or remove a project, or to import reference documentation or a specification collection into the afterthought library.
+description: Afterthought, the user's shared memory for coding agents, run through the aft command. Use when the user asks what memory holds or what agents remember, to search or read memory, to settle the notes memory has waiting on the user's decision, to review what memory keeps, to forget a session or redact text, to rebuild a digest, to pause or resume background work, to check or reset the token budget, to register, rename or remove a project, or to import reference documentation or a specification collection into the afterthought library.
 ---
 
 # aft
@@ -45,6 +45,7 @@ command has `--dry-run`, show its output first.
 | To register a directory | `aft project add <path>` |
 | To rename a project | `aft project rename <old> <new>` |
 | To settle a note waiting on them | `aft settle <where> --keep`, `aft settle <where> --withdraw`, or `aft settle <where> --replace <statement>`, where is the note's page and line as `aft notes` prints them; follow "Notes waiting on the user" below |
+| To ask what memory should not keep | `aft review <project\|global>`; it calls the model and counts against the day's token budget. Striking the lines it names, `aft review <project\|global> --withdraw <n,n,...\|all>`, follows "Reviewing what memory keeps" below |
 | To rebuild the search index | `aft reindex` |
 | To create the config file and the vault | `aft init`; safe to run again |
 | To install or remove afterthought's hooks, extension, skill or timer | `aft install claude`, `aft install pi`, `aft install timer`; each takes `--dry-run` to preview and `--uninstall` to remove |
@@ -98,6 +99,27 @@ To settle them:
    vault, so `git revert` undoes it, and the note itself moves word for word to the page's
    archive.
 4. When the user wants to stop partway, stop. The notes left wait for the next session.
+
+## Reviewing what memory keeps
+
+Memory written before the keep-test existed holds lines it would not keep: progress on
+the work, the status of a pull request, what a change did to the code. `aft review
+<project|global>` puts the scope's active memory lines to the model, about twenty lines
+per call, and saves the numbered lines it would withdraw, each with a one-line reason,
+to `reports/review-<scope>.md`. No line changes.
+
+1. Run `aft review <project|global>`, where the placeholder is a registered project's
+   slug, or `global` for the global pages. It calls the model and counts against the
+   day's token budget.
+2. Read the report to the user: each numbered line with its reason. The lines the model
+   did not name stay as they are.
+3. If the user chooses lines to strike, run `aft review <project|global> --withdraw
+   <n,n,...|all>`, with the numbers from the report. A line that changed since the list
+   was saved, or one with an open note, is skipped and named; `all` means every line the
+   list carries that nothing was yet recorded for. The withdrawal is one commit in the
+   vault, so `git revert` undoes it.
+4. When the user wants no withdrawal, stop. The list stands in the report for a later
+   decision; a later `aft review` saves a new list.
 
 ## Changing memory by hand
 

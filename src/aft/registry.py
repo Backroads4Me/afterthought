@@ -20,6 +20,8 @@ from aft.ids import new_id
 
 VERSION = 1
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+RESERVED_SLUGS = ("global",)
+"""The scope ``global`` reviews the global pages, so no project may take the slug."""
 
 
 class RegistryError(Exception):
@@ -145,6 +147,8 @@ class Registry:
     def add(self, slug: str, title: str | None = None) -> Project:
         if not SLUG_RE.match(slug):
             raise RegistryError(f"invalid slug {slug!r}: use lowercase letters, digits and -")
+        if slug in RESERVED_SLUGS:
+            raise RegistryError(f"the slug {slug!r} is reserved for the global pages")
         if self.by_slug(slug):
             raise RegistryError(f"project {slug!r} already exists")
         project = Project(
@@ -175,6 +179,8 @@ class Registry:
             raise RegistryError(f"no project {old!r}")
         if not SLUG_RE.match(new):
             raise RegistryError(f"invalid slug {new!r}: use lowercase letters, digits and -")
+        if new in RESERVED_SLUGS:
+            raise RegistryError(f"the slug {new!r} is reserved for the global pages")
         if self.by_slug(new):
             raise RegistryError(f"project {new!r} already exists")
         project.slug = new
