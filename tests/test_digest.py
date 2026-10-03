@@ -3143,7 +3143,40 @@ def test_the_digest_prompt_narrows_stated_to_the_users_own_assertions():
 
 def test_the_digest_prompt_sends_session_progress_to_the_handoff():
     """DESIGN 6: what a session did is no fact; the summary and handoff carry it."""
-    assert "is not a fact. It goes in the summary and the handoff." in prompt_words()
+    assert (
+        "where the work stood goes in the handoff, which only the next session "
+        "sees as Last session" in prompt_words()
+    )
+
+
+def test_the_digest_prompt_gives_every_fact_one_value_test():
+    """F46: a fact earns memory only when a future session would stumble or re-ask."""
+    assert "a future session would make a mistake, or ask the user again, without it" in (
+        prompt_words()
+    )
+
+
+def test_the_digest_prompt_names_what_is_never_a_fact():
+    """F46: progress and repository facts are never facts, long or short term."""
+    words = prompt_words()
+    assert "Never a fact, long or short term" in words
+    for item in (
+        "the status of a pull request, task, branch or commit",
+        "who is working on what",
+        "a test's name or result",
+        "a review's outcome",
+        "what a change or fix did to the code",
+        "anything the repository's own documents already say",
+    ):
+        assert item in words
+
+
+def test_the_digest_prompt_defines_short_term_as_a_temporary_condition():
+    """F46: short term is a condition that changes how an agent acts, never progress."""
+    words = prompt_words()
+    assert "a temporary condition that changes how an agent should act" in words
+    assert "(something paused, a temporary setting, a freeze), not progress on the work" in words
+    assert "such as who is working on what, what is paused, or a temporary setting" not in words
 
 
 def test_the_digest_prompt_defines_both_terms_and_defaults_to_short():

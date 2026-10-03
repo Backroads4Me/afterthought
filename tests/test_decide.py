@@ -472,3 +472,28 @@ def test_the_decide_prompt_shipped_is_the_plans_text():
     start = next(i for i, line in enumerate(lines) if "(`src/aft/prompts/decide.md`)" in line)
     fences = [i for i in range(start, len(lines)) if lines[i].strip() in ("```text", "```")][:2]
     assert decide.prompt() == "".join(lines[fences[0] + 1 : fences[1]])
+
+
+def test_the_decide_prompt_skips_by_the_value_test_and_the_never_a_fact_list():
+    """F46: skip applies the digest's one test and never-a-fact list to the fact."""
+    words = " ".join(decide.prompt().split())
+    assert "a future session would make a mistake, or ask the user again, without it" in words
+    assert "Never a fact, long or short term" in words
+    for item in (
+        "the status of a pull request, task, branch or commit",
+        "who is working on what",
+        "a test's name or result",
+        "a review's outcome",
+        "what a change or fix did to the code",
+        "anything the repository's own documents already say",
+    ):
+        assert item in words
+    assert "it fails that test, is on the never-a-fact list above" in words
+
+
+def test_the_decide_prompt_defines_short_term_as_a_temporary_condition():
+    """F46: short-term memory is a temporary condition, not progress on the work."""
+    words = " ".join(decide.prompt().split())
+    assert "a temporary condition that changes how an agent should act" in words
+    assert "not progress on the work" in words
+    assert "last few sessions were working with" not in words
