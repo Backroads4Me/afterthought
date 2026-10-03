@@ -103,6 +103,8 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
         if any(modified > since for modified in changes.values()):
             result.edited = ready
             return result
+        from aft.dream import report as reportmod
+
         if not ready:
             # No project's digests are up, so the dream has nothing to decide and makes no
             # checkpoint here: that is a project run's work, and a run with nothing
@@ -111,6 +113,13 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if changes:
                 return result
             _expire_short_term(config, result, now, None, None)
+            # A run with nothing waiting still writes the idle and gone section: a home
+            # whose every project is idle is exactly the state the section exists to name
+            # (DESIGN 7, F49). It appends to the day's report, once a day.
+            try:
+                reportmod.write_idle_gone(config, now=now)
+            except Exception as exc:
+                result.failures["idle-gone report"] = str(exc)
             return result
         if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
@@ -158,8 +167,6 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
         # Projects with nothing new in 90 days and projects whose recorded paths are all
         # gone are named in the report; nothing is archived or forgotten without the
         # person's go-ahead (DESIGN 7, F49).
-        from aft.dream import report as reportmod
-
         try:
             reportmod.write_idle_gone(config, now=now)
         except Exception as exc:

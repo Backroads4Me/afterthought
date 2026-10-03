@@ -811,6 +811,11 @@ def _writing(config: Config, *, busy_timeout_ms: int | None = None):
         conn.close()
 
 
+def _session_project_columns(conn: sqlite3.Connection) -> set[str]:
+    """The columns the queue's session_projects table names right now."""
+    return {row[1] for row in conn.execute("PRAGMA table_info(session_projects)")}
+
+
 def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.Connection:
     """Open the queue, creating it on first use.
 
@@ -828,11 +833,18 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn, timeout_ms=timeout)
     conn.executescript(_SCHEMA)
-    if "path" not in {row[1] for row in conn.execute("PRAGMA table_info(session_projects)")}:
+    if "path" not in _session_project_columns(conn):
         # A queue an earlier build wrote names no path on a session-start record. The column
         # is nullable, so its records read as ones kept before the directory was recorded
         # (F49) rather than refusing an upgrade that would cost every record.
-        conn.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
+        try:
+            conn.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
+        except sqlite3.OperationalError:
+            # Two hooks starting together right after the upgrade can both pass the column
+            # check before either ALTER lands; the loser finds the winner's column here,
+            # the way _enter_wal settles its own race (DESIGN 8).
+            if "path" not in _session_project_columns(conn):
+                raise
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "off_record" not in sessions or "digest_due" not in sessions or "claimed_time" not in jobs:

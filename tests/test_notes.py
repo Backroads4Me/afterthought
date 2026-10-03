@@ -140,6 +140,43 @@ def test_every_note_needs_you_lists_is_one_aft_notes_lists(widget):
         assert note.page in needs_you
 
 
+def test_notes_from_an_excluded_directory_ask_the_shared_pages_only(widget, tmp_path, capsys):
+    """A directory capture excludes is no project to `aft notes`, as to every other
+    resolver call (DESIGN 7, F49): the phantom slug its name would settle must not name
+    the pages a session of that directory once filed."""
+    excluded = tmp_path / "scratch" / "gizmo"
+    excluded.mkdir(parents=True)
+    (widget.home / "config.toml").write_text(
+        f'vault = "{widget.vault}"\nhost = "{widget.host}"\n'
+        f'[capture]\nexclude_paths = ["{tmp_path / "scratch"}"]\n'
+    )
+    # The pages a session of the excluded directory once filed under its name stand in
+    # the vault, with a note of their own.
+    evidence.store(
+        widget,
+        agent="c",
+        session_id="9",
+        project_id=None,
+        entries=[entry("e1", 2, USER, "the gizmo daemon listens on 8123 and is round")],
+    )
+    front = {
+        "type": "Project",
+        "title": "Gizmo",
+        "description": "The gizmo project.",
+        "sources": [{"id": "s1", "resource": "aft://session/c/9#e1", "quote": "listens on 8123"}],
+        "aft": {},
+    }
+    phantom = widget.vault / "projects/gizmo/overview.md"
+    phantom.parent.mkdir(parents=True)
+    phantom.write_text(f"---\n{yaml.safe_dump(front, sort_keys=False).strip()}\n---\n\n{BODY}")
+    vaultmod.commit(widget.vault, ["projects/gizmo/overview.md"], "seed gizmo page")
+    assert main(["notes", str(excluded)]) == 0
+    assert capsys.readouterr().out.startswith("aft notes: nothing is waiting")
+    # The same pages answer when they are asked for by name.
+    assert main(["notes", "--all"]) == 0
+    assert "gizmo" in capsys.readouterr().out
+
+
 def test_keep_closes_the_note_and_leaves_the_line(widget):
     note = the_note(widget)
     before = page_text(widget)

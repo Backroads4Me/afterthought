@@ -329,6 +329,14 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
             # outside the exclusion, so it is treated as inside it and leaves no queue row.
             queue.drop_job(config, job)
             return None
+    if resolution is None or resolution.slug is None:
+        # The directory stands but answers no project: it is under the system temporary
+        # directory or the downloads, or capture excludes it. What the session-start hook
+        # recorded while the directory stood is still the session's project (DESIGN 7): a
+        # directory moved aside does not unfile the session that ran in it.
+        recorded = _recorded_resolution(config, registry, job)
+        if recorded is not None and recorded.slug is not None:
+            resolution = recorded
     if resolution is not None and resolution.project is None and resolution.slug is not None:
         # An unregistered directory files its digests under the name its session-start
         # record settled while the directory stood, or - a session with no record - a name
@@ -1307,6 +1315,72 @@ def _recorded_target(
     return resolution
 
 
+def _rebuild_slug(
+    config: Config,
+    session_id: str,
+    cwd: Path | None,
+    agent: str | None,
+    *,
+    unfiled: bool,
+) -> tuple[str, str | None, registrymod.Project | None]:
+    """The agent and the slug a rebuild of this session files under, with its project.
+
+    The archive's record of the session names its project when it has one; a digest of the
+    session filed under another slug names it next; otherwise the directory - the
+    session-start record's for the backfill, the queue's for an ordinary rebuild - is
+    resolved, and the slug it answers is the slug the page files under. A ``None`` slug is
+    a session of no project: its directory answers none (DESIGN 7, F49).
+    """
+    registry = registrymod.Registry.load(config.registry_path)
+    info = evidence.session_info(config, session_id)
+    if agent is None:
+        agent = info[0] if info else "claude"
+    project_id = info[1] if info else None
+
+    project = registry.by_id(project_id) if project_id else None
+    slug = project.slug if project else None
+
+    if slug is None:
+        digests_root = config.vault / "digests"
+        if digests_root.exists():
+            for f in digests_root.rglob("*.md"):
+                if _is_session_digest(f, session_id, config):
+                    rel_parts = f.relative_to(config.vault).parts
+                    if len(rel_parts) >= 2:
+                        if unfiled and rel_parts[1] == UNFILED:
+                            # The backfill's whole point is a digest that sits under
+                            # _unfiled moving out of it, so that directory names nothing
+                            # here: the session's directory decides instead (DESIGN 7, F49).
+                            continue
+                        slug = rel_parts[1]
+                        project = registry.by_slug(slug)
+                        break
+
+    if slug is None:
+        resolution = _recorded_target(config, registry, session_id, agent, cwd, unfiled=unfiled)
+        if resolution is not None and resolution.project is not None:
+            project, slug = resolution.project, resolution.project.slug
+        elif resolution is not None and resolution.slug is not None:
+            slug = resolution.slug
+    return agent, slug, project
+
+
+def stays_unfiled(config: Config, session_id: str) -> bool:
+    """Whether the backfill of this session has nowhere to move its digest to (DESIGN 7, F49).
+
+    The backfill files a session under the project its directory answers for. A session
+    whose directory is gone with nothing naming it, or stands under the system temporary
+    directory, the downloads, or a capture exclusion, answers no project again, so a
+    rebuild would write its digest onto the same ``_unfiled`` path and list it again on
+    every run. Such a session stays unfiled until its directory's answer changes.
+    """
+    _require_session_id(session_id)
+    _, slug, _ = _rebuild_slug(
+        config, session_id, queue.session_cwd(config, session_id), None, unfiled=True
+    )
+    return slug is None
+
+
 def redigest(
     config: Config,
     session_id: str,
@@ -1364,43 +1438,10 @@ def redigest(
     if not entries:
         raise DigestError(f"no archived evidence for session {session_id!r}")
 
-    info = evidence.session_info(config, session_id)
-    agent = info[0] if info else None
-    project_id = info[1] if info else None
-
-    registry = registrymod.Registry.load(config.registry_path)
-    project = registry.by_id(project_id) if project_id else None
-    slug = project.slug if project else None
-
-    if slug is None:
-        digests_root = config.vault / "digests"
-        if digests_root.exists():
-            for f in digests_root.rglob("*.md"):
-                if _is_session_digest(f, session_id, config):
-                    rel_parts = f.relative_to(config.vault).parts
-                    if len(rel_parts) >= 2:
-                        if unfiled and rel_parts[1] == UNFILED:
-                            # The backfill's whole point is a digest that sits under
-                            # _unfiled moving out of it, so that directory names nothing
-                            # here: the session's directory decides instead (DESIGN 7, F49).
-                            continue
-                        slug = rel_parts[1]
-                        project = registry.by_slug(slug)
-                        break
-
-    if slug is None:
-        resolution = _recorded_target(config, registry, session_id, agent, cwd, unfiled=unfiled)
-        if resolution is not None and resolution.project is not None:
-            project, slug = resolution.project, resolution.project.slug
-        elif resolution is not None and resolution.slug is not None:
-            slug = resolution.slug
-
+    agent, slug, project = _rebuild_slug(config, session_id, cwd, None, unfiled=unfiled)
     if slug is None:
         # A session of no project is digested as unfiled (DESIGN 7).
         slug = UNFILED
-    if agent is None:
-        agent = "claude"
-
     when = entries[-1].time.astimezone(UTC).date()
     rel = f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
 

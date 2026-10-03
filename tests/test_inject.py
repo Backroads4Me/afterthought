@@ -1462,6 +1462,26 @@ def test_an_archived_projects_directory_gets_the_global_pages_alone(widget, tmp_
     assert inject.build(widget, resolve(widget, tmp_path / "widget")) == EXPECTED
 
 
+def test_an_archived_projects_session_start_still_records_the_project(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """Archiving takes a project out of the block, not out of capture (DESIGN 7, F49): a
+    session starting in its directory is still recorded under it, so its words file there
+    when they are digested."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    registry = Registry.load(widget.registry_path)
+    registry.set_archived("widget", "2026-10-06")
+    registry.save()
+    project = Registry.load(widget.registry_path).by_slug("widget")
+
+    out = run_session_start(
+        monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, tmp_path / "widget"
+    )
+    assert out == inject.build(widget, resolve(widget, tmp_path / "widget")) + "\n"
+    assert recorded_projects(widget) == [("claude", project.id, "widget")]
+    assert hook_log(widget) == []
+
+
 def _record_start(monkeypatch, capsys, agent: str, event: str, session_id: str, cwd: Path):
     """A session-start hook run with its own session id, so two runs keep two records."""
     payload = json.loads((HOOK_FIXTURES / "claude-session-start.json").read_text(encoding="utf-8"))

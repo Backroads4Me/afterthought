@@ -1319,6 +1319,42 @@ def test_an_unregistered_repository_is_digested_under_its_own_name(session: Sess
     assert written["description"] == "Built the capture hook."
 
 
+def test_a_live_directory_of_no_project_files_under_the_records_slug(session: Session):
+    """The directory still stands and answers no project, and the name its session-start
+    record settled while it was being keyed files the session (DESIGN 7, F49)."""
+    plain = (Path(tempfile.gettempdir()) / "plain-widget").resolve()
+    plain.mkdir(exist_ok=True)
+    queue.record_project(session.cfg, CLAUDE, SESSION, None, "widget", plain)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, plain))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.path == f"digests/widget/{NOW:%Y}/{NOW:%m}/{NOW:%Y-%m-%d}-{CLAUDE}-{SESSION}.md"
+    record = queue.recorded_project(cfg, CLAUDE, SESSION)
+    assert record is not None and (record.slug, record.path) == ("widget", str(plain))
+
+
+def test_the_home_directory_is_recorded_and_filed_like_any_project(session: Session):
+    """The home directory is no exception to the keying: a project registered at it has its
+    sessions recorded there and their digests filed under it (DESIGN 7, F49)."""
+    registered = registry.Registry.load(session.cfg.registry_path)
+    project = registered.add("homebase", "Homebase")
+    registered.add_path(project, registry.path_key(session.cfg.host, session.cfg.home))
+    registered.save()
+    queue.record_project(session.cfg, CLAUDE, SESSION, project.id, "homebase", session.cfg.home)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cfg.home))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.path.startswith("digests/homebase/")
+    written = frontmatter(cfg, wrote.path)
+    assert written["aft"]["project"] == project.id
+
+
 @pytest.mark.parametrize("escaped", ["../../escaped", "C:..outside"])
 def test_a_session_id_that_is_not_a_name_is_refused_before_a_path_is_made(
     session: Session, escaped: str
@@ -1424,6 +1460,32 @@ def test_a_deleted_directory_is_filed_under_the_project_its_session_started_in(
     assert pages(cfg) == [below("gone-cwd")]
     assert frontmatter(cfg, page_path("gone-cwd"))["aft"]["project"] == project.id
     assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, project.id)
+
+
+def test_a_directory_moved_under_the_temporary_is_filed_under_the_record(
+    session: Session, tmp_path
+):
+    """A directory that still stands but answers no project does not unfile its session.
+
+    The directory was moved under the system temporary directory between session start and
+    the digest, so the fresh resolve answers none. The record the session-start hook left
+    while the directory stood names the project, and that is where the session is filed
+    (DESIGN 7, F49) - deletion and move-aside file the session in the same place.
+    """
+    project = registry.Registry.load(session.cfg.registry_path).by_slug(SLUG)
+    moved = (Path(tempfile.gettempdir()) / "moved-widget").resolve()
+    moved.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        assert queue.record_project(cfg, CLAUDE, SESSION, project.id, SLUG, session.cwd)
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, moved))
+    finally:
+        fake.stop()
+        shutil.rmtree(moved)
+    assert wrote is not None
+    assert pages(cfg) == [below(SESSION)]
+    assert frontmatter(cfg, wrote.path)["aft"]["project"] == project.id
+    assert evidence.session_info(cfg, SESSION) == (CLAUDE, project.id)
 
 
 def test_a_deleted_directory_of_an_unregistered_project_keeps_its_recorded_name(

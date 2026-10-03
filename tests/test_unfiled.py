@@ -224,3 +224,92 @@ def test_the_backfill_names_the_sessions_that_still_have_an_archive(initialized,
     shutil.rmtree(plain)
     evidence.forget(initialized, "u1")
     assert digest.unfiled_sessions(initialized) == []
+
+
+def _unfiled_session(cfg, session: str, name: str, directory: Path | None) -> None:
+    """An unfiled digest of ``session`` and a session-start record naming ``directory``."""
+    write_digest(
+        cfg,
+        digest.UNFILED,
+        f"{TODAY}-c-{session}",
+        facts=[
+            {
+                "statement": "The user wants plain hyphens, never em dashes.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": f"aft://session/c/{session}#e1",
+                "quote": "The user wants plain hyphens, never em dashes.",
+            }
+        ],
+    )
+    if directory is not None:
+        queue.record_project(cfg, "c", session, None, name, directory)
+
+
+def test_the_backfill_leaves_a_session_whose_directory_answers_no_project(
+    initialized, home, fake, tmp_path, capsys, monkeypatch
+):
+    """A session whose directory resolves to no project has nowhere to move its digest to:
+    the backfill lists it as staying unfiled and skips it, so the digest is not rebuilt
+    onto the same ``_unfiled`` path and charged for again on every run (DESIGN 7, F49)."""
+    import tempfile
+
+    from aft.cli import main
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    # The system temporary directory answers no project (DESIGN 7, F49), and a removed
+    # directory with no registered path answers none either.
+    nowhere = (Path(tempfile.gettempdir()) / "loose-stay1").resolve()
+    nowhere.mkdir(exist_ok=True)
+    _unfiled_session(cfg, "stay1", "stay1", nowhere)
+    gone = tmp_path / "gonefield"
+    gone.mkdir()
+    _unfiled_session(cfg, "stay2", "stay2", gone)
+    shutil.rmtree(gone)
+    fieldwork = tmp_path / "fieldwork"
+    fieldwork.mkdir()
+    _unfiled_session(cfg, "move1", "fieldwork", fieldwork)
+    assert digest.unfiled_sessions(cfg) == ["move1", "stay1", "stay2"]
+    assert digest.stays_unfiled(cfg, "stay1")
+    assert digest.stays_unfiled(cfg, "stay2")
+    assert not digest.stays_unfiled(cfg, "move1")
+
+    monkeypatch.setattr(
+        digest,
+        "redigest_estimate",
+        lambda config, session_id: 900 if session_id == "move1" else None,
+    )
+    assert main(["redigest", "--unfiled", "--dry-run"]) == 0
+    assert capsys.readouterr().out == (
+        "move1\t~900 tokens\n"
+        "stay1\tstays unfiled: its directory answers no project\n"
+        "stay2\tstays unfiled: its directory answers no project\n"
+        "1 session(s) would rebuild, ~900 tokens; 2 staying unfiled\n"
+    )
+
+    rebuilt: list[str] = []
+    monkeypatch.setattr(
+        digest,
+        "redigest",
+        lambda config, session_id, now=None, unfiled=False: (
+            rebuilt.append(session_id)
+            or digest.Digest(path="digests/fieldwork/x.md", facts=(), dropped=(), watermark="e9")
+        ),
+    )
+    assert main(["redigest", "--unfiled"]) == 0
+    assert capsys.readouterr().out == (
+        "rebuilt digest at digests/fieldwork/x.md\n"
+        "stay1\tstays unfiled: its directory answers no project\n"
+        "stay2\tstays unfiled: its directory answers no project\n"
+    )
+    assert rebuilt == ["move1"], "a session with nowhere to move was put to the model"
+    assert digest.unfiled_sessions(cfg) == ["move1", "stay1", "stay2"]

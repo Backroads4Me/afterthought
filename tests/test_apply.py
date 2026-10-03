@@ -230,6 +230,51 @@ def test_add(initialized, home, fake):
     assert report.commit is not None
 
 
+def test_an_archived_projects_digest_is_dreamed(initialized, home, fake):
+    """Archiving takes a project out of injection and the idle report, not out of the
+    dream (DESIGN 7, F49): its waiting digest is applied to its pages like any other."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.set_archived("widget", TODAY)
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Existing line. [observed] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
+    )
+
+    write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": "The queue uses SQLite WAL mode.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s10",
+            }
+        ],
+        sources=[
+            {
+                "id": "s10",
+                "resource": "aft://session/c/2#e5",
+                "quote": "The queue uses SQLite WAL mode.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "new decision")]
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "- The queue uses SQLite WAL mode. [stated] 2026-10-05" in overview_text
+
+
 def test_confirm(initialized, home, fake):
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)

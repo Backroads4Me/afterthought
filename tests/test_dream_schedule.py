@@ -87,6 +87,33 @@ def test_no_digests_no_commit(initialized):
     assert "preferences.md" in run_git(["status", "--porcelain"], initialized.vault)
 
 
+def test_a_run_with_nothing_waiting_writes_the_idle_and_gone_report(widget, initialized, tmp_path):
+    """A dream run with nothing waiting still names the idle and the gone: a home whose
+    every project is idle gets no digest to run, and that is the state the section exists
+    to surface (DESIGN 7, F49). It is written once a day, as a run with work writes it."""
+    queue.enqueue(
+        initialized,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s-widget",
+            cwd=widget,
+            transcript_path=None,
+            time=NOW - timedelta(days=100),
+            detail=None,
+        ),
+    )
+    run = schedule.run(initialized, Recorder(), now=NOW)
+    assert run.waiting == {} and run.ran == []
+    report_path = initialized.vault / "reports" / "2026" / "09" / "2026-09-29.md"
+    body = report_path.read_text()
+    assert "## Idle and gone" in body
+    assert "widget: no session since 2026-06-21" in body
+    # The second quiet run adds nothing: the day's section stands.
+    schedule.run(initialized, Recorder(), now=NOW)
+    assert report_path.read_text() == body
+
+
 def test_consumed_digests_are_not_waiting(initialized):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z", consumed="abc123")
     before = head(initialized)

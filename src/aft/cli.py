@@ -695,7 +695,12 @@ def cmd_notes(args) -> int:
     if not args.all:
         registry = Registry.load(config.registry_path)
         try:
-            slug = keys.resolve(Path(args.path).resolve(), registry, config.host).slug
+            slug = keys.resolve(
+                Path(args.path).resolve(),
+                registry,
+                config.host,
+                never=config.settings.capture.exclude_paths,
+            ).slug
         except gitutil.GitError:
             slug = None
     found = notes.open_notes(config, slug, everywhere=args.all)
@@ -927,6 +932,10 @@ def cmd_redigest(args) -> int:
     config = load()
     vault.require(config)
     if args.unfiled:
+        if args.session_id is not None:
+            raise UsageError(
+                "--unfiled rebuilds the unfiled backfill alone; give it without a session id"
+            )
         return _redigest_unfiled(config, args)
     if args.dry_run:
         raise UsageError("--dry-run lists the unfiled backfill; give --unfiled with it")
@@ -946,34 +955,49 @@ def cmd_redigest(args) -> int:
 def _redigest_unfiled(config: Config, args) -> int:
     """The unfiled backfill (DESIGN 7, F49).
 
-    Every still-archived session whose digests are filed as unfiled is rebuilt, so each
-    files under the project its recorded directory now resolves to; the dream turns the
-    refiled digests into memory. ``--dry-run`` lists the sessions and the tokens a rebuild
-    would charge, and writes nothing. A session the day's token budget has no room for stops
-    the run with the rest still waiting; one that fails for its own reason is named and the
-    rest go on.
+    Every still-archived session whose digests are filed as unfiled and whose directory
+    answers a project is rebuilt, so it files under that project; the dream turns the
+    refiled digests into memory. A session whose directory still answers no project has
+    nowhere to move to: it is listed as staying unfiled and skipped, and waits for its
+    directory's answer to change. ``--dry-run`` lists the sessions, the tokens a rebuild
+    would charge, and the ones staying unfiled, and writes nothing. A session the day's
+    token budget has no room for stops the run with the rest still waiting; one that fails
+    for its own reason is named and the rest go on.
     """
     from aft import digest, model
 
     sessions = digest.unfiled_sessions(config)
+    staying_line = "stays unfiled: its directory answers no project"
     if args.dry_run:
         estimate = 0
+        movable = 0
+        staying = 0
         for session_id in sessions:
+            if digest.stays_unfiled(config, session_id):
+                staying += 1
+                print(f"{session_id}\t{staying_line}")
+                continue
             cost = digest.redigest_estimate(config, session_id)
             if cost is None:
                 print(f"{session_id}\tno archived entries")
                 continue
             estimate += cost
+            movable += 1
             print(f"{session_id}\t~{cost} tokens")
-        print(f"{len(sessions)} session(s), ~{estimate} tokens")
+        print(f"{movable} session(s) would rebuild, ~{estimate} tokens; {staying} staying unfiled")
         return 0
     budget = config.settings.work.daily_token_budget
     now = datetime.now(UTC)
     rebuilt = 0
     failed = 0
+    staying = 0
     for session_id in sessions:
+        if digest.stays_unfiled(config, session_id):
+            staying += 1
+            print(f"{session_id}\t{staying_line}")
+            continue
         if model.tokens_used_today(config, now) >= budget:
-            waiting = len(sessions) - rebuilt - failed
+            waiting = len(sessions) - rebuilt - failed - staying
             print(
                 f"the day's token budget of {budget} tokens is spent;"
                 f" {waiting} session(s) wait for a day with room in it"
@@ -1184,9 +1208,7 @@ def cmd_install_timer(args) -> int:
     elif change.active:
         state = "disabled and stopped" if args.uninstall else "enabled and started"
         print(f"{state} {systemd_install.TIMER_NAME}")
-    elif change.active is not None and not change.active:
-        # ``active`` is False when systemd answered and refused, and None when there was
-        # nothing to enable; the commands branch below speaks for None.
+    elif change.active is False:
         print(f"systemd refused: {change.problem}", file=sys.stderr)
         print("run these yourself:", file=sys.stderr)
         for command in change.commands:

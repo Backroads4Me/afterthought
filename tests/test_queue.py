@@ -835,6 +835,53 @@ def test_a_queue_file_without_the_digest_debt_is_refused(cfg: Config) -> None:
         queue.enqueue(cfg, event(session_id="old"))
 
 
+def test_a_hook_that_loses_the_column_race_goes_on(cfg: Config, tmp_path) -> None:
+    """Two hooks upgrading the same pre-F49 queue together both pass the column check and
+    both ALTER; the loser finds the winner's column and opens the queue rather than dying
+    on ``duplicate column name`` (DESIGN 8, F49)."""
+    import threading
+    import time
+
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    setup = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    # A queue an earlier build wrote: this build's tables, with no path on session_projects.
+    setup.executescript(queue._SCHEMA)
+    setup.execute("ALTER TABLE session_projects DROP COLUMN path")
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.close()
+
+    winner = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    winner.execute("PRAGMA busy_timeout = 5000")
+    winner.execute("BEGIN IMMEDIATE")
+    opened: list[bool] = []
+    failures: list[BaseException] = []
+
+    def hook() -> None:
+        try:
+            conn = queue._connect(cfg)
+            conn.close()
+            opened.append(True)
+        except BaseException as exc:  # the race is what this observes
+            failures.append(exc)
+
+    thread = threading.Thread(target=hook)
+    thread.start()
+    # The hook is in its ALTER by now, waiting on the write lock the winner holds, so its
+    # column check is already behind it: the interleaving two hooks starting together turn
+    # on. The winner lands the column and commits, and the hook's ALTER runs against it.
+    time.sleep(0.5)
+    winner.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
+    winner.execute("COMMIT")
+    winner.close()
+    thread.join()
+    assert failures == [], "the hook that lost the upgrade race died on it"
+    assert opened == [True]
+
+    queue.record_project(cfg, CLAUDE, "settled", None, "gizmo", tmp_path)
+    record = queue.recorded_project(cfg, CLAUDE, "settled")
+    assert (record.slug, record.path) == ("gizmo", str(tmp_path))
+
+
 def test_an_owed_digest_is_filed_once_and_settled_by_the_digest(cfg: Config) -> None:
     """The archive's debt becomes one row, not one row per run, and a digest settles it.
 

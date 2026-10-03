@@ -261,6 +261,7 @@ def test_redigest_unfiled_dry_run_lists_sessions_and_writes_nothing(
     import aft.digest
 
     monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(aft.digest, "stays_unfiled", lambda config, session_id: False)
     monkeypatch.setattr(
         aft.digest,
         "redigest_estimate",
@@ -268,7 +269,8 @@ def test_redigest_unfiled_dry_run_lists_sessions_and_writes_nothing(
     )
     assert main(["redigest", "--unfiled", "--dry-run"]) == 0
     assert capsys.readouterr().out == (
-        "u1\t~1234 tokens\nu2\tno archived entries\n2 session(s), ~1234 tokens\n"
+        "u1\t~1234 tokens\nu2\tno archived entries\n"
+        "1 session(s) would rebuild, ~1234 tokens; 0 staying unfiled\n"
     )
     assert run_git(["log", "--format=%s"], initialized.vault) == "aft: initialize vault"
 
@@ -280,6 +282,7 @@ def test_redigest_unfiled_stops_at_the_day_budget(initialized, monkeypatch, caps
     import aft.model
 
     monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(aft.digest, "stays_unfiled", lambda config, session_id: False)
     monkeypatch.setattr(aft.model, "tokens_used_today", lambda config, now: 2**40)
     rebuilt: list[str] = []
     monkeypatch.setattr(
@@ -293,12 +296,42 @@ def test_redigest_unfiled_stops_at_the_day_budget(initialized, monkeypatch, caps
     assert rebuilt == []
 
 
+def test_redigest_unfiled_stops_at_the_budget_between_sessions(initialized, monkeypatch, capsys):
+    """A rebuild that spends the day's budget stops the backfill after itself, not before
+    the next session: what ran is said, and the rest wait for a day with room (DESIGN 13,
+    F49)."""
+    import aft.digest
+    import aft.model
+
+    spent = iter([0, 2**40])
+    monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(aft.digest, "stays_unfiled", lambda config, session_id: False)
+    monkeypatch.setattr(aft.model, "tokens_used_today", lambda config, now: next(spent))
+    rebuilt: list[str] = []
+    monkeypatch.setattr(
+        aft.digest,
+        "redigest",
+        lambda config, session_id, now=None, unfiled=False: (
+            rebuilt.append(session_id)
+            or aft.digest.Digest(
+                path="digests/fieldwork/x.md", facts=(), dropped=(), watermark="e9"
+            )
+        ),
+    )
+    assert main(["redigest", "--unfiled"]) == 1
+    out = capsys.readouterr().out
+    assert "rebuilt digest at digests/fieldwork/x.md" in out
+    assert "token budget" in out and "1 session(s) wait" in out
+    assert rebuilt == ["u1"]
+
+
 def test_redigest_unfiled_names_a_failing_session_and_carries_on(initialized, monkeypatch, capsys):
     """A session that refuses for its own reason is named and the backfill goes on to the
     rest (DESIGN 7, F49)."""
     import aft.digest
 
     monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(aft.digest, "stays_unfiled", lambda config, session_id: False)
     seen: list[str] = []
 
     def redigest(config, session_id, now=None, unfiled=False):
@@ -315,6 +348,13 @@ def test_redigest_unfiled_names_a_failing_session_and_carries_on(initialized, mo
     assert "u1: no archived evidence" in captured.err
     assert "rebuilt digest at digests/fieldwork/2026/10/x.md" in captured.out
     assert seen == ["u1", "u2"]
+
+
+def test_redigest_refuses_a_session_id_with_unfiled(initialized, capsys):
+    """``--unfiled`` is the whole backfill of DESIGN 7 (F49), and a session id names one
+    rebuild; the two are not one command, so together they are a usage error."""
+    assert main(["redigest", "u1", "--unfiled"]) == 2
+    assert "give it without a session id" in capsys.readouterr().err
 
 
 def test_redigest_without_a_session_id_prints_usage(initialized, capsys):
