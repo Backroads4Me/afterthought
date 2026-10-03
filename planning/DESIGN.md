@@ -391,9 +391,15 @@ A working directory resolves to one project:
    themselves.
 3. Otherwise look up the normalized `origin` remote. A match records the new path as an
    alias, so a moved or re-cloned repository keeps its memory.
-4. Otherwise, inside a git repository, the directory is an unregistered project named after
-   its directory. It is added to the registry only when its first curated fact is written,
-   so a throwaway directory creates nothing.
+4. Otherwise the directory is an unregistered project: the repository's main checkout
+   inside git, the directory itself outside it, and your home directory itself is the
+   project `home`. It is added to the registry, with its path, only when its first
+   curated fact is written, so a throwaway directory creates nothing. Its slug is the
+   directory's name; when another path already holds that slug, parent directory names
+   are prefixed until it is unique (`foo`, `work-foo`, `ted-work-foo`). The path, not the
+   name, is the identity: a later `git init` or a rename with `aft project rename` keeps
+   the project. The system temporary directory, `~/Downloads` and `capture.exclude_paths`
+   never become projects.
 
 A session's project is decided when the session starts, while its directory exists: the
 session-start hook resolves the directory to build the memory block, and records the answer
@@ -402,14 +408,17 @@ the digest then files the session under the recorded project. When `capture.excl
 names any project, a session with no record whose directory is gone is dropped, because it
 cannot be shown to be outside the exclusion.
 
-A session that belongs to no project, because its directory is outside every registered
-project and every repository or is gone with no record, is still captured. It is archived
-and indexed under no project and digested as unfiled, under `digests/_unfiled/`. Dreaming
-takes only its global facts into memory, under the usual rules: what you say about yourself
-and your machines counts wherever you say it. Its project facts have no project page, so
-they stay in the digest, where `aft search --all` finds them, and the report lists them.
-Nothing is made a project automatically, so a session in `~/Downloads` never creates one;
-`aft project add` registers a directory, git or not, that should be one.
+A session that belongs to no project, because its directory never becomes one or is gone
+with no record, is still captured. It is archived and indexed under no project and digested
+as unfiled, under `digests/_unfiled/`. Dreaming takes only its global facts into memory,
+under the usual rules: what you say about yourself and your machines counts wherever you
+say it. Its project facts stay in the digest, where `aft search` finds them, and the
+report lists them.
+
+A project is never archived on a schedule. The dream report lists projects with no session
+in 90 days and projects whose recorded directory no longer exists. `aft project archive`
+takes a project out of injection and default search and keeps its files; `aft project
+unarchive` returns it, and `aft search --archive` still reaches it.
 
 Each project has a stable id separate from its slug, so a rename rewrites nothing else.
 `aft project list`, `aft project rename` and `aft project forget` manage the registry.
@@ -688,7 +697,11 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 
 ### Search
 
-`aft search` queries a SQLite FTS5 index with BM25 ranking. The default collections are:
+`aft search` queries a SQLite FTS5 index with BM25 ranking, across every project: the
+current directory's project first, then the global pages, then other projects, so what one
+project learned answers a question asked in another. `--project P` narrows it to one
+project and the global pages. The memory block stays the current project's and the global
+pages' alone (section 10). The default collections are:
 
 | Collection | Contents |
 |---|---|

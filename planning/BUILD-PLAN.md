@@ -1070,6 +1070,38 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   changes; withdraw by number and all; a changed line and a noted line are skipped; a
   number not on the list is refused; the budget is counted. Review checkpoint: yes (the
   prompt, withdrawal).
+- **F49 Any directory can be a project** (ruling 2026-10-03; FINDINGS T28). DESIGN 7.
+  Sessions outside a repository were unfiled and lost their project facts, work before
+  `git init` among them, and two repositories with one directory name shared a project.
+  `keys.resolve` step 4 resolves any directory to an unregistered project as DESIGN 7 says
+  (repository main checkout, directory, `home` for the home directory itself); the system
+  temporary directory, `~/Downloads` and `capture.exclude_paths` resolve to none. The
+  resolution carries the path, the session-start record keeps it, and the dream registers a
+  new project with that path; the dream finds an existing project by path, never by slug.
+  A slug taken by another path gets parent names prefixed until unique; the digest
+  directory uses the same slug. `aft project archive <slug>` / `unarchive <slug>`: an
+  archived project (`archived: <date>` in `registry.yaml`) gets no memory block in its
+  directory (only global), its pages and digests answer only `aft search --archive`, its
+  sessions are still captured and dreamed; the skill lists both as needing the user's
+  go-ahead. The dream report lists projects with no session in 90 days and projects whose
+  recorded paths are all gone; nothing is archived automatically. Backfill: `aft redigest
+  --unfiled` redigests every unfiled session still in the evidence archive, so each files
+  under the project its recorded directory now resolves to; `--dry-run` lists them with an
+  estimate of tokens. Tests: a plain directory, `home`, the temp directory, Downloads and an
+  excluded path; two `foo` directories become `foo` and `<parent>-foo`; a project created
+  before `git init` keeps its memory after; the dream registers the path and finds by
+  path; archive and unarchive with the block and search; the idle and gone report lines;
+  the backfill and its dry run. Review checkpoint: yes (`apply.py` registration).
+- **F50 Search reaches every project** (ruling 2026-10-03; after F49). DESIGN 10
+  (Search). Default `aft search` searches every project that is not archived: the
+  current directory's project ranks first, then global pages, then other projects (a
+  fixed rank tier ahead of BM25 within each tier), and each result names its project.
+  `--project P` narrows to P and global; `--all` is kept as an accepted no-op alias for the
+  new default. Unfiled digests and evidence are searched as another project. Injection is
+  unchanged. Tests: a fact in another project answers from this one, below an equal match
+  in this one; `--project`; an archived project answers only with `--archive`; the
+  known-answer suite still passes; search time on the 20,000-row bench stays within 10% of
+  main. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
