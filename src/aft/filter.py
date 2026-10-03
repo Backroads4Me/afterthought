@@ -129,13 +129,14 @@ def filter_entries(
     halfway through a capture.
     """
     patterns = compile_patterns(config.settings.capture.redact_patterns)
+    builtin = config.settings.capture.builtin_redaction
     outside, off_record = _outside_spans(entries, off_record)
     kept: list[Entry] = []
     for entry in outside:
-        text = _kept_text(entry, patterns)
+        text = _kept_text(entry, patterns, builtin=builtin)
         if text is None:
             continue
-        kept.append(replace(entry, text=_cap(redact(text, patterns))))
+        kept.append(replace(entry, text=_cap(redact(text, patterns, builtin=builtin))))
     return kept, off_record
 
 
@@ -191,7 +192,9 @@ def prompt_count(entries: Iterable[Entry]) -> int:
     return sum(1 for entry in outside if entry.role == USER)
 
 
-def _kept_text(entry: Entry, patterns: tuple[re.Pattern[str], ...]) -> str | None:
+def _kept_text(
+    entry: Entry, patterns: tuple[re.Pattern[str], ...], builtin: bool = True
+) -> str | None:
     """The text to keep from one entry, or None to drop the entry.
 
     Prompts and answers keep their text whole. From a tool entry the agent flagged as an
@@ -203,11 +206,17 @@ def _kept_text(entry: Entry, patterns: tuple[re.Pattern[str], ...]) -> str | Non
     if entry.role in (USER, ASSISTANT):
         return entry.text
     if entry.role == TOOL:
-        return _flagged_output(entry.text, patterns) if entry.is_error else _tool_lines(entry.text)
+        return (
+            _flagged_output(entry.text, patterns, builtin=builtin)
+            if entry.is_error
+            else _tool_lines(entry.text)
+        )
     return None
 
 
-def _flagged_output(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None:
+def _flagged_output(
+    text: str, patterns: tuple[re.Pattern[str], ...], builtin: bool = True
+) -> str | None:
     """The head of an output the agent flagged as an error, with the lines below it to keep.
 
     The agent's flag is its own verdict, so what it reported is evidence whatever its lines
@@ -219,7 +228,7 @@ def _flagged_output(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | N
     Head and lines then run through the same cap and redaction as every other kept text, so
     a flagged entry is bounded like any other.
     """
-    redacted = redact(text, patterns)
+    redacted = redact(text, patterns, builtin=builtin)
     head = redacted[:FLAG_HEAD_CHARS]
     below = _tool_lines(redacted[FLAG_HEAD_CHARS:])
     if not head.strip():

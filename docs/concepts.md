@@ -11,8 +11,9 @@ performs.
 
 1. **Evidence.** When a session ends (or compacts), its transcript is read, filtered and
    stored in the evidence archive, `~/.afterthought/evidence.sqlite`. The filter drops
-   routine tool output, keeps errors, and redacts secrets: API keys, tokens, passwords, and
-   anything matching your own `capture.redact_patterns`. Evidence is what happened. It is
+   routine tool output, keeps errors, and redacts secrets whose shape identifies them (API
+   keys, tokens, private keys, headers, URL credentials) and anything matching your own
+   `capture.redact_patterns`. Evidence is what happened. It is
    kept so claims can be checked, and it is searchable, but it is not memory.
 2. **Digest.** A model reads the session in chunks and writes a digest page: a short
    summary, a handoff (what was in flight, what failed, what is still open), and proposed

@@ -46,6 +46,7 @@ class CaptureConfig:
     # at a directory no one listed.
     exclude_projects: tuple[str, ...] = ()
     redact_patterns: tuple[str, ...] = ()
+    builtin_redaction: bool = True
 
 
 @dataclass(frozen=True)
@@ -290,6 +291,10 @@ exclude_projects = []
 # built-ins. One that does not compile, or that holds nothing to match, is an error
 # raised before any text is filtered, never a silent no-op.
 redact_patterns = []
+# Redact built-in secret shapes (private key blocks, provider-prefixed tokens,
+# Authorization: headers, bearer tokens, credentials in URLs). False turns them off
+# and applies only redact_patterns.
+builtin_redaction = true
 
 [evidence]
 # Days to keep filtered conversation in the evidence archive.

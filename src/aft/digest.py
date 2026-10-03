@@ -1200,8 +1200,15 @@ def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
     replacement runs over each entry before any of it is rendered into a prompt (DESIGN 12).
     """
     patterns = config.settings.capture.redact_patterns
+    builtin = config.settings.capture.builtin_redaction
     return [
-        Entry(entry.id, entry.time, entry.role, redact.redact(entry.text, patterns), entry.is_error)
+        Entry(
+            entry.id,
+            entry.time,
+            entry.role,
+            redact.redact(entry.text, patterns, builtin=builtin),
+            entry.is_error,
+        )
         for entry in entries
     ]
 

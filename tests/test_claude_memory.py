@@ -324,9 +324,15 @@ def with_capture(
     exclude: tuple[str, ...] = (),
     patterns: tuple[str, ...] = (),
     projects: tuple[str, ...] = (),
+    builtin_redaction: bool = True,
 ):
     """The config again with capture settings written into it, the way an operator sets them."""
-    lines = [f'vault = "{config.vault}"', 'host = "testhost"', "[capture]"]
+    lines = [
+        f'vault = "{config.vault}"',
+        'host = "testhost"',
+        "[capture]",
+        f"builtin_redaction = {'true' if builtin_redaction else 'false'}",
+    ]
     settings = (
         ("exclude_paths", exclude),
         ("exclude_projects", projects),
@@ -341,7 +347,8 @@ def with_capture(
 
 # A token the built-in patterns know, a password-style assignment, and a secret only the
 # configured pattern knows: an import that copied a memory line verbatim would carry all three
-# into the vault, into the digest's own frontmatter, and into the quote record.
+# into the vault, into the digest's own frontmatter, and into the quote record. With shape-only
+# redaction, the password assignment survives while the token and custom pattern are redacted.
 SECRET = """\
 ---
 name: deploy-notes
@@ -367,7 +374,7 @@ def test_a_secret_in_a_memory_file_reaches_neither_the_vault_nor_the_record(
     text = next(path for path in digests(config) if "secrets" in path.name).read_text()
     record = json.dumps(json.loads((config.home / "library/verified_quotes.json").read_text()))
     assert "sk-3f3f3f3f3f3f3f3f" not in text
-    assert "hunter2hunter2" not in text
+    assert "hunter2hunter2" in text
     assert "aardvark-42" not in text
     assert "[redacted]" in text
     assert "sk-3f3f3f3f3f3f3f3f" not in record
@@ -377,6 +384,21 @@ def test_a_secret_in_a_memory_file_reaches_neither_the_vault_nor_the_record(
     candidate = next(c for c in claude_memory.plans(config)[0] if c.path.name == "secrets.md")
     quote = next(q for _, q in candidate.lines if "staging key" in q)
     assert _lookup_evidence(config, candidate.resource, quote)[0]
+
+
+def test_claude_memory_import_with_builtin_redaction_false(memory: Config):
+    """When capture.builtin_redaction is false, built-in shapes survive and custom patterns
+    still redact."""
+    config = with_capture(memory, patterns=("aardvark-42",), builtin_redaction=False)
+    memory_file(Path(os.environ["HOME"]), memory_path_project(config), "secrets.md", SECRET)
+
+    assert claude_memory.run(config) == 0
+
+    text = next(path for path in digests(config) if "secrets" in path.name).read_text()
+    assert "sk-3f3f3f3f3f3f3f3f" in text
+    assert "hunter2hunter2" in text
+    assert "aardvark-42" not in text
+    assert "[redacted]" in text
 
 
 def test_a_project_under_capture_exclude_paths_is_never_read(memory: Config):

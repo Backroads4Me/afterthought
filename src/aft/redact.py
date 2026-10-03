@@ -1,16 +1,16 @@
 """Redaction: the secret shapes that must not reach the archive, the index or a model.
 
 Design section 12 makes redaction a rule of capture rather than a cleanup: built-in
-Design section 12 makes redaction a rule of capture rather than a cleanup: built-in
-secret patterns plus the user's own, applied before anything is archived. The list of shapes
-is the one BUILD-PLAN 5 (M2.3) names - private key blocks, the ``sk-``, ``ghp_``,
-``github_pat_``, ``xox*`` and AWS access key id tokens, ``Authorization:`` headers,
-password-style assignments, and credentials in URLs - plus the shapes the same text arrives
-in: a secret under a quoted JSON key, the Google, GitLab and npm token prefixes, a bearer
-token with no header word in front of it, a credential header that names itself
-(``X-Api-Key:``), and a mysql password glued to its option. Patterns from
-``capture.redact_patterns`` are applied after it, adding to the list rather than
-replacing it.
+secret patterns plus the user's own, applied before anything is archived. The built-in
+patterns recognize credentials by their shape alone, never by a name beside them (such as
+password, token, or key), so test passwords and token counts stay intact. The list of
+shapes covers private key blocks, the ``sk-``, ``ghp_``, ``github_pat_``, ``xox*`` and AWS
+access key id tokens, the Google, GitLab and npm token prefixes, ``Authorization:``
+headers, bearer tokens, and credentials in URLs.
+
+Patterns from ``capture.redact_patterns`` are applied after built-in patterns, adding to the
+list rather than replacing it. When ``capture.builtin_redaction`` is false, the built-in
+patterns are skipped and only the user's configured patterns are applied.
 
 Every match becomes the same ``[redacted]`` marker, and the whole match goes, so the
 output says nothing about what was removed: not its length, not its prefix, not its
@@ -71,28 +71,6 @@ _HEADER = r"\bauthorization\s*:\s*[^\r\n]*"
 # is past any ordinary word that could follow the noun, and the token is what must not stay.
 _BEARER = r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"
 
-# A password-style assignment: an option, a key, or a field whose name says it holds a
-# secret, with the value that follows it. The name may be one word of a longer identifier
-# (AWS_SECRET_ACCESS_KEY), the two words of a header joined by a dash (X-Api-Key), or a
-# command-line option (--password); it closes with a quote before its colon when the text is
-# JSON, which is how tool output and pasted config write a credential. A value beginning with
-# the marker is already redacted, so redaction is never re-applied to its own output.
-_ASSIGNMENT = (
-    r"[\w-]*"
-    r"(?:passwor\w*|passwd|pwd|secret\w*|token\w*|api[-\w]*key\w*|access[-\w]*key\w*"
-    r"|private[-\w]*key\w*|credential\w*)"
-    r"[\w-]*"
-    r"""["']?"""
-    r"\s*(?:=|:)\s*(?:\"[^\"]*\"|'[^']*'|(?!\[)[^\s,;)\]}]+)"
-)
-
-# mysql takes its password glued to the option (-pS3cret), and no fixed-width lookbehind can
-# name that option while leaving the command around it, so the match runs from the command
-# word to the option. What goes with the secret is the invocation, and the failure line that
-# reported it keeps its own words. A bare -p<value> is not enough to go on: that is how half
-# the tools on a host write a port, a package or a plugin.
-_MYSQL_PASSWORD = r"\b(?:mysql|mariadb|mysqldump)\b[^\r\n]*?\s-p[^\s]+"
-
 # Credentials in a URL: the userinfo run up to and including the @, so the host the
 # session was talking to stays. The fixed lookbehind is what tells a URL's userinfo from
 # an email address in prose.
@@ -103,8 +81,6 @@ _BUILTIN_SOURCES: tuple[str, ...] = (
     *_TOKENS,
     _HEADER,
     _BEARER,
-    _ASSIGNMENT,
-    _MYSQL_PASSWORD,
     _URL_CREDENTIAL,
 )
 
@@ -141,9 +117,16 @@ def compile_patterns(sources: Iterable[str | re.Pattern[str]]) -> tuple[re.Patte
     return tuple(compiled)
 
 
-def redact(text: str, patterns: Iterable[str | re.Pattern[str]] = ()) -> str:
-    """``text`` with every built-in secret shape and every pattern in ``patterns``
-    replaced by ``[redacted]``.
+def redact(
+    text: str,
+    patterns: Iterable[str | re.Pattern[str]] = (),
+    builtin: bool = True,
+) -> str:
+    """``text`` with secret shapes and configured ``patterns`` replaced by ``[redacted]``.
+
+    When ``builtin`` is true (the default), built-in credential shapes are redacted along
+    with ``patterns``. When ``builtin`` is false, only the configured ``patterns`` are
+    applied.
 
     ``patterns`` are the sources of ``capture.redact_patterns``, or those same patterns as
     ``compile_patterns`` returns them. A pattern that cannot be applied raises
@@ -151,6 +134,7 @@ def redact(text: str, patterns: Iterable[str | re.Pattern[str]] = ()) -> str:
     leaves whatever it was written for in the clear.
     """
     out = text
-    for pattern in (*_BUILTIN, *compile_patterns(patterns)):
+    active = (*_BUILTIN, *compile_patterns(patterns)) if builtin else compile_patterns(patterns)
+    for pattern in active:
         out = pattern.sub(REDACTED, out)
     return out
