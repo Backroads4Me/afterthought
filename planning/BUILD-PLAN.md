@@ -1021,6 +1021,21 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   markup for off and for on opens and closes a span; the pi form does the same; `/aft
   offline` and a slash command with other arguments do not; an archived slash-command
   prompt reads as `/<name> <args>`. Review checkpoint: no (lead reads the filter).
+- **F46 What memory keeps** (ruling 2026-10-03). DESIGN 6 (short-term and long-term
+  memory), 8 (the digest), 9 (a decision). Memory filled with lines a session could learn
+  from the repository or that only described where the work stood. The digest prompt gives
+  every fact one test: a future session would make a mistake, or ask the user again,
+  without it. It names what is never a fact, long or short term: the status of a PR,
+  task, branch or commit; who is working on what; a test's name or result; a review's
+  outcome; what a change or fix did to the code; and anything the repository's own
+  documents already say. Where the work stood belongs in the handoff, which only the next
+  session sees as Last session. A short-term fact is a temporary condition that changes
+  how an agent should act (something paused, a temporary setting, a freeze), not progress
+  on the work. The decide prompt's skip applies the same test and list to the fact
+  before it reaches memory. No rule, schema or script changes. Tests: the prompt and
+  seed sync tests; the prompt texts hold the test, the list and the short-term definition.
+  Review checkpoint: yes (both prompts). After merge, redigest two sessions and compare
+  their facts with the pages they replace.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
