@@ -1649,6 +1649,37 @@ def test_redigest_keeps_the_parts_it_can_and_records_the_one_it_cannot(session: 
     assert written["aft"]["refused_parts"][0]["first"] == "e1"
 
 
+def test_redacted_entries_respects_builtin_redaction(session: Session, tmp_path, monkeypatch):
+    home = tmp_path / "home_nobuiltin_digest"
+    home.mkdir(exist_ok=True)
+    (home / "config.toml").write_text(
+        f'vault = "{session.cfg.vault}"\nhost = "testhost"\n'
+        "[capture]\n"
+        "builtin_redaction = false\n"
+        'redact_patterns = ["custom-secret-[0-9]+"]\n'
+    )
+    monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    nobuiltin_cfg = configmod.load()
+
+    entries = [
+        Entry(
+            "e1",
+            NOW,
+            "user",
+            "token ghp_notarealgithutpat0123456789 and custom-secret-12345",
+            False,
+        ),
+    ]
+    redacted = digest._redacted_entries(nobuiltin_cfg, entries)
+    assert "ghp_notarealgithutpat0123456789" in redacted[0].text
+    assert "custom-secret-12345" not in redacted[0].text
+    assert REDACTED in redacted[0].text
+
+    builtin_redacted = digest._redacted_entries(session.cfg, entries)
+    assert "ghp_notarealgithutpat0123456789" not in builtin_redacted[0].text
+    assert REDACTED in builtin_redacted[0].text
+
+
 def test_a_job_whose_every_part_is_refused_fails(session: Session):
     wide = long_transcript("wide-all-refused.jsonl", session)
     fake, cfg = serve(session.cfg, refused(), refused(), refused(), refused())
@@ -2945,22 +2976,25 @@ def test_a_project_named_in_capture_exclude_projects_is_never_captured(
 def test_a_planted_secret_reaches_neither_model_archive_nor_index(session: Session):
     """One end-to-end check of DESIGN 8 and DESIGN 12: a secret stays where it was said.
 
-    A token, a JSON password and a Google API key sit beside ordinary work in one prompt.
-    After a whole `aft work` each is looked for in every place it could have landed: the
-    body the endpoint was sent, the archive's own file, and the search index with its
-    write-ahead log. The ordinary words of the same session are found in the archive and
-    indexed, so each absence above is redaction and not a capture that never happened.
+    A token, a Slack token and a Google API key sit beside ordinary work and a test
+    password in one prompt. After a whole `aft work` each secret is looked for in every place
+    it could have landed: the body the endpoint was sent, the archive's own file, and the search
+    index with its write-ahead log. The test password survives because redaction is by shape
+    alone.
     """
     token = "ghp_NotARealGitHubToken0123456789"
-    password = "hunter2notreal"
+    slack = "xoxb-not-a-real-slack-token-1234"
     google = "AIzaSyNotARealGoogleApiKey0123456789012345"
+    password = "hunter2notreal"
     # The session's ordinary work carries the prompt the digest will quote, so the fact it
     # files is a verified one and the page is the normal size.
     secret_prompt = (
         USER_PROMPT
         + " Wire it with token "
         + token
-        + ', then {"password": "'
+        + ", then Slack "
+        + slack
+        + ' and {"password": "'
         + password
         + '"} and the map key " + google + " for the tiles."'
     )
@@ -2989,11 +3023,13 @@ def test_a_planted_secret_reaches_neither_model_archive_nor_index(session: Sessi
         fake.stop()
     assert report.digested == 1
     assert indexed[indexmod.EVIDENCE] > 0, "the session's own words are not searchable"
-    for secret in (token, password, google):
+    for secret in (token, slack, google):
         assert secret not in asked, f"{secret} reached the model"
         assert secret not in archived, f"{secret} reached the archive"
         assert secret.encode() not in on_disk, f"{secret} reached the files on disk"
         assert secret not in written, f"{secret} reached the page"
+    assert password in archived, "the test password should survive shape-only redaction"
+    assert password in asked, "the test password should reach the model"
     assert REDACTED in archived, "nothing was redacted, so the zeros prove nothing"
 
 

@@ -17,18 +17,20 @@ def test_defaults_when_file_missing(tmp_path, monkeypatch):
     assert cfg.vault.name == "afterthought"
     assert cfg.settings.evidence.retention_days == 90
     assert cfg.settings.library.commit is True
+    assert cfg.settings.capture.builtin_redaction is True
     assert cfg.host == configmod.default_host()
 
 
 def test_values_and_sections(home):
     (home / "config.toml").write_text(
         'vault = "/srv/mem"\nhost = "box"\n[library]\ncommit = false\n'
-        '[capture]\nworker_paths = ["/w"]\n'
+        '[capture]\nworker_paths = ["/w"]\nbuiltin_redaction = false\n'
     )
     cfg = configmod.load()
     assert (str(cfg.vault), cfg.host) == ("/srv/mem", "box")
     assert cfg.settings.library.commit is False
     assert cfg.settings.capture.worker_paths == ("/w",)
+    assert cfg.settings.capture.builtin_redaction is False
 
 
 @pytest.mark.parametrize(
@@ -40,6 +42,11 @@ def test_values_and_sections(home):
         ("[dream]\ninterval_minutes = 0\n", "dream.interval_minutes must be positive"),
         ("[dream]\ninterval_minutes = -5\n", "dream.interval_minutes must be positive"),
         ("[library]\ncommit = 1\n", "library.commit must be true or false"),
+        ("[capture]\nbuiltin_redaction = 1\n", "capture.builtin_redaction must be true or false"),
+        (
+            "[capture]\nbuiltin_redaction = 'true'\n",
+            "capture.builtin_redaction must be true or false",
+        ),
         ("[evidence]\nretention_days = true\n", "must be an integer"),
         ("[capture]\nworker_paths = '/w'\n", "must be a list of strings"),
         ("dream = 3\n", "[dream] must be a table"),

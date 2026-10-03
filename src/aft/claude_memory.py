@@ -25,10 +25,10 @@ own words would hand it an authority it does not have (design 11: nothing import
 ``[stated]``).
 
 A memory file is text an agent wrote with nobody reviewing it, so a line can hold a token or a
-password. Every line is therefore redacted with the configured ``capture.redact_patterns``
-before it becomes a statement, a quote, or a record - the same thing capture does before
-archiving (design 8) - and a project capture excludes is skipped outright, by either
-``capture.exclude_paths`` or ``capture.exclude_projects``: capture is told never to read that
+key. Every line is therefore redacted with built-in secret shapes and configured
+``capture.redact_patterns`` before it becomes a statement, a quote, or a record - the same thing
+capture does before archiving (design 8) - and a project capture excludes is skipped outright, by
+either ``capture.exclude_paths`` or ``capture.exclude_projects``: capture is told never to read that
 work, and an import is not an exemption from it.
 """
 
@@ -135,6 +135,7 @@ def plans(
     root = memory_home(source)
     registry = Registry.load(config.registry_path)
     patterns = config.settings.capture.redact_patterns
+    builtin = config.settings.capture.builtin_redaction
     wanted = None
     if project is not None:
         found = registry.by_slug(project)
@@ -160,7 +161,7 @@ def plans(
                 excluded.append(f"{registered.slug} ({registered_path})")
                 continue
             for memory_file in sorted(memory_dir.glob("*.md")):
-                candidate = read_file(registered, memory_file, patterns)
+                candidate = read_file(registered, memory_file, patterns, builtin=builtin)
                 if candidate.lines:
                     candidates.append(candidate)
     unclaimed = sorted(
@@ -171,22 +172,27 @@ def plans(
     return candidates, unclaimed, excluded
 
 
-def read_file(project: Project, path: Path, patterns: Iterable[str] = ()) -> Candidate:
+def read_file(
+    project: Project,
+    path: Path,
+    patterns: Iterable[str] = (),
+    builtin: bool = True,
+) -> Candidate:
     """One memory file as lines that could become facts, and the lines that cannot.
 
     A memory file is text an agent wrote without anyone reviewing it, and it can hold a token
-    or a password, so every line is redacted with the configured ``capture.redact_patterns``
-    before it becomes anything at all - statement, quote, or verified record. Redacting later
-    would leave the secret in the digest's own frontmatter, and a dropped line is reported in
-    its redacted form for the same reason. Verification then asks after the redacted text,
-    which is the text the digest actually holds.
+    or a key, so every line is redacted with built-in secret shapes and configured
+    ``capture.redact_patterns`` before it becomes anything at all - statement, quote, or
+    verified record. Redacting later would leave the secret in the digest's own frontmatter,
+    and a dropped line is reported in its redacted form for the same reason. Verification
+    then asks after the redacted text, which is the text the digest actually holds.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     lines: list[tuple[str, str]] = []
     dropped: list[tuple[str, str]] = []
     for line in _body(raw).splitlines():
-        quote = redact.redact(line, patterns).strip()
+        quote = redact.redact(line, patterns, builtin=builtin).strip()
         if not quote:
             continue
         if quote.startswith("#"):

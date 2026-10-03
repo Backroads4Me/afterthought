@@ -292,20 +292,6 @@ SECRET_FORMS = [
         id="xoxp- user token",
     ),
     pytest.param(
-        # JSON writes a credential with the quotes around the name, which is how tool output
-        # and a pasted config say it.
-        '{"password": "hunter2notreal"}',
-        "hunter2notreal",
-        ("and moved on",),
-        id="quoted JSON key",
-    ),
-    pytest.param(
-        '{"api_key":"notrealapikeyvalue0123"}',
-        "notrealapikeyvalue",
-        ("and moved on",),
-        id="quoted JSON api_key",
-    ),
-    pytest.param(
         "AIzaSyNotARealGoogleApiKey0123456789012345",
         "NotARealGoogle",
         ("and moved on",),
@@ -331,20 +317,6 @@ SECRET_FORMS = [
         ("and moved on",),
         id="bearer token on its own",
     ),
-    pytest.param(
-        "X-Api-Key: NotARealKeyValue12345",
-        "NotARealKeyValue",
-        ("and moved on",),
-        id="X-Api-Key header",
-    ),
-    pytest.param(
-        # mysql glues the password to the option, so the invocation goes with it and the
-        # database named after it stays.
-        "mysql -uroot -pNotRealPw7 widgetdb",
-        "NotRealPw7",
-        ("widgetdb", "and moved on"),
-        id="mysql -p password",
-    ),
     pytest.param("AKIANOTAREALKEY01234", "NOTAREALKEY", ("and moved on",), id="AWS key id"),
     pytest.param(
         # The value of the header runs to the end of the line, so the sentence around it
@@ -353,15 +325,6 @@ SECRET_FORMS = [
         "not.a.real.bearer.token",
         (),
         id="Authorization header",
-    ),
-    pytest.param(
-        'password = "not a real password"', "not a real password", ("and moved on",), id="password="
-    ),
-    pytest.param(
-        "AWS_SECRET_ACCESS_KEY=notarealsecretaccesskeyvalue01",
-        "notarealsecretaccesskeyvalue",
-        ("and moved on",),
-        id="environment-style assignment",
     ),
     pytest.param(
         "https://deploy:notrealpw@api.example.com/v1",
@@ -390,6 +353,46 @@ def test_no_secret_form_leaves_a_hint_of_what_it_removed(secret, body, remain, c
     [result] = kept([said(f"context {secret} tail")], cfg)
     assert body[:6] not in result
     assert body[-6:] not in result
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password = hunter2",
+        '"max_tokens": 4000',
+        "daily_token_budget = 200_000",
+        '{"password": "hunter2notreal"}',
+        '{"api_key":"notrealapikeyvalue0123"}',
+        "X-Api-Key: NotARealKeyValue12345",
+        "mysql -uroot -pNotRealPw7 widgetdb",
+        'password = "not a real password"',
+        "AWS_SECRET_ACCESS_KEY=notarealsecretaccesskeyvalue01",
+    ],
+)
+def test_name_and_value_assignments_survive_filter(text, cfg):
+    sample = f"the run used {text} and moved on"
+    [result] = kept([said(sample)], cfg)
+    assert text in result
+    assert REDACTED not in result
+
+
+def test_builtin_redaction_false_skips_builtin_shapes_in_filter(tmp_path, monkeypatch):
+    home = tmp_path / "home_nobuiltin"
+    home.mkdir(exist_ok=True)
+    (home / "config.toml").write_text(
+        f'vault = "{tmp_path / "vault"}"\nhost = "testhost"\n'
+        "[capture]\n"
+        "builtin_redaction = false\n"
+        'redact_patterns = ["custom-secret-[0-9]+"]\n'
+    )
+    monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    config = configmod.load()
+
+    text = "use ghp_notarealgithutpat0123456789 and custom-secret-12345"
+    [result] = kept([said(text)], config)
+    assert "ghp_notarealgithutpat0123456789" in result
+    assert "custom-secret-12345" not in result
+    assert REDACTED in result
 
 
 def test_a_word_that_happens_to_end_in_the_token_prefix_survives(cfg):

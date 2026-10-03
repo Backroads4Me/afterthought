@@ -60,7 +60,7 @@ PI_DECISION = "Forget the daemon: the queue keeps its state in the SQLite file a
 PI_DECISION_QUOTE = "the queue keeps its state in the SQLite file"
 PI_STATEMENT = "The queue keeps its state in the SQLite file at state/q.sqlite."
 CLAUDE_SECRET = "sk-proj-VkQ7mR2nT9xL4dF6hJ8s"
-PI_SECRET = "db_password=Wrangler7calibrate"
+PI_SECRET = "ghp_Wrangler7calibrate01234567"
 
 # A fact the model invents: words no entry of that session holds. The digest is meant to keep
 # it off the page as a fact and name it as dropped (DESIGN 8).
@@ -110,7 +110,7 @@ def pi_transcript(path: Path, cwd: Path) -> Path:
                 "p3",
                 "p2",
                 "user",
-                f"{PI_ONLY}. The reader password is {PI_SECRET}.",
+                f"{PI_ONLY}. The reader token is {PI_SECRET}.",
             ),
             pi_record("p4", "p3", "assistant", "Done: noted both."),
         ],

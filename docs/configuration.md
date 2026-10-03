@@ -34,6 +34,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 | `capture.exclude_paths` | `[]` | Directories whose sessions are never captured. |
 | `capture.exclude_projects` | `[]` | Projects, by id or slug, whose sessions are never captured, whatever directory they ran in. |
 | `capture.redact_patterns` | `[]` | Extra regular expressions to redact, on top of the built-in secret patterns. Case-insensitive. A pattern that does not compile is an error. Applies to new evidence; use `aft forget pattern` for what is already archived. |
+| `capture.builtin_redaction` | `true` | Redact built-in secret shapes (private key blocks, provider-prefixed tokens, `Authorization:` headers, bearer tokens, URL credentials). `false` turns them off and applies only `capture.redact_patterns`. |
 
 ## `[evidence]`
 
