@@ -1009,6 +1009,18 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   unchanged. Tests: the block ends with the line, under every budget the closing line
   survives; the echo filter still drops a repeated marker line; the skill text holds it.
   Review checkpoint: no (lead reads it).
+- **F45 Markers given as a slash command** (ruling 2026-10-03). DESIGN 12. Typed as
+  `/aft off`, a marker reaches the transcript as the agent's skill-call markup (Claude
+  Code: `<command-message>aft</command-message>` `<command-name>/aft</command-name>`
+  `<command-args>off</command-args>`; pi: its `<skill name="aft" ...>` expansion and the
+  arguments after it), so no span opened and the session was archived whole. The Claude Code
+  reader renders a slash-command prompt as the text typed, `/<name> <args>`; the pi reader
+  does the same for a skill call, without the skill body. The markers also match with one
+  leading `/` (`/aft off`, `/aft on`); `/off the record` is not a form anyone types and
+  need not match. Matching stays at the start of a prompt only. Tests: the exact Claude Code
+  markup for off and for on opens and closes a span; the pi form does the same; `/aft
+  offline` and a slash command with other arguments do not; an archived slash-command
+  prompt reads as `/<name> <args>`. Review checkpoint: no (lead reads the filter).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

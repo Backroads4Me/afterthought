@@ -863,7 +863,8 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
 
 - **Off the record.** A prompt that begins with `aft off` or `off the record` starts an
   off-the-record span, and one that begins with `aft on` or `on the record` ends it. Case
-  and trailing punctuation do not matter, and an unclosed span runs to the end of the
+  and trailing punctuation do not matter, `/aft off` and `/aft on` typed as slash commands
+  count the same, and an unclosed span runs to the end of the
   session. The markers count only at the start of a prompt, so discussing them mid-sentence
   never triggers them. The filter drops the span before anything is archived, indexed or
   sent to the model.
