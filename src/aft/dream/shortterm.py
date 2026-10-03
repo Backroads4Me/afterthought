@@ -62,6 +62,37 @@ def written_at(frontmatter: dict) -> str:
     return at if isinstance(at, str) else ""
 
 
+def names_session(path: Path, stems: set[str]) -> tuple[str, str, dict] | None:
+    """The (agent, session id) one digest file names for the project's own work, with the
+    file's frontmatter, or None when it names none.
+
+    A library or memory-import digest proposes facts from imported material (DESIGN 11),
+    and a worker's digest is a worker session's evidence (DESIGN 8): neither is a session
+    of the project's own work, so neither counts toward the short-term window and neither
+    reconciles the page (DESIGN 6, R10). A digest filed as a later part of one day names
+    its session's first part, and only when that first part's file is beside it, where the
+    evidence archive holds the session.
+    """
+    if "-library-" in path.name or "-import-" in path.name:
+        return None
+    named = digest._DIGEST_NAME.match(path.stem)
+    if named is None:
+        return None
+    try:
+        frontmatter = page.split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
+    except (OSError, UnicodeDecodeError):
+        return None
+    aft = frontmatter.get("aft")
+    if isinstance(aft, dict) and aft.get("role") == "worker":
+        return None
+    agent, session = named.group("agent"), named.group("session")
+    part = _PART.match(session)
+    # A later part of one day is filed as <session>-2, and only beside its first part.
+    if part and f"{named.group('date')}-{agent}-{part.group('base')}" in stems:
+        session = part.group("base")
+    return agent, session, frontmatter
+
+
 def sessions(vault: Path, slug: str) -> list[Session]:
     """The project's primary sessions that have a digest, in session order.
 
@@ -73,27 +104,15 @@ def sessions(vault: Path, slug: str) -> list[Session]:
     if not root.is_dir():
         return []
     stems = {path.stem for path in root.rglob("*.md")}
-    found: list[tuple[str, str, str, str]] = []
+    found: list[tuple[str, str, str, str, str]] = []
     for path in root.rglob("*.md"):
-        if "-library-" in path.name or "-import-" in path.name:
-            continue
-        named = digest._DIGEST_NAME.match(path.stem)
+        named = names_session(path, stems)
         if named is None:
             continue
-        try:
-            frontmatter = page.split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
-        except (OSError, UnicodeDecodeError):
-            continue
+        agent, session, frontmatter = named
         aft = frontmatter.get("aft")
-        if isinstance(aft, dict) and aft.get("role") == "worker":
-            continue
-        session = named.group("session")
-        part = _PART.match(session)
-        # A later part of one day is filed as <session>-2, and only beside its first part.
-        if part and f"{named.group('date')}-{named.group('agent')}-{part.group('base')}" in stems:
-            session = part.group("base")
         dreamed = _run_time(aft.get("consumed") if isinstance(aft, dict) else None)
-        found.append((written_at(frontmatter), str(path), named.group("agent"), session, dreamed))
+        found.append((written_at(frontmatter), str(path), agent, session, dreamed))
     ordered: dict[tuple[str, str], Session] = {}
     for at, _, agent, session, dreamed in sorted(found):
         ordered.setdefault((agent, session), Session(agent, session, at, dreamed))

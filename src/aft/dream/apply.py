@@ -880,9 +880,18 @@ def _short_term(
         changed = True
     # The day backstop (F47): counted in sessions, a line of a project that stops having
     # sessions never leaves by count, so what time has left behind expires the same way.
+    # A line the reconcile withdrew in this run is already gone by its own verdict: it
+    # stands struck as the record of what the newest session showed, and the backstop
+    # would strike the same line again in one run and list it twice in the report.
+    settled = {line.statement for line in report.withdrawn}
     while True:
         going = next(
-            (f for f in doc.page.facts if _expired(config, f, doc.sources, vault_path, today)),
+            (
+                f
+                for f in doc.page.facts
+                if f.statement not in settled
+                and _expired(config, f, doc.sources, vault_path, today)
+            ),
             None,
         )
         if going is None:

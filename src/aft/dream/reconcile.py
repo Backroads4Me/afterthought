@@ -8,15 +8,18 @@ chunk cap - puts the numbered short-term lines beside the session's own words. F
 line that a part shows is done, false or replaced, the answer names the line's number, a
 quote, and the entry the quote comes from.
 
-The script judges nothing. It verifies each quote against its entry as R1 does, and
-withdraws on ``recent.md`` only what verifies; an answer whose quote is not in the entry
-it names changes nothing and is reported. The step never touches a long-term line (it can
+The script judges nothing. It verifies each quote against its entry as R1 does, and a
+withdrawal passes only when the evidence may replace the line, under the same authority
+table and R4 a supersede answers to (DESIGN 6): a [stated] preference is withdrawn only
+on your own words, and the words have to be newer than the line's own date. Anything
+less changes nothing and is reported. The step never touches a long-term line (it can
 name only lines it numbered from ``recent.md``), and a worker session's words never reach
-it: it reads only the newest session this run applied that was a primary session. A line
-with an open note is numbered by no one - a note's state is the note's, not ``active`` -
-so the model is never told of it and cannot withdraw it; the note waits on you (DESIGN 6).
-Like every model call it counts against the day's token budget, and it is skipped when
-that budget is spent.
+it: it reads only the newest session this run applied that was a primary session, and the
+entries it reads are that agent's, matched by agent and session id and never by the id
+alone. A line with an open note is numbered by no one - a note's state is the note's, not
+``active`` - so the model is never told of it and cannot withdraw it; the note waits on
+you (DESIGN 6). Like every model call it counts against the day's token budget, and it is
+skipped when that budget is spent.
 """
 
 from __future__ import annotations
@@ -31,15 +34,14 @@ from typing import TYPE_CHECKING
 
 from aft import digest, evidence, model, page, pagewrite
 from aft.config import Config
-from aft.dream import shortterm
+from aft.dream import rules, shortterm
+from aft.readers import USER
 
 if TYPE_CHECKING:
     from aft.dream.apply import ProjectRunReport
 
 PROMPT_FILE = "prompts/reconcile.md"
 SCHEMA_FILE = "prompts/reconcile.schema.json"
-MAX_TOKENS = 512
-"""The answer is a list of line numbers with a quote and an entry each."""
 
 R1 = "R1"
 RULE = "reconcile"
@@ -85,7 +87,7 @@ def run(
     ``digests`` is the list this run applied, in session order; the newest primary
     session among them is the one the short-term lines are read against. Makes no call
     and changes nothing when the project has no ``recent.md``, no active line on it, or
-    no primary session applied, when the session's entries are not in the evidence
+    no primary session applied, when that session's entries are not in the evidence
     archive, or when the day's token budget is spent.
     """
     recent = vault_path / "projects" / slug / page.RECENT_PAGE
@@ -98,23 +100,36 @@ def run(
     target = newest_primary(vault_path, digests)
     if target is None:
         return
-    _agent, session_id = target
-    entries = evidence.entries(config, session_id)
+    agent, session_id = target
+    entries = evidence.entries(config, session_id, agent=agent)
     if not entries:
         return
     if model.tokens_used_today(config, now) >= config.settings.work.daily_token_budget:
         return
     system = prompt()
     preamble = _numbered(numbered)
+    answer_schema = schema()
     # The cap bounds one call's input, the prompt and the lines block included, as the
     # digest's cap does (DESIGN 13), so the entries are divided by what is left of it.
     budget = max(1, digest.MAX_CHUNK_TOKENS - digest.tokens(system) - digest.tokens(preamble))
+    cap = max_tokens(answer_schema)
     for part in digest.split_parts(entries, budget):
         answer = model.complete_json(
-            config, system, _user_message(preamble, part), schema(), MAX_TOKENS
+            config, system, _user_message(preamble, part), answer_schema, cap
         )
         _apply_answers(
-            config, doc, recent, numbered, part, session_id, answer, today, report, record_write
+            config,
+            agent,
+            session_id,
+            slug,
+            doc,
+            recent,
+            numbered,
+            part,
+            answer,
+            today,
+            report,
+            record_write,
         )
 
 
@@ -123,27 +138,18 @@ def newest_primary(vault_path: Path, digests: Sequence[Path]) -> tuple[str, str]
 
     The digests arrive in session order and are applied in it, so the last primary one is
     the newest applied. A worker's digest is no session of the project's own work (DESIGN
-    8): its entries never reconcile short-term memory. A digest filed as a later part of
-    one day names its session's first part, where the evidence archive holds the session.
+    8), and neither is a library or memory-import digest (DESIGN 11): neither reconciles
+    short-term memory, so an applied digest of that kind leaves the newest applied session
+    where it was. A digest filed as a later part of one day names its session's first
+    part, where the evidence archive holds the session.
     """
     stems = {path.stem for path in (vault_path / shortterm.DIGESTS).rglob("*.md")}
     newest: tuple[str, str] | None = None
     for path in digests:
-        named = digest._DIGEST_NAME.match(path.stem)
-        if named is None:
-            continue
-        try:
-            frontmatter = page.split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
-        except (OSError, UnicodeDecodeError):
-            continue
-        aft = frontmatter.get("aft")
-        if isinstance(aft, dict) and aft.get("role") == "worker":
-            continue
-        agent, session = named.group("agent"), named.group("session")
-        part = shortterm._PART.match(session)
-        if part and f"{named.group('date')}-{agent}-{part.group('base')}" in stems:
-            session = part.group("base")
-        newest = (agent, session)
+        named = shortterm.names_session(path, stems)
+        if named is not None:
+            agent, session, _ = named
+            newest = (agent, session)
     return newest
 
 
@@ -162,22 +168,29 @@ def _user_message(preamble: str, part: Sequence[digest.Entry]) -> str:
 
 def _apply_answers(
     config: Config,
+    agent: str,
+    session_id: str,
+    slug: str,
     doc: pagewrite.PageDoc,
     recent: Path,
     numbered: Sequence[page.Fact],
     part: Sequence[digest.Entry],
-    session_id: str,
     answer: dict,
     today: str,
     report: ProjectRunReport,
     record_write,
 ) -> None:
-    """Withdraw what one part's answer shows and verifies; refuse and report the rest.
+    """Withdraw what one part's answer shows, verifies and may replace; refuse the rest.
 
     A withdrawal strikes the line through and dates it, the grammar's own ``withdrawn``
     form; the line keeps the sources it was built on, and the quote that showed it done is
     reported beside it. The answer's numbers name the lines as they were numbered, and a
     withdrawal rewrites its line in place, so they hold across the whole answer.
+
+    The quote alone does not withdraw: the answer's evidence has to carry the authority to
+    replace the line and be newer than it, by the same authority table and R4 a supersede
+    answers to (DESIGN 6). A withdrawal that fails that check changes nothing and is
+    reported, like one whose quote does not verify.
     """
     by_entry = digest._cited(part)
     changed = False
@@ -203,7 +216,7 @@ def _apply_answers(
                 )
             )
             continue
-        if not evidence.find_quote(config, session_id, entry.id, item["quote"]):
+        if not evidence.find_quote(config, session_id, entry.id, item["quote"], agent=agent):
             report.refused.append(
                 RefusedWithdrawal(
                     statement=fact.statement,
@@ -216,6 +229,10 @@ def _apply_answers(
         if current is None:
             # An answer may name a line an earlier item already withdrew; the withdrawal
             # is counted once, where it happened.
+            continue
+        refused = _refused_withdrawal(current, entry, agent, session_id, slug, today)
+        if refused is not None:
+            report.refused.append(refused)
             continue
         try:
             doc.withdraw(current, today)
@@ -239,6 +256,53 @@ def _active(doc: pagewrite.PageDoc, statement: str) -> page.Fact | None:
     return found[0] if len(found) == 1 else None
 
 
+def _refused_withdrawal(
+    current: page.Fact,
+    entry: digest.Entry,
+    agent: str,
+    session_id: str,
+    slug: str,
+    today: str,
+) -> RefusedWithdrawal | None:
+    """Why the rules refuse to withdraw ``current`` on ``entry``'s words, or None when
+    they allow it.
+
+    The answer's evidence is one verified quote out of the newest primary session, so it
+    travels to the rules as one quote whose tag follows the entry's role: ``stated`` when
+    the entry is one of your turns, ``observed`` otherwise. The verdict is the one a
+    supersede of this line on this evidence gets, judged by the rules module's own
+    ``_supersede``, so a withdrawal answers to the same authority table and R4 a supersede
+    does (DESIGN 6). A refusal writes nothing: the note a downgraded supersede would write
+    is the decide step's to settle, so the line stands and the report carries why.
+    """
+    tagged = "stated" if entry.role == USER else "observed"
+    quote_date = f"{entry.time:%Y-%m-%d}"
+    quote = rules.Evidence(
+        source=entry.id,
+        resource=f"aft://session/{agent}/{session_id}#{entry.id}",
+        origin=rules.PRIMARY,
+        date=quote_date,
+        verified=True,
+        yours=entry.role == USER,
+    )
+    outcome = rules._supersede(
+        rules.NewFact(current.statement, current.kind or "", tagged, quote_date, term=rules.SHORT),
+        current,
+        rules.Context(today=today, evidence=(quote,), run_project=slug, target_recent=True),
+    )
+    if isinstance(outcome, rules.Apply):
+        return None
+    if tagged not in rules.AUTHORITY.get(current.kind or "", ()):
+        reason = (
+            f"a {current.kind} line is withdrawn only on your own words"
+            if current.kind
+            else "the line has no kind the authority table gives a row"
+        )
+    else:
+        reason = f"the quote is from {quote_date}, not newer than the line's {current.date}"
+    return RefusedWithdrawal(statement=current.statement, rule=outcome.rule, reason=reason)
+
+
 def prompt() -> str:
     """The system prompt every reconcile call sends, shipped as the plan's fixed text."""
     return (files("aft") / PROMPT_FILE).read_text(encoding="utf-8")
@@ -258,3 +322,22 @@ def schema() -> dict:
         raise ReconcileError(
             f"the shipped reconcile schema at {SCHEMA_FILE} is not JSON: {exc}"
         ) from exc
+
+
+def max_tokens(answer_schema: dict) -> int:
+    """The output cap one call needs to hold the schema's worst answer (DESIGN 13).
+
+    The answer is a list of line numbers with a quote and an entry each, so the worst
+    answer is the lines array at its ``maxItems`` with every quote at its ``maxLength``,
+    priced at the digest's characters-to-token estimate. A cap under it truncates the
+    answer, the call fails its schema, and the project rolls back to hit the same wall on
+    every later run. The punctuation around the quotes is priced at the prose rate, which
+    undercounts it, so the cap is rounded up by half again.
+    """
+    lines = answer_schema["properties"]["lines"]
+    items = lines["maxItems"]
+    quote_cap = lines["items"]["properties"]["quote"]["maxLength"]
+    worst = {
+        "lines": [{"line": items, "quote": "x" * quote_cap, "entry": "#99"} for _ in range(items)]
+    }
+    return digest.tokens(json.dumps(worst)) * 3 // 2
