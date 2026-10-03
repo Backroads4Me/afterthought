@@ -88,7 +88,7 @@ to answer.
 
 A line under a note waits on your decision, and memory does not decide for you. When notes
 wait, a session starts with a "Needs your decision" section at the top of its block, and
-the agent is told to say how many and ask whether to settle them now or skip for now. The
+the agent is told to say how many: reply "settle" to go through them, or carry on to skip them. The
 hook also shows you a short notice directly: Claude Code displays it as a hook message, and
 pi as a notification. To settle a note, the agent explains it, recommends keep, replace or
 withdraw, and runs `aft settle` with your choice. Skipping changes nothing; the next session
