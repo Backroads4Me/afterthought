@@ -7,7 +7,8 @@
 // file runs one command per event, keeps the one block that command printed, and adds that
 // block as a system prompt section of its own. `aft hook pi session_start` prints the block
 // `aft inject` prints for the session's directory; the other two events are capture's and
-// print nothing. It has no queue, no retries, no cache and no settings of its own.
+// print nothing. When notes in memory wait on the user, session_start prints a JSON object
+// instead, `{"block", "notice"}`, and the notice is shown to the user (BUILD-PLAN F42). It has no queue, no retries, no cache and no settings of its own.
 //
 // The payload is the shape src/aft/adapters/pi.py parses, and the event names are that
 // module's own table: `session_start`, `session_before_compact`, `session_shutdown`.
@@ -54,7 +55,11 @@ export default function (pi: ExtensionAPI) {
     try {
       const p = payload("session_start", event?.reason, ctx?.sessionManager, ctx?.cwd)
       if (p) {
-        block = await hook("session_start", p)
+        const start = startOutput(await hook("session_start", p))
+        block = start.block
+        if (start.notice && ctx?.hasUI) {
+          ctx.ui.notify(start.notice, "warning")
+        }
       }
     } catch {}
   })
@@ -81,7 +86,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const p = payload("session_start", event?.reason, ctx?.sessionManager, ctx?.cwd)
       if (p) {
-        const refreshed = await hook("session_start", p)
+        const refreshed = startOutput(await hook("session_start", p)).block
         if (refreshed) {
           block = refreshed
         }
@@ -150,6 +155,25 @@ export default function (pi: ExtensionAPI) {
       child.stdin?.end(JSON.stringify(body))
     })
     return printed.trim()
+  }
+}
+
+/**
+ * What a session start printed: the block alone as plain text, or, when notes wait on the
+ * user, `{"block", "notice"}` as JSON. A plain block never starts with "{".
+ */
+function startOutput(printed: string): { block: string; notice: string } {
+  if (!printed.startsWith("{")) {
+    return { block: printed, notice: "" }
+  }
+  try {
+    const parsed = JSON.parse(printed)
+    return {
+      block: typeof parsed?.block === "string" ? parsed.block : "",
+      notice: typeof parsed?.notice === "string" ? parsed.notice : "",
+    }
+  } catch {
+    return { block: "", notice: "" }
   }
 }
 

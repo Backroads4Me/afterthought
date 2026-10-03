@@ -73,9 +73,9 @@ uv tool install --editable .
    aft install timer
    ```
 
-6. Open `~/afterthought` as a vault in Obsidian to read and edit memory. Check
-   `reports/needs-you.md` now and then: it lists every question memory is waiting on you
-   for.
+6. Open `~/afterthought` as a vault in Obsidian to read and edit memory. When memory has a
+   question for you, the next session tells you and offers to settle it with you;
+   `reports/needs-you.md` lists every one.
 
 `aft pause` stops background work at any time without losing anything, since sessions are
 still queued, and `aft resume` picks them up.

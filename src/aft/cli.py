@@ -45,6 +45,8 @@ _CLI_ERROR_NAMES = {
     "ImportError",
     "ProposeError",
     "BadPattern",
+    "NoteError",
+    "WriteError",
 }
 
 
@@ -121,6 +123,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--force", action="store_true", help="run once even while paused")
     p.set_defaults(handler=cmd_work)
+
+    p = sub.add_parser("notes", help="list the notes in memory waiting on the user's decision")
+    p.add_argument("path", nargs="?", default=".", help="a directory of the project to ask about")
+    p.add_argument("--all", action="store_true", help="every project's notes, not one project's")
+    p.add_argument("--json", action="store_true", help="output the notes as JSON")
+    p.set_defaults(handler=cmd_notes)
+
+    p = sub.add_parser("settle", help="settle one note as the user decided")
+    p.add_argument("where", help="<page>:<line>, as aft notes prints it")
+    how = p.add_mutually_exclusive_group(required=True)
+    how.add_argument("--keep", action="store_true", help="the line stands")
+    how.add_argument("--withdraw", action="store_true", help="the line no longer holds")
+    how.add_argument(
+        "--replace", metavar="STATEMENT", help="the line is replaced by this statement"
+    )
+    p.set_defaults(handler=cmd_settle)
 
     p = sub.add_parser("budget", help="show today's token use against the daily budget")
     bsub = p.add_subparsers(metavar="action")
@@ -593,6 +611,54 @@ def cmd_dream(args) -> int:
         return 0
     _budget_note(config, "dream")
     _dream(config)
+    return 0
+
+
+def cmd_notes(args) -> int:
+    """The notes waiting on the user's decision, with what explains each (BUILD-PLAN F42)."""
+    import dataclasses
+
+    from aft import gitutil, keys, notes
+
+    config = load()
+    slug = None
+    if not args.all:
+        registry = Registry.load(config.registry_path)
+        try:
+            slug = keys.resolve(Path(args.path).resolve(), registry, config.host).slug
+        except gitutil.GitError:
+            slug = None
+    found = notes.open_notes(config, slug, everywhere=args.all)
+    if args.json:
+        print(json.dumps([dataclasses.asdict(n) | {"where": n.where} for n in found], indent=2))
+        return 0
+    if not found:
+        print("aft notes: nothing is waiting on the user")
+        return 0
+    print(f"aft notes: {len(found)} note(s) need the user's decision\n")
+    for number, note in enumerate(found, start=1):
+        print(f"[{number}] {note.where} ({note.note_type}, {note.note_date})")
+        print(f"    Memory says: {note.statement} [{note.tag}] {note.date}")
+        for source in note.line_sources:
+            print(f'      quote ({source.date}): "{source.quote}"')
+        print(f"    The note says: {' '.join(note.note_text)}")
+        for source in note.note_sources:
+            print(f'      quote ({source.date}): "{source.quote}"')
+        print(
+            f"    Settle with: aft settle {note.where} --keep | --withdraw"
+            ' | --replace "<statement>"\n'
+        )
+    return 0
+
+
+def cmd_settle(args) -> int:
+    """Settle one note as the user decided (BUILD-PLAN F42)."""
+    from aft import notes
+
+    config = load()
+    choice = notes.KEEP if args.keep else notes.WITHDRAW if args.withdraw else notes.REPLACE
+    message = notes.settle(config, args.where, choice, args.replace)
+    print(f"aft settle: committed {message!r}; the note is in the page's archive")
     return 0
 
 
@@ -1069,8 +1135,10 @@ def _dispatch(event: SessionEvent) -> str:
     event's working directory (BUILD-PLAN M1.1, M1.2). The block goes out as plain text.
     Claude Code adds a ``SessionStart`` hook's plain stdout to the session's context, for
     every source including ``compact`` (hooks reference, "SessionStart"), and pi's extension
-    reads the same text and adds it as a system prompt section. Injection only reads, so
-    ``capture.exclude_paths`` and ``capture.exclude_projects`` do not apply to it. A vault
+    reads the same text and adds it as a system prompt section. When notes wait on the user,
+    the block goes out inside a JSON object with a notice for the user (`_start_output`).
+    Injection only reads, so ``capture.exclude_paths`` and ``capture.exclude_projects`` do
+    not apply to it. A vault
     that is not initialized has no memory to give and returns nothing. `cmd_hook` also
     records the project a captured session started in, once the block is printed
     (`_session_start`).
@@ -1114,7 +1182,10 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         result = keys.resolve(event.cwd, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
-    block = inject.build(config, result)
+    from aft import notes
+
+    waiting = notes.count(config, result.slug)
+    block = _start_output(event.agent, inject.build(config, result, waiting), waiting)
     if result.slug is None or is_excluded(event.cwd, config):
         return block, None
     project_id = result.project.id if result.project is not None else None
@@ -1128,6 +1199,35 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         queue.record_project(config, event.agent, event.session_id, project_id, slug)
 
     return block, remember
+
+
+def _start_output(agent: str, block: str, waiting: int) -> str:
+    """What a session-start hook prints: the block as plain text, or, when notes wait on the
+    user, a JSON object that also carries a notice the agent's interface shows the user
+    directly, so the user hears of the notes even from an agent that does not pass on what
+    the block asks (BUILD-PLAN F42).
+
+    Claude Code reads ``systemMessage`` as a message shown to the user and
+    ``hookSpecificOutput.additionalContext`` as context, the same place plain stdout goes
+    (hooks reference, "JSON output" and "SessionStart"). pi's extension reads ``block`` and
+    ``notice`` and shows the notice with ``ctx.ui.notify``. A plain block never starts with
+    ``{``, so an extension tells the two apart by the first character.
+    """
+    if not waiting or not block:
+        return block
+    noun = "note in memory waits" if waiting == 1 else "notes in memory wait"
+    notice = f"afterthought: {waiting} {noun} on your decision. Ask the agent to settle them."
+    if agent == "claude":
+        return json.dumps(
+            {
+                "systemMessage": notice,
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": block,
+                },
+            }
+        )
+    return json.dumps({"block": block, "notice": notice})
 
 
 class HookTimeoutError(BaseException):

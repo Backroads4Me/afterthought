@@ -970,6 +970,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   supersede or conflict; the first real dream paired unrelated lines as conflicts. M2.6
   and M4.3 hold the prompts' text. Tests: the prompts' words. Review checkpoint: yes
   (prompts).
+- **F42 Notes the user settles** (ruling 2026-10-02). DESIGN 6, 10. A conflict or question
+  note waits on the user, and nothing told them one existed or let an agent settle it.
+  `aft notes [path] [--all] [--json]` lists the open notes with their lines and quotes;
+  `aft settle <page>:<line> --keep|--withdraw|--replace "<statement>"` settles one, moves
+  the note verbatim to the archive, regenerates `needs-you.md` and commits. A replacement
+  cites the note's verified, non-worker sources only, and a refused settle restores the
+  archive. The memory block opens with "Needs your decision"
+  when notes wait, telling the agent to raise them first and ask whether to settle now or
+  skip; the session-start hook prints JSON carrying a notice the interface shows the user
+  (Claude Code `systemMessage`, pi `ctx.ui.notify`). The aft skill holds the settle
+  procedure: explain, recommend, ask, run `aft settle`. Tests: listing, counting, each
+  choice, a replacement refused without verified quotes and leaving no trace, the commands,
+  the block's part and its cap, the hook's JSON for both agents and plain text with no notes,
+  and the pi extension's notice. Review checkpoint: yes (injection, trust).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

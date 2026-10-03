@@ -315,7 +315,16 @@ markdown:
 | Conflict | Active line followed by a `[!conflict]` callout | Yes, with the conflict noted |
 | Needs you | Active line followed by a `[!question]` callout | Yes, with the question noted |
 | Stale | Line ending `(stale <date>: <reason>)` | No |
-| Withdrawn | Struck through, with `withdrawn <date>` after `aft forget` | No |
+| Withdrawn | Struck through, with `withdrawn <date>` after `aft forget` or `aft settle --withdraw` | No |
+
+A conflict or a question waits on the user, and the dream never settles one. `aft settle
+<page>:<line>` does, with the user's choice: `--keep` leaves the line standing,
+`--withdraw` strikes it, and `--replace "<statement>"` supersedes it with a line citing the
+note's own sources, tagged `[stated]` when one of them is the user's words and `[observed]`
+otherwise, and refused when none still verifies or the only ones that do come from worker
+sessions (R1, DESIGN 8). Whichever it is, the note moves
+verbatim to the archive, `needs-you.md` is regenerated, and the change is one commit.
+`aft notes` lists the open notes with the quotes behind each, for an agent to explain them.
 
 ### Short-term and long-term memory
 
@@ -654,7 +663,12 @@ raised it. It is the one page to check, and it is worth bookmarking in Obsidian.
 a map of the project, not a dump of it. It is capped at about 8,000 characters (roughly
 2,000 tokens) to start, built in this order:
 
-1. the project name and its one-line description
+1. the project name and its one-line description, then **needs your decision** when notes
+   wait on the user in the project's pages or the global and reference ones: how many, and an instruction
+   to tell the user before anything else and ask whether to settle them now or skip for now.
+   The session-start hook also hands the agent's interface a notice it shows the user
+   directly: Claude Code's `systemMessage`, and a pi notification. Skipping records nothing,
+   so the next session asks again.
 2. **last session**: in flight, what failed, and what is open, from the newest digest
 3. the project's active state, decisions and lessons, with conflicts and questions noted
 4. your global preferences

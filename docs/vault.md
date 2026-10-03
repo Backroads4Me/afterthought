@@ -86,8 +86,11 @@ Each dream run that changes anything appends a section to the day's report in
 was superseded, added and confirmed, conflicts, what the rules rejected and why, stale
 lines, candidate progress, short-term changes, and the command to revert the run.
 
-`reports/needs-you.md` is regenerated on every run: one list of every open conflict and
-question across all projects. It is the one page worth checking regularly.
+`reports/needs-you.md` is regenerated on every run and every `aft settle`: one list of every
+open conflict and question across all projects. Sessions raise the same notes for their
+project and the global and reference pages, and `aft settle` closes them: the note moves word for word to
+`archive/<page path>`, and the line is kept, withdrawn, or superseded by a statement that
+rests on the note's own quotes.
 
 Reports describe memory; they are never memory. Agents are not shown them, default search
 skips them, and the dream never reads them.

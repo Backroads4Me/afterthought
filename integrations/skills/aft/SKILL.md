@@ -1,6 +1,6 @@
 ---
 name: aft
-description: Afterthought, the user's shared memory for coding agents, run through the aft command. Use when the user asks what memory holds or what agents remember, to search or read memory, to forget a session or redact text, to rebuild a digest, to pause or resume background work, to check or reset the token budget, to register, rename or remove a project, or to import reference documentation or a specification collection into the afterthought library.
+description: Afterthought, the user's shared memory for coding agents, run through the aft command. Use when the user asks what memory holds or what agents remember, to search or read memory, to settle the notes memory has waiting on the user's decision, to forget a session or redact text, to rebuild a digest, to pause or resume background work, to check or reset the token budget, to register, rename or remove a project, or to import reference documentation or a specification collection into the afterthought library.
 ---
 
 # aft
@@ -23,6 +23,7 @@ These read and change nothing:
 | Where a fact came from | `aft trace <page> <source>`: the page's path and the footnote id the fact cites, such as s3; or a search hit's evidence path on its own |
 | What a session starts with | `aft inject <path>` |
 | Which project a directory is | `aft key <path>` |
+| The notes waiting on their decision | `aft notes`; add `--all` for every project, `--json` for the fields |
 | The day's token use | `aft budget` |
 | The registered projects | `aft project list` |
 | A check of the vault | `aft lint` |
@@ -43,6 +44,7 @@ command has `--dry-run`, show its output first.
 | To rebuild a session's digest | `aft redigest <session>`; it counts against the budget, and the vault's git history keeps the old digest |
 | To register a directory | `aft project add <path>` |
 | To rename a project | `aft project rename <old> <new>` |
+| To settle a note waiting on them | `aft settle <where> --keep`, `aft settle <where> --withdraw`, or `aft settle <where> --replace <statement>`, where is the note's page and line as `aft notes` prints them; follow "Notes waiting on the user" below |
 | To rebuild the search index | `aft reindex` |
 | To create the config file and the vault | `aft init`; safe to run again |
 | To install or remove afterthought's hooks, extension, skill or timer | `aft install claude`, `aft install pi`, `aft install timer`; each takes `--dry-run` to preview and `--uninstall` to remove |
@@ -63,6 +65,35 @@ yes to that specific command. An earlier general go-ahead does not count.
 
 Never run `aft hook`: the agents' own hooks call it.
 
+## Notes waiting on the user
+
+When newer evidence disagrees with a line in memory and has no authority to replace it,
+memory keeps the line and writes a note under it: a conflict, or a question. The line then
+waits on the user's decision. When notes wait, the memory block a session starts with says
+how many under "Needs your decision". Before anything else in that session, tell the user
+how many notes wait and ask whether to settle them now or skip for now. Skipping changes
+nothing; the next session asks again.
+
+To settle them:
+
+1. Run `aft notes --json`. Each note gives the line memory holds now, the note's own text,
+   and the quotes behind both, with their dates and whether each is the user's own words.
+2. Take the notes one at a time. In plain words, say what memory holds, what the newer
+   evidence says, and when each was said. Recommend one of the three choices, with your
+   reason, and ask the user to choose:
+   - Keep: the line stands as it is.
+   - Replace: a new statement takes the line's place, resting on the note's quotes. Draft
+     the statement from those quotes and let the user change it. Replace is refused when
+     none of the note's quotes still verifies, or only a worker session's do; offer keep
+     or withdraw then.
+   - Withdraw: the line is struck through, and nothing replaces it.
+3. Run `aft settle <where> --keep`, `aft settle <where> --withdraw`, or
+   `aft settle <where> --replace <statement>`, using the `where` field of the note the user
+   decided. Each settle is one commit in the
+   vault, so `git revert` undoes it, and the note itself moves word for word to the page's
+   archive.
+4. When the user wants to stop partway, stop. The notes left wait for the next session.
+
 ## Changing memory by hand
 
 Memory pages live in the vault, `~/afterthought` by default, and the user may edit them in
@@ -70,7 +101,8 @@ any editor or in Obsidian:
 
 - A fact: a bare bullet such as `- No RGB lighting.` under the right section. The next
   dream run turns it into a full line tagged `[stated]`.
-- An answer to a question or a conflict: typed under the note.
+- An answer to a question or a conflict: typed under the note, for the next dream run to
+  read. Settling it with `aft settle` takes effect at once.
 - Short-term memory: a line moved from `projects/<slug>/recent.md` to `overview.md` becomes
   long-term; a line deleted is dropped.
 
