@@ -292,6 +292,24 @@ def test_project_add_refuses_a_chosen_name_another_directory_claimed(initialized
     assert Registry.load(initialized.registry_path).projects == []
 
 
+def test_project_add_takes_a_chosen_name_the_directory_claimed(initialized, tmp_path, capsys):
+    """A name the directory's own session records hold is its own (DESIGN 7, F49):
+    `aft project add <dir> --slug <name>` is refused only by another directory's claim, so
+    the person can name the directory what its sessions already file it under."""
+    import aft.queue as queue
+
+    making = (tmp_path / "c" / "foo").resolve()
+    making.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-1", None, "foo", making)
+
+    assert main(["project", "add", str(making), "--slug", "foo"]) == 0
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.by_path_key(path_key("testhost", making))
+    assert project is not None and project.slug == "foo"
+    assert "registered foo" in capsys.readouterr().out
+
+
 def test_project_rename_refuses_a_name_another_directory_claimed(initialized, tmp_path, capsys):
     """A rename may not take a name another path's session records claim (DESIGN 7, F49)."""
     import aft.queue as queue

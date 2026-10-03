@@ -490,9 +490,11 @@ def cmd_project_add(args) -> int:
                 " `aft project rename` changes its name"
             )
         if args.slug:
-            # The name a person chose is theirs to choose again: one another path's session
-            # records claim is refused, not quietly prefixed (DESIGN 7, F49).
-            if args.slug in queue.claimed_slugs(config, registry):
+            # The name a person chose is theirs to choose again: one another directory's
+            # session records claim is refused, not quietly prefixed. The directory's own
+            # claim does not count against it, so the name its sessions file it under
+            # stays takeable (DESIGN 7, F49).
+            if args.slug in queue.claimed_slugs(config, registry, keep={str(root)}):
                 raise UsageError(
                     f"the name {args.slug!r} is claimed by the session records of another"
                     " directory; pick another name, or leave it off to have one settled"
