@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1274,13 +1275,15 @@ def test_a_part_filed_while_the_model_answered_is_left_standing(
     assert watermark(cfg) == wrote.watermark
 
 
-def test_a_directory_that_is_no_project_is_digested_unfiled(session: Session, tmp_path):
+def test_a_directory_that_is_no_project_is_digested_unfiled(session: Session):
     """A session outside every project still reaches memory through its global facts.
 
     DESIGN 7: the session is digested and filed as unfiled, so what it says about the user
     and their machines is kept, while its project facts stay in the digest. No job fails.
+    Under F49 a plain directory is a project, so the directory a session of no project runs
+    in is under the system temporary directory, which resolves to none (DESIGN 7, F49).
     """
-    nowhere = (tmp_path / "just-a-directory").resolve()
+    nowhere = (Path(tempfile.gettempdir()) / "just-a-directory").resolve()
     nowhere.mkdir()
     fake, cfg = serve(session.cfg, answer(said()))
     try:
@@ -1314,6 +1317,42 @@ def test_an_unregistered_repository_is_digested_under_its_own_name(session: Sess
     written = frontmatter(cfg, wrote.path)
     assert "project" not in written["aft"]
     assert written["description"] == "Built the capture hook."
+
+
+def test_a_live_directory_of_no_project_files_under_the_records_slug(session: Session):
+    """The directory still stands and answers no project, and the name its session-start
+    record settled while it was being keyed files the session (DESIGN 7, F49)."""
+    plain = (Path(tempfile.gettempdir()) / "plain-widget").resolve()
+    plain.mkdir(exist_ok=True)
+    queue.record_project(session.cfg, CLAUDE, SESSION, None, "widget", plain)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, plain))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.path == f"digests/widget/{NOW:%Y}/{NOW:%m}/{NOW:%Y-%m-%d}-{CLAUDE}-{SESSION}.md"
+    record = queue.recorded_project(cfg, CLAUDE, SESSION)
+    assert record is not None and (record.slug, record.path) == ("widget", str(plain))
+
+
+def test_the_home_directory_is_recorded_and_filed_like_any_project(session: Session):
+    """The home directory is no exception to the keying: a project registered at it has its
+    sessions recorded there and their digests filed under it (DESIGN 7, F49)."""
+    registered = registry.Registry.load(session.cfg.registry_path)
+    project = registered.add("homebase", "Homebase")
+    registered.add_path(project, registry.path_key(session.cfg.host, session.cfg.home))
+    registered.save()
+    queue.record_project(session.cfg, CLAUDE, SESSION, project.id, "homebase", session.cfg.home)
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cfg.home))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.path.startswith("digests/homebase/")
+    written = frontmatter(cfg, wrote.path)
+    assert written["aft"]["project"] == project.id
 
 
 @pytest.mark.parametrize("escaped", ["../../escaped", "C:..outside"])
@@ -1423,6 +1462,32 @@ def test_a_deleted_directory_is_filed_under_the_project_its_session_started_in(
     assert evidence.session_info(cfg, "gone-cwd") == (CLAUDE, project.id)
 
 
+def test_a_directory_moved_under_the_temporary_is_filed_under_the_record(
+    session: Session, tmp_path
+):
+    """A directory that still stands but answers no project does not unfile its session.
+
+    The directory was moved under the system temporary directory between session start and
+    the digest, so the fresh resolve answers none. The record the session-start hook left
+    while the directory stood names the project, and that is where the session is filed
+    (DESIGN 7, F49) - deletion and move-aside file the session in the same place.
+    """
+    project = registry.Registry.load(session.cfg.registry_path).by_slug(SLUG)
+    moved = (Path(tempfile.gettempdir()) / "moved-widget").resolve()
+    moved.mkdir()
+    fake, cfg = serve(session.cfg, answer(said()))
+    try:
+        assert queue.record_project(cfg, CLAUDE, SESSION, project.id, SLUG, session.cwd)
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, moved))
+    finally:
+        fake.stop()
+        shutil.rmtree(moved)
+    assert wrote is not None
+    assert pages(cfg) == [below(SESSION)]
+    assert frontmatter(cfg, wrote.path)["aft"]["project"] == project.id
+    assert evidence.session_info(cfg, SESSION) == (CLAUDE, project.id)
+
+
 def test_a_deleted_directory_of_an_unregistered_project_keeps_its_recorded_name(
     session: Session, tmp_path
 ):
@@ -1472,7 +1537,7 @@ def test_forgetting_a_session_forgets_the_project_it_started_in(session: Session
     forgotten session is not recorded again."""
     cfg = session.cfg
     assert queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
-    assert queue.recorded_project(cfg, CLAUDE, SESSION) == (None, SLUG)
+    assert queue.recorded_project(cfg, CLAUDE, SESSION) == queue.ProjectRecord(None, SLUG, None)
     queue.forget_session(cfg, SESSION)
     assert queue.recorded_project(cfg, CLAUDE, SESSION) is None
     assert not queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
@@ -3253,3 +3318,44 @@ def test_the_digest_prompt_names_no_one_and_guesses_no_pronoun():
     words = prompt_words()
     assert 'the summary and handoff as much as each fact, calls the user "the user"' in words
     assert "never by name, and never with he, she or another pronoun" in words
+
+
+def test_a_digest_of_an_unregistered_directory_carries_its_path(initialized: Config):
+    """A digest of an unregistered directory carries the path its sessions ran in as
+    ``aft.path`` (DESIGN 7, F49), so the index files its facts into that directory's own
+    scope and not into whatever directory once claimed the name the digest is filed under.
+    A digest of a registered project carries the project's id, and an unfiled one carries
+    neither, being nobody's project."""
+    import datetime as dt
+
+    cfg = initialized
+    registered = registry.Registry.load(cfg.registry_path).add("widget")
+    when = dt.date(2026, 10, 5)
+    stamp = dt.datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    handoff = {"in_flight": [], "failed": [], "open": []}
+
+    def frontmatter(resolution: keys.Resolution) -> dict:
+        return digest._frontmatter(
+            cfg,
+            resolution,
+            "widget",
+            [],
+            handoff,
+            [],
+            [],
+            when,
+            stamp,
+        )["aft"]
+
+    in_project = frontmatter(keys.Resolution(keys.PATH, cfg.vault, registered, "widget", cfg.vault))
+    assert in_project["project"] == registered.id
+    assert "path" not in in_project
+
+    unregistered = frontmatter(
+        keys.Resolution(keys.UNREGISTERED, cfg.vault, None, "widget", cfg.vault / "notes")
+    )
+    assert "project" not in unregistered
+    assert unregistered["path"] == str(cfg.vault / "notes")
+
+    unfiled = frontmatter(keys.Resolution(keys.NONE, cfg.vault))
+    assert "project" not in unfiled and "path" not in unfiled

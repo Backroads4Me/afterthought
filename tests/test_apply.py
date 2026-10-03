@@ -12,8 +12,9 @@ import pytest
 import yaml
 
 from aft import config as configmod
-from aft import evidence, inject, lint, page, pagewrite, vault
+from aft import evidence, inject, keys, lint, page, pagewrite, queue, vault
 from aft.dream import apply, rules, schedule
+from aft.events import SESSION_END, SessionEvent
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
 from fakes.model_server import FakeEndpoint, Reply
@@ -56,6 +57,7 @@ def write_digest(
     at: str = "2026-10-05T08:00:00Z",
     consumed: str | None = None,
     store_evidence: bool = True,
+    with_project: bool = True,
 ) -> Path:
     if store_evidence:
         from aft.readers import USER, Entry
@@ -90,7 +92,7 @@ def write_digest(
                 cfg,
                 agent=agent,
                 session_id=sess_id,
-                project_id=f"p_{slug}",
+                project_id=f"p_{slug}" if with_project else None,
                 entries=entries,
             )
 
@@ -98,7 +100,9 @@ def write_digest(
     path = cfg.vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    aft_dict: dict[str, object] = {"project": f"p_{slug}", "role": role}
+    aft_dict: dict[str, object] = {"role": role}
+    if with_project:
+        aft_dict["project"] = f"p_{slug}"
     if consumed:
         aft_dict["consumed"] = consumed
     aft_dict["facts"] = facts
@@ -224,6 +228,51 @@ def test_add(initialized, home, fake):
     overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "- The queue uses SQLite WAL mode. [stated] 2026-10-05" in overview_text
     assert report.commit is not None
+
+
+def test_an_archived_projects_digest_is_dreamed(initialized, home, fake):
+    """Archiving takes a project out of injection and the idle report, not out of the
+    dream (DESIGN 7, F49): its waiting digest is applied to its pages like any other."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.set_archived("widget", TODAY)
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Existing line. [observed] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "existing quote"}],
+    )
+
+    write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": "The queue uses SQLite WAL mode.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s10",
+            }
+        ],
+        sources=[
+            {
+                "id": "s10",
+                "resource": "aft://session/c/2#e5",
+                "quote": "The queue uses SQLite WAL mode.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "new decision")]
+    res = schedule.run(cfg, now=NOW)
+    assert "widget" in res.ran
+    overview_text = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "- The queue uses SQLite WAL mode. [stated] 2026-10-05" in overview_text
 
 
 def test_confirm(initialized, home, fake):
@@ -918,6 +967,170 @@ def test_unregistered_project_with_only_skips_is_not_registered(initialized, hom
     assert not (cfg.vault / "projects" / "transient-widget" / "overview.md").exists()
 
 
+def test_a_registration_midrun_keeps_one_run_id(initialized, home, fake, tmp_path):
+    """A registration that renames the group mid-run makes no new run id: the digests
+    consumed before it and the run's commit name the same id (DESIGN 9)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    # The group's two sessions ran in yard/widget, and their records carry the path; they
+    # were written while the name widget was free.
+    yard_widget = tmp_path / "yard" / "widget"
+    for session in ("1", "2"):
+        queue.record_project(
+            cfg,
+            "c",
+            session,
+            None,
+            "widget",
+            yard_widget,
+            registry=Registry.load(cfg.registry_path),
+        )
+    # Another directory registered the name in the meantime.
+    registry = Registry.load(cfg.registry_path)
+    other = registry.add("widget", "Widget")
+    registry.add_path(other, path_key(cfg.host, tmp_path / "elsewhere" / "widget"))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "aft: register widget")
+
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-1",
+        facts=[
+            {
+                "statement": "The user prefers the morning standup at nine.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "standup at nine"}],
+        at="2026-10-05T08:00:00Z",
+    )
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-2",
+        facts=[
+            {
+                "statement": "The yard build runs on the GPU host.",
+                "kind": "state",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+                "scope": "project",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s2", "resource": "aft://session/c/2#e1", "quote": "runs on the GPU host"}],
+        at="2026-10-05T09:00:00Z",
+    )
+    fake.script = [reply("add", None, "preference"), reply("add", None, "state")]
+    res = schedule.run(cfg, now=NOW)
+    assert res.failures == {}
+
+    # The first project fact registered the directory under the name the registry had
+    # free, and the run id stayed the one the group filed its digests under.
+    reg = Registry.load(cfg.registry_path)
+    project = reg.by_path_key(path_key(cfg.host, yard_widget))
+    assert project is not None and project.slug == "yard-widget"
+
+    consumed = page.split_frontmatter(
+        (cfg.vault / "digests/widget/2026/10/2026-10-05-c-1.md").read_text()
+    )[0]["aft"]["consumed"]
+    named = run_git(["log", "--grep", consumed, "--format=%H"], cwd=cfg.vault)
+    assert named, f"no commit's message names the consumed id {consumed}"
+    trailer = run_git(["log", "--grep", "Run: dream-widget", "--format=%B", "-1"], cwd=cfg.vault)
+    assert f"Run: {consumed}" in trailer
+
+
+def test_a_contested_group_slug_leaves_the_holding_projects_pages_alone(
+    initialized, home, fake, tmp_path
+):
+    """A group whose slug a registered project holds writes no short-term line of that
+    project's: the page under the group slug belongs to the holder, and the run neither
+    reconciles nor lifts from it (DESIGN 7, F49)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    from aft import evidence
+    from aft.readers import USER, Entry
+
+    # Session c/8 spoke the line the holder's recent.md carries.
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="8",
+        project_id=None,
+        entries=[
+            Entry(id="e1", time=NOW, role=USER, text="The hook rewrite is paused.", is_error=False)
+        ],
+    )
+    # The contested group's session c/9 ran in work/widget, and its record was written
+    # while the name was free.
+    work_widget = tmp_path / "work" / "widget"
+    queue.record_project(
+        cfg, "c", "9", None, "widget", work_widget, registry=Registry.load(cfg.registry_path)
+    )
+    # Another directory registered the name, and its recent.md carries an active line.
+    registry = Registry.load(cfg.registry_path)
+    holder = registry.add("widget", "Widget")
+    registry.add_path(holder, path_key(cfg.host, tmp_path / "elsewhere" / "widget"))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "aft: register widget")
+    holder_id = Registry.load(cfg.registry_path).by_slug("widget").id
+    holder_recent = cfg.vault / "projects/widget/recent.md"
+    holder_recent.parent.mkdir(parents=True, exist_ok=True)
+    fm = {
+        "type": "Project",
+        "title": "Widget recent",
+        "description": "Short-term memory.",
+        "sources": [
+            {"id": "r0", "resource": "aft://session/c/8#e1", "quote": "The hook rewrite is paused."}
+        ],
+        "aft": {"project": holder_id},
+    }
+    holder_recent.write_text(
+        f"---\n{yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).strip()}\n---\n\n"
+        "## State\n\n- The hook rewrite is paused. [observed] 2026-10-04 [^r0]\n"
+    )
+    vault.commit(cfg.vault, ["projects/widget/recent.md"], "seed holder recent")
+
+    # The contested group's digest holds only a global fact, so the run registers no
+    # project of its own and its slug stays the held name.
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-c-9",
+        facts=[
+            {
+                "statement": "The user prefers the morning standup at nine.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s9",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[{"id": "s9", "resource": "aft://session/c/9#e1", "quote": "standup at nine"}],
+        at="2026-10-05T08:00:00Z",
+    )
+    fake.script = [reply("add", None, "preference")]
+    res = schedule.run(cfg, now=NOW)
+    assert res.failures == {}
+
+    # The holder's line stands untouched: the newest session of the contested group never
+    # withdraws it, and no lift moves it into a project of the group's own.
+    body = holder_recent.read_text()
+    assert "~~The hook rewrite is paused.~~" not in body
+    assert "- The hook rewrite is paused. [observed] 2026-10-04 [^r0]" in body
+    # No project was registered for the group's directory: the run registered nothing,
+    # because its digests held only a global fact.
+    reg = Registry.load(cfg.registry_path)
+    assert reg.by_path_key(path_key(cfg.host, work_widget)) is None
+
+
 def test_broken_anchor_cleared_when_words_appear_again(initialized, home, fake, tmp_path):
     cfg = config_with_fake(home, initialized.vault, fake)
     repo = make_repo(tmp_path / "widget")
@@ -1148,12 +1361,13 @@ def test_marks_consumed_digests(initialized, home, fake):
     assert res2.ran == []
 
 
-def test_makes_one_commit_per_project_run(initialized, home, fake):
+def test_makes_one_commit_per_project_run(initialized, home, fake, tmp_path):
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
     registry.save()
     vault.commit(cfg.vault, ["registry.yaml"], "register widget")
+    keep_out_of_the_idle_report(cfg, tmp_path)
 
     seed_overview(
         cfg,
@@ -1675,7 +1889,7 @@ def test_lint_failure_leaves_unrelated_uncommitted_file_untouched(
     assert "New fact that triggers lint error." not in overview_text
 
 
-def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake):
+def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake, tmp_path):
     """A failure partway through a run restores every path it wrote, leaves the digests
     unconsumed and re-raises; the next run finds a clean vault and makes no
     checkpoint: human edits commit."""
@@ -1684,6 +1898,7 @@ def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake):
     registry.add("widget", "Widget")
     registry.save()
     vault.commit(cfg.vault, ["registry.yaml"], "seed registry")
+    keep_out_of_the_idle_report(cfg, tmp_path)
 
     overview = seed_overview(
         cfg,
@@ -2376,13 +2591,14 @@ def test_new_fact_evidence_date_uses_quote_date_not_digest_date(initialized, hom
 
 
 def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(
-    initialized, home, fake, monkeypatch
+    initialized, home, fake, monkeypatch, tmp_path
 ):
     """The real per-page lint refuses a page this run wrote, and the run rolls back."""
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
     registry.save()
+    keep_out_of_the_idle_report(cfg, tmp_path)
 
     write_digest(
         cfg,
@@ -2414,6 +2630,9 @@ def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(
         return orig_render(self) + "\n- Broken fact line missing required metadata\n"
 
     monkeypatch.setattr(pagewrite.PageDoc, "render", render_with_an_unlintable_line)
+
+    # A hand edit stands uncommitted beside the run, and the checkpoint commits it alone.
+    (cfg.vault / "hand-notes.md").write_text("a hand note\n", encoding="utf-8")
 
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
     res = schedule.run(cfg, now=NOW)
@@ -2567,3 +2786,384 @@ def test_a_failing_project_leaves_the_next_project_alone(initialized, home, fake
         name for name in committed if name.startswith(("projects/alpha", "digests/alpha"))
     ] == []
     assert run_git(["status", "--porcelain"], cfg.vault) == ""
+
+
+def keep_out_of_the_idle_report(cfg: configmod.Config, tmp_path: Path, slug: str = "widget"):
+    """A project the dream's idle report has nothing to say about, so a test counts only its
+    own run's commits (DESIGN 7, F49). The session it records ended outside the quiet
+    period, so the dream still runs, and inside the 90-day idle window, so the report
+    names nothing."""
+    repo = make_repo(tmp_path / slug)
+    registry = Registry.load(cfg.registry_path)
+    registered = registry.by_slug(slug)
+    assert registered is not None
+    registry.add_path(registered, path_key("testhost", repo))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register widget's path")
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s-idle",
+            cwd=repo,
+            transcript_path=None,
+            time=NOW - timedelta(days=1),
+            detail=None,
+        ),
+    )
+
+
+# Any directory can be a project (BUILD-PLAN F49; DESIGN 7, DESIGN 10)
+
+
+def _unregistered_digest(
+    cfg: configmod.Config, slug: str, filename: str, agent: str, session: str, at: str
+) -> Path:
+    """A digest of a session whose directory belongs to no registered project yet.
+
+    It carries no ``aft.project``, because the registry has no id to name, and its evidence
+    is stored with no project either (DESIGN 7, F49).
+    """
+    return write_digest(
+        cfg,
+        slug,
+        filename,
+        facts=[
+            {
+                "statement": "The tester prefers plain hyphens.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": f"aft://session/{agent}/{session}#e1",
+                "quote": "plain hyphens",
+            }
+        ],
+        with_project=False,
+    )
+
+
+def test_a_dream_registers_the_directory_a_session_ran_in(initialized, home, fake, tmp_path):
+    """The dream registers a still-unregistered project from the directory its session-start
+    record names, and writes its pages under that project (DESIGN 7, F49)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
+    digest_path = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
+    fake.script = [reply("add", None, "add fact")]
+
+    rep = apply.run_project(cfg, "workspace", [digest_path], now=NOW)
+
+    registry = Registry.load(cfg.registry_path)
+    project = registry.by_path_key(path_key("testhost", workspace))
+    assert project is not None and project.slug == "workspace"
+    assert rep is not None and rep.project == "workspace"
+    assert (
+        "The tester prefers plain hyphens."
+        in (cfg.vault / "projects/workspace/overview.md").read_text()
+    )
+    fm, _, _, _ = page.split_frontmatter(digest_path.read_text())
+    assert fm is not None and fm["aft"]["consumed"]
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+
+
+def test_a_pathless_record_is_adopted_only_by_its_own_directory_in_the_dream(
+    initialized, home, fake, tmp_path
+):
+    """The review case (DESIGN 7, F49): a session in /src/foo claimed ``foo`` before paths
+    were kept and its digest waits under digests/foo; then a session records in
+    /scratch/foo, and then one in /src/foo. The record is adopted by /src/foo alone, so
+    the dream registers foo at /src/foo and files /src/foo's facts there, while
+    /scratch/foo settles its own name and never sees them."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    src_foo = (tmp_path / "src" / "foo").resolve()
+    src_foo.mkdir(parents=True)
+    scratch_foo = (tmp_path / "scratch" / "foo").resolve()
+    scratch_foo.mkdir(parents=True)
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s0",
+            cwd=src_foo,
+            transcript_path=None,
+            time=NOW - timedelta(hours=1),
+            detail=None,
+        ),
+    )
+    assert queue.record_project(cfg, "claude", "s0", None, "foo")
+    old = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s0", "claude", "s0", TODAY)
+
+    # A session in another directory of the same name records next: the name is
+    # /src/foo's claim, so this one settles its own name and the record is left pathless.
+    assert queue.record_project(
+        cfg, "claude", "s1", None, "foo", scratch_foo, registry=Registry.load(cfg.registry_path)
+    )
+    assert queue.recorded_project(cfg, "claude", "s1").slug == "scratch-foo"
+    assert queue.recorded_project(cfg, "claude", "s0").path is None
+
+    # A session in the record's own directory adopts it, so the dream files the old
+    # digest by /src/foo's path and makes one project of the directory.
+    assert queue.record_project(
+        cfg, "claude", "s2", None, "foo", src_foo, registry=Registry.load(cfg.registry_path)
+    )
+    assert queue.recorded_project(cfg, "claude", "s0").path == str(src_foo)
+
+    registry = Registry.load(cfg.registry_path)
+    groups = apply.digest_groups(cfg, registry, "foo", [old])
+    assert groups == [[old]]
+    assert apply._project_of_group(cfg, registry, "foo", groups[0]) == (None, src_foo)
+
+    fake.script = [reply("add", None, "add fact")]
+    rep = apply.run_project(cfg, "foo", groups[0], now=NOW)
+
+    project = Registry.load(cfg.registry_path).by_path_key(path_key("testhost", src_foo))
+    assert project is not None and project.slug == "foo"
+    assert (
+        "The tester prefers plain hyphens." in (cfg.vault / "projects/foo/overview.md").read_text()
+    )
+    fm, _, _, _ = page.split_frontmatter(old.read_text())
+    assert fm is not None and fm["aft"]["consumed"]
+    assert rep is not None and rep.project == "foo"
+
+
+def test_a_dream_finds_a_registered_project_by_path(initialized, home, fake, tmp_path):
+    """A later session in the same directory is dreamed into the same project by the path its
+    record names, not by making a second project (DESIGN 7, F49)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
+    first = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
+    fake.script = [reply("add", None, "first fact")]
+    apply.run_project(cfg, "workspace", [first], now=NOW)
+
+    assert queue.record_project(cfg, "claude", "s-ws2", None, "workspace", workspace)
+    second = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY
+    )
+    fake.script = [reply("add", None, "second fact")]
+    rep = apply.run_project(cfg, "workspace", [second], now=NOW)
+
+    assert rep is not None and rep.project == "workspace"
+    registry = Registry.load(cfg.registry_path)
+    assert len(registry.projects) == 1
+    overview = (cfg.vault / "projects/workspace/overview.md").read_text()
+    assert overview.count("The tester prefers plain hyphens.") == 2
+
+
+def test_a_project_registered_before_git_init_keeps_its_memory_after(
+    initialized, home, fake, tmp_path
+):
+    """The path decides (DESIGN 7, F49): a project the dream registered while its directory
+    was plain keeps that directory as its own once the person runs `git init` in it, and the
+    next session's digest is dreamed into the same project."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
+    first = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
+    fake.script = [reply("add", None, "first fact")]
+    apply.run_project(cfg, "workspace", [first], now=NOW)
+    registry = Registry.load(cfg.registry_path)
+    assert len(registry.projects) == 1
+
+    make_repo(workspace)
+    resolution = keys.resolve(workspace, Registry.load(cfg.registry_path), cfg.host)
+    assert (resolution.kind, resolution.project.slug) == (keys.PATH, "workspace")
+
+    assert queue.record_project(cfg, "claude", "s-ws2", None, "workspace", workspace)
+    second = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY
+    )
+    fake.script = [reply("add", None, "second fact")]
+    rep = apply.run_project(cfg, "workspace", [second], now=NOW)
+
+    assert rep is not None and rep.project == "workspace"
+    registry = Registry.load(cfg.registry_path)
+    assert len(registry.projects) == 1
+    overview = (cfg.vault / "projects/workspace/overview.md").read_text()
+    assert overview.count("The tester prefers plain hyphens.") == 2
+
+
+def test_the_dream_names_idle_projects_in_the_days_report(initialized, home, fake, tmp_path):
+    """The dream's report names a project no session has touched in 90 days (DESIGN 7,
+    F49), under its own commit, and says nothing about the project it dreamed."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register widget")
+    keep_out_of_the_idle_report(cfg, tmp_path)
+
+    idle_repo = (tmp_path / "idle-gizmo").resolve()
+    idle_repo.mkdir()
+    registry = Registry.load(cfg.registry_path)
+    gizmo = registry.add("idle-gizmo", "Idle gizmo")
+    registry.add_path(gizmo, path_key("testhost", idle_repo))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register idle-gizmo")
+    queue.record_project(cfg, "claude", "s-idle-gizmo", gizmo.id, "idle-gizmo", idle_repo)
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s-idle-gizmo",
+            cwd=idle_repo,
+            transcript_path=None,
+            time=NOW - timedelta(days=100),
+            detail=None,
+        ),
+    )
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state"}],
+    )
+    write_digest(cfg, "widget", "d1", facts=[], sources=[])
+
+    schedule.run(cfg, now=NOW)
+
+    report_path = cfg.vault / "reports" / "2026" / "10" / f"{NOW.date().isoformat()}.md"
+    text = report_path.read_text()
+    assert "- idle-gizmo: no session since" in text
+    assert "widget: no session" not in text and "widget: recorded paths" not in text
+    assert run_git(["log", "--format=%s"], cfg.vault).splitlines()[0] == (
+        "aft: report idle and gone"
+    )
+
+
+def test_a_dream_does_not_attach_a_digest_to_a_project_that_merely_has_its_name(
+    initialized, home, fake, tmp_path
+):
+    """The registry's name decides nothing once a record names a path (DESIGN 7, F49): a
+    digest whose group name is a registered project's slug is dreamed into a project of its
+    own, registered at the path its record names, not into the project that holds the
+    name."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    same_name = (tmp_path / "yard" / "widget").resolve()
+    same_name.mkdir(parents=True)
+    real = (tmp_path / "real").resolve()
+    real.mkdir()
+    registry = Registry.load(cfg.registry_path)
+    registered = registry.add("widget", "Widget")
+    registry.add_path(registered, path_key("testhost", real))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register widget")
+
+    # The digest is filed under the registered project's name, as a digest written before
+    # records carried paths would be, and the record names a path the registry has never
+    # met. The path decides, not the name.
+    digest_path = write_digest(
+        cfg,
+        "widget",
+        f"{TODAY}-claude-s-y1",
+        facts=[
+            {
+                "statement": "The tester prefers plain hyphens.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/s-y1#e1", "quote": "hyphens"}],
+        with_project=False,
+    )
+    assert queue.record_project(cfg, "claude", "s-y1", None, "widget", same_name)
+    fake.script = [reply("add", None, "add fact")]
+
+    rep = apply.run_project(cfg, "widget", [digest_path], now=NOW)
+
+    assert rep is not None and rep.project == "yard-widget"
+    registry = Registry.load(cfg.registry_path)
+    new = registry.by_path_key(path_key("testhost", same_name))
+    assert new is not None and new.slug == "yard-widget"
+    assert (
+        "The tester prefers plain hyphens."
+        in (cfg.vault / "projects/yard-widget/overview.md").read_text()
+    )
+    assert not (cfg.vault / "projects/widget/overview.md").exists()
+
+
+def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
+    initialized, home, fake, tmp_path
+):
+    """Two directories of one name become two projects: the digest of the second files under
+    the name its parent gives it, and the dream registers it there (DESIGN 7, F49)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    first = (tmp_path / "work" / "foo").resolve()
+    first.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-f1", None, "foo", first)
+    first_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-f1", "claude", "s-f1", TODAY)
+    fake.script = [reply("add", None, "first foo")]
+    apply.run_project(cfg, "foo", [first_digest], now=NOW)
+
+    second = (tmp_path / "yard" / "foo").resolve()
+    second.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-f2", None, "foo", second)
+    second_digest = _unregistered_digest(
+        cfg, "foo", f"{TODAY}-claude-s-f2", "claude", "s-f2", TODAY
+    )
+    fake.script = [reply("add", None, "second foo")]
+    rep = apply.run_project(cfg, "foo", [second_digest], now=NOW)
+
+    # The first dream registered foo; the second group's record still names foo, so the
+    # digest's own filing settled its slug before the dream ran.
+    record = queue.recorded_project(cfg, "claude", "s-f2")
+    assert record is not None and record.slug == "yard-foo"
+    registry = Registry.load(cfg.registry_path)
+    project = registry.by_path_key(path_key("testhost", second))
+    assert project is not None and project.slug == "yard-foo"
+    assert (
+        "The tester prefers plain hyphens."
+        in (cfg.vault / "projects/yard-foo/overview.md").read_text()
+    )
+    assert rep is not None and rep.project == "yard-foo"
+
+
+def test_the_dream_splits_one_slug_by_each_digests_own_record(initialized, home, fake, tmp_path):
+    """The review case (DESIGN 7, F49): /b/foo's session files its digest under foo, a
+    project is registered over foo, then /c/foo's session files its digest under foo too.
+    The dream decides each digest's project from its own record, so the two never share
+    one, and a digest whose session left no record at all runs by itself."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    bfoo = (tmp_path / "b" / "foo").resolve()
+    bfoo.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-b1", None, "foo", bfoo)
+    registry = Registry.load(cfg.registry_path)
+    registered = registry.add("foo", "Foo")
+    registry.add_path(registered, path_key("testhost", bfoo))
+    registry.save()
+    assert queue.record_project(cfg, "claude", "s-c1", registered.id, "foo")
+    cfoo = (tmp_path / "c" / "foo").resolve()
+    cfoo.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-c2", None, "foo", cfoo)
+
+    named_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-c1", "claude", "s-c1", TODAY)
+    path_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-c2", "claude", "s-c2", TODAY)
+    orphan = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-x9", "claude", "s-x9", TODAY)
+
+    groups = apply.digest_groups(cfg, registry, "foo", [named_digest, path_digest, orphan])
+
+    assert len(groups) == 3
+    assert groups[0] == [named_digest]
+    assert groups[1] == [path_digest]
+    assert groups[2] == [orphan]

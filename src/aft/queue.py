@@ -25,14 +25,17 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from collections.abc import Collection, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aft import keys
 from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
+from aft.registry import Registry, unique_slug
 
 QUEUE_NAME = "queue.sqlite"
 
@@ -107,6 +110,7 @@ CREATE TABLE IF NOT EXISTS session_projects (
     session_id  TEXT NOT NULL,
     project_id  TEXT,
     slug        TEXT NOT NULL,
+    path        TEXT,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -167,6 +171,23 @@ class SessionState:
     read_at: datetime | None = None
     failed_at: datetime | None = None
     forgotten: bool = False
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    """The session-start record: the project a session started in, and where (DESIGN 7).
+
+    ``project_id`` is set when the registry knew the project at session start and None when
+    it was still to be made. ``slug`` is the name the session's digests file under - the
+    project's slug, or the name an unregistered directory resolved to. ``path`` is the
+    directory the project would be registered at, kept so the dream can register a
+    still-unregistered project with it and find a registered one by it; it is None on a
+    record an earlier build wrote, which kept no directory.
+    """
+
+    project_id: str | None
+    slug: str
+    path: str | None = None
 
 
 def enqueue(
@@ -271,40 +292,255 @@ RECORD_BUSY_TIMEOUT_MS = 200
 
 
 def record_project(
-    config: Config, agent: str, session_id: str, project_id: str | None, slug: str
+    config: Config,
+    agent: str,
+    session_id: str,
+    project_id: str | None,
+    slug: str,
+    path: Path | str | None = None,
+    registry: Registry | None = None,
 ) -> bool:
-    """Remember which project a session started in (DESIGN 7).
+    """Remember which project a session started in, and where (DESIGN 7).
 
     A session's directory can be gone by the time its words are digested: a worktree is made,
     worked in and removed. The project is decided while the directory still exists, at
     session start, and the digest reads it from here when the directory no longer answers.
     ``project_id`` is None for a project the registry does not hold yet, which is named by its
-    slug alone. A session `aft forget` removed is not recorded again. Returns whether a row
-    was written.
+    slug alone; ``path`` is the directory the project would be registered at, which is what
+    the dream registers a still-unregistered project from.
+
+    For an unregistered directory the slug is settled here, inside the same write the record
+    takes, so two sessions starting in two directories of one name cannot both claim it
+    (DESIGN 7, F49): the name is checked against the registry - pass ``registry``, which the
+    callers that resolve directories hold loaded - and against every slug another path's
+    record holds, and parent directory names are prefixed until it is free. A digest that
+    settles an unregistered directory's slug rewrites the record with the slug it filed
+    under, so every digest of the session agrees on one place. A session `aft forget` removed
+    is not recorded again. Returns whether a row was written.
     """
     with _writing(config, busy_timeout_ms=RECORD_BUSY_TIMEOUT_MS) as conn:
         if conn.execute(
             "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (session_id,)
         ).fetchone():
             return False
+        if project_id is None and path is not None and registry is not None:
+            slug = _settled_slug(conn, registry, config, Path(path), slug)
         conn.execute(
-            "INSERT INTO session_projects (agent, session_id, project_id, slug)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO session_projects (agent, session_id, project_id, slug, path)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT (agent, session_id) DO UPDATE SET"
-            " project_id = excluded.project_id, slug = excluded.slug",
-            (agent, session_id, project_id, slug),
+            " project_id = excluded.project_id, slug = excluded.slug, path = excluded.path",
+            (agent, session_id, project_id, slug, None if path is None else str(path)),
         )
     return True
 
 
-def recorded_project(config: Config, agent: str, session_id: str) -> tuple[str | None, str] | None:
-    """The ``(project id, slug)`` a session started in, or None when none was recorded."""
+_CLAIM_ROWS = (
+    "SELECT slug, path, project_id, agent, session_id,"
+    " (SELECT j.cwd FROM jobs j WHERE j.agent = session_projects.agent"
+    "   AND j.session_id = session_projects.session_id"
+    "  ORDER BY j.event_time DESC, j.created_time DESC, j.id DESC LIMIT 1) AS cwd"
+    " FROM session_projects"
+)
+
+
+def _settled_slug(
+    conn: sqlite3.Connection, registry: Registry, config: Config, root: Path, base: str
+) -> str:
+    """A slug this directory can file its digests under, decided against the whole claim table.
+
+    Every session-start record is a claim: the slug it holds belongs to the directory its
+    session ran in, so a slug another directory holds is not free for this one, whatever
+    named it first (DESIGN 7, F49). A record naming a project the registry holds is that
+    project's own claim, whose name the registry governs. The registry's own slugs
+    ``unique_slug`` answers for; the walk it makes is prefixed with parent directory names
+    until nothing claims the name.
+
+    A record that names no path is one an earlier build wrote. Its session's directory is
+    what the queue last saw for that session, so the record is this directory's own claim
+    only when that directory resolves to ``root`` - a record of the same name whose session
+    ran anywhere else is another directory's claim, and the name walks aside for it. A
+    record that is adopted is given the path it was missing, so the sessions recorded
+    before and after the upgrade file under one name and the dream makes one project of
+    them.
+    """
+    rows = conn.execute(_CLAIM_ROWS).fetchall()
+    settled, own = _settle_from(rows, registry, config, root, base)
+    for agent, session_id in own:
+        conn.execute(
+            "UPDATE session_projects SET path = ?"
+            " WHERE agent = ? AND session_id = ? AND path IS NULL",
+            (str(root), agent, session_id),
+        )
+    return settled
+
+
+def _settle_from(
+    rows: Iterable[tuple[str, str | None, str | None, str, str, str | None]],
+    registry: Registry,
+    config: Config,
+    root: Path,
+    base: str,
+) -> tuple[str, list[tuple[str, str]]]:
+    """The name ``root`` may file under, read off the claim table, and the records to adopt.
+
+    ``rows`` holds every session-start record as (slug, path, project id, agent, session
+    id, the session's directory). A claim is a name another directory holds, so it takes
+    the name away from ``root``: a claim naming a project the registry holds is the
+    registry's to govern, and a claim naming ``root`` itself is the directory's own. A
+    claim with no path and exactly ``base`` is this directory's own only when the record's
+    session ran in a directory that resolves to ``root``; the same name claimed by a
+    session that ran anywhere else, or a session the queue no longer knows the directory
+    of, holds the name against ``root`` (DESIGN 7, F49). Returns the settled name and the
+    (agent, session id) pairs of the pathless claims that were adopted - so only when
+    ``base`` survived the walk - each of which the caller may give ``root`` as its path.
+    """
+    taken: set[str] = set()
+    own: list[tuple[str, str]] = []
+    roots: dict[str | None, Path | None] = {}
+
+    def session_root(cwd: str | None) -> Path | None:
+        """The directory the record's session ran in, resolved the way a digest resolves."""
+        if cwd not in roots:
+            roots[cwd] = (
+                None
+                if cwd is None
+                else keys.resolve(
+                    Path(cwd), registry, config.host, never=config.settings.capture.exclude_paths
+                ).root
+            )
+        return roots[cwd]
+
+    for slug, path, project_id, agent, session_id, cwd in rows:
+        if project_id is not None and registry.by_id(project_id) is not None:
+            continue  # a registered project's claim: the registry's names answer for it
+        if path == str(root):
+            continue  # this directory's own claim
+        if path is None and slug == base and session_root(cwd) == root:
+            own.append((agent, session_id))  # a pathless record of this directory's own
+            continue
+        taken.add(slug)
+    settled = unique_slug(root, registry, base=base, taken=taken)
+    return settled, own if settled == base else []
+
+
+def settle_slug(config: Config, registry: Registry, root: Path, base: str) -> str:
+    """The name ``root`` would settle for itself, decided without writing (DESIGN 7, F49).
+
+    The same decision a session-start record makes, asked by a step that must not claim
+    anything: the walk against the registry and every live claim, with a pathless record
+    counted as the claim of the directory its session ran in.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(_CLAIM_ROWS).fetchall()
+    settled, _ = _settle_from(rows, registry, config, root, base)
+    return settled
+
+
+def settled_slugs(config: Config, registry: Registry) -> dict[Path, str]:
+    """The name each recorded directory's sessions file their digests under (DESIGN 7, F49).
+
+    A record is the answer its session's digest files under, so a step that dates a
+    directory's sessions - the dream's quiet check, the idle and gone report - reads the
+    record's name rather than resolving the directory afresh: a fresh answer can differ
+    from the one the record was written with, and then the sessions look active under a
+    name no digest uses. A record naming a project the registry holds decides its
+    directory, because that project is where the session's digest files; records of one
+    path that disagree over an unregistered name are an answer only in the sense that one
+    of them must stand, and the first in sort order does.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT path, project_id, slug FROM session_projects WHERE path IS NOT NULL"
+        ).fetchall()
+    by_path: dict[Path, list[tuple[str, str]]] = {}
+    for path, project_id, slug in rows:
+        by_path.setdefault(Path(str(path)), []).append(
+            ("" if project_id is None else str(project_id), str(slug))
+        )
+    slugs: dict[Path, str] = {}
+    for path, candidates in by_path.items():
+        named = [
+            project.slug
+            for project_id, _ in candidates
+            if project_id and (project := registry.by_id(project_id)) is not None
+        ]
+        slugs[path] = sorted(named)[0] if named else sorted(slug for _, slug in candidates)[0]
+    return slugs
+
+
+def adopt_claim(config: Config, registry: Registry, root: Path, base: str) -> str:
+    """Settle a name for ``root`` the way a session-start record does, and keep the table.
+
+    A project made by hand - ``aft project add`` with no name of its own - takes the name
+    the same walk gives a session-start record: against the registry and every live claim
+    (DESIGN 7, F49). A pathless record whose session ran in this directory is this
+    directory's claim, and is given the path it was missing, so the project made here and
+    the sessions already recorded under the name are one project. A record of the same
+    name whose session ran anywhere else holds the name against this directory.
+    """
+    with _writing(config) as conn:
+        rows = conn.execute(_CLAIM_ROWS).fetchall()
+        settled, own = _settle_from(rows, registry, config, root, base)
+        for agent, session_id in own:
+            conn.execute(
+                "UPDATE session_projects SET path = ?"
+                " WHERE agent = ? AND session_id = ? AND path IS NULL",
+                (str(root), agent, session_id),
+            )
+    return settled
+
+
+def claimed_slugs(config: Config, registry: Registry, *, keep: Collection[str] = ()) -> set[str]:
+    """The names the queue's records hold for directories other than ``keep`` (DESIGN 7, F49).
+
+    Every session-start record is a claim: the slug it holds belongs to the directory its
+    session ran in, so a project made another way may not take the name. A record naming a
+    project the registry holds is left out, the registry governing that name. A record with
+    no path is one an earlier build wrote; its claim's directory is what the queue last saw
+    for its session, and one whose session's directory resolves to a ``keep`` path is that
+    directory's own claim. ``keep`` names the paths whose own claims do not count against
+    the caller: the directory a project is being made from, or the directories of a project
+    being renamed.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(_CLAIM_ROWS).fetchall()
+    keep_paths = {Path(path) for path in keep}
+    roots: dict[str | None, Path | None] = {}
+
+    def session_root(cwd: str | None) -> Path | None:
+        """The directory the record's session ran in, resolved the way a digest resolves."""
+        if cwd not in roots:
+            roots[cwd] = (
+                None
+                if cwd is None
+                else keys.resolve(
+                    Path(cwd), registry, config.host, never=config.settings.capture.exclude_paths
+                ).root
+            )
+        return roots[cwd]
+
+    claimed: set[str] = set()
+    for slug, path, project_id, _, _, cwd in rows:
+        if project_id is not None and registry.by_id(project_id) is not None:
+            continue
+        if path is not None:
+            if Path(path) not in keep_paths:
+                claimed.add(slug)
+        elif session_root(cwd) not in keep_paths:
+            claimed.add(slug)
+    return claimed
+
+
+def recorded_project(config: Config, agent: str, session_id: str) -> ProjectRecord | None:
+    """The project a session started in, as its session-start record keeps it (DESIGN 7)."""
     with _reading(config) as conn:
         row = conn.execute(
-            "SELECT project_id, slug FROM session_projects WHERE agent = ? AND session_id = ?",
+            "SELECT project_id, slug, path FROM session_projects"
+            " WHERE agent = ? AND session_id = ?",
             (agent, session_id),
         ).fetchone()
-    return (row[0], row[1]) if row else None
+    return ProjectRecord(row[0], row[1], row[2]) if row else None
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:
@@ -648,6 +884,24 @@ def last_events(config: Config) -> dict[Path, datetime]:
     return {Path(cwd): datetime.fromisoformat(text) for cwd, text in rows}
 
 
+def project_activity(config: Config) -> dict[str, datetime]:
+    """The newest event time the queue holds for each project a session-start record names.
+
+    Keyed by the record's project id, this is a project's own last sign of life, read from
+    the records rather than from the directories the events ran in, so a removed worktree
+    does not make its project look quieter than it is (DESIGN 7, F49). A record that names
+    no project id - one an earlier build wrote, or a session of no project - is not here;
+    the reader of this answers for those from the directories instead.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT sp.project_id, max(j.event_time) FROM session_projects sp"
+            " JOIN jobs j ON j.agent = sp.agent AND j.session_id = sp.session_id"
+            " WHERE sp.project_id IS NOT NULL GROUP BY sp.project_id"
+        ).fetchall()
+    return {project_id: datetime.fromisoformat(text) for project_id, text in rows}
+
+
 def watching_since(config: Config, now: datetime) -> datetime:
     """When this host began watching for sessions, recording ``now`` the first time.
 
@@ -738,6 +992,11 @@ def _writing(config: Config, *, busy_timeout_ms: int | None = None):
         conn.close()
 
 
+def _session_project_columns(conn: sqlite3.Connection) -> set[str]:
+    """The columns the queue's session_projects table names right now."""
+    return {row[1] for row in conn.execute("PRAGMA table_info(session_projects)")}
+
+
 def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.Connection:
     """Open the queue, creating it on first use.
 
@@ -755,6 +1014,18 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn, timeout_ms=timeout)
     conn.executescript(_SCHEMA)
+    if "path" not in _session_project_columns(conn):
+        # A queue an earlier build wrote names no path on a session-start record. The column
+        # is nullable, so its records read as ones kept before the directory was recorded
+        # (F49) rather than refusing an upgrade that would cost every record.
+        try:
+            conn.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
+        except sqlite3.OperationalError:
+            # Two hooks starting together right after the upgrade can both pass the column
+            # check before either ALTER lands; the loser finds the winner's column here,
+            # the way _enter_wal settles its own race (DESIGN 8).
+            if "path" not in _session_project_columns(conn):
+                raise
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "off_record" not in sessions or "digest_due" not in sessions or "claimed_time" not in jobs:

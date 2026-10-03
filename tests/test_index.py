@@ -21,7 +21,7 @@ from aft import evidence, forget, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
-from aft.registry import Project, Registry
+from aft.registry import Project, Registry, path_key
 
 REL = "projects/widget/overview.md"
 
@@ -96,6 +96,21 @@ The widget gained a flange.
 ## Handoff
 
 In flight: the flange tests.
+"""
+
+# A digest an unregistered directory wrote (DESIGN 7, F49): its frontmatter carries the
+# path its sessions ran in instead of a project's id.
+DIGEST_OF_PATH = """---
+type: Session Digest
+title: foo session
+description: What the session on 2026-09-28 did.
+aft:
+  path: {path}
+---
+
+## Summary
+
+The foo gained a flange.
 """
 
 REPORT = """---
@@ -719,6 +734,60 @@ def test_an_appended_evidence_row_is_indexed_once(initialized: Config) -> None:
     assert twice[0] == once[0]
 
 
+def test_an_archived_projects_entries_leave_the_default_search(initialized: Config) -> None:
+    """An archived project's captured entries leave the ordinary evidence collection the way
+    its pages and digests do (DESIGN 10, F49): they answer only `aft search --archive`, and
+    they come back when the project is unarchived. Another project's entries, and an entry
+    whose session resolved to no project, stay in the ordinary collection."""
+    widget = register(initialized, "widget")
+    other = register(initialized, "other")
+    evidence.store(initialized, "claude", "abc", widget.id, entries("ship the flange"))
+    evidence.store(initialized, "claude", "def", other.id, entries("keep the gizmo"))
+    evidence.store(initialized, "claude", "ghi", None, entries("plain words unfiled"))
+    index.update(initialized)
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+    assert search(initialized, "evidence", "gizmo") == ["def#e1"]
+    assert search(initialized, "evidence", "unfiled") == ["ghi#e1"]
+
+    registry = Registry.load(initialized.registry_path)
+    registry.set_archived("widget", "2026-09-29")
+    registry.save()
+    index.update(initialized)
+
+    assert search(initialized, "evidence", "flange") == []
+    assert search(initialized, "archive", "flange") == ["abc#e1"]
+    assert search(initialized, "evidence", "gizmo") == ["def#e1"]
+    assert search(initialized, "archive", "gizmo") == []
+    assert search(initialized, "evidence", "unfiled") == ["ghi#e1"]
+
+    registry.set_archived("widget", "")
+    registry.save()
+    index.update(initialized)
+
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+    assert search(initialized, "archive", "flange") == []
+
+
+def test_a_registry_change_that_moves_no_archived_flag_rewrites_no_evidence_row(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A registry that moves for another reason than the archived flag - a project added, a
+    project's directory registered (DESIGN 7, F49) - re-derives the file rows and leaves the
+    session rows where they were filed: the copied state beside each row already says which
+    collection it answers from, so the scan has no reason to name its rows again."""
+    widget = register(initialized, "widget")
+    evidence.store(initialized, "claude", "abc", widget.id, entries("ship the flange"))
+    assert index.update(initialized) == []
+    removals = watch(monkeypatch, "DELETE FROM evidence")
+
+    # A registry change that carries no archived flag: a second project is registered.
+    register(initialized, "other")
+    assert index.update(initialized) == []
+
+    assert removals == [], "the scan threw the session rows out to rebuild them"
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+
+
 def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config) -> None:
     """The index reads the archive row by row and decompresses what it finds, so its rows are
     checked against the archive's own reader: wherever the two disagree about what a row holds,
@@ -1294,6 +1363,49 @@ def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
     assert _column(rested_mirrored_row, "project_id") == widget.id
     assert _column(unknown_row, "project_id") is None
     assert _column(global_row, "project_id") is None
+
+
+def test_a_digests_recorded_path_decides_its_project_not_the_name_it_is_filed_under(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """A digest of an unregistered directory carries the path its sessions ran in (DESIGN 7,
+    F49), and the index reads its project from that path, not from the name the digest is
+    filed under: two directories that once claimed one name share one digest directory, and
+    the name would give every one of them the first directory's project. A path the registry
+    holds for names that project even where the digest moved, one it does not names nothing,
+    and a digest with no path at all keeps the old filing."""
+    first = tmp_path / "b" / "foo"
+    first.mkdir(parents=True)
+    registry = Registry.load(initialized.registry_path)
+    project = registry.add("foo")
+    assert project is not None
+    registry.add_path(project, path_key(initialized.host, first))
+    registry.save()
+
+    registered_digest = write(initialized, "digests/foo/2026/09/2026-09-28-claude-s1.md", DIGEST)
+    stranger = tmp_path / "c" / "foo"
+    stranger.mkdir(parents=True)
+    stranger_digest = write(
+        initialized,
+        "digests/foo/2026/09/2026-09-28-claude-s2.md",
+        DIGEST_OF_PATH.format(path=stranger),
+    )
+    moved = write(
+        initialized,
+        "digests/foo/2026/09/2026-09-28-claude-s3.md",
+        DIGEST_OF_PATH.format(path=first),
+    )
+    ancient = write(initialized, "digests/foo/2026/09/2026-09-28-claude-s4.md", DIGEST)
+    assert index.update(initialized) == []
+
+    named = row_for(initialized, "digests", f"{registered_digest}#Summary")
+    stranger_row = row_for(initialized, "digests", f"{stranger_digest}#Summary")
+    moved_row = row_for(initialized, "digests", f"{moved}#Summary")
+    ancient_row = row_for(initialized, "digests", f"{ancient}#Summary")
+    assert _column(named, "project_id") == project.id
+    assert _column(stranger_row, "project_id") is None
+    assert _column(moved_row, "project_id") == project.id
+    assert _column(ancient_row, "project_id") == project.id
 
 
 def test_a_registry_that_will_not_parse_stops_the_run_rather_than_guessing(

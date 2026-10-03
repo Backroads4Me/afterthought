@@ -23,12 +23,12 @@ from pathlib import Path
 
 import yaml
 
-from aft import digest, evidence, lint, page, pagewrite
+from aft import digest, evidence, lint, page, pagewrite, queue
 from aft import vault as vaultmod
 from aft.config import Config
 from aft.dream import decide, maintain, reconcile, rules, shortterm
 from aft.gitutil import git
-from aft.registry import Registry
+from aft.registry import Project, Registry, path_key
 
 
 class ApplyError(Exception):
@@ -187,6 +187,95 @@ class ProjectRunReport:
     error: str | None = None
 
 
+def _record_of(config: Config, digest_path: Path) -> tuple[str, str, queue.ProjectRecord] | None:
+    """The session-start record a digest's session carries, with the record's key (F49).
+
+    A digest's name holds the agent and session that made it, and the record says which
+    project that session started in and where. A later part of one session carries the
+    session's id with a ``-<n>`` on the end, and the record is keyed by the session's own id,
+    which is what comes back so the record can be rewritten against it.
+    """
+    match = digest._DIGEST_NAME.match(digest_path.stem)
+    if match is None:
+        return None
+    agent, session = match.group("agent"), match.group("session")
+    record = queue.recorded_project(config, agent, session)
+    if record is None:
+        prefix, sep, suffix = session.rpartition("-")
+        if sep and suffix.isdigit():
+            session, record = prefix, queue.recorded_project(config, agent, prefix)
+    if record is None:
+        return None
+    return agent, session, record
+
+
+def digest_groups(
+    config: Config, registry: Registry, slug: str, digests: Sequence[Path]
+) -> list[list[Path]]:
+    """One slug's waiting digests split into the projects their own records name (DESIGN 7,
+    F49).
+
+    Two directories that once claimed one name can file their digests under one directory -
+    ``digests/<slug>/`` - when a project was registered over the claim, or when a record
+    predates the paths records carry. The records still say which directory each session
+    ran in, so a digest whose record names a different project, or a different directory
+    that would register one, is a run of its own, whatever the group's first record says.
+    A digest whose session left no record at all is run by itself, falling back to the
+    group's name as it did before records carried a path.
+
+    The groups come back in session order, each list in the order its digests were given.
+    """
+    groups: dict[tuple[str, str], list[Path]] = {}
+    for digest_path in digests:
+        named = _record_of(config, digest_path)
+        if named is None:
+            key = ("recordless", slug)
+        else:
+            _, _, record = named
+            project = registry.by_id(record.project_id) if record.project_id else None
+            if project is not None:
+                key = ("project", project.id)
+            elif record.path is not None:
+                path = Path(record.path)
+                project = registry.by_path_key(path_key(config.host, path))
+                key = ("project", project.id) if project is not None else ("path", record.path)
+            else:
+                project = registry.by_slug(record.slug)
+                key = ("project", project.id) if project is not None else ("slug", record.slug)
+        groups.setdefault(key, []).append(digest_path)
+    return list(groups.values())
+
+
+def _project_of_group(
+    config: Config, registry: Registry, slug: str, digests: Sequence[Path]
+) -> tuple[Project | None, Path | None]:
+    """The project this group of digests belongs to, and the path that would register it.
+
+    The session-start records are what say which project each session started in: by the
+    project's id when the registry knew it at session start, and by the recorded path
+    otherwise, since the path, not the name, is what a project is (DESIGN 7, F49). The path
+    is also what an unregistered group carries back, for the dream to register the project
+    at. A record that names neither an id the registry answers for nor a path - one an
+    earlier build wrote - falls back to the slug it holds, and a digest whose session left
+    no record at all falls back to the group's own directory name, as it did before records
+    carried a path.
+    """
+    for digest_path in digests:
+        named = _record_of(config, digest_path)
+        if named is None:
+            continue
+        _, _, record = named
+        project = registry.by_id(record.project_id) if record.project_id else None
+        if project is not None:
+            return project, None
+        if record.path is not None:
+            path = Path(record.path)
+            project = registry.by_path_key(path_key(config.host, path))
+            return project, (None if project is not None else path)
+        return registry.by_slug(record.slug), None
+    return registry.by_slug(slug), None
+
+
 def run_project(
     config: Config,
     slug: str,
@@ -198,20 +287,23 @@ def run_project(
         return ProjectRunReport(project=slug)
 
     registry = Registry.load(config.registry_path)
-    project = registry.by_slug(slug)
+    project, project_path = _project_of_group(config, registry, slug, digests)
+    # The pages a run writes follow the project's slug, and the digests it reads sit under
+    # the name their sessions filed them under; the two are the same unless the project was
+    # registered under a name the group's directory could not keep (DESIGN 7, F49).
+    page_slug = project.slug if project else slug
     run_project_id = project.id if project else None
     # Digests of sessions that belong to no project: only their global facts are memory.
     unfiled = slug == digest.UNFILED
-
     now = now or datetime.now(UTC)
     today = now.date().isoformat()
     # A digest is marked consumed by the same commit that consumes it, so the marker
     # cannot hold that commit's sha: it holds this run id instead, and the commit
     # message names the same id, so `git log --grep <run id>` answers with the sha.
-    run_id = f"dream-{slug}-{now:%Y%m%dT%H%M%SZ}"
+    run_id = f"dream-{page_slug}-{now:%Y%m%dT%H%M%SZ}"
     vault_path = config.vault.resolve()
 
-    report = ProjectRunReport(project=slug)
+    report = ProjectRunReport(project=page_slug)
 
     written_paths: set[Path] = set()
     created_paths: set[Path] = set()
@@ -260,7 +352,7 @@ def run_project(
         survives (design 9 steps 2 to 5). ``sources_map`` holds the sources the fact's
         evidence cites: its digest's, or for a short-term line becoming long-term, the
         sources of ``recent.md``."""
-        nonlocal project, run_project_id
+        nonlocal project, run_project_id, page_slug, run_id
         verified_evidence = [e for e in evidence_list if e.verified]
         if not verified_evidence:
             report.rejected.append(
@@ -282,7 +374,7 @@ def run_project(
             config,
             new_fact,
             quote_to_send,
-            slug if project else None,
+            page_slug if project else None,
         )
 
         # Target line evidence from archive
@@ -310,7 +402,7 @@ def run_project(
                     )
                 )
 
-        effective_project = run_project_id or f"p_{slug}"
+        effective_project = run_project_id or f"p_{page_slug}"
         context = proposal.context(
             today=today,
             evidence=tuple(evidence_list),
@@ -341,11 +433,39 @@ def run_project(
         else:
             # Actions: add, candidate, confirm, promote, supersede, conflict, needs-you
             if project is None and new_fact.scope != "global":
-                project = registry.add(slug, title=slug.capitalize())
+                # The directory this group of sessions ran in becomes a project (DESIGN 7,
+                # F49): registered with the recorded path, under the name the digests file
+                # it under unless that is taken. A group whose records named no path - a
+                # digest of a session that left no record - registers under the group's name
+                # alone, as it did before paths were recorded.
+                if project_path is not None:
+                    project = registry.add_for_path(config.host, project_path, base=slug)
+                else:
+                    project = registry.add(slug, title=slug.capitalize())
                 record_write(config.registry_path)
                 registry.save()
                 run_project_id = project.id
-
+                page_slug = project.slug
+                # The pages this run writes from here stand under the project the registry
+                # made, and the report names it (DESIGN 7, F49). The run id is not made
+                # again: the digests consumed before the registration already carry it, and
+                # one run keeps one id, the one its commit names.
+                report.project = page_slug
+                # The records of the sessions this group was digested from name the project
+                # they became, so a later digest of the same session finds it (DESIGN 7, F49).
+                for digest_path in digests:
+                    named = _record_of(config, digest_path)
+                    if named is None:
+                        continue
+                    agent, session, record = named
+                    queue.record_project(
+                        config,
+                        agent,
+                        session,
+                        project.id,
+                        project.slug,
+                        None if record.path is None else Path(record.path),
+                    )
             if proposal.target is not None and action in (
                 "confirm",
                 "lift",
@@ -357,10 +477,12 @@ def run_project(
                 target_file = vault_path / proposal.target.path
                 record_write(target_file)
             elif new_fact.term == rules.SHORT:
-                target_file = _recent_page(vault_path, slug)
+                target_file = _recent_page(vault_path, page_slug)
                 record_write(target_file)
                 if not target_file.exists():
-                    target_file.write_text(_recent_text(slug, project, run_project_id), "utf-8")
+                    target_file.write_text(
+                        _recent_text(page_slug, project, run_project_id), "utf-8"
+                    )
             elif new_fact.scope == "global":
                 g_file = "preferences.md" if new_fact.kind == "preference" else "environment.md"
                 target_file = vault_path / "global" / g_file
@@ -376,17 +498,17 @@ def run_project(
                 else:
                     record_write(target_file)
             else:
-                overview_path = vault_path / "projects" / slug / "overview.md"
+                overview_path = vault_path / "projects" / page_slug / "overview.md"
                 if not overview_path.exists():
                     overview_path.parent.mkdir(parents=True, exist_ok=True)
-                    proj_id = run_project_id or (project.id if project else f"p_{slug}")
-                    proj_title = project.title if project else slug.capitalize()
+                    proj_id = run_project_id or (project.id if project else f"p_{page_slug}")
+                    proj_title = project.title if project else page_slug.capitalize()
                     record_write(overview_path)
                     overview_path.write_text(
                         f"---\n"
                         f"type: Project\n"
                         f"title: {proj_title}\n"
-                        f"description: {slug}\n"
+                        f"description: {page_slug}\n"
                         f"sources: []\n"
                         f"aft:\n"
                         f"  project: {proj_id}\n"
@@ -660,15 +782,27 @@ def run_project(
                 digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
             report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
 
-        # What the newest session this run applied shows about the short-term lines: a
-        # line it showed done, false or replaced is withdrawn on its verified quote
-        # (BUILD-PLAN F47).
-        reconcile.run(config, vault_path, slug, digests, today, report, record_write, now=now)
+        # The short-term machinery edits ``projects/<page_slug>/recent.md``. Until the run
+        # registers a project, that name is the group's pending one, which the project
+        # takes at its first project fact; when a registered project already holds it, the
+        # page there belongs to that project and not to this group, and the run leaves it
+        # alone (DESIGN 7, F49).
+        if project is not None or registry.by_slug(page_slug) is None:
+            # What the newest session this run applied shows about the short-term lines: a
+            # line it showed done, false or replaced is withdrawn on its verified quote
+            # (BUILD-PLAN F47).
+            reconcile.run(
+                config, vault_path, page_slug, digests, today, report, record_write, now=now
+            )
 
-        # Short-term memory: lift the lines that became long-term, then roll off the lines
-        # whose sessions have gone by, and expire the ones their days have left behind
-        # (design 6, design 9 step 6).
-        _short_term(config, vault_path, slug, to_lift, settle, report, record_write, today)
+            # Short-term memory: lift the lines that became long-term, then roll off the
+            # lines whose sessions have gone by, and expire the ones their days have left
+            # behind (design 6, design 9 step 6). The session order is counted over the
+            # digests the group was filed under, and the page it edits is the project's
+            # (DESIGN 6, F49).
+            _short_term(
+                config, vault_path, slug, page_slug, to_lift, settle, report, record_write, today
+            )
         # Maintenance
         broken, cleared = maintain.check_anchors(
             vault_path, project, today, config.host, record_write=record_write
@@ -676,10 +810,12 @@ def run_project(
         report.broken_anchors.extend(broken)
         report.cleared_anchors.extend(cleared)
 
-        archived = maintain.archive_superseded(vault_path, slug, today, record_write=record_write)
+        archived = maintain.archive_superseded(
+            vault_path, page_slug, today, record_write=record_write
+        )
         report.archived_lines.extend(archived)
 
-        project_dir = vault_path / "projects" / slug
+        project_dir = vault_path / "projects" / page_slug
         project_pages = list(project_dir.glob("*.md")) if project_dir.is_dir() else []
         oversize = maintain.check_oversize(vault_path, project_pages)
         report.oversize_pages.extend(oversize)
@@ -687,12 +823,14 @@ def run_project(
         if not unfiled:
             maintain.regenerate_index(
                 vault_path,
-                slug,
-                project.title if project else slug.capitalize(),
+                page_slug,
+                project.title if project else page_slug.capitalize(),
                 record_write=record_write,
             )
         maintain.ensure_root_index(vault_path, record_write=record_write)
-        maintain.append_log(vault_path, slug, f"{today}: dream {slug}", record_write=record_write)
+        maintain.append_log(
+            vault_path, page_slug, f"{today}: dream {page_slug}", record_write=record_write
+        )
 
         # Lint check: lint only the pages this run wrote, not the whole vault
         rel_written = [
@@ -724,7 +862,7 @@ def run_project(
                             "commit",
                             "-q",
                             "-m",
-                            f"aft: dream {slug}",
+                            f"aft: dream {page_slug}",
                             "-m",
                             f"Run: {run_id}",
                         ],
@@ -768,6 +906,7 @@ def _short_term(
     config: Config,
     vault_path: Path,
     slug: str,
+    page_slug: str,
     to_lift: list[tuple[str, str]],
     settle,
     report: ProjectRunReport,
@@ -787,8 +926,13 @@ def _short_term(
     archive first, so nothing a person typed there is lost. A project that stops having
     sessions never rolls a line off by count, so a line whose newest source is older than
     ``dream.short_term_days`` days expires the same way roll-off does.
+
+    ``slug`` is the directory the group's digests were filed under, which is where the
+    session order is read from; ``page_slug`` is the project's slug, which is where
+    ``recent.md`` lives. They are the same unless the project was registered under a name
+    the group's directory could not keep (DESIGN 7, F49).
     """
-    recent = vault_path / "projects" / slug / page.RECENT_PAGE
+    recent = vault_path / "projects" / page_slug / page.RECENT_PAGE
     if not recent.exists():
         return
     window = config.settings.dream.short_term_sessions

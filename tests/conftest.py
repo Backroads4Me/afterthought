@@ -5,12 +5,29 @@ configuration."""
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from aft import config as configmod
 from aft import vault
+
+
+@pytest.fixture(autouse=True, scope="session")
+def system_temp(tmp_path_factory):
+    """Move the system temporary directory under pytest's own (DESIGN 7, F49).
+
+    F49 makes a plain directory a project, so the directories that still resolve to no
+    project are the system temporary directory, ``~/Downloads`` and the ones capture
+    excludes. Tests make those from the temporary directories they are given, so the system
+    temp is moved into the test tree, where the run can reach it, and is set back after.
+    """
+    original = tempfile.tempdir
+    moved = tmp_path_factory.mktemp("system-temp")
+    tempfile.tempdir = str(moved)
+    yield moved
+    tempfile.tempdir = original
 
 
 def run_git(args: list[str], cwd: Path) -> str:

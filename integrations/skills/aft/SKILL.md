@@ -42,8 +42,11 @@ command has `--dry-run`, show its output first.
 | To run background work now | `aft work`, or `aft dream` for the dream alone |
 | To start the day's token count again | `aft budget reset` |
 | To rebuild a session's digest | `aft redigest <session>`; it counts against the budget, and the vault's git history keeps the old digest |
-| To register a directory | `aft project add <path>` |
+| To backfill the sessions of no project | `aft redigest --unfiled`, with `--dry-run` first; it rebuilds every still-archived unfiled session to file under the project its recorded directory now resolves to, and counts against the budget |
+| To register a directory | `aft project add <path>`; any directory is a project now, git or not |
 | To rename a project | `aft project rename <old> <new>` |
+| To archive a project | `aft project archive <slug>`; its memory block is not injected and its pages and digests answer only `aft search <words> --archive`, until `aft project unarchive <slug>` |
+| To bring an archived project back | `aft project unarchive <slug>`; its pages and digests answer ordinary searches again, from the date the archive began |
 | To settle a note waiting on them | `aft settle <where> --keep`, `aft settle <where> --withdraw`, or `aft settle <where> --replace <statement>`, where is the note's page and line as `aft notes` prints them; follow "Notes waiting on the user" below |
 | To ask what memory should not keep | `aft review <project\|global>`; it calls the model and counts against the day's token budget. Striking the lines it names, `aft review <project\|global> --withdraw <n,n,...\|all>`, follows "Reviewing what memory keeps" below |
 | To rebuild the search index | `aft reindex` |

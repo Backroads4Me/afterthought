@@ -132,7 +132,7 @@ from pathlib import Path
 from aft import inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
-from aft.registry import Registry, RegistryError
+from aft.registry import Registry, RegistryError, path_key
 
 INDEX_NAME = "index.sqlite"
 
@@ -292,11 +292,20 @@ _RECORD_BUILD = (
     f" ON CONFLICT (name) DO UPDATE SET stamp = excluded.stamp"
 )
 
+#: The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
+#: an evidence row is one entry, so its path carries the entry id the way a page row's does the
+#: heading. This is how a page already names a session, and the whole resource is what
+#: `aft trace` takes to open the entry's context (DESIGN 10).
+SESSION_RESOURCE = "aft://session/"
+
 #: Whether the index holds anything a build wrote. A run records a hash for every file it read
 #: and the state of every archive row it read, in the same transaction as the rows themselves,
 #: so with neither record the file holds no row whose meaning a stamp would vouch for.
-_HOLDS_ROWS = f"SELECT EXISTS (SELECT 1 FROM {FILES_TABLE}) OR EXISTS (SELECT 1 FROM {EVIDENCE})"
-
+_HOLDS_ROWS = (
+    f"SELECT EXISTS (SELECT 1 FROM {FILES_TABLE})"
+    f" OR EXISTS (SELECT 1 FROM {EVIDENCE})"
+    f" OR EXISTS (SELECT 1 FROM {ARCHIVE} WHERE path LIKE '{SESSION_RESOURCE}%')"
+)
 # SQLite takes a table name in the statement text and never as a parameter, so every
 # statement that names one is written once here from `COLLECTIONS` and `FILES_TABLE` - this
 # module's own constants, never a caller's string.
@@ -327,10 +336,16 @@ _DELETE_KEYS_BY_ENTRY = {
 _DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
 _DROP_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
 # What the index recorded about each evidence row: the key it was stored under, the digest of
-# its stored payload, and the fields the row copied out of the archive beside it. A row is read
-# again when any of it moved.
+# its stored payload, the fields the row copied out of the archive beside it, and the
+# collection the row answers from. A row is read again when any of it moved. The state is read
+# over both collections an evidence row can stand in, since an archived project's entries
+# answer only `aft search --archive` (DESIGN 10, F49) and so are re-homed into the archive
+# collection there, the way its pages are.
 _EVIDENCE_STATE = (
-    f"SELECT session_id, entry_id, entry_hash, agent, project_id, time FROM {EVIDENCE}"
+    f"SELECT session_id, entry_id, entry_hash, agent, project_id, time, '{EVIDENCE}' AS home"
+    f" FROM {EVIDENCE}"
+    f" UNION ALL SELECT session_id, entry_id, entry_hash, agent, project_id, time, '{ARCHIVE}'"
+    f" FROM {ARCHIVE} WHERE path LIKE '{SESSION_RESOURCE}%'"
 )
 _SELECT_HASHES = f"SELECT path, digest FROM {FILES_TABLE}"
 # The modification each recorded hash was taken beside (`_file_state`), which is what a run reads
@@ -394,11 +409,6 @@ _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
 _FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
-# The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
-# an evidence row is one entry, so its path carries the entry id the way a page row's does the
-# heading. This is how a page already names a session, and the whole resource is what
-# `aft trace` takes to open the entry's context (DESIGN 10).
-SESSION_RESOURCE = "aft://session/"
 
 #: The heading a digest's handoff note is indexed under. The note itself lives in the digest's
 #: frontmatter (DESIGN 8) and `aft.inject` renders it for a new session; this is the name a
@@ -464,9 +474,9 @@ def update(config: Config) -> list[str]:
     This is the incremental path BUILD-PLAN M3.1 names: a file is rebuilt only when its
     content hash moved or when the project registry the rows were filed against moved,
     an evidence row is read only when the index has not seen its stored bytes or the archive
-    row beside them changed what the index row copies, and whatever has disappeared from
-    either loses its rows. Nothing here waits for a model or a git commit; it reads the files
-    as they are.
+    row beside them changed what the index row copies - of which the collection the entry
+    answers from is a part - and whatever has disappeared from either loses its rows. Nothing
+    here waits for a model or a git commit; it reads the files as they are.
 
     Whether any of that has to happen at all is asked of `_moved` first, from a read connection
     that takes no write lock - which is the difference between a search that checks the index
@@ -489,9 +499,9 @@ def update(config: Config) -> list[str]:
         # this host cannot describe at all is recorded as nothing, which the next run reads as
         # moved and asks again (`_moved`).
         archive = _archive_state(config) or ""
-        registry = _project_registry(config)
-        report = _sync_files(conn, config, registry)
-        _sync_evidence(conn, config)
+        projects = _project_registry(config)
+        report = _sync_files(conn, config, projects)
+        _sync_evidence(conn, config, projects.registry)
         report.extend(_sync_library(conn, config))
         conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
@@ -510,8 +520,9 @@ def reindex(config: Config) -> list[str]:
     with _writing(config, rebuild=True) as conn:
         _create(conn, fresh=True)
         archive = _archive_state(config) or ""
-        report = _sync_files(conn, config, _project_registry(config))
-        _sync_evidence(conn, config)
+        projects = _project_registry(config)
+        report = _sync_files(conn, config, projects)
+        _sync_evidence(conn, config, projects.registry)
         report.extend(_sync_library(conn, config))
         conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
@@ -581,7 +592,7 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         if current is None:
             continue  # gone from the vault: the drop above was the whole job
         try:
-            rows = _file_rows(rel, current, projects.registry)
+            rows = _file_rows(rel, current, projects.registry, config.host)
         except _Unreadable as exc:
             report.append(f"{rel}: {exc}")
             continue  # its rows and hash went with the drop, so a repaired page reads again
@@ -800,7 +811,7 @@ def _collection_of(rel: str) -> str | None:
     return None
 
 
-def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[Row]]:
+def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[str, list[Row]]:
     """The rows one file contributes, under each collection they belong to.
 
     Usually one collection, the one named by the directory the file sits in. A live fact page is
@@ -829,15 +840,31 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
         raise _Unreadable(f"cannot be indexed: {error}")
     title = inject.one_line((frontmatter or {}).get("title")) or Path(rel).stem
     description = inject.one_line((frontmatter or {}).get("description"))
-    scopes = _project_scopes(rel, frontmatter, registry)
+    scopes = _project_scopes(rel, frontmatter, registry, host)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
     sections: dict[str, list[tuple[str, str]]] = {}
+    # its pages and digests are read into the archive collection instead of their own,
+    # exactly as a page's resting lines are, until the person unarchives the project.
+    home = _file_home(rel, frontmatter, registry, host)
     if admitted is None:
         chunks = _prose_chunks(body)
         if current.collection == DIGESTS:
             chunks = [*chunks, *_handoff_chunks(frontmatter)]
-        sections[current.collection] = chunks
+        sections[home or current.collection] = chunks
+    elif home == ARCHIVE:
+        parsed = page.parse(current.text, Path(rel))
+        # The whole file reads as archived: every state a page admits beside its resting
+        # lines, in one collection - and no resting step, because the rows are already home.
+        fact_chunks = _fact_chunks(parsed, inject.INJECTED + FACT_STATES[ARCHIVE])
+        fact_sections = {h for h, _ in fact_chunks}
+        archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
+        prose_chunks = [
+            (heading, text)
+            for heading, text in _prose_chunks(body)
+            if heading not in fact_sections and heading in archive_prose
+        ]
+        sections[ARCHIVE] = [*fact_chunks, *prose_chunks]
     else:
         parsed = page.parse(current.text, Path(rel))
         fact_chunks = _fact_chunks(parsed, admitted)
@@ -858,6 +885,43 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
         collection: _section_rows(rel, title, description, scopes, agent, session_id, chunks)
         for collection, chunks in sections.items()
     }
+
+
+def _file_home(rel: str, frontmatter: dict | None, registry: Registry, host: str) -> str | None:
+    """The collection an archived project's file is read into, or None to keep its own (F49).
+
+    When a project is archived with ``aft project archive`` (DESIGN 10, F49) its pages and
+    digests stop answering an ordinary search and answer only ``aft search --archive``, so
+    each of its files is read into the archive collection whatever directory it sits in. The
+    project is named by the file's own ``aft.project`` when it has one, by the path its
+    ``aft.path`` names when the file carries one (DESIGN 7, F49), and otherwise by the
+    directory it is filed under, the way `_project_scopes` reads it. A file scoped to several
+    projects is not re-homed: one of the projects being archived does not make the other
+    one's lines archived. A file whose project is unknown, or known and not archived, keeps
+    its own collection.
+    """
+    aft = (frontmatter or {}).get("aft")
+    if not isinstance(aft, dict):
+        return None
+    listed = aft.get("projects")
+    if isinstance(listed, list) and listed:
+        return None
+    project_value = aft.get("project")
+    if isinstance(project_value, str) and project_value:
+        project = registry.by_id(project_value)
+        return ARCHIVE if project is not None and project.archived else None
+    recorded = aft.get("path")
+    if isinstance(recorded, str) and recorded:
+        project = registry.by_path_key(path_key(host, Path(recorded)))
+        if project is not None and project.archived:
+            return ARCHIVE
+        return None
+    slug = _path_slug(rel)
+    if slug is not None:
+        project = registry.by_slug(slug)
+        if project is not None and project.archived:
+            return ARCHIVE
+    return None
 
 
 def _section_rows(
@@ -1005,21 +1069,25 @@ def _project_registry(config: Config) -> _Projects:
 
 
 def _project_scopes(
-    rel: str, frontmatter: dict | None, registry: Registry
+    rel: str, frontmatter: dict | None, registry: Registry, host: str
 ) -> list[tuple[str | None, str | None]]:
     """The project each row of this file belongs to, and what its row key carries to say so.
 
     A page's own ``aft.project`` (DESIGN 6) wins. A reference page is one collection of lines
     covering several projects at once (DESIGN 11), so ``aft.projects`` gives a row per project
-    and each row names itself in its key. Failing both, the directory a file is filed under
-    names the project it belongs to and the registry turns that slug into an id; a slug the
-    registry does not know is no error and gives no id.
+    and each row names itself in its key. A digest of an unregistered directory (DESIGN 7, F49)
+    carries the path its sessions ran in as ``aft.path``, and that path decides the project:
+    the one the registry holds for the path when it has one, and nothing when it does not.
+    Failing all of these, the directory a file is filed under names the project it belongs to
+    and the registry turns that slug into an id; a slug the registry does not know is no error
+    and gives no id.
 
     A row with no id is every project's memory - the global pages of DESIGN 6, a report day,
-    or a reference page that covers nothing yet - and not a page whose project went missing.
-    A digest filed under a slug the registry does not answer for lands here too, so no id says
-    nothing about which of the two it is, and `aft search` reads an id-less row as shared memory
-    only for the collections where a page could not have a project to begin with.
+    a reference page that covers nothing yet, or a digest of a directory that belongs to no
+    project - and not a page whose project went missing. A digest filed under a slug the
+    registry does not answer for lands here too, so no id says nothing about which of the
+    two it is, and `aft search` reads an id-less row as shared memory only for the collections
+    where a page could not have a project to begin with.
     """
     aft = (frontmatter or {}).get("aft")
     if isinstance(aft, dict):
@@ -1034,6 +1102,16 @@ def _project_scopes(
                     ids.append(value)
             if ids:
                 return [(project_id, project_id) for project_id in ids]
+        recorded = aft.get("path")
+        if isinstance(recorded, str) and recorded:
+            # The directory the digest's sessions ran in decides, not the name the digest
+            # is filed under: two directories that once claimed one name file their digests
+            # under one name, and the file's directory would give every one of them the
+            # first directory's project (DESIGN 7, F49).
+            found = registry.by_path_key(path_key(host, Path(recorded)))
+            if found is not None:
+                return [(found.id, None)]
+            return [(None, None)]
     slug = _path_slug(rel)
     if slug is not None:
         found = registry.by_slug(slug)
@@ -1192,17 +1270,24 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
     return report
 
 
-def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
+def _sync_evidence(conn: sqlite3.Connection, config: Config, registry: Registry) -> None:
     """Index the archive rows this index has not seen, and stop holding the ones it dropped.
 
     The row identity is the archive's ``(session_id, entry_id)`` primary key, which the
     archive itself keeps unique across a rerun (``aft.evidence.store`` replaces a row rather
     than adding a copy). What says whether a row is current is everything the index row copies
-    out of the archive row - the SHA-256 of the stored payload, and the agent, project and time
-    the row carries - so a redaction that rewrote archived text in place (`aft forget pattern`,
-    BUILD-PLAN M2.8) reaches the index whatever the compressed text measures, and so does a
-    session whose project moved because its directory was registered after it was archived.
-    The stored bytes are digested as they are read; only the rows that moved are decompressed.
+    out of the archive row - the SHA-256 of the stored payload, the agent, project and time
+    the row carries, and the collection it answers from - so a redaction that rewrote archived
+    text in place (`aft forget pattern`, BUILD-PLAN M2.8) reaches the index whatever the
+    compressed text measures, and so does a session whose project moved because its directory
+    was registered after it was archived, or whose project was archived after that (DESIGN 10,
+    F49). The stored bytes are digested as they are read; only the rows that moved are
+    decompressed.
+
+    Which collection a row answers from is the archived flag of the project its id names: an
+    archived project's pages and digests answer only `aft search --archive`, and its captured
+    entries go where they went (DESIGN 10, F49). An entry whose project is unknown is every
+    project's memory, and stays in the ordinary evidence collection.
 
     Nothing is removed that was never recorded: a row and the state that says it was read land
     in the same transaction, so a key the index holds no state for is a key with no row to
@@ -1211,37 +1296,45 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
     over an empty index deletes nothing at all (`_unindex`).
     """
     recorded = {
-        (session_id, entry_id): (digest, agent, project_id, moment)
-        for session_id, entry_id, digest, agent, project_id, moment in conn.execute(_EVIDENCE_STATE)
+        (session_id, entry_id): (digest, agent, project_id, moment, home)
+        for session_id, entry_id, digest, agent, project_id, moment, home in conn.execute(
+            _EVIDENCE_STATE
+        )
     }
     archive = config.home / EVIDENCE_NAME
     if not archive.exists():
-        _unindex(conn, EVIDENCE, sorted(recorded))
+        _unindex(conn, (EVIDENCE, ARCHIVE), sorted(recorded))
         return
+
+    def home_of(record: sqlite3.Row) -> str:
+        project = registry.by_id(record["project_id"]) if record["project_id"] else None
+        return ARCHIVE if project is not None and project.archived else EVIDENCE
+
     live: set[tuple[str, str]] = set()
-    rewritten: list[tuple[tuple[str, str], sqlite3.Row, bytes, str]] = []
+    rewritten: list[tuple[tuple[str, str], sqlite3.Row, bytes, str, str]] = []
     with _reading_archive(archive) as source:
         for record in source.execute(_SCAN_ARCHIVE):
             key = (record["session_id"], record["entry_id"])
             payload = bytes(record["text"])
             digest = hashlib.sha256(payload).hexdigest()
             live.add(key)
-            copied = (digest, record["agent"], record["project_id"], record["time"])
+            home = home_of(record)
+            copied = (digest, record["agent"], record["project_id"], record["time"], home)
             if recorded.get(key) == copied:
                 continue  # every field this row was built from is what it was built from
             if key in recorded:
                 # Its rows are here from before, and they say what this row now says they
                 # should not: they go with the rest, and the fresh one follows the removal.
-                rewritten.append((key, record, payload, digest))
+                rewritten.append((key, record, payload, digest, home))
             else:
-                _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+                _insert(conn, home, _evidence_row(record, payload, digest))
     _unindex(
         conn,
-        EVIDENCE,
-        sorted(set(recorded) - live) + sorted(key for key, _, _, _ in rewritten),
+        (EVIDENCE, ARCHIVE),
+        sorted(set(recorded) - live) + sorted(key for key, *_ in rewritten),
     )
-    for _, record, payload, digest in rewritten:
-        _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+    for _, record, payload, digest, home in rewritten:
+        _insert(conn, home, _evidence_row(record, payload, digest))
 
 
 def _fill_keys(conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]) -> None:
@@ -1261,11 +1354,15 @@ def _fill_keys(conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]) -> Non
     conn.executemany(_ADD_KEY, keys)
 
 
-def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
+def _unindex(
+    conn: sqlite3.Connection, collections: Iterable[str], keys: list[tuple[str, str]]
+) -> None:
     """Stop holding the rows of these archive keys.
 
     ``(session_id, entry_id)`` is where an evidence row was stored, so it is what its removal
-    names, and the whole set goes into one statement (`_fill_keys`). Rows under a key this was
+    names, and the whole set goes into one statement per collection (`_fill_keys`). An
+    evidence row can stand in either collection an entry answers from, so the removal names
+    them all and each one loses whatever it held under these keys. Rows under a key this was
     not given keep their place.
 
     Nothing is removed that was never recorded: a row and the state that says it was read land in
@@ -1274,7 +1371,8 @@ def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, st
     if not keys:
         return
     _fill_keys(conn, keys)
-    conn.execute(_DELETE_KEYS_BY_ENTRY[collection])
+    for collection in collections:
+        conn.execute(_DELETE_KEYS_BY_ENTRY[collection])
 
 
 def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:

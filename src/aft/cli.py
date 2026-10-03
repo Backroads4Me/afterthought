@@ -12,14 +12,14 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from aft import __version__
 from aft.config import HOME_ENV, Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
-from aft.registry import Registry, RegistryError, path_key, slugify
+from aft.registry import Registry, RegistryError, path_key, slugify, split_key
 
 
 class UsageError(Exception):
@@ -111,6 +111,12 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("old")
     q.add_argument("new")
     q.set_defaults(handler=cmd_project_rename)
+    q = psub.add_parser("archive", help="take a project out of memory without deleting anything")
+    q.add_argument("slug")
+    q.set_defaults(handler=cmd_project_archive)
+    q = psub.add_parser("unarchive", help="bring an archived project back into memory")
+    q.add_argument("slug")
+    q.set_defaults(handler=cmd_project_unarchive)
     q = psub.add_parser("forget", help="remove a project from the registry")
     q.add_argument("slug")
     q.set_defaults(handler=cmd_project_forget)
@@ -183,9 +189,19 @@ def _parser() -> argparse.ArgumentParser:
     q.set_defaults(handler=cmd_forget_pattern)
 
     p = sub.add_parser("redigest", help="rebuild a session digest from archived evidence")
-    p.add_argument("session_id", help="the session id to redigest")
+    p.add_argument("session_id", nargs="?", help="the session id to redigest")
+    p.add_argument(
+        "--unfiled",
+        action="store_true",
+        help="rebuild every still-archived session filed as unfiled, so each files under the"
+        " project its recorded directory now resolves to",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --unfiled, list the sessions and the tokens a rebuild would charge",
+    )
     p.set_defaults(handler=cmd_redigest)
-
     p = sub.add_parser("search", help="search memory with BM25 ranking")
     p.add_argument("query", help="words to search for")
     p.add_argument("--project", help="search within a project and global pages")
@@ -373,7 +389,13 @@ def cmd_key(args) -> int:
     registry = Registry.load(config.registry_path)
     from aft import keys
 
-    result = keys.resolve(Path(args.path), registry, config.host, on_alias=_alias_writer(config))
+    result = keys.resolve(
+        Path(args.path),
+        registry,
+        config.host,
+        on_alias=_alias_writer(config),
+        never=config.settings.capture.exclude_paths,
+    )
     if args.json:
         print(
             json.dumps(
@@ -411,7 +433,9 @@ def _injection_block(path: Path) -> str:
     config = load()
     registry = Registry.load(config.registry_path)
     try:
-        result = keys.resolve(path, registry, config.host)
+        result = keys.resolve(
+            path, registry, config.host, never=config.settings.capture.exclude_paths
+        )
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=path)
     return inject.build(config, result)
@@ -447,7 +471,7 @@ def cmd_project_list(args) -> int:
 
 
 def cmd_project_add(args) -> int:
-    from aft import gitutil, vault
+    from aft import gitutil, queue, vault
 
     config = load()
     vault.require(config)
@@ -455,9 +479,33 @@ def cmd_project_add(args) -> int:
     root = info.main if info else Path(args.path).resolve()
     if not args.allow_temp:
         _refuse_temporary_project(root)
-    slug = args.slug or slugify(root.name)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
+        held = registry.by_path_key(path_key(config.host, root))
+        if held is not None:
+            # The directory is already someone's project, so this is a rename's business,
+            # not a second project under a name its own walk would step aside from.
+            raise UsageError(
+                f"a project {held.slug!r} already exists for {root};"
+                " `aft project rename` changes its name"
+            )
+        if args.slug:
+            # The name a person chose is theirs to choose again: one another directory's
+            # session records claim is refused, not quietly prefixed. The directory's own
+            # claim does not count against it, so the name its sessions file it under
+            # stays takeable (DESIGN 7, F49).
+            if args.slug in queue.claimed_slugs(config, registry, keep={str(root)}):
+                raise UsageError(
+                    f"the name {args.slug!r} is claimed by the session records of another"
+                    " directory; pick another name, or leave it off to have one settled"
+                    " (DESIGN 7, F49)"
+                )
+            slug = args.slug
+        else:
+            # The default name settles the way a session-start record settles it, against
+            # the registry and every claim, and a pathless record of the name this
+            # directory resolves to is given the directory (DESIGN 7, F49).
+            slug = queue.adopt_claim(config, registry, root, slugify(root.name))
         project = registry.add(slug, args.title)
         registry.add_path(project, path_key(config.host, root))
         if info and info.origin:
@@ -488,12 +536,22 @@ def _refuse_temporary_project(root: Path) -> None:
 
 
 def cmd_project_rename(args) -> int:
-    from aft import vault
+    from aft import queue, vault
 
     config = load()
     vault.require(config)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
+        project = registry.by_slug(args.old)
+        if project is not None:
+            # The new name is a person's choice, so a name another path's session records
+            # claim is refused with the claim named, never silently prefixed (DESIGN 7, F49).
+            keep = {str(path) for _, path in (split_key(key) for key in project.paths)}
+            if args.new in queue.claimed_slugs(config, registry, keep=keep):
+                raise UsageError(
+                    f"the name {args.new!r} is claimed by the session records of another"
+                    " directory; pick another name (DESIGN 7, F49)"
+                )
         registry.rename(args.old, args.new)
         registry.save()
         changed = ["registry.yaml"]
@@ -539,6 +597,39 @@ def cmd_project_forget(args) -> int:
         print(
             f"its pages remain in projects/{args.slug}; delete them yourself if you want them gone"
         )
+    return 0
+
+
+def cmd_project_archive(args) -> int:
+    """Take a project out of memory without deleting anything (DESIGN 7, F49).
+
+    Its directory is then given the global pages alone, and its pages and digests answer
+    only ``aft search --archive``. Nothing is archived by this run or by any other: the
+    command is the person's to run, and `aft project unarchive` undoes it.
+    """
+    return _set_archived(args, True)
+
+
+def cmd_project_unarchive(args) -> int:
+    """Bring an archived project back into memory (DESIGN 7, F49)."""
+    return _set_archived(args, False)
+
+
+def _set_archived(args, archived: bool) -> int:
+    from aft import vault
+
+    config = load()
+    vault.require(config)
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        project = registry.set_archived(args.slug, date.today().isoformat() if archived else "")
+        registry.save()
+        vault.commit(
+            config.vault,
+            ["registry.yaml"],
+            f"aft: {'archive' if archived else 'unarchive'} {args.slug}",
+        )
+    print(f"{'archived' if archived else 'unarchived'} {args.slug} ({project.id})")
     return 0
 
 
@@ -638,7 +729,12 @@ def cmd_notes(args) -> int:
     if not args.all:
         registry = Registry.load(config.registry_path)
         try:
-            slug = keys.resolve(Path(args.path).resolve(), registry, config.host).slug
+            slug = keys.resolve(
+                Path(args.path).resolve(),
+                registry,
+                config.host,
+                never=config.settings.capture.exclude_paths,
+            ).slug
         except gitutil.GitError:
             slug = None
     found = notes.open_notes(config, slug, everywhere=args.all)
@@ -794,8 +890,11 @@ def _dream(config: Config) -> None:
         rep = result.reports.get(slug)
         n = len(rep.expired) if rep is not None else 0
         print(f"aft dream: {slug}: expired {n} short-term line(s)")
-    for slug in result.ran:
-        print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug in dict.fromkeys(result.ran):
+        # One slug may split into several runs (two directories that once claimed one name,
+        # DESIGN 7, F49), so the line counts the digests the runs together took up.
+        taken = result.taken.get(slug, len(result.waiting[slug]))
+        print(f"aft dream: {slug}: {taken} digest(s) taken up")
     for slug, err in result.failures.items():
         print(f"aft dream: {slug}: failed: {err}")
     for slug in result.active:
@@ -869,9 +968,98 @@ def cmd_redigest(args) -> int:
 
     config = load()
     vault.require(config)
+    if args.unfiled:
+        if args.session_id is not None:
+            raise UsageError(
+                "--unfiled rebuilds the unfiled backfill alone; give it without a session id"
+            )
+        return _redigest_unfiled(config, args)
+    if args.dry_run:
+        raise UsageError("--dry-run lists the unfiled backfill; give --unfiled with it")
+    if args.session_id is None:
+        # The parser keeps the id optional so --unfiled can name the backfill alone (F49);
+        # without it a session id is what rebuilds, and a missing one is an argparse-style
+        # usage exit like a subcommand's missing argument.
+        print(
+            "usage: aft redigest <session-id> | aft redigest --unfiled [--dry-run]", file=sys.stderr
+        )
+        raise SystemExit(2)
     result = digest.redigest(config, args.session_id)
     print(f"rebuilt digest at {result.path}")
     return 0
+
+
+def _redigest_unfiled(config: Config, args) -> int:
+    """The unfiled backfill (DESIGN 7, F49).
+
+    Every still-archived session whose digests are filed as unfiled, cite nothing the archive
+    has lost, and whose directory answers a project is rebuilt, so it files under that
+    project; the dream turns the refiled digests into memory. A session whose directory still
+    answers no project has nowhere to move to: it is listed as staying unfiled and skipped,
+    and waits for its directory's answer to change. A session whose digests cite entries the
+    archive no longer holds is not rebuilt at all: a rebuild would replace the fuller memory
+    with a thinner one, so it is named with the reason and the person decides (DESIGN 7, F49).
+    ``--dry-run`` lists the sessions, the tokens a rebuild would charge, and the ones staying
+    unfiled, and writes nothing. A session the day's token budget has no room for stops the
+    run with the rest still waiting; one that fails for its own reason is named and the rest
+    go on.
+    """
+    from aft import digest, model
+
+    sessions = digest.unfiled_sessions(config)
+    staying_line = "stays unfiled: its directory answers no project"
+    uncovered = digest.uncovered_unfiled(config)
+    for session_id, reason in uncovered:
+        print(f"{session_id}\tcannot rebuild: {reason}")
+    if args.dry_run:
+        estimate = 0
+        movable = 0
+        staying = 0
+        for session_id in sessions:
+            if digest.stays_unfiled(config, session_id):
+                staying += 1
+                print(f"{session_id}\t{staying_line}")
+                continue
+            cost = digest.redigest_estimate(config, session_id)
+            if cost is None:
+                print(f"{session_id}\tno archived entries")
+                continue
+            estimate += cost
+            movable += 1
+            print(f"{session_id}\t~{cost} tokens")
+        print(
+            f"{movable} session(s) would rebuild, ~{estimate} tokens; {staying} staying"
+            f" unfiled; {len(uncovered)} cannot rebuild"
+        )
+        return 0
+    budget = config.settings.work.daily_token_budget
+    now = datetime.now(UTC)
+    rebuilt = 0
+    failed = 0
+    staying = 0
+    for session_id in sessions:
+        if digest.stays_unfiled(config, session_id):
+            staying += 1
+            print(f"{session_id}\t{staying_line}")
+            continue
+        if model.tokens_used_today(config, now) >= budget:
+            waiting = len(sessions) - rebuilt - failed - staying
+            print(
+                f"the day's token budget of {budget} tokens is spent;"
+                f" {waiting} session(s) wait for a day with room in it"
+            )
+            return 1
+        try:
+            wrote = digest.redigest(config, session_id, now=now, unfiled=True)
+        except (digest.DigestError, model.ModelError) as exc:
+            print(f"{session_id}: {exc}", file=sys.stderr)
+            failed += 1
+            continue
+        rebuilt += 1
+        print(f"rebuilt digest at {wrote.path}")
+    # A session that failed for its own reason is named above, and the rest went on; the
+    # run still says it did not finish (DESIGN 7, F49).
+    return 1 if failed else 0
 
 
 def cmd_search(args) -> int:
@@ -1238,12 +1426,18 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         return "", None
     registry = Registry.load(config.registry_path)
     try:
+        # The directory is resolved without the capture exclusions: they keep a session's
+        # words out of the queue, and the record is skipped below for that, but a session
+        # that starts in an excluded path still gets the memory the path's project holds.
         result = keys.resolve(event.cwd, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
     from aft import notes
 
-    waiting = notes.count(config, result.slug)
+    # An archived project's directory is given the global pages alone (DESIGN 7, F49), so
+    # its notes are counted on the shared pages, as a session of no project's are.
+    for_block = inject.block_project(result)
+    waiting = notes.count(config, for_block.slug if for_block else None)
     block = _start_output(event.agent, inject.build(config, result, waiting), waiting)
     if result.slug is None or is_excluded(event.cwd, config):
         return block, None
@@ -1255,7 +1449,15 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         # the hook's time is for.
         from aft import queue
 
-        queue.record_project(config, event.agent, event.session_id, project_id, slug)
+        queue.record_project(
+            config,
+            event.agent,
+            event.session_id,
+            project_id,
+            slug,
+            result.root,
+            registry=registry,
+        )
 
     return block, remember
 

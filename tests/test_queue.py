@@ -26,6 +26,7 @@ from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.filter import filter_entries
 from aft.readers import CLAUDE, PI, Entry
+from aft.registry import Registry
 
 # A hook and a digest worker are separate interpreters, so where a test needs a second
 # process it starts one, with its own imports and its own connection to the queue file.
@@ -834,6 +835,53 @@ def test_a_queue_file_without_the_digest_debt_is_refused(cfg: Config) -> None:
         queue.enqueue(cfg, event(session_id="old"))
 
 
+def test_a_hook_that_loses_the_column_race_goes_on(cfg: Config, tmp_path) -> None:
+    """Two hooks upgrading the same pre-F49 queue together both pass the column check and
+    both ALTER; the loser finds the winner's column and opens the queue rather than dying
+    on ``duplicate column name`` (DESIGN 8, F49)."""
+    import threading
+    import time
+
+    cfg.home.mkdir(parents=True, exist_ok=True)
+    setup = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    # A queue an earlier build wrote: this build's tables, with no path on session_projects.
+    setup.executescript(queue._SCHEMA)
+    setup.execute("ALTER TABLE session_projects DROP COLUMN path")
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.close()
+
+    winner = sqlite3.connect(cfg.home / queue.QUEUE_NAME, isolation_level=None)
+    winner.execute("PRAGMA busy_timeout = 5000")
+    winner.execute("BEGIN IMMEDIATE")
+    opened: list[bool] = []
+    failures: list[BaseException] = []
+
+    def hook() -> None:
+        try:
+            conn = queue._connect(cfg)
+            conn.close()
+            opened.append(True)
+        except BaseException as exc:  # the race is what this observes
+            failures.append(exc)
+
+    thread = threading.Thread(target=hook)
+    thread.start()
+    # The hook is in its ALTER by now, waiting on the write lock the winner holds, so its
+    # column check is already behind it: the interleaving two hooks starting together turn
+    # on. The winner lands the column and commits, and the hook's ALTER runs against it.
+    time.sleep(0.5)
+    winner.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
+    winner.execute("COMMIT")
+    winner.close()
+    thread.join()
+    assert failures == [], "the hook that lost the upgrade race died on it"
+    assert opened == [True]
+
+    queue.record_project(cfg, CLAUDE, "settled", None, "gizmo", tmp_path)
+    record = queue.recorded_project(cfg, CLAUDE, "settled")
+    assert (record.slug, record.path) == ("gizmo", str(tmp_path))
+
+
 def test_an_owed_digest_is_filed_once_and_settled_by_the_digest(cfg: Config) -> None:
     """The archive's debt becomes one row, not one row per run, and a digest settles it.
 
@@ -999,3 +1047,132 @@ def test_the_sweep_looks_back_only_over_its_window(
 def test_watching_begins_once(cfg: Config) -> None:
     assert queue.watching_since(cfg, NOW) == NOW
     assert queue.watching_since(cfg, NOW + timedelta(days=1)) == NOW
+
+
+# A session-start record settles its slug at write time (DESIGN 7, F49)
+
+
+def test_a_records_slug_is_settled_against_the_registry_and_the_other_paths_claims(
+    cfg: Config, tmp_path
+) -> None:
+    """Two directories of one name never share a digest directory: the second session's
+    record is written under the name its parent gives it, decided inside the same write
+    that records it, and a re-record of the same session keeps what was settled."""
+    registry = Registry(cfg.registry_path)
+    first = (tmp_path / "work" / "foo").resolve()
+    first.mkdir(parents=True)
+    second = (tmp_path / "yard" / "foo").resolve()
+    second.mkdir(parents=True)
+
+    assert queue.record_project(cfg, "claude", "s-1", None, "foo", first, registry=registry)
+    assert queue.record_project(cfg, "claude", "s-2", None, "foo", second, registry=registry)
+    one = queue.recorded_project(cfg, "claude", "s-1")
+    two = queue.recorded_project(cfg, "claude", "s-2")
+    assert (one.slug, one.path) == ("foo", str(first))
+    assert (two.slug, two.path) == ("yard-foo", str(second))
+
+    # The digest that settled the record rewrites it with what it filed under, and the
+    # write keeps it: this session's own path does not count as another claim.
+    assert queue.record_project(cfg, "claude", "s-2", None, "yard-foo", second, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-2").slug == "yard-foo"
+
+
+def test_a_pathless_record_of_the_name_a_directory_resolves_to_is_its_own(
+    cfg: Config, tmp_path
+) -> None:
+    """A record an earlier build wrote carries a slug and no directory. When a directory
+    resolves to the name it holds, that record is this directory's (DESIGN 7, F49): the
+    name stays with it instead of a prefixed one splitting one directory into two projects
+    after the upgrade, and the record is given the path it was missing."""
+    registry = Registry(cfg.registry_path)
+    plain = (tmp_path / "other" / "foo").resolve()
+    plain.mkdir(parents=True)
+    # The queue saw the old session running in that directory: its rows are what tell the
+    # record apart from a same-named directory's claim.
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=plain))
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "foo"
+    old = queue.recorded_project(cfg, "claude", "s-old")
+    assert (old.slug, old.path) == ("foo", str(plain))
+
+
+def test_a_pathless_record_is_adopted_only_by_the_directory_its_session_ran_in(
+    cfg: Config, tmp_path
+) -> None:
+    """A pathless record of a name is the claim of the directory its own session ran in,
+    never of the first same-named directory to record next (DESIGN 7, F49): a session in
+    /scratch/foo settles its own name and leaves the record alone, and the record's own
+    directory keeps the plain name when a session there records after it."""
+    registry = Registry(cfg.registry_path)
+    recorded = (tmp_path / "src" / "foo").resolve()
+    recorded.mkdir(parents=True)
+    other = (tmp_path / "scratch" / "foo").resolve()
+    other.mkdir(parents=True)
+    # The queue saw the old session running in /src/foo; its rows are what tell the
+    # record apart from a same-named directory's claim.
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=recorded))
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+
+    # A session in the other directory of the same name records next: the name is
+    # /src/foo's claim, so this one walks aside and the record is left pathless.
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", other, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "scratch-foo"
+    assert queue.recorded_project(cfg, "claude", "s-old").path is None
+
+    # A session in the record's own directory: the record is its claim, and is given the
+    # path it was missing.
+    assert queue.record_project(cfg, "claude", "s-newer", None, "foo", recorded, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-newer").slug == "foo"
+    old = queue.recorded_project(cfg, "claude", "s-old")
+    assert (old.slug, old.path) == ("foo", str(recorded))
+
+
+def test_a_path_is_never_written_into_a_record_of_a_registered_project(
+    cfg: Config, tmp_path
+) -> None:
+    """A record that names a project the registry holds is that project's own (DESIGN 7,
+    F49): adopting a pathless record gives a path to the records of unregistered
+    directories alone, and a registered record keeps the registry as the only place its
+    directory is written."""
+    registry = Registry(cfg.registry_path)
+    project = registry.add("widget")
+    registry.save()
+    # A record of a session that started in the registered project, written before paths
+    # were kept, still names only the slug; beside it, a pathless record of an
+    # unregistered directory of the same name.
+    assert queue.record_project(cfg, "claude", "s-reg", project.id, "foo")
+    recorded = (tmp_path / "src" / "foo").resolve()
+    recorded.mkdir(parents=True)
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=recorded))
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+
+    # A session in the unregistered record's own directory adopts that record alone.
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", recorded, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "foo"
+    assert queue.recorded_project(cfg, "claude", "s-old").path == str(recorded)
+    assert queue.recorded_project(cfg, "claude", "s-reg").path is None
+
+
+def test_a_pathless_record_of_another_name_still_holds_its_name(cfg: Config, tmp_path) -> None:
+    """A record an earlier build wrote with no path holds its name against a directory that
+    resolves to another name (DESIGN 7, F49): only the directory the name resolves to may
+    claim it, and every other walk prefixes."""
+    registry = Registry(cfg.registry_path)
+    plain = (tmp_path / "other" / "bar").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+    assert queue.record_project(cfg, "claude", "s-new", None, "bar", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "bar"
+    assert queue.recorded_project(cfg, "claude", "s-old").path is None
+
+
+def test_a_registered_projects_name_is_not_a_free_slug(cfg: Config, tmp_path) -> None:
+    """The registry answers for the names it holds: a session in a directory of a taken
+    name settles under the name its parent gives it (DESIGN 7, F49)."""
+    registry = Registry(cfg.registry_path)
+    registry.add("foo")
+    plain = (tmp_path / "field" / "foo").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-1", None, "foo", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-1").slug == "field-foo"

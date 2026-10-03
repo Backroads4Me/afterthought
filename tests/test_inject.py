@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -668,8 +669,11 @@ def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path)
 
 
 def test_a_directory_with_no_project_gets_the_same_two_layers(widget, tmp_path):
-    plain = tmp_path / "plain"
-    plain.mkdir()
+    """A directory that is no project carries only the global layers, the same block an
+    unregistered repository carries (DESIGN 7, F49). Its directory is under the system
+    temporary directory, which resolves to none."""
+    plain = (Path(tempfile.gettempdir()) / "aft-inject-plain").resolve()
+    plain.mkdir(exist_ok=True)
     resolution = resolve(widget, plain)
     assert resolution.kind == keys.NONE
     assert resolution.slug is None
@@ -942,10 +946,11 @@ def test_a_session_start_records_the_project_the_session_started_in(
 def test_a_session_start_outside_every_project_records_nothing(
     widget, tmp_path, capsys, monkeypatch
 ):
-    """A directory that resolves to no project has no project to record."""
+    """A directory that resolves to no project has no project to record. Its directory is
+    under the system temporary directory, which resolves to none (DESIGN 7, F49)."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
-    plain = tmp_path / "plain"
-    plain.mkdir()
+    plain = (Path(tempfile.gettempdir()) / "aft-start-plain").resolve()
+    plain.mkdir(exist_ok=True)
     run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, plain)
     assert recorded_projects(widget) == []
 
@@ -1435,3 +1440,88 @@ def test_the_notes_line_names_the_one_word_reply():
     line = inject.notes_line(1)
     assert 'replying "settle" goes through them now' in line
     assert "any other reply skips them" in line
+
+
+def test_an_archived_projects_directory_gets_the_global_pages_alone(widget, tmp_path):
+    """An archived project's directory is given the global pages alone (DESIGN 7, F49):
+    its block is the one a session of no project gets, until the person unarchives it.
+    The project keeps its files and its sessions are still captured."""
+    resolution = resolve(widget, tmp_path / "widget")
+    assert inject.build(widget, resolution) == EXPECTED
+
+    registry = Registry.load(widget.registry_path)
+    registry.set_archived("widget", "2026-10-06")
+    registry.save()
+    assert inject.build(widget, resolve(widget, tmp_path / "widget")) == inject.build(
+        widget, resolve(widget, make_repo(tmp_path / "nowhere"))
+    )
+
+    registry = Registry.load(widget.registry_path)
+    registry.set_archived("widget", "")
+    registry.save()
+    assert inject.build(widget, resolve(widget, tmp_path / "widget")) == EXPECTED
+
+
+def test_an_archived_projects_session_start_still_records_the_project(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """Archiving takes a project out of the block, not out of capture (DESIGN 7, F49): a
+    session starting in its directory is still recorded under it, so its words file there
+    when they are digested."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    registry = Registry.load(widget.registry_path)
+    registry.set_archived("widget", "2026-10-06")
+    registry.save()
+    project = Registry.load(widget.registry_path).by_slug("widget")
+
+    out = run_session_start(
+        monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, tmp_path / "widget"
+    )
+    assert out == inject.build(widget, resolve(widget, tmp_path / "widget")) + "\n"
+    assert recorded_projects(widget) == [("claude", project.id, "widget")]
+    assert hook_log(widget) == []
+
+
+def _record_start(monkeypatch, capsys, agent: str, event: str, session_id: str, cwd: Path):
+    """A session-start hook run with its own session id, so two runs keep two records."""
+    payload = json.loads((HOOK_FIXTURES / "claude-session-start.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(payload | {"cwd": str(cwd), "session_id": session_id}))
+    )
+    assert main(["hook", agent, event]) == 0
+    capsys.readouterr()
+
+
+def test_a_session_start_in_an_unregistered_directory_records_the_directory(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """Any directory can be a project (DESIGN 7, F49): a session in one the registry has
+    not met starts with its memory, and the record keeps the directory the project would
+    be registered at, under the name the session's digests file under."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    plain = tmp_path / "fieldwork"
+    plain.mkdir()
+
+    _record_start(monkeypatch, capsys, "claude", "SessionStart", "s-unreg-1", plain)
+    record = queue.recorded_project(widget, "claude", "s-unreg-1")
+    assert record is not None
+    assert (record.project_id, record.slug, record.path) == (None, "fieldwork", str(plain))
+    assert hook_log(widget) == []
+
+
+def test_two_directories_of_one_name_record_two_names(widget, tmp_path, capsys, monkeypatch):
+    """A slug another path holds is not taken a second time (DESIGN 7, F49): the second
+    directory's session-start record is written under the name its parent gives it,
+    decided inside the same write, so their digests never share a place."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    first = tmp_path / "work" / "foo"
+    first.mkdir(parents=True)
+    second = tmp_path / "yard" / "foo"
+    second.mkdir(parents=True)
+
+    _record_start(monkeypatch, capsys, "claude", "SessionStart", "s-foo-1", first)
+    _record_start(monkeypatch, capsys, "claude", "SessionStart", "s-foo-2", second)
+    first_record = queue.recorded_project(widget, "claude", "s-foo-1")
+    second_record = queue.recorded_project(widget, "claude", "s-foo-2")
+    assert (first_record.slug, str(first_record.path)) == ("foo", str(first))
+    assert (second_record.slug, str(second_record.path)) == ("yard-foo", str(second))

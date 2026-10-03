@@ -10,15 +10,19 @@ Verifies:
 7. Temp dirs only
 """
 
-from datetime import UTC, datetime
+import shutil
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
-from aft import evidence, index, pagewrite, search, vault
+from aft import evidence, index, pagewrite, queue, search, vault
 from aft.config import Config
 from aft.dream import apply, decide, maintain, report, rules, schedule
+from aft.events import SESSION_END, SessionEvent
 from aft.gitutil import git
-from aft.registry import Registry
+from aft.registry import Registry, path_key
+from conftest import make_repo, run_git
 from fakes.model_server import FakeEndpoint, Reply
 
 NOW = datetime(2026, 10, 4, 14, 30, tzinfo=UTC)
@@ -1041,3 +1045,101 @@ def test_schedule_run_drives_real_apply_with_fake_endpoint(initialized, home, fa
 
     status = git(["status", "--porcelain=v1"], cwd=cfg.vault).stdout.strip()
     assert status == ""
+
+
+# The idle and gone report (DESIGN 7, F49)
+
+
+def _named_project(cfg, tmp_path, slug: str, *, days: int, keep: bool = True) -> Path:
+    """A project registered at a standing directory with one recorded session ``days``
+    before NOW."""
+    repo = make_repo(tmp_path / slug)
+    registry = Registry.load(cfg.registry_path)
+    project = registry.add(slug, slug.capitalize())
+    registry.add_path(project, path_key("testhost", repo))
+    registry.save()
+    queue.record_project(cfg, "claude", f"s-{slug}", project.id, slug, repo)
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id=f"s-{slug}",
+            cwd=repo,
+            transcript_path=tmp_path / "t.jsonl",
+            time=NOW - timedelta(days=days),
+            detail=None,
+        ),
+    )
+    if not keep:
+        shutil.rmtree(repo)
+    return repo
+
+
+def test_idle_and_gone_names_a_project_with_no_recent_session(initialized, tmp_path):
+    """A project whose newest session is older than 90 days is named with the date of its
+    last one, and a project with a session this week says nothing (DESIGN 7, F49)."""
+    _named_project(initialized, tmp_path, "idle-gizmo", days=100)
+    _named_project(initialized, tmp_path, "widget", days=1)
+    assert report.idle_and_gone(initialized, now=NOW) == ["idle-gizmo: no session since 2026-06-26"]
+
+
+def test_a_project_the_queue_has_never_heard_of_is_not_named(initialized, tmp_path):
+    """The report dates what it names (DESIGN 7, F49): a project no session in the queue
+    has ever touched has nothing to date its line with, so a quiet dream says nothing."""
+    repo = make_repo(tmp_path / "widget")
+    registry = Registry.load(initialized.registry_path)
+    project = registry.add("widget", "Widget")
+    registry.add_path(project, path_key("testhost", repo))
+    registry.save()
+    assert report.idle_and_gone(initialized, now=NOW) == []
+
+
+def test_idle_and_gone_names_a_project_whose_paths_are_all_gone(initialized, tmp_path):
+    """A project every recorded directory of has left the machine is named by its slug;
+    with one directory standing it is not (DESIGN 7, F49)."""
+    _named_project(initialized, tmp_path, "widget", days=1, keep=False)
+    assert report.idle_and_gone(initialized, now=NOW) == ["widget: recorded paths are all gone"]
+
+
+def test_an_archived_project_is_not_named_by_the_idle_report(initialized, tmp_path):
+    """The registry's own archived flag keeps a project out of the report (DESIGN 7,
+    F49): archiving is the person's answer to it."""
+    repo = _named_project(initialized, tmp_path, "idle-gizmo", days=100)
+    registry = Registry.load(initialized.registry_path)
+    registry.set_archived("idle-gizmo", TODAY)
+    registry.save()
+    assert report.idle_and_gone(initialized, now=NOW) == []
+    shutil.rmtree(repo)
+
+
+def test_write_idle_gone_appends_to_the_days_report_and_commits(initialized, tmp_path):
+    """The section is written to the day's report page and committed once; a run that has
+    nothing to say writes nothing (DESIGN 7, F49)."""
+    _named_project(initialized, tmp_path, "idle-gizmo", days=100)
+    path = report.write_idle_gone(initialized, now=NOW)
+    assert path is not None and path.exists()
+    text = path.read_text()
+    assert text.endswith("\n\n## Idle and gone\n\n- idle-gizmo: no session since 2026-06-26\n")
+    assert run_git(["log", "--format=%s"], initialized.vault).splitlines()[0] == (
+        "aft: report idle and gone"
+    )
+
+    assert report.write_idle_gone(initialized, now=NOW) is None
+    assert run_git(["log", "--format=%s"], initialized.vault).splitlines()[0] == (
+        "aft: report idle and gone"
+    )
+
+
+def test_write_idle_gone_appends_below_a_runs_sections(initialized, tmp_path):
+    """A report the dream's runs already wrote keeps them: the section joins at the end
+    (DESIGN 7, F49)."""
+    _named_project(initialized, tmp_path, "idle-gizmo", days=100)
+    run_path = report.write_report(
+        initialized, _make_dummy_report(), now=NOW, checkpoint="cccc1111"
+    )
+    path = report.write_idle_gone(initialized, now=NOW)
+    assert path == run_path
+    text = path.read_text()
+    assert "# widget 14:30:00Z" in text and "## Idle and gone" in text
+    assert text.index("## Idle and gone") > text.index("# widget 14:30:00Z")

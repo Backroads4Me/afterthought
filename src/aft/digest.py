@@ -313,7 +313,9 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     registry = registrymod.Registry.load(config.registry_path)
     resolution: keys.Resolution | None
     try:
-        resolution = keys.resolve(job.cwd, registry, config.host)
+        resolution = keys.resolve(
+            job.cwd, registry, config.host, never=config.settings.capture.exclude_paths
+        )
     except GitError:
         # The directory belongs to whatever ran the session and goes away with it: a worktree
         # is made, worked in and removed. The project was decided while it still stood, at
@@ -328,9 +330,23 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
             queue.drop_job(config, job)
             return None
     if resolution is None or resolution.slug is None:
-        # No project: a directory outside every registered project and every repository, or
-        # one gone with no record. The session is still digested, filed as unfiled, so what
-        # it says about the user and their machines reaches global memory (DESIGN 7).
+        # The directory stands but answers no project: it is under the system temporary
+        # directory or the downloads, or capture excludes it. What the session-start hook
+        # recorded while the directory stood is still the session's project (DESIGN 7): a
+        # directory moved aside does not unfile the session that ran in it.
+        recorded = _recorded_resolution(config, registry, job)
+        if recorded is not None and recorded.slug is not None:
+            resolution = recorded
+    if resolution is not None and resolution.project is None and resolution.slug is not None:
+        # An unregistered directory files its digests under the name its session-start
+        # record settled while the directory stood, or - a session with no record - a name
+        # no other path holds (DESIGN 7, F49).
+        resolution = _settle(config, registry, resolution, job.session_id, job.agent)
+    if resolution is None or resolution.slug is None:
+        # No project: a directory under the temporary directory or the downloads, one capture
+        # excludes, or one gone with no record. The session is still digested, filed as
+        # unfiled, so what it says about the user and their machines reaches global memory
+        # (DESIGN 7).
         resolution = keys.Resolution(kind=keys.NONE, cwd=job.cwd)
     if job.transcript_path is None:
         raise DigestError(f"job {job.id} names no transcript for session {job.session_id}")
@@ -475,20 +491,67 @@ def _recorded_resolution(
 ) -> keys.Resolution | None:
     """The project a session started in, as the queue recorded it, or None.
 
-    The record holds the project's id when the registry knew it at session start, and its
-    slug either way. A project registered since then is found by that slug; one still
-    unregistered is digested under its own name, as its directory would have been.
+    The record holds the project's id when the registry knew it at session start, its slug
+    either way, and the directory the session ran in (DESIGN 7). A project registered since
+    then is found by that id, or by the recorded path when the id names nothing; a record an
+    earlier build wrote kept no directory, and is matched by its slug, which is all it named.
+    What is still unregistered keeps the name its record settled and the directory it names,
+    which is what the digest files under and the dream registers from (DESIGN 7, F49).
     """
     recorded = queue.recorded_project(config, job.agent, job.session_id)
     if recorded is None:
         return None
-    project_id, slug = recorded
-    project = registry.by_id(project_id) if project_id else None
-    if project is None:
-        project = registry.by_slug(slug)
+    root = Path(recorded.path) if recorded.path is not None else None
+    project = registry.by_id(recorded.project_id) if recorded.project_id else None
+    if project is None and root is not None:
+        project = registry.by_path_key(registrymod.path_key(config.host, root))
+    if project is None and root is None:
+        project = registry.by_slug(recorded.slug)
     if project is not None:
-        return keys.Resolution(kind="recorded", cwd=job.cwd, project=project, slug=project.slug)
-    return keys.Resolution(kind="recorded", cwd=job.cwd, slug=slug)
+        return keys.Resolution(
+            kind="recorded", cwd=job.cwd, project=project, slug=project.slug, root=root
+        )
+    return keys.Resolution(kind="recorded", cwd=job.cwd, slug=recorded.slug, root=root)
+
+
+def _settle(
+    config: Config,
+    registry: registrymod.Registry,
+    resolution: keys.Resolution,
+    session_id: str,
+    agent: str,
+    *,
+    write: bool = True,
+) -> keys.Resolution:
+    """An unregistered resolution filed under the name its session-start record settled.
+
+    The record is the answer the session-start hook decided while the directory stood
+    (DESIGN 7): it holds the slug the session's digests file under, settled against the
+    registry and every other path's claim inside the write that recorded it (F49). A session
+    whose record never got written - a hook that failed, or a session captured before records
+    were kept - claims a name here instead, by the same rule, and the record is written so
+    every later digest of the session files in the same place. A record an earlier build
+    wrote names no directory, so nothing can be prefixed and its slug is what there is to
+    file under. A step that writes nothing - the backfill's ``--dry-run`` check - asks with
+    ``write=False``, which decides the settlement the same way but claims nothing
+    (queue.settle_slug, DESIGN 7, F49).
+    """
+    root = resolution.root
+    if root is None or resolution.slug is None:
+        return resolution
+    recorded = queue.recorded_project(config, agent, session_id)
+    if recorded is None:
+        if write:
+            queue.record_project(
+                config, agent, session_id, None, resolution.slug, root, registry=registry
+            )
+            recorded = queue.recorded_project(config, agent, session_id)
+        else:
+            settled = queue.settle_slug(config, registry, root, resolution.slug)
+            return replace(resolution, slug=settled)
+    if recorded is not None and recorded.slug:
+        return replace(resolution, slug=recorded.slug)
+    return resolution
 
 
 def archive_worker_job(config: Config, job: queue.Job) -> bool:
@@ -537,7 +600,9 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     if kept:
         registry = registrymod.Registry.load(config.registry_path)
         try:
-            resolution = keys.resolve(job.cwd, registry, config.host)
+            resolution = keys.resolve(
+                job.cwd, registry, config.host, never=config.settings.capture.exclude_paths
+            )
         except GitError:
             # Archiving files no page, so the project is a label rather than a requirement:
             # a directory that has gone away takes the project its session start recorded,
@@ -939,6 +1004,11 @@ def _frontmatter(
         aft["role"] = rules.WORKER
     if resolution.project is not None:
         aft["project"] = resolution.project.id
+    elif resolution.root is not None:
+        # A digest of an unregistered directory carries the path its sessions ran in, so
+        # the index files its facts into that directory's own scope and not into whatever
+        # directory once claimed the name the digest is filed under (DESIGN 7, F49).
+        aft["path"] = str(resolution.root)
     aft["handoff"] = {
         "in_flight": handoff["in_flight"],
         "failed": list(handoff["failed"]),
@@ -1213,10 +1283,131 @@ def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
     ]
 
 
+def _recorded_target(
+    config: Config,
+    registry: registrymod.Registry,
+    session_id: str,
+    agent: str | None,
+    cwd: Path | None,
+    *,
+    unfiled: bool,
+    write: bool = True,
+) -> keys.Resolution | None:
+    """What a rebuild resolves this session's directory to (DESIGN 7, F49).
+
+    The backfill resolves the directory the session-start record keeps - its sessions' own
+    directories are gone more often than not - and falls back to the queue's record of where
+    the session last ran. An ordinary rebuild resolves the queue's record alone, as it did
+    before the record existed. A project registered at the directory is answered even when
+    the directory itself is gone, by the path key it was registered under; a directory that
+    resolves to none is no target at all. ``write=False`` decides an unrecorded directory's
+    settlement without claiming it, for a step that writes nothing (DESIGN 7, F49).
+    """
+    directory: Path | None = None
+    if unfiled:
+        recorded = queue.recorded_project(config, agent or "claude", session_id)
+        if recorded is not None and recorded.path is not None:
+            directory = Path(recorded.path)
+    if directory is None and cwd is not None and Path(cwd).is_dir():
+        directory = Path(cwd)
+    if directory is None:
+        return None
+    if not directory.is_dir():
+        project = registry.by_path_key(registrymod.path_key(config.host, directory))
+        if project is None:
+            return None
+        return keys.Resolution(
+            kind="recorded", cwd=directory, project=project, slug=project.slug, root=directory
+        )
+    try:
+        resolution = keys.resolve(
+            directory, registry, config.host, never=config.settings.capture.exclude_paths
+        )
+    except GitError:
+        return None
+    if resolution.project is None and resolution.slug is not None:
+        return _settle(config, registry, resolution, session_id, agent or "claude", write=write)
+    return resolution
+
+
+def _rebuild_slug(
+    config: Config,
+    session_id: str,
+    cwd: Path | None,
+    agent: str | None,
+    *,
+    unfiled: bool,
+    write: bool = True,
+) -> tuple[str, str | None, registrymod.Project | None]:
+    """The agent and the slug a rebuild of this session files under, with its project.
+
+    The archive's record of the session names its project when it has one; a digest of the
+    session filed under another slug names it next; otherwise the directory - the
+    session-start record's for the backfill, the queue's for an ordinary rebuild - is
+    resolved, and the slug it answers is the slug the page files under. A ``None`` slug is
+    a session of no project: its directory answers none (DESIGN 7, F49). ``write=False``
+    decides the target without claiming anything, for a step that writes nothing
+    (DESIGN 7, F49).
+    """
+    registry = registrymod.Registry.load(config.registry_path)
+    info = evidence.session_info(config, session_id)
+    if agent is None:
+        agent = info[0] if info else "claude"
+    project_id = info[1] if info else None
+    project = registry.by_id(project_id) if project_id else None
+    slug = project.slug if project else None
+
+    if slug is None:
+        digests_root = config.vault / "digests"
+        if digests_root.exists():
+            for f in digests_root.rglob("*.md"):
+                if _is_session_digest(f, session_id, config):
+                    rel_parts = f.relative_to(config.vault).parts
+                    if len(rel_parts) >= 2:
+                        if unfiled and rel_parts[1] == UNFILED:
+                            # The backfill's whole point is a digest that sits under
+                            # _unfiled moving out of it, so that directory names nothing
+                            # here: the session's directory decides instead (DESIGN 7, F49).
+                            continue
+                        slug = rel_parts[1]
+                        project = registry.by_slug(slug)
+                        break
+
+    if slug is None:
+        resolution = _recorded_target(
+            config, registry, session_id, agent, cwd, unfiled=unfiled, write=write
+        )
+        if resolution is not None and resolution.project is not None:
+            project, slug = resolution.project, resolution.project.slug
+        elif resolution is not None and resolution.slug is not None:
+            slug = resolution.slug
+    return agent, slug, project
+
+
+def stays_unfiled(config: Config, session_id: str) -> bool:
+    """Whether the backfill of this session has nowhere to move its digest to (DESIGN 7, F49).
+
+    The backfill files a session under the project its directory answers for. A session
+    whose directory is gone with nothing naming it, or stands under the system temporary
+    directory, the downloads, or a capture exclusion, answers no project again, so a
+    rebuild would write its digest onto the same ``_unfiled`` path and list it again on
+    every run. Such a session stays unfiled until its directory's answer changes. The check
+    claims nothing: a dry run of the backfill writes nothing at all, so the answer is
+    decided without settling a name into the queue (DESIGN 7, F49).
+    """
+    _require_session_id(session_id)
+    _, slug, _ = _rebuild_slug(
+        config, session_id, queue.session_cwd(config, session_id), None, unfiled=True, write=False
+    )
+    return slug is None
+
+
 def redigest(
     config: Config,
     session_id: str,
     now: datetime | None = None,
+    *,
+    unfiled: bool = False,
 ) -> Digest:
     """Rebuild a digest from archived evidence alone (DESIGN 8, BUILD-PLAN M2.8).
 
@@ -1230,6 +1421,12 @@ def redigest(
     against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
     outright - exclusion says its words are not the vault's, and a rebuild of an archive
     written before that decision was added does not change the answer.
+
+    With ``unfiled`` the rebuild is the backfill of DESIGN 7 (F49): the session's digests sit
+    under ``digests/_unfiled`` and it is rebuilt to file under the project its recorded
+    directory now resolves to. The directory it already sits in names nothing on purpose,
+    and the session-start record is what says where the session ran, so the backfill resolves
+    that record's directory first and the queue's own record of it second.
 
     Two costs the rebuild owns. Its calls are charged to the day's token budget as any
     digest's are, and a rebuild asked for after that budget is spent refuses rather than
@@ -1262,39 +1459,10 @@ def redigest(
     if not entries:
         raise DigestError(f"no archived evidence for session {session_id!r}")
 
-    info = evidence.session_info(config, session_id)
-    agent = info[0] if info else None
-    project_id = info[1] if info else None
-
-    registry = registrymod.Registry.load(config.registry_path)
-    project = registry.by_id(project_id) if project_id else None
-    slug = project.slug if project else None
-
-    if slug is None:
-        digests_root = config.vault / "digests"
-        if digests_root.exists():
-            for f in digests_root.rglob("*.md"):
-                if _is_session_digest(f, session_id, config):
-                    rel_parts = f.relative_to(config.vault).parts
-                    if len(rel_parts) >= 2:
-                        slug = rel_parts[1]
-                        project = registry.by_slug(slug)
-                        break
-
-    if slug is None and cwd is not None and Path(cwd).is_dir():
-        # An unregistered repository has a name of its own and no project id to record it.
-        try:
-            slug = keys.resolve(Path(cwd), registry, config.host).slug
-        except GitError:
-            slug = None
-
+    agent, slug, project = _rebuild_slug(config, session_id, cwd, None, unfiled=unfiled)
     if slug is None:
         # A session of no project is digested as unfiled (DESIGN 7).
         slug = UNFILED
-
-    if agent is None:
-        agent = "claude"
-
     when = entries[-1].time.astimezone(UTC).date()
     rel = f"digests/{slug}/{when:%Y}/{when:%m}/{when:%Y-%m-%d}-{agent}-{session_id}.md"
 
@@ -1307,7 +1475,7 @@ def redigest(
             project=project,
             slug=slug,
             root=None,
-            alias_added=False,
+            alias_added=None,
         )
     )
 
@@ -1378,3 +1546,149 @@ def redigest(
 
     index.update(config)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=entries[-1].id)
+
+
+def _unfiled_digests(config: Config) -> dict[str, list[Path]]:
+    """The digest files filed as unfiled, by the session the rebuild names.
+
+    The parts of one session - the ``-2``, ``-3`` files a second chunk of a day takes - are
+    listed under the session the rebuild names, so a coverage check sees them all. A longer
+    id the archive holds a session of its own stays its own session (DESIGN 7).
+    """
+    root = config.vault / "digests" / UNFILED
+    named: dict[str, list[Path]] = {}
+    if root.is_dir():
+        for path in root.rglob("*.md"):
+            match = _DIGEST_NAME.match(path.stem)
+            if match is None:
+                continue
+            session = match.group("session")
+            prefix, sep, suffix = session.rpartition("-")
+            if sep and suffix.isdigit() and evidence.session_info(config, session) is None:
+                # A later part of one session, unless the archive holds the longer id itself.
+                session = prefix
+            named.setdefault(session, []).append(path)
+    return named
+
+
+def _citations(config: Config, session_id: str, digests: Sequence[Path]) -> dict[Path, set[str]]:
+    """The entries of ``session_id`` each digest part cites in its sources, by the part
+    (DESIGN 8).
+
+    A digest page's sources name the entries its facts were verified against, one
+    ``aft://session/<agent>/<session>#<entry>`` each. A part that kept no fact cites no
+    entry, so no surviving entry can be named for the span it covered. Citations of some
+    other session's entries are not this session's coverage.
+    """
+    cited: dict[Path, set[str]] = {}
+    for path in digests:
+        cited.setdefault(path, set())
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        frontmatter, _, _, _ = page.split_frontmatter(text)
+        if not isinstance(frontmatter, dict):
+            continue
+        sources = frontmatter.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            resource = str(source.get("resource", ""))
+            entry = resource.rpartition("#")[2] if "#" in resource else ""
+            if entry and _is_session_resource(resource, session_id):
+                cited[path].add(entry)
+    return cited
+
+
+def _uncovered_reason(
+    config: Config, session_id: str, digests: Sequence[Path], archived: set[str]
+) -> str | None:
+    """Why the session's digests are not covered by the archive, or None when they are
+    (DESIGN 7, F49).
+
+    Coverage is judged part by part: every part of the session's digests must stand on
+    entries the archive still holds. A part that cites no entry of its own session names no
+    surviving entry of the span it covered, and a part that cites entries the archive no
+    longer holds names gone ones - so the session is not rebuilt on the strength of its
+    other parts. Entries leave the archive between the digest being written and the rebuild
+    because retention purges them, the evidence archive's oldest first
+    (`evidence.purge`, BUILD-PLAN M2.7).
+    """
+    by_part = _citations(config, session_id, digests)
+    silent = sorted(path.name for path, cited in by_part.items() if not cited)
+    if silent:
+        noun = "part" if len(silent) == 1 else "parts"
+        verb = "cites" if len(silent) == 1 else "cite"
+        pronoun = "its" if len(silent) == 1 else "their"
+        span = silent[0] if len(silent) == 1 else f"{silent[0]} through {silent[-1]}"
+        return (
+            f"its digests hold {len(silent)} {noun} that {verb} no entry of {pronoun} own"
+            f" session ({span})"
+        )
+    missing = sorted(set().union(*by_part.values()) - archived)
+    if missing:
+        noun = "entry" if len(missing) == 1 else "entries"
+        span = missing[0] if len(missing) == 1 else f"{missing[0]} through {missing[-1]}"
+        return f"its digests cite {len(missing)} {noun} the archive no longer holds ({span})"
+    return None
+
+
+def uncovered_unfiled(config: Config) -> list[tuple[str, str]]:
+    """The unfiled sessions the backfill must skip because the archive no longer covers them,
+    each with the reason (DESIGN 7, F49).
+
+    A rebuild replaces the session's digests with one built from the entries the evidence
+    archive still holds. When the archive's coverage of a session has moved since its
+    digests were written - retention purging entries (`evidence.purge`), or a session
+    `aft forget` emptied - the rebuild would replace the fuller memory with a thinner one,
+    so the session is named instead of rebuilt, and the person decides between
+    re-archiving and letting it stand.
+    """
+    uncovered: list[tuple[str, str]] = []
+    for session, digests in sorted(_unfiled_digests(config).items()):
+        if evidence.session_info(config, session) is None:
+            continue  # not archived at all: the backfill never sees it
+        archived = {entry.id for entry in evidence.entries(config, session)}
+        reason = _uncovered_reason(config, session, digests, archived)
+        if reason is not None:
+            uncovered.append((session, reason))
+    return uncovered
+
+
+def unfiled_sessions(config: Config) -> list[str]:
+    """The session ids of every digest filed as unfiled the backfill can rebuild (DESIGN 7,
+    F49, ``aft redigest --unfiled``).
+
+    A session whose digests sit under ``digests/_unfiled`` is rebuilt when the archive
+    still covers its digests part by part: every part stands on entries the archive holds,
+    and a session `aft forget` emptied has no archive left, so it is not here. One whose
+    coverage moved - retention purged entries, or a part cites none of its own session -
+    is named by `uncovered_unfiled` instead, so a rebuild never replaces the fuller memory
+    with a thinner one. The multipart parts of one session name it once.
+    """
+    backfillable: list[str] = []
+    for session, digests in sorted(_unfiled_digests(config).items()):
+        if evidence.session_info(config, session) is None:
+            continue
+        archived = {entry.id for entry in evidence.entries(config, session)}
+        if _uncovered_reason(config, session, digests, archived) is None:
+            backfillable.append(session)
+    return backfillable
+
+
+def redigest_estimate(config: Config, session_id: str) -> int | None:
+    """The tokens one rebuild of this session would charge, or None with no archived entries.
+
+    The estimate counts what the calls would cost, the way the cap is counted (DESIGN 13):
+    each part's prompt and chunk at three characters to the token, plus the answer's own
+    room. It is an estimate, not a promise: an answer may be shorter than its room, and a
+    refused answer spends a retry.
+    """
+    entries = _redacted_entries(config, evidence.entries(config, session_id))
+    if not entries:
+        return None
+    prompt = tokens(prompt_text())
+    return sum(prompt + tokens(render(part)) + MAX_OUTPUT_TOKENS for part in parts(entries))

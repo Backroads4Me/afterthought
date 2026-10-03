@@ -87,6 +87,33 @@ def test_no_digests_no_commit(initialized):
     assert "preferences.md" in run_git(["status", "--porcelain"], initialized.vault)
 
 
+def test_a_run_with_nothing_waiting_writes_the_idle_and_gone_report(widget, initialized, tmp_path):
+    """A dream run with nothing waiting still names the idle and the gone: a home whose
+    every project is idle gets no digest to run, and that is the state the section exists
+    to surface (DESIGN 7, F49). It is written once a day, as a run with work writes it."""
+    queue.enqueue(
+        initialized,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s-widget",
+            cwd=widget,
+            transcript_path=None,
+            time=NOW - timedelta(days=100),
+            detail=None,
+        ),
+    )
+    run = schedule.run(initialized, Recorder(), now=NOW)
+    assert run.waiting == {} and run.ran == []
+    report_path = initialized.vault / "reports" / "2026" / "09" / "2026-09-29.md"
+    body = report_path.read_text()
+    assert "## Idle and gone" in body
+    assert "widget: no session since 2026-06-21" in body
+    # The second quiet run adds nothing: the day's section stands.
+    schedule.run(initialized, Recorder(), now=NOW)
+    assert report_path.read_text() == body
+
+
 def test_consumed_digests_are_not_waiting(initialized):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z", consumed="abc123")
     before = head(initialized)
@@ -104,6 +131,95 @@ def test_waiting_digests_in_session_order(initialized):
     result = schedule.run(initialized, process, now=NOW)
     assert result.ran == ["gadget", "widget"]
     assert process.calls == [("gadget", [other]), ("widget", [first, part, later])]
+
+
+def test_one_slugs_digests_run_once_per_directory_their_records_name(widget, initialized, tmp_path):
+    """Two directories that once claimed one name hold one digest directory, but never one
+    project: the dream decides each digest's project from its own record, so one slug's
+    waiting digests run as two runs (DESIGN 7, F49)."""
+    second = (tmp_path / "yard" / "widget").resolve()
+    second.mkdir(parents=True)
+    # A record that names a project's id (a session that started in a registered project)
+    # and one that names only a path the registry has never met.
+    assert queue.record_project(initialized, "claude", "s-w1", "p_1", "widget")
+    assert queue.record_project(initialized, "claude", "s-w2", None, "widget", second)
+    digest(initialized, "widget", "2026-09-29-claude-s-w1", "2026-09-29T08:00:00Z")
+    digest(initialized, "widget", "2026-09-29-claude-s-w2", "2026-09-29T07:00:00Z")
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+
+    assert [slug for slug, _ in process.calls] == ["widget", "widget"]
+    assert all(len(digests) == 1 for _, digests in process.calls)
+    assert result.ran == ["widget", "widget"]
+    assert result.taken == {"widget": 2}
+
+
+def _split_slug_setup(initialized, tmp_path) -> None:
+    """One project's slug holding digests of two directories' sessions, so its digests run
+    as two groups (DESIGN 7, F49)."""
+    second = (tmp_path / "yard" / "widget").resolve()
+    second.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-w1", "p_1", "widget")
+    assert queue.record_project(initialized, "claude", "s-w2", None, "widget", second)
+    digest(initialized, "widget", "2026-09-29-claude-s-w1", "2026-09-29T08:00:00Z")
+    digest(initialized, "widget", "2026-09-29-claude-s-w2", "2026-09-29T07:00:00Z")
+
+
+def test_one_slugs_group_reports_come_out_together(widget, initialized, tmp_path):
+    """One slug that runs as several groups keeps every group's work (DESIGN 7, F49): the
+    run hands back one report per slug with all the groups' items named, and the commit the
+    first group's run made is still the run's."""
+    _split_slug_setup(initialized, tmp_path)
+
+    def process(cfg, slug, digests):
+        return apply.ProjectRunReport(
+            project=slug,
+            commit="sha123",
+            added=[
+                apply.AddedFact(
+                    statement=f"fact from {digests[0].stem}",
+                    kind="state",
+                    source="observed",
+                    date="2026-09-29",
+                    refs=(),
+                    path="projects/widget/overview.md",
+                )
+            ],
+        )
+
+    result = schedule.run(initialized, process, now=NOW)
+
+    report = result.reports["widget"]
+    assert [fact.statement for fact in report.added] == [
+        "fact from 2026-09-29-claude-s-w2",
+        "fact from 2026-09-29-claude-s-w1",
+    ]
+    assert report.commit == "sha123"
+    assert result.taken == {"widget": 2}
+
+
+def test_a_failing_group_consumes_nothing_and_its_error_reaches_the_report(
+    widget, initialized, tmp_path
+):
+    """A slug whose groups split across directories counts only the digests the runs
+    actually consumed (DESIGN 7, F49): a group whose run failed consumed none of its
+    digests, so they wait again, and its error stands beside the group that went through."""
+    _split_slug_setup(initialized, tmp_path)
+
+    def process(cfg, slug, digests):
+        if "s-w1" in digests[0].name:
+            return apply.ProjectRunReport(project=slug, commit="sha123")
+        raise apply.ApplyError("the model endpoint said no")
+
+    result = schedule.run(initialized, process, now=NOW)
+
+    assert result.taken == {"widget": 1}
+    assert result.ran == ["widget"]
+    assert result.failures["widget"] == "the model endpoint said no"
+    report = result.reports["widget"]
+    assert report.commit == "sha123"
+    assert report.error == "the model endpoint said no"
 
 
 def test_recent_hand_edit_skips_the_project(widget, initialized):
@@ -515,3 +631,101 @@ def test_every_project_failing_still_reports_the_checkpoint_commits(initialized)
     assert "- Error: the model endpoint said no" in report_text
     assert f"Separate checkpoint commit: git revert {result.checkpoint}" in report_text
     assert f"Separate hand edits tag commit: git revert {result.tag_commit}" in report_text
+
+
+def test_a_recorded_directory_is_dated_under_the_name_its_record_settled(
+    widget, initialized, tmp_path
+):
+    """A session's events are dated under the name its session-start record settled, not a
+    fresh answer for its directory (DESIGN 7, F49): the digest of that session files under
+    the record's name, so the dream's quiet check sees the sessions where the digests went,
+    and a same-named directory that claimed the plain name first does not hide one."""
+    from aft.registry import Registry
+
+    claimed = tmp_path / "fieldwork" / "widgets"
+    claimed.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s0",
+        None,
+        "widgets",
+        claimed,
+        registry=Registry.load(initialized.registry_path),
+    )
+    # A second directory of the same name records after: its plain name is taken, so the
+    # record settles its parent's name in front of it.
+    loose = tmp_path / "loose" / "widgets"
+    loose.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s1",
+        None,
+        "widgets",
+        loose,
+        registry=Registry.load(initialized.registry_path),
+    )
+    record = queue.recorded_project(initialized, "claude", "s1")
+    assert record.slug == "loose-widgets"
+
+    digest(initialized, "loose-widgets", "c", "2026-09-29T08:00:00Z")
+    moment = NOW - timedelta(minutes=3)
+    queue.enqueue(initialized, event(loose, moment))
+    assert schedule.last_activity(initialized).get("loose-widgets") == moment
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+    assert result.active == ["loose-widgets"]
+    assert process.calls == [], "a session recorded under one name hid behind a fresh one"
+
+
+def test_a_session_below_the_root_dates_the_name_its_record_settled(widget, initialized, tmp_path):
+    """A session that runs below the root its digests file under, in a linked worktree, or
+    through a symlink is dated under the name its directory's session-start record settled
+    (DESIGN 7, F49): the record's name is looked up by the resolved root, so a session one
+    level deep holds back the right group instead of hiding behind a fresh answer."""
+    from aft.registry import Registry
+
+    claimer = tmp_path / "fieldwork" / "widgets"
+    claimer.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s0",
+        None,
+        "widgets",
+        claimer,
+        registry=Registry.load(initialized.registry_path),
+    )
+    # The directory the digest files under is a repository; another same-named directory
+    # claimed the plain name first, so the record settled its parent's name.
+    repo = make_repo(tmp_path / "elsewhere" / "widgets")
+    queue.record_project(
+        initialized,
+        "claude",
+        "s1",
+        None,
+        "widgets",
+        repo,
+        registry=Registry.load(initialized.registry_path),
+    )
+    assert queue.recorded_project(initialized, "claude", "s1").slug == "elsewhere-widgets"
+    run_git(["worktree", "add", "--detach", str(tmp_path / "tree"), "HEAD"], cwd=repo)
+    linked = tmp_path / "alias"
+    linked.symlink_to(repo, target_is_directory=True)
+    (repo / "src").mkdir()
+
+    digest(initialized, "elsewhere-widgets", "c", "2026-09-29T08:00:00Z")
+    moment = NOW - timedelta(minutes=3)
+    queue.enqueue(initialized, event(repo / "src", moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+    queue.enqueue(initialized, event(tmp_path / "tree", moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+    queue.enqueue(initialized, event(linked, moment))
+    assert schedule.last_activity(initialized).get("elsewhere-widgets") == moment
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+    assert result.active == ["elsewhere-widgets"]
+    assert process.calls == [], "a session below the root hid behind a fresh one"

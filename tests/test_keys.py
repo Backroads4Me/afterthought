@@ -6,7 +6,7 @@ import pytest
 
 from aft import keys
 from aft.gitutil import normalize_remote
-from aft.registry import Registry, path_key
+from aft.registry import Registry, RegistryError, path_key, slugify, unique_slug
 from conftest import make_repo, run_git
 
 HOST = "testhost"
@@ -118,7 +118,7 @@ def test_prefix_matches_whole_path_components(tmp_path):
     (tmp_path / "foo").mkdir()
     (tmp_path / "foobar").mkdir()
     registry = registry_with(tmp_path, foo={"paths": [tmp_path / "foo"]})
-    assert keys.resolve(tmp_path / "foobar", registry, HOST).kind == keys.NONE
+    assert keys.resolve(tmp_path / "foobar", registry, HOST).kind == keys.UNREGISTERED
     assert keys.resolve(tmp_path / "foo", registry, HOST).kind == keys.PATH
 
 
@@ -141,3 +141,213 @@ def test_normalize_local_remote(tmp_path):
     target.mkdir()
     assert normalize_remote(str(target)) == f"file:{tmp_path.resolve() / 'bare'}"
     assert normalize_remote(f"file://{target}") == f"file:{tmp_path.resolve() / 'bare'}"
+
+
+def test_a_plain_directory_is_a_project_the_registry_has_not_met(tmp_path):
+    """Any directory can be a project (DESIGN 7, F49): a directory with no git boundary of
+    its own resolves as unregistered, named after itself, carrying the directory so the
+    session-start record and the digest can file it."""
+    plain = tmp_path / "fieldwork"
+    plain.mkdir()
+    result = keys.resolve(plain, registry_with(tmp_path), HOST)
+    assert (result.kind, result.slug, result.root) == (
+        keys.UNREGISTERED,
+        "fieldwork",
+        plain.resolve(),
+    )
+
+
+def test_a_plain_directory_inside_a_registered_project_belongs_to_it(tmp_path):
+    outer = make_repo(tmp_path / "outer")
+    (outer / "notes").mkdir()
+    registry = registry_with(tmp_path, outer={"paths": [outer]})
+    assert keys.resolve(outer / "notes", registry, HOST).slug == "outer"
+
+
+def test_a_directory_of_a_taken_name_files_under_its_parent(tmp_path):
+    """A slug another project holds is not taken a second time (DESIGN 7, F49): the second
+    ``foo`` resolves to its own project under the name its parent gives it."""
+    first = tmp_path / "work" / "foo"
+    first.mkdir(parents=True)
+    second = tmp_path / "other" / "foo"
+    second.mkdir(parents=True)
+    registry = registry_with(tmp_path, foo={"paths": [first]})
+    result = keys.resolve(second, registry, HOST)
+    assert (result.kind, result.slug) == (keys.UNREGISTERED, "other-foo")
+    assert result.root == second.resolve()
+
+
+def test_the_home_directory_itself_is_a_project(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    result = keys.resolve(home, registry_with(tmp_path), HOST)
+    assert (result.kind, result.slug, result.root) == (
+        keys.UNREGISTERED,
+        "home",
+        home.resolve(),
+    )
+
+
+def test_a_directory_under_the_temporary_directory_is_no_project(tmp_path, monkeypatch):
+    temp = tmp_path / "system-temp"
+    temp.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(temp))
+    repo = make_repo(temp / "scratch")
+    registry = registry_with(tmp_path)
+    assert keys.resolve(repo, registry, HOST).kind == keys.NONE
+    (temp / "plain").mkdir()
+    assert keys.resolve(temp / "plain", registry, HOST).kind == keys.NONE
+
+
+def test_the_downloads_directory_is_no_project(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    downloads = home / "Downloads"
+    (downloads / "unpacked").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    registry = registry_with(tmp_path)
+    assert keys.resolve(downloads, registry, HOST).kind == keys.NONE
+    assert keys.resolve(downloads / "unpacked", registry, HOST).kind == keys.NONE
+
+
+def test_a_path_capture_excludes_is_no_project(tmp_path):
+    excluded = tmp_path / "classified"
+    excluded.mkdir()
+    registry = registry_with(tmp_path)
+    assert keys.resolve(excluded, registry, HOST, never=[str(excluded)]).kind == keys.NONE
+
+
+def test_a_subdirectory_of_a_registered_home_is_a_project_of_its_own(tmp_path, monkeypatch):
+    """home is the home directory itself and matches only that directory (DESIGN 7, F49): a
+    plain directory below it resolves as a project of its own, not as home."""
+    home = tmp_path / "home"
+    notes = home / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    registry = registry_with(tmp_path, home={"paths": [home]})
+    result = keys.resolve(notes, registry, HOST)
+    assert (result.kind, result.slug, result.root) == (
+        keys.UNREGISTERED,
+        "notes",
+        notes.resolve(),
+    )
+
+
+def test_downloads_and_an_excluded_path_stay_none_under_a_registered_home(tmp_path, monkeypatch):
+    """The never-a-project refusals are answered before the registry is looked at (DESIGN 7,
+    F49): a registered path above them, home included, does not claim them."""
+    home = tmp_path / "home"
+    downloads = home / "Downloads" / "x"
+    downloads.mkdir(parents=True)
+    private = home / "private"
+    private.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    registry = registry_with(tmp_path, home={"paths": [home]})
+    assert keys.resolve(downloads, registry, HOST).kind == keys.NONE
+    assert keys.resolve(private, registry, HOST, never=[str(private)]).kind == keys.NONE
+
+
+def test_a_registered_path_under_the_temporary_directory_claims_nothing(tmp_path, monkeypatch):
+    """The refusal comes before any lookup (DESIGN 7, F49): even a project registered under
+    the system temporary directory answers none from its own subdirectories, so a scratch
+    tree never grows a project out of what stands above it."""
+    temp = tmp_path / "system-temp"
+    scratch = temp / "scratch"
+    (scratch / "sub").mkdir(parents=True)
+    monkeypatch.setattr("tempfile.tempdir", str(temp))
+    registry = registry_with(tmp_path, scratch={"paths": [scratch]})
+    assert keys.resolve(scratch / "sub", registry, HOST).kind == keys.NONE
+    # The path the registry itself holds stays that project's own (DESIGN 7, F49): the
+    # refusals keep a directory from becoming a project, and registering it is the
+    # person's override of that.
+    assert keys.resolve(scratch, registry, HOST).kind == keys.PATH
+
+
+def test_unique_slug_prefixes_parent_names_until_the_name_is_free(tmp_path):
+    first = tmp_path / "work" / "foo"
+    first.mkdir(parents=True)
+    registry = Registry(tmp_path / "registry.yaml")
+    registry.add("foo")
+    second = tmp_path / "other" / "foo"
+    second.mkdir(parents=True)
+    assert unique_slug(second, registry) == "other-foo"
+    registry.add("other-foo")
+    third = tmp_path / "yard" / "other" / "foo"
+    third.mkdir(parents=True)
+    assert unique_slug(third, registry) == "yard-other-foo"
+
+
+def test_unique_slug_counts_a_path_by_its_own_name_first(tmp_path):
+    plain = tmp_path / "notes"
+    plain.mkdir()
+    registry = Registry(tmp_path / "registry.yaml")
+    assert unique_slug(plain, registry) == "notes"
+
+
+def test_unique_slug_falls_back_to_a_number_past_the_root(tmp_path):
+    """Every name the path's chain can offer is taken, the walk reaches the filesystem root,
+    which has no name to prefix, and a number keeps the project's own name (DESIGN 7, F49)."""
+    registry = Registry(tmp_path / "registry.yaml")
+    plain = (tmp_path / "foo").resolve()
+    plain.mkdir()
+    candidate = "foo"
+    for parent in plain.parents:
+        registry.add(candidate)
+        name = slugify(parent.name)
+        if not name:
+            break
+        candidate = f"{name}-{candidate}"
+    assert unique_slug(plain, registry) == "foo-2"
+
+
+def test_add_for_path_registers_the_directory_under_a_free_name(tmp_path):
+    work = (tmp_path / "work" / "widget").resolve()
+    work.mkdir(parents=True)
+    registry = Registry(tmp_path / "registry.yaml")
+    project = registry.add_for_path(HOST, work)
+    assert project.slug == "widget"
+    assert path_key(HOST, work) in project.paths
+    assert registry.by_path_key(path_key(HOST, work)) is project
+
+
+def test_add_for_path_keeps_the_name_the_digests_file_it_under(tmp_path):
+    """The dream proposes the name the session-start record already claims (DESIGN 7, F49):
+    the home directory registers as ``home``, not under its own directory's name."""
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    registry = Registry(tmp_path / "registry.yaml")
+    project = registry.add_for_path(HOST, home, base="home")
+    assert project.slug == "home"
+    assert path_key(HOST, home) in project.paths
+
+
+def test_add_for_path_steps_aside_when_the_name_is_taken(tmp_path):
+    first = (tmp_path / "work" / "foo").resolve()
+    first.mkdir(parents=True)
+    second = (tmp_path / "yard" / "foo").resolve()
+    second.mkdir(parents=True)
+    registry = Registry(tmp_path / "registry.yaml")
+    assert registry.add_for_path(HOST, first).slug == "foo"
+    assert registry.add_for_path(HOST, second).slug == "yard-foo"
+
+
+def test_set_archived_dates_a_project_and_bringing_it_back_clears_it(tmp_path):
+    registry = Registry(tmp_path / "registry.yaml")
+    registry.add("widget")
+    registry.save()
+    assert registry.set_archived("widget", "2026-10-04").archived == "2026-10-04"
+    registry.save()
+    reloaded = Registry.load(tmp_path / "registry.yaml")
+    widget = reloaded.by_slug("widget")
+    assert widget is not None and widget.archived == "2026-10-04"
+    reloaded.set_archived("widget", "")
+    reloaded.save()
+    cleared = Registry.load(tmp_path / "registry.yaml").by_slug("widget")
+    assert cleared is not None and cleared.archived == ""
+
+
+def test_set_archived_wants_a_date(tmp_path):
+    registry = Registry(tmp_path / "registry.yaml")
+    registry.add("widget")
+    with pytest.raises(RegistryError):
+        registry.set_archived("widget", "soon")

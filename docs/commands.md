@@ -20,6 +20,8 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | `aft project list [--json]` | Lists registered projects, their ids, paths and remotes. |
 | `aft project rename OLD NEW` | Changes a project's slug. Its id, and every page that names it, stay the same. |
 | `aft project forget SLUG` | Removes a project from the registry. Its pages stay in `projects/<slug>/`, and the command says so; delete them yourself if you want them gone. |
+| `aft project archive SLUG` | Retires a project from everyday memory with the user's say-so: its block is not injected, and its pages and digests answer only `aft search --archive`. Sessions still capture and dream, and the daily report names projects idle for 90 days. Nothing is deleted; `aft project unarchive` brings it back. |
+| `aft project unarchive SLUG` | Ends a project's archive: its block is injected again and its pages and digests answer ordinary searches, from the date the archive began. |
 | `aft key [path] [--json]` | Shows which project a directory belongs to and why; exits 1 when it belongs to none. |
 
 ## Memory
@@ -49,7 +51,7 @@ The timer runs `aft work`, which ends with a dream. Both can be run by hand.
 | `aft budget reset` | Starts today's count again from now, for when something spent the budget and has been fixed. The usage log is never changed; midnight UTC still starts the next day. |
 | `aft pause [REASON]` | Pauses background work: `aft work` and `aft dream` do nothing, whatever starts them, and a session's end no longer starts a run. Sessions are still captured and queued, and the memory block is still shown, so nothing is lost. Use it while the model server is down, while something in the pipeline looks wrong, or during a large edit of the vault. |
 | `aft resume` | Ends the pause and starts a run for the backlog. |
-| `aft redigest SESSION` | Rebuilds a session's digest from the evidence archive, with the current prompt, checks and redaction patterns. The rebuilt digest is dreamed again. Counts against the daily budget. |
+| `aft redigest SESSION` | Rebuilds a session's digest from the evidence archive, with the current prompt, checks and redaction patterns. The rebuilt digest is dreamed again. Counts against the daily budget. `aft redigest --unfiled [--dry-run]` is the backfill: every still-archived session whose digests sit under `_unfiled` is rebuilt to file under the project its recorded directory now resolves to; `--dry-run` lists the sessions and the tokens it would charge and writes nothing. |
 
 ## Forgetting
 

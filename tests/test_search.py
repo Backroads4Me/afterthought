@@ -1131,3 +1131,67 @@ def test_search_and_trace_answer_nothing_once_a_session_is_purged(
 
     assert search.search(cfg, "nitrile", all_projects=True, limit=20) == []
     assert search.trace(cfg, "aft://session/pi/s-old", "e-1") == search.EXPIRED
+
+
+ARCHIVED_PROJECT_DIGEST = """---
+type: Session Digest
+title: Widget session 7
+description: The widget's kumquat experiment.
+aft:
+  session: s-widget-7
+---
+
+# Widget session 7
+
+## Summary
+
+The widget ran a kumquat acidity trial.
+"""
+
+
+def test_an_archived_projects_memory_answers_only_the_archive_flag(
+    populated_vault: Config, monkeypatch, capsys
+) -> None:
+    """F49: archiving a project takes its pages and digests out of the everyday search and
+    leaves them to `aft search --archive`, without moving the files (DESIGN 10, F49). A file
+    with no project of its own follows the project its directory names. Unarchiving puts
+    them back, because the registry's change re-derives every row the project named."""
+    digest_rel = "digests/widget/2026/09/2026-09-27-claude-s-widget-7.md"
+    digest_path = populated_vault.vault / digest_rel
+    digest_path.parent.mkdir(parents=True, exist_ok=True)
+    digest_path.write_text(ARCHIVED_PROJECT_DIGEST, encoding="utf-8")
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+
+    assert [hit.path for hit in search.search(populated_vault, "kumquat")] == [digest_rel]
+    assert [hit.path for hit in search.search(populated_vault, "milling")] == [
+        "projects/widget/flange.md"
+    ]
+
+    registry = Registry.load(populated_vault.registry_path)
+    registry.set_archived("widget", "2026-10-04")
+    registry.save()
+
+    assert search.search(populated_vault, "kumquat") == []
+    assert search.search(populated_vault, "milling") == []
+    hits = search.search(populated_vault, "kumquat", archive=True)
+    assert [(hit.path, hit.collection) for hit in hits] == [(digest_rel, "archive")]
+    hits = search.search(populated_vault, "milling", archive=True)
+    assert [(hit.path, hit.collection) for hit in hits] == [
+        ("projects/widget/flange.md", "archive")
+    ]
+
+    # Another project's scope does not reach it; the archived project's own does.
+    monkeypatch.chdir(populated_vault.vault / "projects" / "gadget")
+    assert search.search(populated_vault, "kumquat", archive=True) == []
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+    assert [hit.path for hit in search.search(populated_vault, "kumquat", archive=True)] == [
+        digest_rel
+    ]
+
+    registry = Registry.load(populated_vault.registry_path)
+    registry.set_archived("widget", "")
+    registry.save()
+    assert [hit.path for hit in search.search(populated_vault, "kumquat")] == [digest_rel]
+    assert [hit.path for hit in search.search(populated_vault, "milling")] == [
+        "projects/widget/flange.md"
+    ]
