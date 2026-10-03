@@ -564,3 +564,50 @@ def test_every_project_failing_still_reports_the_checkpoint_commits(initialized)
     assert "- Error: the model endpoint said no" in report_text
     assert f"Separate checkpoint commit: git revert {result.checkpoint}" in report_text
     assert f"Separate hand edits tag commit: git revert {result.tag_commit}" in report_text
+
+
+def test_a_recorded_directory_is_dated_under_the_name_its_record_settled(
+    widget, initialized, tmp_path
+):
+    """A session's events are dated under the name its session-start record settled, not a
+    fresh answer for its directory (DESIGN 7, F49): the digest of that session files under
+    the record's name, so the dream's quiet check sees the sessions where the digests went,
+    and a same-named directory that claimed the plain name first does not hide one."""
+    from aft.registry import Registry
+
+    claimed = tmp_path / "fieldwork" / "widgets"
+    claimed.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s0",
+        None,
+        "widgets",
+        claimed,
+        registry=Registry.load(initialized.registry_path),
+    )
+    # A second directory of the same name records after: its plain name is taken, so the
+    # record settles its parent's name in front of it.
+    loose = tmp_path / "loose" / "widgets"
+    loose.mkdir(parents=True)
+    queue.record_project(
+        initialized,
+        "claude",
+        "s1",
+        None,
+        "widgets",
+        loose,
+        registry=Registry.load(initialized.registry_path),
+    )
+    record = queue.recorded_project(initialized, "claude", "s1")
+    assert record.slug == "loose-widgets"
+
+    digest(initialized, "loose-widgets", "c", "2026-09-29T08:00:00Z")
+    moment = NOW - timedelta(minutes=3)
+    queue.enqueue(initialized, event(loose, moment))
+    assert schedule.last_activity(initialized).get("loose-widgets") == moment
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+    assert result.active == ["loose-widgets"]
+    assert process.calls == [], "a session recorded under one name hid behind a fresh one"

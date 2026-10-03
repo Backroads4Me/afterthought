@@ -448,24 +448,33 @@ _written_at = shortterm.written_at
 def last_activity(config: Config) -> dict[str, datetime]:
     """The newest session event per project slug, from the capture queue.
 
-    Each directory is resolved the way the digest resolves it, so a session's events and
-    its digests land under the same slug. The lookup records no alias: scheduling only
-    reads the registry. A directory that no longer exists, such as a removed worktree,
-    has no session left running in it and nothing to resolve, so it is passed over.
+    A directory is dated under the name its sessions' digests file under: the project it
+    answers for when one exists, the name its session-start records settled when it answers
+    for none and a record stands there, and a fresh answer the way the digest resolves it
+    when no record does (DESIGN 7, F49). The lookup records no alias: scheduling only
+    reads the registry. A directory that no longer exists, such as a removed worktree, has
+    no session left running in it and nothing to resolve, so it is passed over.
     """
     registry = Registry.load(config.registry_path)
+    settled = queue.settled_slugs(config, registry)
     newest: dict[str, datetime] = {}
     for cwd, moment in queue.last_events(config).items():
         if not cwd.is_dir():
             continue
-        # A directory of no project files its sessions as unfiled (DESIGN 7); one capture
-        # excludes resolves to none, and files them as unfiled too.
-        slug = (
-            keys.resolve(
-                cwd, registry, config.host, never=config.settings.capture.exclude_paths
-            ).slug
-            or digest.UNFILED
+        resolution = keys.resolve(
+            cwd, registry, config.host, never=config.settings.capture.exclude_paths
         )
+        if resolution.project is not None:
+            # The project the directory answers for is where its sessions' digests file,
+            # even when a record wrote an earlier, unregistered name (DESIGN 7, F49).
+            slug = resolution.project.slug
+        else:
+            # A record is the name its session's digest files under, and a fresh answer for
+            # an unregistered directory is not: the record's settled name decides (DESIGN 7,
+            # F49). A directory of no record and of no project files its sessions as unfiled
+            # (DESIGN 7); one capture excludes resolves to none, and files them as unfiled
+            # too.
+            slug = settled.get(cwd) or resolution.slug or digest.UNFILED
         if slug not in newest or moment > newest[slug]:
             newest[slug] = moment
     return newest

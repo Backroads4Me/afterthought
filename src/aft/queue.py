@@ -406,6 +406,38 @@ def settle_slug(config: Config, registry: Registry, root: Path, base: str) -> st
     return settled
 
 
+def settled_slugs(config: Config, registry: Registry) -> dict[Path, str]:
+    """The name each recorded directory's sessions file their digests under (DESIGN 7, F49).
+
+    A record is the answer its session's digest files under, so a step that dates a
+    directory's sessions - the dream's quiet check, the idle and gone report - reads the
+    record's name rather than resolving the directory afresh: a fresh answer can differ
+    from the one the record was written with, and then the sessions look active under a
+    name no digest uses. A record naming a project the registry holds decides its
+    directory, because that project is where the session's digest files; records of one
+    path that disagree over an unregistered name are an answer only in the sense that one
+    of them must stand, and the first in sort order does.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT path, project_id, slug FROM session_projects WHERE path IS NOT NULL"
+        ).fetchall()
+    by_path: dict[Path, list[tuple[str, str]]] = {}
+    for path, project_id, slug in rows:
+        by_path.setdefault(Path(str(path)), []).append(
+            ("" if project_id is None else str(project_id), str(slug))
+        )
+    slugs: dict[Path, str] = {}
+    for path, candidates in by_path.items():
+        named = [
+            project.slug
+            for project_id, _ in candidates
+            if project_id and (project := registry.by_id(project_id)) is not None
+        ]
+        slugs[path] = sorted(named)[0] if named else sorted(slug for _, slug in candidates)[0]
+    return slugs
+
+
 def adopt_claim(config: Config, registry: Registry, root: Path, base: str) -> str:
     """Settle a name for ``root`` the way a session-start record does, and keep the table.
 
