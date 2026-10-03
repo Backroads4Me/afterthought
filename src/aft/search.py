@@ -106,7 +106,6 @@ def _ask(
     collection is asked to narrow itself to one row per document - the best-ranked one, which is
     the only row of it any search could have kept - and the limit goes after that. That is what
     makes the limit mean what it says, and it is done in SQL over the whole collection rather
-    makes the limit mean what it says, and it is done in SQL over the whole collection rather
     than after the rows arrive, because a search that reads every row to discover the eight it
     wanted has already paid for the ones it threw away. A collection whose rows are one per
     document (``SINGLE_ROW_COLLECTIONS``) skips the fold: there is nothing to narrow, and the
@@ -201,7 +200,7 @@ def search(
     directory's project ranks first, the global pages next, then the other projects and the
     unfiled text, a fixed tier ahead of the BM25 order inside each. ``project`` names one
     project to narrow the query to, with the global pages. ``all_projects`` is accepted and
-    changes nothing: the default has been every project since F50.
+    changes nothing, since the default already reaches every project.
     """
     vault.require(config)
     index.update(config)
