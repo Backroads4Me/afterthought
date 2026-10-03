@@ -292,11 +292,20 @@ _RECORD_BUILD = (
     f" ON CONFLICT (name) DO UPDATE SET stamp = excluded.stamp"
 )
 
+#: The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
+#: an evidence row is one entry, so its path carries the entry id the way a page row's does the
+#: heading. This is how a page already names a session, and the whole resource is what
+#: `aft trace` takes to open the entry's context (DESIGN 10).
+SESSION_RESOURCE = "aft://session/"
+
 #: Whether the index holds anything a build wrote. A run records a hash for every file it read
 #: and the state of every archive row it read, in the same transaction as the rows themselves,
 #: so with neither record the file holds no row whose meaning a stamp would vouch for.
-_HOLDS_ROWS = f"SELECT EXISTS (SELECT 1 FROM {FILES_TABLE}) OR EXISTS (SELECT 1 FROM {EVIDENCE})"
-
+_HOLDS_ROWS = (
+    f"SELECT EXISTS (SELECT 1 FROM {FILES_TABLE})"
+    f" OR EXISTS (SELECT 1 FROM {EVIDENCE})"
+    f" OR EXISTS (SELECT 1 FROM {ARCHIVE} WHERE path LIKE '{SESSION_RESOURCE}%')"
+)
 # SQLite takes a table name in the statement text and never as a parameter, so every
 # statement that names one is written once here from `COLLECTIONS` and `FILES_TABLE` - this
 # module's own constants, never a caller's string.
@@ -327,10 +336,16 @@ _DELETE_KEYS_BY_ENTRY = {
 _DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
 _DROP_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
 # What the index recorded about each evidence row: the key it was stored under, the digest of
-# its stored payload, and the fields the row copied out of the archive beside it. A row is read
-# again when any of it moved.
+# its stored payload, the fields the row copied out of the archive beside it, and the
+# collection the row answers from. A row is read again when any of it moved. The state is read
+# over both collections an evidence row can stand in, since an archived project's entries
+# answer only `aft search --archive` (DESIGN 10, F49) and so are re-homed into the archive
+# collection there, the way its pages are.
 _EVIDENCE_STATE = (
-    f"SELECT session_id, entry_id, entry_hash, agent, project_id, time FROM {EVIDENCE}"
+    f"SELECT session_id, entry_id, entry_hash, agent, project_id, time, '{EVIDENCE}' AS home"
+    f" FROM {EVIDENCE}"
+    f" UNION ALL SELECT session_id, entry_id, entry_hash, agent, project_id, time, '{ARCHIVE}'"
+    f" FROM {ARCHIVE} WHERE path LIKE '{SESSION_RESOURCE}%'"
 )
 _SELECT_HASHES = f"SELECT path, digest FROM {FILES_TABLE}"
 # The modification each recorded hash was taken beside (`_file_state`), which is what a run reads
@@ -394,11 +409,6 @@ _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
 _FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 _DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
-# The resource form DESIGN 6 gives a session's sources, used as the path of an evidence row:
-# an evidence row is one entry, so its path carries the entry id the way a page row's does the
-# heading. This is how a page already names a session, and the whole resource is what
-# `aft trace` takes to open the entry's context (DESIGN 10).
-SESSION_RESOURCE = "aft://session/"
 
 #: The heading a digest's handoff note is indexed under. The note itself lives in the digest's
 #: frontmatter (DESIGN 8) and `aft.inject` renders it for a new session; this is the name a
@@ -489,9 +499,14 @@ def update(config: Config) -> list[str]:
         # this host cannot describe at all is recorded as nothing, which the next run reads as
         # moved and asks again (`_moved`).
         archive = _archive_state(config) or ""
-        registry = _project_registry(config)
-        report = _sync_files(conn, config, registry)
-        _sync_evidence(conn, config)
+        projects = _project_registry(config)
+        # Which collection an evidence row answers from is the registry's archived flag, so
+        # a registry that moved asks its evidence rows to be re-homed as much as it asks the
+        # file rows to be re-derived (DESIGN 10, F49).
+        filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
+        rehome = filed_by is None or filed_by[0] != projects.digest
+        report = _sync_files(conn, config, projects)
+        _sync_evidence(conn, config, projects.registry, rehome=rehome)
         report.extend(_sync_library(conn, config))
         conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
@@ -510,8 +525,9 @@ def reindex(config: Config) -> list[str]:
     with _writing(config, rebuild=True) as conn:
         _create(conn, fresh=True)
         archive = _archive_state(config) or ""
-        report = _sync_files(conn, config, _project_registry(config))
-        _sync_evidence(conn, config)
+        projects = _project_registry(config)
+        report = _sync_files(conn, config, projects)
+        _sync_evidence(conn, config, projects.registry)
         report.extend(_sync_library(conn, config))
         conn.execute(_RECORD_ORIGIN, (ARCHIVE_ORIGIN, archive))
         _record_build(conn)
@@ -1259,17 +1275,30 @@ def _sync_library(conn: sqlite3.Connection, config: Config) -> list[str]:
     return report
 
 
-def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
+def _sync_evidence(
+    conn: sqlite3.Connection, config: Config, registry: Registry, *, rehome: bool = False
+) -> None:
     """Index the archive rows this index has not seen, and stop holding the ones it dropped.
 
     The row identity is the archive's ``(session_id, entry_id)`` primary key, which the
     archive itself keeps unique across a rerun (``aft.evidence.store`` replaces a row rather
     than adding a copy). What says whether a row is current is everything the index row copies
-    out of the archive row - the SHA-256 of the stored payload, and the agent, project and time
-    the row carries - so a redaction that rewrote archived text in place (`aft forget pattern`,
-    BUILD-PLAN M2.8) reaches the index whatever the compressed text measures, and so does a
-    session whose project moved because its directory was registered after it was archived.
-    The stored bytes are digested as they are read; only the rows that moved are decompressed.
+    out of the archive row - the SHA-256 of the stored payload, the agent, project and time
+    the row carries, and the collection it answers from - so a redaction that rewrote archived
+    text in place (`aft forget pattern`, BUILD-PLAN M2.8) reaches the index whatever the
+    compressed text measures, and so does a session whose project moved because its directory
+    was registered after it was archived, or whose project was archived after that (DESIGN 10,
+    F49). The stored bytes are digested as they are read; only the rows that moved are
+    decompressed.
+
+    Which collection a row answers from is the archived flag of the project its id names: an
+    archived project's pages and digests answer only `aft search --archive`, and its captured
+    entries go where they went (DESIGN 10, F49). An entry whose project is unknown is every
+    project's memory, and stays in the ordinary evidence collection.
+
+    ``rehome`` says the registry moved since the rows were filed, so every session row goes
+    and the scan rebuilds them: the rows' copied state cannot say which side of the archived
+    flag they were filed under, because that flag is what moved.
 
     Nothing is removed that was never recorded: a row and the state that says it was read land
     in the same transaction, so a key the index holds no state for is a key with no row to
@@ -1277,38 +1306,49 @@ def _sync_evidence(conn: sqlite3.Connection, config: Config) -> None:
     goes out after the scan, each named by the key it was stored under, which is why a rebuild
     over an empty index deletes nothing at all (`_unindex`).
     """
+    if rehome:
+        for collection in (EVIDENCE, ARCHIVE):
+            conn.execute(f"DELETE FROM {collection} WHERE path LIKE '{SESSION_RESOURCE}%'")
     recorded = {
-        (session_id, entry_id): (digest, agent, project_id, moment)
-        for session_id, entry_id, digest, agent, project_id, moment in conn.execute(_EVIDENCE_STATE)
+        (session_id, entry_id): (digest, agent, project_id, moment, home)
+        for session_id, entry_id, digest, agent, project_id, moment, home in conn.execute(
+            _EVIDENCE_STATE
+        )
     }
     archive = config.home / EVIDENCE_NAME
     if not archive.exists():
-        _unindex(conn, EVIDENCE, sorted(recorded))
+        _unindex(conn, (EVIDENCE, ARCHIVE), sorted(recorded))
         return
+
+    def home_of(record: sqlite3.Row) -> str:
+        project = registry.by_id(record["project_id"]) if record["project_id"] else None
+        return ARCHIVE if project is not None and project.archived else EVIDENCE
+
     live: set[tuple[str, str]] = set()
-    rewritten: list[tuple[tuple[str, str], sqlite3.Row, bytes, str]] = []
+    rewritten: list[tuple[tuple[str, str], sqlite3.Row, bytes, str, str]] = []
     with _reading_archive(archive) as source:
         for record in source.execute(_SCAN_ARCHIVE):
             key = (record["session_id"], record["entry_id"])
             payload = bytes(record["text"])
             digest = hashlib.sha256(payload).hexdigest()
             live.add(key)
-            copied = (digest, record["agent"], record["project_id"], record["time"])
+            home = home_of(record)
+            copied = (digest, record["agent"], record["project_id"], record["time"], home)
             if recorded.get(key) == copied:
                 continue  # every field this row was built from is what it was built from
             if key in recorded:
                 # Its rows are here from before, and they say what this row now says they
                 # should not: they go with the rest, and the fresh one follows the removal.
-                rewritten.append((key, record, payload, digest))
+                rewritten.append((key, record, payload, digest, home))
             else:
-                _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+                _insert(conn, home, _evidence_row(record, payload, digest))
     _unindex(
         conn,
-        EVIDENCE,
-        sorted(set(recorded) - live) + sorted(key for key, _, _, _ in rewritten),
+        (EVIDENCE, ARCHIVE),
+        sorted(set(recorded) - live) + sorted(key for key, *_ in rewritten),
     )
-    for _, record, payload, digest in rewritten:
-        _insert(conn, EVIDENCE, _evidence_row(record, payload, digest))
+    for _, record, payload, digest, home in rewritten:
+        _insert(conn, home, _evidence_row(record, payload, digest))
 
 
 def _fill_keys(conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]) -> None:
@@ -1328,11 +1368,15 @@ def _fill_keys(conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]) -> Non
     conn.executemany(_ADD_KEY, keys)
 
 
-def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, str]]) -> None:
+def _unindex(
+    conn: sqlite3.Connection, collections: Iterable[str], keys: list[tuple[str, str]]
+) -> None:
     """Stop holding the rows of these archive keys.
 
     ``(session_id, entry_id)`` is where an evidence row was stored, so it is what its removal
-    names, and the whole set goes into one statement (`_fill_keys`). Rows under a key this was
+    names, and the whole set goes into one statement per collection (`_fill_keys`). An
+    evidence row can stand in either collection an entry answers from, so the removal names
+    them all and each one loses whatever it held under these keys. Rows under a key this was
     not given keep their place.
 
     Nothing is removed that was never recorded: a row and the state that says it was read land in
@@ -1341,7 +1385,8 @@ def _unindex(conn: sqlite3.Connection, collection: str, keys: list[tuple[str, st
     if not keys:
         return
     _fill_keys(conn, keys)
-    conn.execute(_DELETE_KEYS_BY_ENTRY[collection])
+    for collection in collections:
+        conn.execute(_DELETE_KEYS_BY_ENTRY[collection])
 
 
 def _evidence_row(record: sqlite3.Row, payload: bytes, digest: str) -> Row:

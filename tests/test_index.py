@@ -734,6 +734,40 @@ def test_an_appended_evidence_row_is_indexed_once(initialized: Config) -> None:
     assert twice[0] == once[0]
 
 
+def test_an_archived_projects_entries_leave_the_default_search(initialized: Config) -> None:
+    """An archived project's captured entries leave the ordinary evidence collection the way
+    its pages and digests do (DESIGN 10, F49): they answer only `aft search --archive`, and
+    they come back when the project is unarchived. Another project's entries, and an entry
+    whose session resolved to no project, stay in the ordinary collection."""
+    widget = register(initialized, "widget")
+    other = register(initialized, "other")
+    evidence.store(initialized, "claude", "abc", widget.id, entries("ship the flange"))
+    evidence.store(initialized, "claude", "def", other.id, entries("keep the gizmo"))
+    evidence.store(initialized, "claude", "ghi", None, entries("plain words unfiled"))
+    index.update(initialized)
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+    assert search(initialized, "evidence", "gizmo") == ["def#e1"]
+    assert search(initialized, "evidence", "unfiled") == ["ghi#e1"]
+
+    registry = Registry.load(initialized.registry_path)
+    registry.set_archived("widget", "2026-09-29")
+    registry.save()
+    index.update(initialized)
+
+    assert search(initialized, "evidence", "flange") == []
+    assert search(initialized, "archive", "flange") == ["abc#e1"]
+    assert search(initialized, "evidence", "gizmo") == ["def#e1"]
+    assert search(initialized, "archive", "gizmo") == []
+    assert search(initialized, "evidence", "unfiled") == ["ghi#e1"]
+
+    registry.set_archived("widget", "")
+    registry.save()
+    index.update(initialized)
+
+    assert search(initialized, "evidence", "flange") == ["abc#e1"]
+    assert search(initialized, "archive", "flange") == []
+
+
 def test_the_indexed_evidence_text_is_the_archives_own_text(initialized: Config) -> None:
     """The index reads the archive row by row and decompresses what it finds, so its rows are
     checked against the archive's own reader: wherever the two disagree about what a row holds,
