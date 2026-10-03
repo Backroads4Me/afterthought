@@ -338,6 +338,7 @@ def test_redigest_unfiled_dry_run_lists_sessions_and_writes_nothing(
 
     monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
     monkeypatch.setattr(aft.digest, "stays_unfiled", lambda config, session_id: False)
+    monkeypatch.setattr(aft.digest, "uncovered_unfiled", lambda config: [])
     monkeypatch.setattr(
         aft.digest,
         "redigest_estimate",
@@ -346,7 +347,7 @@ def test_redigest_unfiled_dry_run_lists_sessions_and_writes_nothing(
     assert main(["redigest", "--unfiled", "--dry-run"]) == 0
     assert capsys.readouterr().out == (
         "u1\t~1234 tokens\nu2\tno archived entries\n"
-        "1 session(s) would rebuild, ~1234 tokens; 0 staying unfiled\n"
+        "1 session(s) would rebuild, ~1234 tokens; 0 staying unfiled; 0 cannot rebuild\n"
     )
     assert run_git(["log", "--format=%s"], initialized.vault) == "aft: initialize vault"
 
