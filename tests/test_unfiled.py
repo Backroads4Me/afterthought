@@ -414,3 +414,65 @@ def test_the_backfill_skips_and_names_a_session_the_archive_no_longer_covers(
     unfiled = [p.name for p in (cfg.vault / "digests" / digest.UNFILED).rglob("*.md")]
     assert f"{TODAY}-c-u1.md" in unfiled, "the uncovered digest was rebuilt over"
     assert f"{TODAY}-c-u2.md" not in unfiled, "the covered session was not rebuilt"
+
+
+def test_the_dry_run_records_no_claim_for_a_session_with_no_record(
+    initialized, home, fake, tmp_path, capsys
+):
+    """A dry run of the backfill writes nothing at all, and the queue is no exception
+    (DESIGN 7, F49): a session whose session-start record never got written gets its
+    directory's settlement decided without claiming it, so the same session still gets the
+    same answer - and the claim - on a real run."""
+    from aft import events
+    from aft.cli import main
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    queue.enqueue(
+        cfg,
+        events.SessionEvent(
+            agent="c",
+            kind=events.SESSION_START,
+            session_id="u9",
+            cwd=plain,
+            transcript_path=None,
+            time=NOW,
+            detail=None,
+        ),
+    )
+    write_digest(
+        cfg,
+        digest.UNFILED,
+        f"{TODAY}-c-u9",
+        facts=[
+            {
+                "statement": "The user wants plain hyphens, never em dashes.",
+                "kind": "preference",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+                "term": "long",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/c/u9#e1",
+                "quote": "The user wants plain hyphens, never em dashes.",
+            }
+        ],
+    )
+    assert not digest.stays_unfiled(cfg, "u9")
+
+    assert main(["redigest", "--unfiled", "--dry-run"]) == 0
+    assert "u9\t~" in capsys.readouterr().out
+    assert queue.recorded_project(cfg, "c", "u9") is None, "the dry run claimed a name"
+
+    fake.script = [Reply(content=EMPTY_ANSWER)]
+    assert main(["redigest", "--unfiled"]) == 0
+    record = queue.recorded_project(cfg, "c", "u9")
+    assert record is not None and (record.slug, record.path) == ("plain", str(plain))
+    moved = list((cfg.vault / "digests/plain").rglob(f"{TODAY}-c-u9.md"))
+    assert moved, "the run refiled u9"

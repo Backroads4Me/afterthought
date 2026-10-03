@@ -520,6 +520,8 @@ def _settle(
     resolution: keys.Resolution,
     session_id: str,
     agent: str,
+    *,
+    write: bool = True,
 ) -> keys.Resolution:
     """An unregistered resolution filed under the name its session-start record settled.
 
@@ -530,17 +532,23 @@ def _settle(
     were kept - claims a name here instead, by the same rule, and the record is written so
     every later digest of the session files in the same place. A record an earlier build
     wrote names no directory, so nothing can be prefixed and its slug is what there is to
-    file under.
+    file under. A step that writes nothing - the backfill's ``--dry-run`` check - asks with
+    ``write=False``, which decides the settlement the same way but claims nothing
+    (queue.settle_slug, DESIGN 7, F49).
     """
     root = resolution.root
     if root is None or resolution.slug is None:
         return resolution
     recorded = queue.recorded_project(config, agent, session_id)
     if recorded is None:
-        queue.record_project(
-            config, agent, session_id, None, resolution.slug, root, registry=registry
-        )
-        recorded = queue.recorded_project(config, agent, session_id)
+        if write:
+            queue.record_project(
+                config, agent, session_id, None, resolution.slug, root, registry=registry
+            )
+            recorded = queue.recorded_project(config, agent, session_id)
+        else:
+            settled = queue.settle_slug(config, registry, root, resolution.slug)
+            return replace(resolution, slug=settled)
     if recorded is not None and recorded.slug:
         return replace(resolution, slug=recorded.slug)
     return resolution
@@ -1283,6 +1291,7 @@ def _recorded_target(
     cwd: Path | None,
     *,
     unfiled: bool,
+    write: bool = True,
 ) -> keys.Resolution | None:
     """What a rebuild resolves this session's directory to (DESIGN 7, F49).
 
@@ -1291,7 +1300,8 @@ def _recorded_target(
     the session last ran. An ordinary rebuild resolves the queue's record alone, as it did
     before the record existed. A project registered at the directory is answered even when
     the directory itself is gone, by the path key it was registered under; a directory that
-    resolves to none is no target at all.
+    resolves to none is no target at all. ``write=False`` decides an unrecorded directory's
+    settlement without claiming it, for a step that writes nothing (DESIGN 7, F49).
     """
     directory: Path | None = None
     if unfiled:
@@ -1316,7 +1326,7 @@ def _recorded_target(
     except GitError:
         return None
     if resolution.project is None and resolution.slug is not None:
-        return _settle(config, registry, resolution, session_id, agent or "claude")
+        return _settle(config, registry, resolution, session_id, agent or "claude", write=write)
     return resolution
 
 
@@ -1327,6 +1337,7 @@ def _rebuild_slug(
     agent: str | None,
     *,
     unfiled: bool,
+    write: bool = True,
 ) -> tuple[str, str | None, registrymod.Project | None]:
     """The agent and the slug a rebuild of this session files under, with its project.
 
@@ -1334,14 +1345,15 @@ def _rebuild_slug(
     session filed under another slug names it next; otherwise the directory - the
     session-start record's for the backfill, the queue's for an ordinary rebuild - is
     resolved, and the slug it answers is the slug the page files under. A ``None`` slug is
-    a session of no project: its directory answers none (DESIGN 7, F49).
+    a session of no project: its directory answers none (DESIGN 7, F49). ``write=False``
+    decides the target without claiming anything, for a step that writes nothing
+    (DESIGN 7, F49).
     """
     registry = registrymod.Registry.load(config.registry_path)
     info = evidence.session_info(config, session_id)
     if agent is None:
         agent = info[0] if info else "claude"
     project_id = info[1] if info else None
-
     project = registry.by_id(project_id) if project_id else None
     slug = project.slug if project else None
 
@@ -1362,7 +1374,9 @@ def _rebuild_slug(
                         break
 
     if slug is None:
-        resolution = _recorded_target(config, registry, session_id, agent, cwd, unfiled=unfiled)
+        resolution = _recorded_target(
+            config, registry, session_id, agent, cwd, unfiled=unfiled, write=write
+        )
         if resolution is not None and resolution.project is not None:
             project, slug = resolution.project, resolution.project.slug
         elif resolution is not None and resolution.slug is not None:
@@ -1377,11 +1391,13 @@ def stays_unfiled(config: Config, session_id: str) -> bool:
     whose directory is gone with nothing naming it, or stands under the system temporary
     directory, the downloads, or a capture exclusion, answers no project again, so a
     rebuild would write its digest onto the same ``_unfiled`` path and list it again on
-    every run. Such a session stays unfiled until its directory's answer changes.
+    every run. Such a session stays unfiled until its directory's answer changes. The check
+    claims nothing: a dry run of the backfill writes nothing at all, so the answer is
+    decided without settling a name into the queue (DESIGN 7, F49).
     """
     _require_session_id(session_id)
     _, slug, _ = _rebuild_slug(
-        config, session_id, queue.session_cwd(config, session_id), None, unfiled=True
+        config, session_id, queue.session_cwd(config, session_id), None, unfiled=True, write=False
     )
     return slug is None
 
