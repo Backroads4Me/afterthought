@@ -697,7 +697,7 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 
 ### Search
 
-`aft search` queries a SQLite FTS5 index with BM25 ranking, across every project: the
+`aft search` queries a SQLite FTS5 index with BM25 ranking. It searches every project: the
 current directory's project first, then the global pages, then other projects, so what one
 project learned answers a question asked in another. `--project P` narrows it to one
 project and the global pages. The memory block stays the current project's and the global
