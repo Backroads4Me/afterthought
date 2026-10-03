@@ -1036,6 +1036,40 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   seed sync tests; the prompt texts hold the test, the list and the short-term definition.
   Review checkpoint: yes (both prompts). After merge, redigest two sessions and compare
   their facts with the pages they replace.
+- **F47 Short-term memory follows the newest session** (ruling 2026-10-03). DESIGN 6
+  (short-term memory), 9 (a run, R10, the report), 13. A recent line that a later session
+  showed was finished or wrong stayed until it rolled off by session count, and a project
+  with no new sessions kept its short-term memory indefinitely. (1) Reconcile: when a run
+  applies a project's digests and `recent.md` has active lines, one call per part of the
+  newest primary session applied (its archived entries, split under the digest's chunk
+  cap) receives the numbered recent lines and returns, for each line that part shows is
+  done, false or replaced, the line number, a quote and the entry it comes from. A new
+  prompt `prompts/reconcile.md` and schema. The script verifies each quote against its
+  entry as R1 does and withdraws the line on `recent.md` with that source; an unverified
+  answer changes nothing and is reported. It never touches a long-term line, a line with an
+  open note, or anything from a worker session, and it counts against the daily budget and
+  is skipped when the budget is spent. (2) Backstop: `dream.short_term_days` (integer,
+  default 7; below 1 is a config error) rolls off, in maintenance and exactly as session
+  roll-off does, a recent line whose newest source is older than that many days. The
+  report's Short term section lists withdrawn and expired lines. Tests: a done line is
+  withdrawn with its quote; a wrong quote, a long-term line number and a worker session
+  change nothing; the budget skip; the day backstop and its config; a run with no recent
+  lines makes no call. Review checkpoint: yes (the prompt, `rules.py`, `apply.py`).
+- **F48 `aft review`: clearing what memory should not keep** (ruling 2026-10-03; after
+  F46). DESIGN 6, 9, 12. Memory written before F46 holds lines F46 would not keep.
+  `aft review <project|global>` puts every active line on that project's fact pages
+  (`recent.md` included; never digests, reports, archive or references), about twenty
+  lines per call, to the model with F46's test and list (a new `prompts/review.md` and
+  schema), and prints the lines it would withdraw, numbered, each with a one-line reason;
+  it saves them to `reports/review-<slug>.md` and changes no page. `aft review <project>
+  --withdraw <n,n,...|all>` withdraws the chosen lines from that saved list: struck through
+  and dated like `aft settle --withdraw`, with the reason recorded, one commit. A line
+  with an open note, or one that changed since the list was saved, is skipped and named.
+  Seeded lines are reviewed like any other. The aft skill lists the command as one needing
+  the user's go-ahead, with the list shown first. Tests: the list is saved and no page
+  changes; withdraw by number and all; a changed line and a noted line are skipped; a
+  number not on the list is refused; the budget is counted. Review checkpoint: yes (the
+  prompt, withdrawal).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
