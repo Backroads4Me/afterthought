@@ -61,16 +61,25 @@ three signals across two separate sessions. They never replace a line on their o
 - **Short-term memory** is what the project's last few sessions were working with: who is
   doing what, what is paused and why, a setting changed for a test. It lives on
   `projects/<slug>/recent.md` and is shown in its own "Recent" section of the memory block.
-  It is counted in sessions, never in days: a line rolls off once it has not come up in
-  the project's last `dream.short_term_sessions` sessions (5 by default). A project you
-  leave alone for a year comes back with its short-term memory as it was, dated so the
-  agent can judge it.
+  A line rolls off once it has not come up in the project's last
+  `dream.short_term_sessions` sessions (5 by default), and a line whose newest source is
+  older than `dream.short_term_days` days (7 by default) expires too, so a project you
+  leave alone does not greet the next session with stale
+  short-term memory. Rolling off and expiring are not forgetting: the line's evidence
+  stays in its digest and in the archive, where search still finds it. The block shows
+  the date of the newest session beside the lines, so the agent can judge them.
 - **Neither** is what a session did and where it stopped. That goes in the digest's
   handoff, and the newest handoff is shown as "Last session".
 
 A short-term line becomes long-term when it outlasts the window (its sources are at least
 `short_term_sessions` sessions apart) or when a later session states the same thing as a
 long-term fact.
+
+When a dream run applies the project's digests, it reads the newest session's own words
+back against the short-term lines: a line that session showed finished, wrong, or
+replaced is withdrawn - struck through and dated, with the quote that showed it in the
+run's report. A line with an open note is left for you, and so is anything the session's
+words do not back with a verifiable quote.
 
 ## Who may change what
 

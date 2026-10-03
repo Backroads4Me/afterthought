@@ -204,6 +204,58 @@ def test_run_holds_the_vault_lock(widget, initialized):
     assert held == ["widget"]
 
 
+def test_maintenance_expires_each_project_in_its_own_commit(widget, initialized, tmp_path):
+    """Two registered projects with spent short-term lines and nothing waiting: each
+    project's expiry is its own commit, named for it, beside its own report section
+    (BUILD-PLAN F47)."""
+    gadget = make_repo(tmp_path / "gadget")
+    assert main(["project", "add", str(gadget)]) == 0
+    for slug in ("gadget", "widget"):
+        recent = initialized.vault / "projects" / slug / "recent.md"
+        recent.parent.mkdir(parents=True, exist_ok=True)
+        recent.write_text(
+            "---\ntype: Project\ntitle: t\ndescription: d\n"
+            "sources:\n  - {id: s1, resource: 'aft://session/c/s0#e1', quote: q}\n"
+            "aft:\n  project: p_1\n---\n\n"
+            "## State\n\n- The rewrite is paused. [observed] 2026-08-01 [^s1]\n"
+        )
+    vault.commit(initialized.vault, ["projects"], "seed recents")
+    run = schedule.run(initialized, Recorder(), now=NOW)
+    assert run.expired == ["gadget", "widget"]
+    assert subjects(initialized)[:4] == [
+        "aft: report widget",
+        "aft: expire short-term memory widget",
+        "aft: report gadget",
+        "aft: expire short-term memory gadget",
+    ]
+    for slug in ("gadget", "widget"):
+        sha = run_git(
+            ["log", "-n", "1", "--format=%H", f"--grep=aft: expire short-term memory {slug}"],
+            initialized.vault,
+        )
+        changed = run_git(["show", "--name-only", "--format=", sha], initialized.vault).splitlines()
+        assert changed == [f"projects/{slug}/recent.md"]
+
+
+def test_maintenance_leaves_a_project_with_waiting_digests(widget, initialized):
+    """A project with waiting digests is not maintenance: its own run expires its lines
+    when it is applied, so an expired line beside a waiting digest stays for that run."""
+    digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
+    recent = initialized.vault / "projects" / "widget" / "recent.md"
+    recent.parent.mkdir(parents=True)
+    recent.write_text(
+        "---\ntype: Project\ntitle: t\ndescription: d\n"
+        "sources:\n  - {id: s1, resource: 'aft://session/c/s0#e1', quote: q}\n"
+        "aft:\n  project: p_1\n---\n\n"
+        "## State\n\n- The rewrite is paused. [observed] 2026-08-01 [^s1]\n"
+    )
+    vault.commit(initialized.vault, ["projects/widget/recent.md"], "seed recent")
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    assert result.ran == ["widget"]
+    assert result.expired == []
+    assert "The rewrite is paused." in recent.read_text()
+
+
 def test_uncommitted_reports_deletions_and_renames(initialized):
     root = initialized.vault
     run_git(["mv", "log.md", "history.md"], root)

@@ -236,13 +236,30 @@ def format_run_section(
     # 9. Short term
     lines.append("## Short term")
     added_short = [a for a in report.added if page.is_recent(a.path)]
-    if added_short or report.lifted or report.rolled_off:
+    shown = bool(
+        added_short
+        or report.lifted
+        or report.rolled_off
+        or report.withdrawn
+        or report.expired
+        or report.refused
+    )
+    if shown:
         for a in added_short:
             lines.append(f'- Added: "{a.statement}" [{a.source}]')
         for lifted in report.lifted:
             lines.append(f'- To long-term memory: "{lifted.statement}" ({lifted.why})')
+        for withdrawn in report.withdrawn:
+            lines.append(f'- Withdrawn: "{withdrawn.statement}"')
+            lines.append(f'  Quote: "{withdrawn.quote}"')
+        for expired in report.expired:
+            lines.append(f'- Expired: "{expired.statement}"')
         for rolled in report.rolled_off:
             lines.append(f'- Rolled off: "{rolled.statement}"')
+        for refused in report.refused:
+            lines.append(
+                f'- Not withdrawn: "{refused.statement}" (rule: {refused.rule} - {refused.reason})'
+            )
     else:
         lines.append("None.")
     lines.append("")
@@ -329,6 +346,8 @@ def has_changes(rep: apply.ProjectRunReport) -> bool:
         or rep.archived_lines
         or rep.lifted
         or rep.rolled_off
+        or rep.withdrawn
+        or rep.expired
     )
 
 

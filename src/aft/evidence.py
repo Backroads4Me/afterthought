@@ -117,7 +117,7 @@ def store(
         )
 
 
-def entries(config: Config, session_id: str) -> list[Entry]:
+def entries(config: Config, session_id: str, agent: str | None = None) -> list[Entry]:
     """The archived entries of one session, oldest first.
 
     What `aft trace` and `aft redigest` read: the same `Entry` records the filter handed
@@ -127,6 +127,12 @@ def entries(config: Config, session_id: str) -> list[Entry]:
     sharing one timestamp - a Claude message and the tool results split out of it - keep
     the order they were written in.
 
+    The table is keyed by the session and entry ids alone, so two agents' sessions can
+    share one id. ``agent`` narrows the read to that agent's rows when given, and a reader
+    that means one session of one agent - the reconcile naming the session its digest
+    names (DESIGN 6) - says which. Left out, the read takes every row the id holds, which
+    is what a reader with no agent in hand wants.
+
     A session with no rows - forgotten, purged, never captured - reads as no entries
     rather than as an error, which is the answer `aft trace` reports when only the
     digest's quote survives (DESIGN 14).
@@ -134,16 +140,26 @@ def entries(config: Config, session_id: str) -> list[Entry]:
     session_id = _require_name(session_id, "session id")
     if not _db_path(config).exists():
         return []
-    with _reading(config) as conn:
-        rows = conn.execute(
+    if agent is None:
+        statement = (
             "SELECT session_id, entry_id, time, role, text, is_error"
-            " FROM evidence WHERE session_id = ? ORDER BY time, rowid",
-            (session_id,),
-        ).fetchall()
+            " FROM evidence WHERE session_id = ? ORDER BY time, rowid"
+        )
+        parameters = (session_id,)
+    else:
+        statement = (
+            "SELECT session_id, entry_id, time, role, text, is_error"
+            " FROM evidence WHERE session_id = ? AND agent = ? ORDER BY time, rowid"
+        )
+        parameters = (session_id, agent)
+    with _reading(config) as conn:
+        rows = conn.execute(statement, parameters).fetchall()
     return [_entry(row) for row in rows]
 
 
-def find_quote(config: Config, session_id: str, entry_id: str, quote: str) -> bool:
+def find_quote(
+    config: Config, session_id: str, entry_id: str, quote: str, agent: str | None = None
+) -> bool:
     """Whether ``quote`` is the words of one archived entry, spacing aside.
 
     The digest drops a fact whose quote does not appear in the entry it cites, compared
@@ -151,6 +167,10 @@ def find_quote(config: Config, session_id: str, entry_id: str, quote: str) -> bo
     it, wrapping included, become single spaces on both sides, while letters, case and
     punctuation still have to match. A matcher loose about those would let a fact stand
     on words nobody said, which is the one thing a quote is there to prevent.
+
+    ``agent`` narrows the row to one agent's session when given, for the same reason
+    ``entries`` takes it: the key is the ids alone, and the reader that names the session
+    by its digest names the agent with it.
 
     No match is the answer, never an error, when the session or the entry is not in the
     archive: the digest's rule is to drop the fact. A quote that holds nothing but
@@ -163,11 +183,14 @@ def find_quote(config: Config, session_id: str, entry_id: str, quote: str) -> bo
         return False
     if not _db_path(config).exists():
         return False
+    if agent is None:
+        statement = "SELECT text FROM evidence WHERE session_id = ? AND entry_id = ?"
+        parameters = (session_id, entry_id)
+    else:
+        statement = "SELECT text FROM evidence WHERE session_id = ? AND entry_id = ? AND agent = ?"
+        parameters = (session_id, entry_id, agent)
     with _reading(config) as conn:
-        row = conn.execute(
-            "SELECT text FROM evidence WHERE session_id = ? AND entry_id = ?",
-            (session_id, entry_id),
-        ).fetchone()
+        row = conn.execute(statement, parameters).fetchone()
     if row is None:
         return False
     return wanted in _spaced(_unpack(row[0], entry_id))
