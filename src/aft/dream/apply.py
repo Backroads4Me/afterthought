@@ -174,9 +174,7 @@ class ProjectRunReport:
     error: str | None = None
 
 
-def _record_of(
-    config: Config, digest_path: Path
-) -> tuple[str, str, queue.ProjectRecord] | None:
+def _record_of(config: Config, digest_path: Path) -> tuple[str, str, queue.ProjectRecord] | None:
     """The session-start record a digest's session carries, with the record's key (F49).
 
     A digest's name holds the agent and session that made it, and the record says which

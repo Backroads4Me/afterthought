@@ -26,6 +26,7 @@ from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.filter import filter_entries
 from aft.readers import CLAUDE, PI, Entry
+from aft.registry import Registry
 
 # A hook and a digest worker are separate interpreters, so where a test needs a second
 # process it starts one, with its own imports and its own connection to the queue file.
@@ -999,3 +1000,54 @@ def test_the_sweep_looks_back_only_over_its_window(
 def test_watching_begins_once(cfg: Config) -> None:
     assert queue.watching_since(cfg, NOW) == NOW
     assert queue.watching_since(cfg, NOW + timedelta(days=1)) == NOW
+
+
+# A session-start record settles its slug at write time (DESIGN 7, F49)
+
+
+def test_a_records_slug_is_settled_against_the_registry_and_the_other_paths_claims(
+    cfg: Config, tmp_path
+) -> None:
+    """Two directories of one name never share a digest directory: the second session's
+    record is written under the name its parent gives it, decided inside the same write
+    that records it, and a re-record of the same session keeps what was settled."""
+    registry = Registry(cfg.registry_path)
+    first = (tmp_path / "work" / "foo").resolve()
+    first.mkdir(parents=True)
+    second = (tmp_path / "yard" / "foo").resolve()
+    second.mkdir(parents=True)
+
+    assert queue.record_project(cfg, "claude", "s-1", None, "foo", first, registry=registry)
+    assert queue.record_project(cfg, "claude", "s-2", None, "foo", second, registry=registry)
+    one = queue.recorded_project(cfg, "claude", "s-1")
+    two = queue.recorded_project(cfg, "claude", "s-2")
+    assert (one.slug, one.path) == ("foo", str(first))
+    assert (two.slug, two.path) == ("yard-foo", str(second))
+
+    # The digest that settled the record rewrites it with what it filed under, and the
+    # write keeps it: this session's own path does not count as another claim.
+    assert queue.record_project(cfg, "claude", "s-2", None, "yard-foo", second, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-2").slug == "yard-foo"
+
+
+def test_a_record_that_names_no_path_still_holds_its_name(cfg: Config, tmp_path) -> None:
+    """A record an earlier build wrote carries a slug and no directory. The name it holds
+    stays taken, so a later directory of that name does not file its digests over the
+    first one's."""
+    registry = Registry(cfg.registry_path)
+    plain = (tmp_path / "other" / "foo").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "other-foo"
+
+
+def test_a_registered_projects_name_is_not_a_free_slug(cfg: Config, tmp_path) -> None:
+    """The registry answers for the names it holds: a session in a directory of a taken
+    name settles under the name its parent gives it (DESIGN 7, F49)."""
+    registry = Registry(cfg.registry_path)
+    registry.add("foo")
+    plain = (tmp_path / "field" / "foo").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-1", None, "foo", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-1").slug == "field-foo"

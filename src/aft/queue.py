@@ -344,7 +344,8 @@ def _settled_slug(conn: sqlite3.Connection, registry: Registry, root: Path, slug
     parent directory names until nothing claims the name.
     """
     taken = {
-        held for held, named in conn.execute("SELECT slug, path FROM session_projects")
+        held
+        for held, named in conn.execute("SELECT slug, path FROM session_projects")
         if named != str(root)
     }
     return unique_slug(root, registry, base=slug, taken=taken)
@@ -359,8 +360,6 @@ def recorded_project(config: Config, agent: str, session_id: str) -> ProjectReco
             (agent, session_id),
         ).fetchone()
     return ProjectRecord(row[0], row[1], row[2]) if row else None
-
-
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:

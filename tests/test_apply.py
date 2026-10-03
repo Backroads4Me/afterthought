@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from aft import config as configmod
-from aft import evidence, inject, lint, page, pagewrite, queue, vault
+from aft import evidence, inject, keys, lint, page, pagewrite, queue, vault
 from aft.dream import apply, rules, schedule
 from aft.events import SESSION_END, SessionEvent
 from aft.registry import Registry, path_key
@@ -2578,6 +2578,7 @@ def test_a_failing_project_leaves_the_next_project_alone(initialized, home, fake
     ] == []
     assert run_git(["status", "--porcelain"], cfg.vault) == ""
 
+
 def keep_out_of_the_idle_report(cfg: configmod.Config, tmp_path: Path, slug: str = "widget"):
     """A project the dream's idle report has nothing to say about, so a test counts only its
     own run's commits (DESIGN 7, F49). The session it records ended outside the quiet
@@ -2646,7 +2647,9 @@ def test_a_dream_registers_the_directory_a_session_ran_in(initialized, home, fak
     workspace = (tmp_path / "workspace").resolve()
     workspace.mkdir()
     assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
-    digest_path = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY)
+    digest_path = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
     fake.script = [reply("add", None, "add fact")]
 
     rep = apply.run_project(cfg, "workspace", [digest_path], now=NOW)
@@ -2671,12 +2674,16 @@ def test_a_dream_finds_a_registered_project_by_path(initialized, home, fake, tmp
     workspace = (tmp_path / "workspace").resolve()
     workspace.mkdir()
     assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
-    first = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY)
+    first = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
     fake.script = [reply("add", None, "first fact")]
     apply.run_project(cfg, "workspace", [first], now=NOW)
 
     assert queue.record_project(cfg, "claude", "s-ws2", None, "workspace", workspace)
-    second = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY)
+    second = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY
+    )
     fake.script = [reply("add", None, "second fact")]
     rep = apply.run_project(cfg, "workspace", [second], now=NOW)
 
@@ -2685,6 +2692,92 @@ def test_a_dream_finds_a_registered_project_by_path(initialized, home, fake, tmp
     assert len(registry.projects) == 1
     overview = (cfg.vault / "projects/workspace/overview.md").read_text()
     assert overview.count("The tester prefers plain hyphens.") == 2
+
+
+def test_a_project_registered_before_git_init_keeps_its_memory_after(
+    initialized, home, fake, tmp_path
+):
+    """The path decides (DESIGN 7, F49): a project the dream registered while its directory
+    was plain keeps that directory as its own once the person runs `git init` in it, and the
+    next session's digest is dreamed into the same project."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
+    first = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY
+    )
+    fake.script = [reply("add", None, "first fact")]
+    apply.run_project(cfg, "workspace", [first], now=NOW)
+    registry = Registry.load(cfg.registry_path)
+    assert len(registry.projects) == 1
+
+    make_repo(workspace)
+    resolution = keys.resolve(workspace, Registry.load(cfg.registry_path), cfg.host)
+    assert (resolution.kind, resolution.project.slug) == (keys.PATH, "workspace")
+
+    assert queue.record_project(cfg, "claude", "s-ws2", None, "workspace", workspace)
+    second = _unregistered_digest(
+        cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY
+    )
+    fake.script = [reply("add", None, "second fact")]
+    rep = apply.run_project(cfg, "workspace", [second], now=NOW)
+
+    assert rep is not None and rep.project == "workspace"
+    registry = Registry.load(cfg.registry_path)
+    assert len(registry.projects) == 1
+    overview = (cfg.vault / "projects/workspace/overview.md").read_text()
+    assert overview.count("The tester prefers plain hyphens.") == 2
+
+
+def test_the_dream_names_idle_projects_in_the_days_report(initialized, home, fake, tmp_path):
+    """The dream's report names a project no session has touched in 90 days (DESIGN 7,
+    F49), under its own commit, and says nothing about the project it dreamed."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register widget")
+    keep_out_of_the_idle_report(cfg, tmp_path)
+
+    idle_repo = (tmp_path / "idle-gizmo").resolve()
+    idle_repo.mkdir()
+    registry = Registry.load(cfg.registry_path)
+    gizmo = registry.add("idle-gizmo", "Idle gizmo")
+    registry.add_path(gizmo, path_key("testhost", idle_repo))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register idle-gizmo")
+    queue.record_project(cfg, "claude", "s-idle-gizmo", gizmo.id, "idle-gizmo", idle_repo)
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s-idle-gizmo",
+            cwd=idle_repo,
+            transcript_path=None,
+            time=NOW - timedelta(days=100),
+            detail=None,
+        ),
+    )
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- State. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "state"}],
+    )
+    write_digest(cfg, "widget", "d1", facts=[], sources=[])
+
+    schedule.run(cfg, now=NOW)
+
+    report_path = cfg.vault / "reports" / "2026" / "10" / f"{NOW.date().isoformat()}.md"
+    text = report_path.read_text()
+    assert "- idle-gizmo: no session since" in text
+    assert "widget: no session" not in text and "widget: recorded paths" not in text
+    assert run_git(["log", "--format=%s"], cfg.vault).splitlines()[0] == (
+        "aft: report idle and gone"
+    )
 
 
 def test_a_dream_does_not_attach_a_digest_to_a_project_that_merely_has_its_name(
@@ -2756,7 +2849,9 @@ def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
     second = (tmp_path / "yard" / "foo").resolve()
     second.mkdir(parents=True)
     assert queue.record_project(cfg, "claude", "s-f2", None, "foo", second)
-    second_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-f2", "claude", "s-f2", TODAY)
+    second_digest = _unregistered_digest(
+        cfg, "foo", f"{TODAY}-claude-s-f2", "claude", "s-f2", TODAY
+    )
     fake.script = [reply("add", None, "second foo")]
     rep = apply.run_project(cfg, "foo", [second_digest], now=NOW)
 

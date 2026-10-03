@@ -126,5 +126,6 @@ def _refused(root: Path, never: Sequence[str]) -> bool:
         return True
     return is_under(root, tuple(never))
 
+
 def _within(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents

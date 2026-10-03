@@ -248,3 +248,77 @@ def test_a_chosen_home_registers_a_temporary_project_without_the_flag(
 
     assert [p.slug for p in Registry.load(initialized.registry_path).projects] == ["widget"]
     shutil.rmtree(repo)
+
+
+# The unfiled backfill's command surface (DESIGN 7, F49)
+
+
+def test_redigest_unfiled_dry_run_lists_sessions_and_writes_nothing(
+    initialized, monkeypatch, capsys
+):
+    """The dry run names each session and what a rebuild would charge, and writes nothing
+    (DESIGN 7, F49)."""
+    import aft.digest
+
+    monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(
+        aft.digest,
+        "redigest_estimate",
+        lambda config, session_id: 1234 if session_id == "u1" else None,
+    )
+    assert main(["redigest", "--unfiled", "--dry-run"]) == 0
+    assert capsys.readouterr().out == (
+        "u1\t~1234 tokens\nu2\tno archived entries\n2 session(s), ~1234 tokens\n"
+    )
+    assert run_git(["log", "--format=%s"], initialized.vault) == "aft: initialize vault"
+
+
+def test_redigest_unfiled_stops_at_the_day_budget(initialized, monkeypatch, capsys):
+    """A day whose token budget is spent starts no rebuild; the sessions still waiting are
+    said so, and the command leaves them for a day with room in it (DESIGN 13, F49)."""
+    import aft.digest
+    import aft.model
+
+    monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    monkeypatch.setattr(aft.model, "tokens_used_today", lambda config, now: 2**40)
+    rebuilt: list[str] = []
+    monkeypatch.setattr(
+        aft.digest,
+        "redigest",
+        lambda config, session_id, now=None, unfiled=False: rebuilt.append(session_id),
+    )
+    assert main(["redigest", "--unfiled"]) == 1
+    out = capsys.readouterr().out
+    assert "token budget" in out and "2 session(s) wait" in out
+    assert rebuilt == []
+
+
+def test_redigest_unfiled_names_a_failing_session_and_carries_on(initialized, monkeypatch, capsys):
+    """A session that refuses for its own reason is named and the backfill goes on to the
+    rest (DESIGN 7, F49)."""
+    import aft.digest
+
+    monkeypatch.setattr(aft.digest, "unfiled_sessions", lambda config: ["u1", "u2"])
+    seen: list[str] = []
+
+    def redigest(config, session_id, now=None, unfiled=False):
+        seen.append(session_id)
+        if session_id == "u1":
+            raise aft.digest.DigestError("no archived evidence")
+        return aft.digest.Digest(
+            path="digests/fieldwork/2026/10/x.md", facts=(), dropped=(), watermark="e9"
+        )
+
+    monkeypatch.setattr(aft.digest, "redigest", redigest)
+    assert main(["redigest", "--unfiled"]) == 1
+    captured = capsys.readouterr()
+    assert "u1: no archived evidence" in captured.err
+    assert "rebuilt digest at digests/fieldwork/2026/10/x.md" in captured.out
+    assert seen == ["u1", "u2"]
+
+
+def test_redigest_without_a_session_id_prints_usage(initialized, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["redigest"])
+    assert excinfo.value.code == 2
+    assert "usage: aft redigest" in capsys.readouterr().err

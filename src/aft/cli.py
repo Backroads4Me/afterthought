@@ -928,7 +928,8 @@ def cmd_redigest(args) -> int:
         raise UsageError("--dry-run lists the unfiled backfill; give --unfiled with it")
     if args.session_id is None:
         # The parser keeps the id optional so --unfiled can name the backfill alone (F49);
-        # without it a session id is what rebuilds.
+        # without it a session id is what rebuilds, and a missing one is an argparse-style
+        # usage exit like a subcommand's missing argument.
         print(
             "usage: aft redigest <session-id> | aft redigest --unfiled [--dry-run]", file=sys.stderr
         )
@@ -965,9 +966,10 @@ def _redigest_unfiled(config: Config, args) -> int:
     budget = config.settings.work.daily_token_budget
     now = datetime.now(UTC)
     rebuilt = 0
+    failed = 0
     for session_id in sessions:
         if model.tokens_used_today(config, now) >= budget:
-            waiting = len(sessions) - rebuilt
+            waiting = len(sessions) - rebuilt - failed
             print(
                 f"the day's token budget of {budget} tokens is spent;"
                 f" {waiting} session(s) wait for a day with room in it"
@@ -977,10 +979,13 @@ def _redigest_unfiled(config: Config, args) -> int:
             wrote = digest.redigest(config, session_id, now=now, unfiled=True)
         except digest.DigestError as exc:
             print(f"{session_id}: {exc}", file=sys.stderr)
+            failed += 1
             continue
         rebuilt += 1
         print(f"rebuilt digest at {wrote.path}")
-    return 0
+    # A session that failed for its own reason is named above, and the rest went on; the
+    # run still says it did not finish (DESIGN 7, F49).
+    return 1 if failed else 0
 
 
 def cmd_search(args) -> int:
@@ -1175,7 +1180,9 @@ def cmd_install_timer(args) -> int:
     elif change.active:
         state = "disabled and stopped" if args.uninstall else "enabled and started"
         print(f"{state} {systemd_install.TIMER_NAME}")
-    elif change.active is False:
+    elif change.active is not None and not change.active:
+        # ``active`` is False when systemd answered and refused, and None when there was
+        # nothing to enable; the commands branch below speaks for None.
         print(f"systemd refused: {change.problem}", file=sys.stderr)
         print("run these yourself:", file=sys.stderr)
         for command in change.commands:

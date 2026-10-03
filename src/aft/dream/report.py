@@ -419,13 +419,15 @@ IDLE_DAYS = 90
 def idle_and_gone(config: Config, now: datetime | None = None) -> list[str]:
     """One line per project that is idle, or whose recorded paths are all gone (F49).
 
-    A project is idle when the queue holds no session for it at all, or its newest is
-    older than ``IDLE_DAYS``: the session-start records are the project's own account of
-    its sessions, and the events' directories - resolved the way the quiet period resolves
-    them - answer for the sessions that left no record. A project is gone when the registry
-    records at least one path for it on this host and every one of them is missing from
-    the disk. An archived project is already out of the way and is not named. Nothing is
-    archived or forgotten here; the lines wait for the person's go-ahead (DESIGN 10, F49).
+    A project is idle when its newest session in the queue is older than ``IDLE_DAYS``:
+    the session-start records are the project's own account of its sessions, and the
+    events' directories - resolved the way the quiet period resolves them - answer for the
+    sessions that left no record. A project the queue has never heard of has nothing to
+    date its line with, so it is not named, and a quiet dream stays quiet. A project is
+    gone when the registry records at least one path for it on this host and every one of
+    them is missing from the disk. An archived project is already out of the way and is
+    not named. Nothing is archived or forgotten here; the lines wait for the person's
+    go-ahead (DESIGN 10, F49).
     """
     now = now or datetime.now(UTC)
     registry = Registry.load(config.registry_path)
@@ -452,9 +454,7 @@ def idle_and_gone(config: Config, now: datetime | None = None) -> list[str]:
             ),
             default=None,
         )
-        if last is None:
-            lines.append(f"{project.slug}: no session in the queue")
-        elif last < cutoff:
+        if last is not None and last < cutoff:
             lines.append(f"{project.slug}: no session since {last.date().isoformat()}")
     return lines
 
@@ -483,6 +483,7 @@ def write_idle_gone(config: Config, now: datetime | None = None) -> Path | None:
             existing += "\n"
         section = existing + "\n" + section
     else:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
         section = f'---\ntype: Dream Report\ntitle: "{date_str}"\n---\n\n' + section
     report_path.write_text(section, encoding="utf-8")
     vault.commit(

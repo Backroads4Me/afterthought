@@ -714,6 +714,7 @@ def propose_facts(
             # `_demand_registered` refused any name the registry does not know, so the project
             # landing here has a slug to write under and an id to be named by: neither is invented.
             project = reg.by_slug(raw_slug) or reg.by_id(raw_slug)
+            assert project is not None  # _demand_registered refused any unknown name
             proj_id = project.id
             canonical_slug = project.slug
 
