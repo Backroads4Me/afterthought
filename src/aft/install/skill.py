@@ -60,6 +60,7 @@ SHIPPED_SHA256 = {
             "020003715b38d6e174f9b5d4005af5324e09087f4409386cb725941d35c3e6a9",
             "b381fc9f7d64187074727ecd3244ef31fd1d196bbb32e6e139bade379c269ddd",
             "a9f13603fc9e3dd8f7606e13fdb7b6d758edfcfbb3b3dfeac316b90a08427645",
+            "918698eb67d71cd5ad3f85e834d70ab79374bfd9d84fd29290f3b6dda12ef04f",
         }
     ),
     "library-import.md": frozenset(

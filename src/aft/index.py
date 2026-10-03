@@ -157,10 +157,12 @@ COLLECTIONS = (PAGES, ARCHIVE, DIGESTS, EVIDENCE, REPORTS, LIBRARY)
 #: The collections whose rows with no project id are every project's memory: DESIGN 6's global
 #: pages, a reference page that covers nothing yet, and the archive, which mirrors the pages: a
 #: global page's line that left memory is shared history exactly as the line was shared memory.
-#: Whoever queries the index takes a row with no id from one of these as shared; from any other
-#: collection an id-less row is text that was never filed under a project at all - a session
-#: that resolved to none (DESIGN 7 step 4), a digest under a slug no registry answers for - and
-#: is not that project's memory.
+#: A narrowed query (`aft search --project`, DESIGN 10) takes a row with no id from one of
+#: these as shared memory; from any other collection an id-less row is unfiled text - a
+#: session that resolved to none (DESIGN 7 step 4), a digest under a slug no registry answers
+#: for - which is no project's memory and answers a project's query never. The default search
+#: reaches every project that is not archived (F50), so it asks the id-less rows of the other
+#: collections too, as the unfiled group and not as any project's.
 GLOBAL_COLLECTIONS: tuple[str, ...] = (PAGES, ARCHIVE)
 
 #: The collections whose rows name no project because they span them all: one dream report day
@@ -1082,12 +1084,13 @@ def _project_scopes(
     and the registry turns that slug into an id; a slug the registry does not know is no error
     and gives no id.
 
-    A row with no id is every project's memory - the global pages of DESIGN 6, a report day,
-    a reference page that covers nothing yet, or a digest of a directory that belongs to no
-    project - and not a page whose project went missing. A digest filed under a slug the
-    registry does not answer for lands here too, so no id says nothing about which of the
-    two it is, and `aft search` reads an id-less row as shared memory only for the collections
-    where a page could not have a project to begin with.
+    A row with no id is not one project's memory: a global page (DESIGN 6), a page whose
+    line left memory, a digest of a directory that belongs to no project, or a slug the
+    registry does not answer for. Under F50's default the search reaches every project that
+    is not archived (DESIGN 10), so an id-less row answers from where it stands and is named
+    for what it is rather than for a project: global in the collections a page could be
+    shared through (`GLOBAL_COLLECTIONS`), unfiled elsewhere. A query narrowed to one project
+    takes an id-less row as its shared memory only in those same collections.
     """
     aft = (frontmatter or {}).get("aft")
     if isinstance(aft, dict):
