@@ -11,6 +11,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from aft import config as configmod
 from aft import digest, evidence, lint, page, queue
 from aft.dream import apply, schedule
 from aft.readers import USER, Entry
@@ -207,6 +208,52 @@ def test_the_backfill_files_a_session_whose_directory_is_still_plain(
     assert not (cfg.vault / "digests" / digest.UNFILED).exists()
     record = queue.recorded_project(cfg, "c", "u1")
     assert (record.slug, record.path) == ("fieldwork", str(plain))
+
+
+def test_the_backfill_never_refiles_a_home_subdirectory_or_the_downloads_into_home(
+    initialized, home, fake, tmp_path, monkeypatch
+):
+    """home is the home directory itself and matches nothing below it, and the refusals are
+    answered before the registry is looked at (DESIGN 7, F49): the backfill refiles a
+    session in a subdirectory of a registered home under that subdirectory's own project,
+    and leaves the sessions of ~/Downloads and an excluded path unfiled instead of filing
+    them into home."""
+    from aft import vault
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    home_dir = tmp_path / "homedir"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    notes = home_dir / "notes"
+    downloads = home_dir / "Downloads" / "x"
+    private = home_dir / "private"
+    for directory in (notes, downloads, private):
+        directory.mkdir(parents=True)
+    registry = Registry.load(cfg.registry_path)
+    project = registry.add("home", "Home")
+    registry.add_path(project, path_key("testhost", home_dir))
+    registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "aft: register home")
+
+    _unfiled_session(cfg, "u1", "notes", notes)
+    _unfiled_session(cfg, "u2", "x", downloads)
+    _unfiled_session(cfg, "u3", "private", private)
+    text = (cfg.home / "config.toml").read_text(encoding="utf-8")
+    (cfg.home / "config.toml").write_text(text + f'\n[capture]\nexclude_paths = ["{private}"]\n')
+    cfg = configmod.load()
+
+    assert digest.stays_unfiled(cfg, "u2")
+    assert digest.stays_unfiled(cfg, "u3"), "an excluded path under home is not home"
+    assert not digest.stays_unfiled(cfg, "u1")
+
+    fake.script = [Reply(content=EMPTY_ANSWER)]
+    wrote = digest.redigest(cfg, "u1", now=NOW, unfiled=True)
+    assert wrote.path.startswith("digests/notes/"), "the subdirectory files as its own project"
+    assert not (cfg.vault / "digests/home").exists(), "nothing was refiled into home"
+    record = queue.recorded_project(cfg, "c", "u1")
+    assert (record.slug, record.path) == ("notes", str(notes))
+    names = [p.name for p in (cfg.vault / "digests" / digest.UNFILED).rglob("*.md")]
+    assert f"{TODAY}-c-u2.md" in names and f"{TODAY}-c-u3.md" in names
 
 
 def test_the_backfill_names_the_sessions_that_still_have_an_archive(initialized, tmp_path):

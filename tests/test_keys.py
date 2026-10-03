@@ -217,6 +217,52 @@ def test_a_path_capture_excludes_is_no_project(tmp_path):
     assert keys.resolve(excluded, registry, HOST, never=[str(excluded)]).kind == keys.NONE
 
 
+def test_a_subdirectory_of_a_registered_home_is_a_project_of_its_own(tmp_path, monkeypatch):
+    """home is the home directory itself and matches only that directory (DESIGN 7, F49): a
+    plain directory below it resolves as a project of its own, not as home."""
+    home = tmp_path / "home"
+    notes = home / "notes"
+    notes.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    registry = registry_with(tmp_path, home={"paths": [home]})
+    result = keys.resolve(notes, registry, HOST)
+    assert (result.kind, result.slug, result.root) == (
+        keys.UNREGISTERED,
+        "notes",
+        notes.resolve(),
+    )
+
+
+def test_downloads_and_an_excluded_path_stay_none_under_a_registered_home(tmp_path, monkeypatch):
+    """The never-a-project refusals are answered before the registry is looked at (DESIGN 7,
+    F49): a registered path above them, home included, does not claim them."""
+    home = tmp_path / "home"
+    downloads = home / "Downloads" / "x"
+    downloads.mkdir(parents=True)
+    private = home / "private"
+    private.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    registry = registry_with(tmp_path, home={"paths": [home]})
+    assert keys.resolve(downloads, registry, HOST).kind == keys.NONE
+    assert keys.resolve(private, registry, HOST, never=[str(private)]).kind == keys.NONE
+
+
+def test_a_registered_path_under_the_temporary_directory_claims_nothing(tmp_path, monkeypatch):
+    """The refusal comes before any lookup (DESIGN 7, F49): even a project registered under
+    the system temporary directory answers none from its own subdirectories, so a scratch
+    tree never grows a project out of what stands above it."""
+    temp = tmp_path / "system-temp"
+    scratch = temp / "scratch"
+    (scratch / "sub").mkdir(parents=True)
+    monkeypatch.setattr("tempfile.tempdir", str(temp))
+    registry = registry_with(tmp_path, scratch={"paths": [scratch]})
+    assert keys.resolve(scratch / "sub", registry, HOST).kind == keys.NONE
+    # The path the registry itself holds stays that project's own (DESIGN 7, F49): the
+    # refusals keep a directory from becoming a project, and registering it is the
+    # person's override of that.
+    assert keys.resolve(scratch, registry, HOST).kind == keys.PATH
+
+
 def test_unique_slug_prefixes_parent_names_until_the_name_is_free(tmp_path):
     first = tmp_path / "work" / "foo"
     first.mkdir(parents=True)

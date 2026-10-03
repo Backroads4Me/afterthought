@@ -42,6 +42,16 @@ class Resolution:
         return self.project is not None
 
 
+def _held_paths(registry: Registry, host: str) -> set[Path]:
+    """The paths this host's registry holds projects at, as the registry states them."""
+    return {
+        split_key(key)[1]
+        for project in registry.projects
+        for key in project.paths
+        if split_key(key)[0] == host
+    }
+
+
 def resolve(
     cwd: Path,
     registry: Registry,
@@ -51,10 +61,20 @@ def resolve(
 ) -> Resolution:
     """Resolve ``cwd`` to a project.
 
+    The directory is refused first, before anything is looked up: a directory under the
+    system temporary directory, under ``~/Downloads``, or under one of ``never`` - the
+    capture exclusions - never becomes a project, whatever stands above it in the registry
+    (DESIGN 7), so no registered path claims it and its sessions file as unfiled. One path
+    the registry itself holds is exempt: the refusals keep a directory from becoming a
+    project, and registering it is the person's override of that, so a project registered
+    under the system temporary directory still answers for its own path (DESIGN 7, F49).
+
     1. Resolve symlinks, and map a linked worktree onto its main checkout.
     2. The longest registered ``host:path`` containing the directory wins. Inside a git
        repository, a registered path above the repository does not count, so a nested
-       repository or a submodule is never claimed by the repository around it.
+       repository or a submodule is never claimed by the repository around it. ``home``'s
+       path is the home directory itself, which matches only that directory, never one
+       below it.
     3. Otherwise a project with the same normalized ``origin`` remote wins, and the
        repository's path is recorded as an alias through ``on_alias``.
     4. Otherwise the directory is an unregistered project of its own: the repository's main
@@ -64,10 +84,6 @@ def resolve(
        project would be registered at, which the resolution carries to the session-start
        record and the dream registers from. The home directory itself is the project
        ``home``.
-
-    A directory under the system temporary directory, under ``~/Downloads``, or under one of
-    ``never`` - the capture exclusions - never becomes a project, whatever it holds: it
-    resolves to none and its sessions file as unfiled.
     """
     real = Path(os.path.realpath(cwd))
     info = gitutil.repo_info(real)
@@ -76,12 +92,32 @@ def resolve(
     if info is not None:
         effective = info.main / real.relative_to(info.toplevel)
         boundary = info.main
-
+    # The directory the project would be registered at: a repository is its main checkout,
+    # anything else is the directory itself (DESIGN 7 step 4).
+    root = boundary if boundary is not None else real
+    # The never-a-project refusals are answered before the registry is looked at, so a
+    # scratch directory never becomes a project, whatever stands above it (DESIGN 7, F49).
+    # One exception: a path the registry itself holds stays that project's own. The
+    # refusals keep a directory from becoming a project, and the registry is where the
+    # person overrides that - `aft project add --allow-temp` being the flag for it - so a
+    # project registered under the system temporary directory still answers for its own
+    # path, while its subdirectories do not.
+    if root not in _held_paths(registry, host) and _refused(root, never):
+        return Resolution(NONE, effective)
+    home_dir = Path.home().resolve()
     best: tuple[int, Project, Path] | None = None
     for project in registry.projects:
         for key in project.paths:
             key_host, path = split_key(key)
-            if key_host != host or not _within(effective, path):
+            if key_host != host:
+                continue
+            if path == home_dir:
+                # home is the home directory itself: its path matches only that directory,
+                # never one below it (DESIGN 7), so a plain directory in the home stays a
+                # project of its own instead of being swallowed.
+                if effective != path:
+                    continue
+            elif not _within(effective, path):
                 continue
             if boundary is not None and not _within(path, boundary):
                 continue
@@ -100,12 +136,7 @@ def resolve(
                     on_alias(project, key)
                 return Resolution(REMOTE, effective, project, project.slug, boundary, key)
 
-    # The directory the project would be registered at: a repository is its main checkout,
-    # anything else is the directory itself (DESIGN 7 step 4).
-    root = boundary if boundary is not None else real
-    if _refused(root, never):
-        return Resolution(NONE, effective)
-    if root == Path.home().resolve():
+    if root == home_dir:
         # The home directory itself is the project `home` (DESIGN 7).
         return Resolution(UNREGISTERED, effective, None, "home", root)
     return Resolution(UNREGISTERED, effective, None, unique_slug(root, registry), root)
