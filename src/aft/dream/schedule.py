@@ -1,8 +1,11 @@
 """When the dream runs, and on what (DESIGN 9, "A run", step 1).
 
-``run`` is ``aft dream``. It exits at once when no digest is waiting; otherwise it takes
-the vault lock and holds it for the whole run, so no digest, registry change or other
-dream lands in the vault while this one reads and writes it.
+``run`` is ``aft dream``. It takes the vault lock and holds it for the whole run, so no
+digest, registry change or other dream lands in the vault while this one reads and writes
+it. With nothing waiting for any project it does one piece of maintenance and stops: the
+short-term lines whose ``dream.short_term_days`` days are spent are expired for every
+registered project with a recent.md and nothing waiting (DESIGN 6, R10), because a
+project whose sessions stopped gets no run to expire them.
 
 A digest is waiting until the dream marks it consumed with ``aft.consumed`` in its
 frontmatter (M4.5). A project with waiting digests runs only once its sessions have been
@@ -12,10 +15,11 @@ for any directory that resolves to it.
 Before any project runs, the vault's uncommitted changes are looked at, because the only
 writer that leaves changes uncommitted is a person editing the vault by hand. If any of
 them was modified within the quiet period, the person may still be typing, so no project
-runs this time. Otherwise they are committed on their own as ``checkpoint: human edits``,
-so a dream commit never carries a person's bytes and each can be reverted alone. The
-bare bullets the person added to fact pages are then tagged ``[stated]`` in a commit of
-their own, citing that checkpoint as their source (R2: your own edit).
+runs and nothing is written this time. Otherwise they are committed on their own as
+``checkpoint: human edits``, so a dream commit never carries a person's bytes and each
+can be reverted alone. The bare bullets the person added to fact pages are then tagged
+``[stated]`` in a commit of their own, citing that checkpoint as their source (R2: your
+own edit).
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from typing import Any
 
 from aft import digest, keys, model, page, pagewrite, queue, vault
 from aft.config import Config
-from aft.dream import shortterm
+from aft.dream import apply, shortterm
 from aft.dream.apply import ProjectRunReport
 from aft.gitutil import git
 from aft.registry import Registry
@@ -76,16 +80,18 @@ class Run:
     over_budget: list[str] = field(default_factory=list)
     """Projects left waiting because the day's token budget was spent (DESIGN 13)."""
 
+    expired: list[str] = field(default_factory=list)
+    """Projects whose short-term memory this run expired as maintenance, with nothing
+    waiting for them (DESIGN 6, R10; BUILD-PLAN F47)."""
+
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
-    """Run the dream once: every quiet project with waiting digests, one at a time."""
+    """Run the dream once: the short-term memory of every project with nothing waiting
+    expired as maintenance, then every quiet project with waiting digests, one at a time."""
     vault.require(config)
-    if not waiting_digests(config.vault):
-        return Run()
     with vault.locked(config):
         now = now or datetime.now(UTC)
         since = now - timedelta(minutes=config.settings.dream.quiet_minutes)
-        # Read again under the lock: another run may have consumed them meanwhile.
         result = Run(waiting=waiting_digests(config.vault))
         activity = last_activity(config)
         for slug in result.waiting:
@@ -93,18 +99,27 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if last is not None and last > since:
                 result.active.append(slug)
         ready = [slug for slug in result.waiting if slug not in result.active]
-        if not ready:
-            return result
         changes = uncommitted(config.vault)
         if any(modified > since for modified in changes.values()):
             result.edited = ready
+            return result
+        if not ready:
+            # No project's digests are up, so the dream has nothing to decide and makes no
+            # checkpoint here: that is a project run's work, and a run with nothing
+            # waiting commits nothing of a person's. The expiry below waits for a clean
+            # vault, so it never carries a hand edit in its own commit.
+            if changes:
+                return result
+            _expire_short_term(config, result, now, None, None)
             return result
         if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
             result.tagged = tag_hand_edits(config, result.checkpoint)
             if result.tagged:
                 result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
-        checkpoint_reported = False
+        checkpoint_reported = _expire_short_term(
+            config, result, now, result.checkpoint, result.tag_commit
+        )
         budget = config.settings.work.daily_token_budget
         for slug in ready:
             # The daily cap counts the dream's model calls with the digests' (DESIGN 13): a
@@ -119,8 +134,6 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                 if process is not None:
                     rep = process(config, slug, result.waiting[slug])
                 else:
-                    from aft.dream import apply
-
                     rep = apply.run_project(config, slug, result.waiting[slug], now=now)
                 result.ran.append(slug)
             except Exception as exc:
@@ -143,6 +156,52 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                 else:
                     result.failures[slug] = f"report not written: {failure}"
         return result
+
+
+def _expire_short_term(
+    config: Config,
+    result: Run,
+    now: datetime,
+    checkpoint: str | None,
+    tag_commit: str | None,
+) -> bool:
+    """Expire the short-term lines whose days are spent, as maintenance, for every
+    registered project with a recent.md and nothing waiting (DESIGN 6, R10).
+
+    A project whose sessions stopped gets no dream run, so its stale lines would wait for a
+    digest that never comes; this expires them instead, through the same expiry a project
+    run applies, one commit per project that changed and one report section naming it. A
+    project with waiting digests is left to its own run, which expires the same lines when
+    it is applied. Returns whether any report section was written.
+    """
+    registry = Registry.load(config.registry_path)
+    reported = False
+    for slug in sorted(project.slug for project in registry.projects):
+        if slug in result.waiting:
+            continue
+        if not (config.vault / "projects" / slug / page.RECENT_PAGE).exists():
+            continue
+        try:
+            expired = apply.expire_short_term(config, slug, now=now)
+        except Exception as exc:
+            result.failures[slug] = str(exc)
+            rep = ProjectRunReport(project=slug, error=str(exc))
+        else:
+            if expired is None:
+                continue
+            rep, paths = expired
+            if vault.commit(config.vault, paths, f"aft: expire short-term memory {slug}"):
+                rep.commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
+            result.expired.append(slug)
+        result.reports[slug] = rep
+        failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
+        if failure is None:
+            reported = True
+        elif slug in result.failures:
+            result.failures[slug] = f"{result.failures[slug]}; its report failed: {failure}"
+        else:
+            result.failures[slug] = f"report not written: {failure}"
+    return reported
 
 
 def _report_run(

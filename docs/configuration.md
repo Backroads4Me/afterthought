@@ -49,6 +49,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 | `dream.interval_minutes` | `30` | How often the timer runs background work. Rerun `aft install timer` after changing it. |
 | `dream.quiet_minutes` | `15` | How long a project must be quiet, with no session events and no hand edits in the vault, before a dream run touches it. |
 | `dream.short_term_sessions` | `5` | How many of a project's sessions short-term memory covers. A line rolls off once its newest source is older than this many sessions, and becomes long-term once its sources are this many sessions apart. At least 1. |
+| `dream.short_term_days` | `7` | Short-term memory also expires by age: a line whose newest source is older than this many days rolls off at the project's next dream run, so a project that stops having sessions does not keep what it was last working with for good. At least 1. |
 
 ## `[work]`
 
