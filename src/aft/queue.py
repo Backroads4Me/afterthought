@@ -33,7 +33,7 @@ from pathlib import Path
 from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
-from aft.registry import path_key
+from aft.registry import Registry, unique_slug
 
 QUEUE_NAME = "queue.sqlite"
 
@@ -296,6 +296,7 @@ def record_project(
     project_id: str | None,
     slug: str,
     path: Path | str | None = None,
+    registry: Registry | None = None,
 ) -> bool:
     """Remember which project a session started in, and where (DESIGN 7).
 
@@ -304,16 +305,24 @@ def record_project(
     session start, and the digest reads it from here when the directory no longer answers.
     ``project_id`` is None for a project the registry does not hold yet, which is named by its
     slug alone; ``path`` is the directory the project would be registered at, which is what
-    the dream registers a still-unregistered project from. A digest that settles an
-    unregistered directory's slug rewrites the record with the slug it filed under, so every
-    digest of the session agrees on one place. A session `aft forget` removed is not recorded
-    again. Returns whether a row was written.
+    the dream registers a still-unregistered project from.
+
+    For an unregistered directory the slug is settled here, inside the same write the record
+    takes, so two sessions starting in two directories of one name cannot both claim it
+    (DESIGN 7, F49): the name is checked against the registry - pass ``registry``, which the
+    callers that resolve directories hold loaded - and against every slug another path's
+    record holds, and parent directory names are prefixed until it is free. A digest that
+    settles an unregistered directory's slug rewrites the record with the slug it filed
+    under, so every digest of the session agrees on one place. A session `aft forget` removed
+    is not recorded again. Returns whether a row was written.
     """
     with _writing(config, busy_timeout_ms=RECORD_BUSY_TIMEOUT_MS) as conn:
         if conn.execute(
             "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (session_id,)
         ).fetchone():
             return False
+        if project_id is None and path is not None and registry is not None:
+            slug = _settled_slug(conn, registry, Path(path), slug)
         conn.execute(
             "INSERT INTO session_projects (agent, session_id, project_id, slug, path)"
             " VALUES (?, ?, ?, ?, ?)"
@@ -322,6 +331,23 @@ def record_project(
             (agent, session_id, project_id, slug, None if path is None else str(path)),
         )
     return True
+
+
+def _settled_slug(conn: sqlite3.Connection, registry: Registry, root: Path, slug: str) -> str:
+    """A slug this directory can file its digests under, decided against the whole claim table.
+
+    Every session-start record is a claim: the slug it holds belongs to the path it names, so
+    a slug another path holds is not free for this one, whatever named it first (DESIGN 7,
+    F49). A record that names no path is one an earlier build wrote, which cannot be told
+    apart from a claim of the same name by a directory now gone, so it is kept as taken too.
+    The registry's own slugs ``unique_slug`` answers for; the walk it makes is prefixed with
+    parent directory names until nothing claims the name.
+    """
+    taken = {
+        held for held, named in conn.execute("SELECT slug, path FROM session_projects")
+        if named != str(root)
+    }
+    return unique_slug(root, registry, base=slug, taken=taken)
 
 
 def recorded_project(config: Config, agent: str, session_id: str) -> ProjectRecord | None:
@@ -335,44 +361,6 @@ def recorded_project(config: Config, agent: str, session_id: str) -> ProjectReco
     return ProjectRecord(row[0], row[1], row[2]) if row else None
 
 
-def holders(config: Config, slug: str) -> list[str]:
-    """Every recorded path that holds this slug, from every session-start record (DESIGN 7).
-
-    A slug is held by another path once a session in it has started: the record is the
-    durable claim that the directory's project files under this name, kept so two
-    directories of one name never share a digest directory before either project is
-    registered.
-    """
-    with _reading(config) as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT path FROM session_projects WHERE slug = ? AND path IS NOT NULL",
-            (slug,),
-        ).fetchall()
-    return [row[0] for row in rows]
-
-
-def recorded_paths(config: Config, host: str, project_id: str) -> list[Path]:
-    """Every recorded path this project's session-start records carry on one host.
-
-    A project that was only ever registered by the dream, from a session that left no
-    record, has no recorded path; an empty answer is what the report reads as "never had
-    one", which is not "its paths are gone".
-    """
-    with _reading(config) as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT path FROM session_projects"
-            " WHERE project_id = ? AND path IS NOT NULL",
-            (project_id,),
-        ).fetchall()
-    paths: list[Path] = []
-    for text, in rows:
-        path = Path(text)
-        try:
-            if path_key(config.host, path) == path_key(host, path):
-                paths.append(path)
-        except ValueError:
-            continue
-    return paths
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:
@@ -714,6 +702,24 @@ def last_events(config: Config) -> dict[Path, datetime]:
         # Every event time is stored as UTC ISO 8601 (_text), so the newest sorts last.
         rows = conn.execute("SELECT cwd, max(event_time) FROM jobs GROUP BY cwd").fetchall()
     return {Path(cwd): datetime.fromisoformat(text) for cwd, text in rows}
+
+
+def project_activity(config: Config) -> dict[str, datetime]:
+    """The newest event time the queue holds for each project a session-start record names.
+
+    Keyed by the record's project id, this is a project's own last sign of life, read from
+    the records rather than from the directories the events ran in, so a removed worktree
+    does not make its project look quieter than it is (DESIGN 7, F49). A record that names
+    no project id - one an earlier build wrote, or a session of no project - is not here;
+    the reader of this answers for those from the directories instead.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT sp.project_id, max(j.event_time) FROM session_projects sp"
+            " JOIN jobs j ON j.agent = sp.agent AND j.session_id = sp.session_id"
+            " WHERE sp.project_id IS NOT NULL GROUP BY sp.project_id"
+        ).fetchall()
+    return {project_id: datetime.fromisoformat(text) for project_id, text in rows}
 
 
 def watching_since(config: Config, now: datetime) -> datetime:

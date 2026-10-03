@@ -144,12 +144,14 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                     result.failures[slug] = f"report not written: {failure}"
         # Projects with nothing new in 90 days and projects whose recorded paths are all
         # gone are named in the report; nothing is archived or forgotten without the
-        # person's go-ahead (DESIGN 10, F49).
+        # person's go-ahead (DESIGN 7, F49).
         from aft.dream import report as reportmod
+
         try:
             reportmod.write_idle_gone(config, now=now)
         except Exception as exc:
             result.failures["idle-gone report"] = str(exc)
+
         return result
 
 

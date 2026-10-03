@@ -252,7 +252,6 @@ class Registry:
         if self.by_slug(new):
             raise RegistryError(f"project {new!r} already exists")
         project.slug = new
-        project.slug = new
         return project
 
     def set_archived(self, slug: str, archived: str = "") -> Project:

@@ -432,8 +432,6 @@ def _injection_block(path: Path) -> str:
 
     config = load()
     registry = Registry.load(config.registry_path)
-    config = load()
-    registry = Registry.load(config.registry_path)
     try:
         result = keys.resolve(
             path, registry, config.host, never=config.settings.capture.exclude_paths
@@ -1372,7 +1370,13 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         from aft import queue
 
         queue.record_project(
-            config, event.agent, event.session_id, project_id, slug, result.root
+            config,
+            event.agent,
+            event.session_id,
+            project_id,
+            slug,
+            result.root,
+            registry=registry,
         )
 
     return block, remember

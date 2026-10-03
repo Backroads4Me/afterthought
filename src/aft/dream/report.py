@@ -29,7 +29,7 @@ from aft import lint, page, queue, vault
 from aft.config import Config
 from aft.dream import apply, schedule
 from aft.model import tokens_used_today
-from aft.registry import Registry
+from aft.registry import Registry, split_key
 
 
 def _lookup_quote(vault_path: Path, page_rel_path: str, source_id: str) -> str:
@@ -419,25 +419,39 @@ IDLE_DAYS = 90
 def idle_and_gone(config: Config, now: datetime | None = None) -> list[str]:
     """One line per project that is idle, or whose recorded paths are all gone (F49).
 
-    A project is idle when the queue holds no session event for it at all, or its newest
-    is older than ``IDLE_DAYS``. A project is gone when at least one session-start record
-    names a path for it on this host and every one of them is missing from the disk. An
-    archived project is already out of the way and is not named. Nothing is archived or
-    forgotten here; the lines wait for the person's go-ahead (DESIGN 10, F49).
+    A project is idle when the queue holds no session for it at all, or its newest is
+    older than ``IDLE_DAYS``: the session-start records are the project's own account of
+    its sessions, and the events' directories - resolved the way the quiet period resolves
+    them - answer for the sessions that left no record. A project is gone when the registry
+    records at least one path for it on this host and every one of them is missing from
+    the disk. An archived project is already out of the way and is not named. Nothing is
+    archived or forgotten here; the lines wait for the person's go-ahead (DESIGN 10, F49).
     """
     now = now or datetime.now(UTC)
     registry = Registry.load(config.registry_path)
     activity = schedule.last_activity(config)
+    recorded = queue.project_activity(config)
     cutoff = now - timedelta(days=IDLE_DAYS)
     lines: list[str] = []
     for project in registry.projects:
         if project.archived:
             continue
-        recorded = queue.recorded_paths(config, config.host, project.id)
-        if recorded and all(not path.exists() for path in recorded):
+        paths: list[Path] = []
+        for key in project.paths:
+            host, path = split_key(key)
+            if host == config.host:
+                paths.append(path)
+        if paths and all(not path.exists() for path in paths):
             lines.append(f"{project.slug}: recorded paths are all gone")
             continue
-        last = activity.get(project.slug)
+        last = max(
+            (
+                moment
+                for moment in (recorded.get(project.id), activity.get(project.slug))
+                if moment is not None
+            ),
+            default=None,
+        )
         if last is None:
             lines.append(f"{project.slug}: no session in the queue")
         elif last < cutoff:

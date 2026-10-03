@@ -174,12 +174,15 @@ class ProjectRunReport:
     error: str | None = None
 
 
-def _record_of(config: Config, digest_path: Path) -> queue.ProjectRecord | None:
-    """The session-start record a digest's session carries, or None (DESIGN 7, F49).
+def _record_of(
+    config: Config, digest_path: Path
+) -> tuple[str, str, queue.ProjectRecord] | None:
+    """The session-start record a digest's session carries, with the record's key (F49).
 
-    A digest's name holds the session that made it, and the record says which project that
-    session started in and where. A later part of one session carries the session's id with
-    a ``-<n>`` on the end, and the record is keyed by the session's own id.
+    A digest's name holds the agent and session that made it, and the record says which
+    project that session started in and where. A later part of one session carries the
+    session's id with a ``-<n>`` on the end, and the record is keyed by the session's own id,
+    which is what comes back so the record can be rewritten against it.
     """
     match = digest._DIGEST_NAME.match(digest_path.stem)
     if match is None:
@@ -189,8 +192,10 @@ def _record_of(config: Config, digest_path: Path) -> queue.ProjectRecord | None:
     if record is None:
         prefix, sep, suffix = session.rpartition("-")
         if sep and suffix.isdigit():
-            record = queue.recorded_project(config, agent, prefix)
-    return record
+            session, record = prefix, queue.recorded_project(config, agent, prefix)
+    if record is None:
+        return None
+    return agent, session, record
 
 
 def _project_of_group(
@@ -199,21 +204,27 @@ def _project_of_group(
     """The project this group of digests belongs to, and the path that would register it.
 
     The session-start records are what say which project each session started in: by the
-    project's id when the registry knew it at session start, by its recorded path otherwise,
-    and the path is what an unregistered group carries for the dream to register (DESIGN 7,
-    F49). A digest whose session left no record names nothing, so the group's own directory
-    name is the last resort, as it was before records carried a path.
+    project's id when the registry knew it at session start, and by the recorded path
+    otherwise, since the path, not the name, is what a project is (DESIGN 7, F49). The path
+    is also what an unregistered group carries back, for the dream to register the project
+    at. A record that names neither an id the registry answers for nor a path - one an
+    earlier build wrote - falls back to the slug it holds, and a digest whose session left
+    no record at all falls back to the group's own directory name, as it did before records
+    carried a path.
     """
     for digest_path in digests:
-        record = _record_of(config, digest_path)
-        if record is None:
+        named = _record_of(config, digest_path)
+        if named is None:
             continue
-        path = Path(record.path) if record.path is not None else None
+        _, _, record = named
         project = registry.by_id(record.project_id) if record.project_id else None
-        if project is None and path is not None:
+        if project is not None:
+            return project, None
+        if record.path is not None:
+            path = Path(record.path)
             project = registry.by_path_key(path_key(config.host, path))
-        if project is not None or path is not None:
-            return project, path
+            return project, (None if project is not None else path)
+        return registry.by_slug(record.slug), None
     return registry.by_slug(slug), None
 
 
@@ -293,7 +304,7 @@ def run_project(
         survives (design 9 steps 2 to 5). ``sources_map`` holds the sources the fact's
         evidence cites: its digest's, or for a short-term line becoming long-term, the
         sources of ``recent.md``."""
-        nonlocal project, run_project_id, page_slug
+        nonlocal project, run_project_id, page_slug, run_id
         verified_evidence = [e for e in evidence_list if e.verified]
         if not verified_evidence:
             report.rejected.append(
@@ -373,7 +384,6 @@ def run_project(
             )
         else:
             # Actions: add, candidate, confirm, promote, supersede, conflict, needs-you
-            # Actions: add, candidate, confirm, promote, supersede, conflict, needs-you
             if project is None and new_fact.scope != "global":
                 # The directory this group of sessions ran in becomes a project (DESIGN 7,
                 # F49): registered with the recorded path, under the name the digests file
@@ -388,7 +398,26 @@ def run_project(
                 registry.save()
                 run_project_id = project.id
                 page_slug = project.slug
-
+                # The pages this run writes from here stand under the project the registry
+                # made, and the run id and the report name it, so the commit, the consumed
+                # markers and the report section all speak of the same project (DESIGN 7, F49).
+                run_id = f"dream-{page_slug}-{now:%Y%m%dT%H%M%SZ}"
+                report.project = page_slug
+                # The records of the sessions this group was digested from name the project
+                # they became, so a later digest of the same session finds it (DESIGN 7, F49).
+                for digest_path in digests:
+                    named = _record_of(config, digest_path)
+                    if named is None:
+                        continue
+                    agent, session, record = named
+                    queue.record_project(
+                        config,
+                        agent,
+                        session,
+                        project.id,
+                        project.slug,
+                        None if record.path is None else Path(record.path),
+                    )
             if proposal.target is not None and action in (
                 "confirm",
                 "lift",
@@ -841,7 +870,6 @@ def _short_term(
         return
     window = config.settings.dream.short_term_sessions
     order = shortterm.sessions(vault_path, slug)
-    window = config.settings.dream.short_term_sessions
 
     doc = pagewrite.PageDoc.read(recent, vault=vault_path)
     for fact in doc.page.facts:

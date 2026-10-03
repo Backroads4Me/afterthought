@@ -309,9 +309,8 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
         queue.drop_job(config, job)
         return None
     _require_session_id(job.session_id)
+    _require_session_id(job.session_id)
     vault.require(config)
-    registry = registrymod.Registry.load(config.registry_path)
-    resolution: keys.Resolution | None
     registry = registrymod.Registry.load(config.registry_path)
     resolution: keys.Resolution | None
     try:
@@ -332,10 +331,10 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
             queue.drop_job(config, job)
             return None
     if resolution is not None and resolution.project is None and resolution.slug is not None:
-        # A directory with no project yet files its digests under a name that stays its own:
-        # the claim settles the slug against every other path that holds it and keeps the
-        # record in step (DESIGN 7, F49).
-        resolution = _claim(config, registry, resolution, job.session_id, job.agent)
+        # An unregistered directory files its digests under the name its session-start
+        # record settled while the directory stood, or - a session with no record - a name
+        # no other path holds (DESIGN 7, F49).
+        resolution = _settle(config, registry, resolution, job.session_id, job.agent)
     if resolution is None or resolution.slug is None:
         # No project: a directory under the temporary directory or the downloads, one capture
         # excludes, or one gone with no record. The session is still digested, filed as
@@ -490,7 +489,8 @@ def _recorded_resolution(
     then is found by that id, or by the recorded path when the id names nothing; a record an
     earlier build wrote kept no directory, and is matched by its slug, which is all it named.
     What is still unregistered keeps the name its directory resolved to, and the directory,
-    so the digest that files it can settle the slug against the paths that hold it.
+    What is still unregistered keeps the name its record settled and the directory it names,
+    which is what the digest files under and the dream registers from (DESIGN 7, F49).
     """
     recorded = queue.recorded_project(config, job.agent, job.session_id)
     if recorded is None:
@@ -508,33 +508,36 @@ def _recorded_resolution(
     return keys.Resolution(kind="recorded", cwd=job.cwd, slug=recorded.slug, root=root)
 
 
-def _claim(
+def _settle(
     config: Config,
     registry: registrymod.Registry,
     resolution: keys.Resolution,
     session_id: str,
     agent: str,
 ) -> keys.Resolution:
-    """An unregistered resolution whose slug is settled against the paths that hold it.
+    """An unregistered resolution filed under the name its session-start record settled.
 
-    ``keys.resolve`` makes the slug unique against the registry; this makes it unique against
-    every other path that has already claimed the name (DESIGN 7, F49): a session that
-    started in a directory of the same name holds the slug through its session-start record,
-    and its digests file under it. The parents of this directory are prefixed until the name
-    is free, the session's record is rewritten with what its digests file under, and the
-    resolution is returned with the settled slug.
+    The record is the answer the session-start hook decided while the directory stood
+    (DESIGN 7): it holds the slug the session's digests file under, settled against the
+    registry and every other path's claim inside the write that recorded it (F49). A session
+    whose record never got written - a hook that failed, or a session captured before records
+    were kept - claims a name here instead, by the same rule, and the record is written so
+    every later digest of the session files in the same place. A record an earlier build
+    wrote names no directory, so nothing can be prefixed and its slug is what there is to
+    file under.
     """
     root = resolution.root
     if root is None or resolution.slug is None:
-        # A record an earlier build wrote names no directory, so nothing can be prefixed:
-        # the slug the record holds is what there is to file under.
         return resolution
-    taken = {path for path in queue.holders(config, resolution.slug) if path != str(root)}
-    slug = registrymod.unique_slug(root, registry, base=resolution.slug, taken=taken)
-    if slug == resolution.slug:
-        return resolution
-    queue.record_project(config, agent, session_id, None, slug, root)
-    return replace(resolution, slug=slug)
+    recorded = queue.recorded_project(config, agent, session_id)
+    if recorded is None:
+        queue.record_project(
+            config, agent, session_id, None, resolution.slug, root, registry=registry
+        )
+        recorded = queue.recorded_project(config, agent, session_id)
+    if recorded is not None and recorded.slug:
+        return replace(resolution, slug=recorded.slug)
+    return resolution
 
 
 def archive_worker_job(config: Config, job: queue.Job) -> bool:
@@ -1302,7 +1305,7 @@ def _recorded_target(
     except GitError:
         return None
     if resolution.project is None and resolution.slug is not None:
-        return _claim(config, registry, resolution, session_id, agent or "claude")
+        return _settle(config, registry, resolution, session_id, agent or "claude")
     return resolution
 
 

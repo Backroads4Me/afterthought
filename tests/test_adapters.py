@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 from datetime import UTC, datetime
@@ -411,12 +412,14 @@ def test_a_capture_event_writes_one_queue_row(home, monkeypatch, capsys, name, a
 
 
 def test_a_session_start_prints_the_block_and_writes_no_queue_row(
-    initialized, home, tmp_path, monkeypatch, capsys
+    initialized, home, monkeypatch, capsys
 ):
     """A session start is injection's: it prints what `aft inject` prints for the event's
-    directory, and capture hears nothing of it."""
-    cwd = tmp_path / "work"
-    cwd.mkdir()
+    directory, and capture hears nothing of it. The directory is one that resolves to no
+    project - under the system temporary directory, which never becomes one (DESIGN 7,
+    F49) - so there is no project to record either."""
+    cwd = (Path(tempfile.gettempdir()) / "aft-adapters-plain").resolve()
+    cwd.mkdir(exist_ok=True)
     assert main(["inject", str(cwd)]) == 0
     block = capsys.readouterr().out
     assert block

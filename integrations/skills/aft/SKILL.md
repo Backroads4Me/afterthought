@@ -28,8 +28,7 @@ These read and change nothing:
 | The registered projects | `aft project list` |
 | A check of the vault | `aft lint` |
 | A check against known answers | `aft eval` |
-| A check of the vault | `aft lint` |
-| A check against known answers | `aft eval` |
+
 ## Changes you can undo: ask first
 
 These change memory, configuration or background work, and each can be undone. Say exactly

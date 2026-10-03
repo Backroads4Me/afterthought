@@ -2422,6 +2422,9 @@ def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(
 
     monkeypatch.setattr(pagewrite.PageDoc, "render", render_with_an_unlintable_line)
 
+    # A hand edit stands uncommitted beside the run, and the checkpoint commits it alone.
+    (cfg.vault / "hand-notes.md").write_text("a hand note\n", encoding="utf-8")
+
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
     res = schedule.run(cfg, now=NOW)
 
@@ -2577,13 +2580,16 @@ def test_a_failing_project_leaves_the_next_project_alone(initialized, home, fake
 
 def keep_out_of_the_idle_report(cfg: configmod.Config, tmp_path: Path, slug: str = "widget"):
     """A project the dream's idle report has nothing to say about, so a test counts only its
-    own run's commits (DESIGN 10, F49)."""
+    own run's commits (DESIGN 7, F49). The session it records ended outside the quiet
+    period, so the dream still runs, and inside the 90-day idle window, so the report
+    names nothing."""
     repo = make_repo(tmp_path / slug)
     registry = Registry.load(cfg.registry_path)
     registered = registry.by_slug(slug)
     assert registered is not None
     registry.add_path(registered, path_key("testhost", repo))
     registry.save()
+    vault.commit(cfg.vault, ["registry.yaml"], "register widget's path")
     queue.enqueue(
         cfg,
         SessionEvent(
@@ -2592,7 +2598,7 @@ def keep_out_of_the_idle_report(cfg: configmod.Config, tmp_path: Path, slug: str
             session_id="s-idle",
             cwd=repo,
             transcript_path=None,
-            time=NOW,
+            time=NOW - timedelta(days=1),
             detail=None,
         ),
     )
@@ -2640,7 +2646,7 @@ def test_a_dream_registers_the_directory_a_session_ran_in(initialized, home, fak
     workspace = (tmp_path / "workspace").resolve()
     workspace.mkdir()
     assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
-    digest_path = _unregistered_digest(cfg, "workspace", "d-ws1", "claude", "s-ws1", TODAY)
+    digest_path = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY)
     fake.script = [reply("add", None, "add fact")]
 
     rep = apply.run_project(cfg, "workspace", [digest_path], now=NOW)
@@ -2665,27 +2671,29 @@ def test_a_dream_finds_a_registered_project_by_path(initialized, home, fake, tmp
     workspace = (tmp_path / "workspace").resolve()
     workspace.mkdir()
     assert queue.record_project(cfg, "claude", "s-ws1", None, "workspace", workspace)
-    first = _unregistered_digest(cfg, "workspace", "d-ws1", "claude", "s-ws1", TODAY)
+    first = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws1", "claude", "s-ws1", TODAY)
     fake.script = [reply("add", None, "first fact")]
     apply.run_project(cfg, "workspace", [first], now=NOW)
 
     assert queue.record_project(cfg, "claude", "s-ws2", None, "workspace", workspace)
-    second = _unregistered_digest(cfg, "workspace", "d-ws2", "claude", "s-ws2", TODAY)
+    second = _unregistered_digest(cfg, "workspace", f"{TODAY}-claude-s-ws2", "claude", "s-ws2", TODAY)
     fake.script = [reply("add", None, "second fact")]
     rep = apply.run_project(cfg, "workspace", [second], now=NOW)
 
     assert rep is not None and rep.project == "workspace"
     registry = Registry.load(cfg.registry_path)
     assert len(registry.projects) == 1
-    assert "second fact" in (cfg.vault / "projects/workspace/overview.md").read_text()
+    overview = (cfg.vault / "projects/workspace/overview.md").read_text()
+    assert overview.count("The tester prefers plain hyphens.") == 2
 
 
 def test_a_dream_does_not_attach_a_digest_to_a_project_that_merely_has_its_name(
     initialized, home, fake, tmp_path
 ):
     """The registry's name decides nothing once a record names a path (DESIGN 7, F49): a
-    digest whose group name is another project's slug is dreamed into the project its
-    recorded path belongs to, and pages under that project's name."""
+    digest whose group name is a registered project's slug is dreamed into a project of its
+    own, registered at the path its record names, not into the project that holds the
+    name."""
     cfg = config_with_fake(home, initialized.vault, fake)
     same_name = (tmp_path / "yard" / "widget").resolve()
     same_name.mkdir(parents=True)
@@ -2697,12 +2705,13 @@ def test_a_dream_does_not_attach_a_digest_to_a_project_that_merely_has_its_name(
     registry.save()
     vault.commit(cfg.vault, ["registry.yaml"], "register widget")
 
-    # The digest group is filed under the directory's own name, and the record names a path
-    # whose project is the registered one.
+    # The digest is filed under the registered project's name, as a digest written before
+    # records carried paths would be, and the record names a path the registry has never
+    # met. The path decides, not the name.
     digest_path = write_digest(
         cfg,
         "widget",
-        "d-y1",
+        f"{TODAY}-claude-s-y1",
         facts=[
             {
                 "statement": "The tester prefers plain hyphens.",
@@ -2720,10 +2729,15 @@ def test_a_dream_does_not_attach_a_digest_to_a_project_that_merely_has_its_name(
 
     rep = apply.run_project(cfg, "widget", [digest_path], now=NOW)
 
-    assert rep is not None and rep.project == "widget"
+    assert rep is not None and rep.project == "yard-widget"
     registry = Registry.load(cfg.registry_path)
-    assert registry.by_path_key(path_key("testhost", same_name)) is not None
-    assert not (cfg.vault / "projects/yard-widget").exists()
+    new = registry.by_path_key(path_key("testhost", same_name))
+    assert new is not None and new.slug == "yard-widget"
+    assert (
+        "The tester prefers plain hyphens."
+        in (cfg.vault / "projects/yard-widget/overview.md").read_text()
+    )
+    assert not (cfg.vault / "projects/widget/overview.md").exists()
 
 
 def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
@@ -2735,14 +2749,14 @@ def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
     first = (tmp_path / "work" / "foo").resolve()
     first.mkdir(parents=True)
     assert queue.record_project(cfg, "claude", "s-f1", None, "foo", first)
-    first_digest = _unregistered_digest(cfg, "foo", "d-f1", "claude", "s-f1", TODAY)
+    first_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-f1", "claude", "s-f1", TODAY)
     fake.script = [reply("add", None, "first foo")]
     apply.run_project(cfg, "foo", [first_digest], now=NOW)
 
     second = (tmp_path / "yard" / "foo").resolve()
     second.mkdir(parents=True)
     assert queue.record_project(cfg, "claude", "s-f2", None, "foo", second)
-    second_digest = _unregistered_digest(cfg, "foo", "d-f2", "claude", "s-f2", TODAY)
+    second_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-f2", "claude", "s-f2", TODAY)
     fake.script = [reply("add", None, "second foo")]
     rep = apply.run_project(cfg, "foo", [second_digest], now=NOW)
 
@@ -2753,5 +2767,8 @@ def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
     registry = Registry.load(cfg.registry_path)
     project = registry.by_path_key(path_key("testhost", second))
     assert project is not None and project.slug == "yard-foo"
-    assert "second foo" in (cfg.vault / "projects/yard-foo/overview.md").read_text()
+    assert (
+        "The tester prefers plain hyphens."
+        in (cfg.vault / "projects/yard-foo/overview.md").read_text()
+    )
     assert rep is not None and rep.project == "yard-foo"
