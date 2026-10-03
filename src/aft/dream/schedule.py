@@ -242,9 +242,13 @@ def _expire_short_term(
     A project whose sessions stopped gets no dream run, so its stale lines would wait for a
     digest that never comes; this expires them instead, through the same expiry a project
     run applies, one commit per project that changed and one report section naming it. A
+    project whose expiry fails has the failure in the run result and its error in the day's
+    report once, so a run that repeats the failure records it and writes nothing (T30). A
     project with waiting digests is left to its own run, which expires the same lines when
     it is applied. Returns whether any report section was written.
     """
+    from aft.dream import report as reportmod
+
     registry = Registry.load(config.registry_path)
     reported = False
     for slug in sorted(project.slug for project in registry.projects):
@@ -255,8 +259,14 @@ def _expire_short_term(
         try:
             expired = apply.expire_short_term(config, slug, now=now)
         except Exception as exc:
-            result.failures[slug] = str(exc)
-            rep = ProjectRunReport(project=slug, error=str(exc))
+            error = str(exc)
+            result.failures[slug] = error
+            if reportmod.error_reported(config, slug, error, now=now):
+                # The day's page carries this error already (T30): the failure stays in the
+                # run result, which every run's output prints, and the page is not written
+                # again for it.
+                continue
+            rep = ProjectRunReport(project=slug, error=error)
         else:
             if expired is None:
                 continue

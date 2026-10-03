@@ -283,6 +283,47 @@ def format_run_section(
     return "\n".join(lines)
 
 
+def day_path(vault_path: Path, now: datetime) -> Path:
+    """The day's report page, the one page every run of the day appends to (DESIGN 9)."""
+    date_str = now.date().isoformat()
+    return vault_path / "reports" / f"{now.year:04d}" / f"{now.month:02d}" / f"{date_str}.md"
+
+
+_RUN_SECTION = re.compile(r"^# (?P<project>.+) \d{2}:\d{2}:\d{2}Z$")
+
+
+def error_reported(config: Config, slug: str, error: str, now: datetime | None = None) -> bool:
+    """Whether the day's report already carries ``slug``'s error section with these words.
+
+    A failure that will not mend repeats with every run - the timer starts one every 30
+    minutes, and capture can start one sooner - and the day's page holds a section per run.
+    An error the page already carries is not written again: the failure stays in the run's
+    own result, and the page holds it the day's first time it fails. The answer is read
+    off the page the earlier run wrote: a section headed by the project's name whose
+    Summary carries the same ``- Error:`` line. A different error, or the same error on
+    another day, is a section of its own.
+    """
+    now = now or datetime.now(UTC)
+    path = day_path(config.vault, now)
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # The section writes ``- Error: <error>``; an error with lines beyond its first leaves
+    # them below the bullet, so the bullet line is what an earlier run's page can hold.
+    wanted = f"- Error: {error}".split("\n", 1)[0]
+    current: str | None = None
+    for line in text.split("\n"):
+        heading = _RUN_SECTION.match(line)
+        if heading:
+            current = heading.group("project")
+        elif current == slug and line == wanted:
+            return True
+    return False
+
+
 def write_report(
     config: Config,
     report: apply.ProjectRunReport,
@@ -312,9 +353,8 @@ def write_report(
     )
 
     date_str = now.date().isoformat()
-    report_dir = vault_path / "reports" / f"{now.year:04d}" / f"{now.month:02d}"
-    report_path = report_dir / f"{date_str}.md"
-    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = day_path(vault_path, now)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not report_path.exists():
         header = f'---\ntype: Dream Report\ntitle: "{date_str}"\n---\n\n'
@@ -490,9 +530,7 @@ def write_idle_gone(config: Config, now: datetime | None = None) -> Path | None:
         return None
     now = now or datetime.now(UTC)
     date_str = now.date().isoformat()
-    report_path = (
-        config.vault / "reports" / f"{now.year:04d}" / f"{now.month:02d}" / f"{date_str}.md"
-    )
+    report_path = day_path(config.vault, now)
     section = "## Idle and gone\n\n" + "\n".join(f"- {line}" for line in lines) + "\n"
     if report_path.exists():
         existing = report_path.read_text(encoding="utf-8")

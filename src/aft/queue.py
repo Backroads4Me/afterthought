@@ -335,13 +335,37 @@ def record_project(
     return True
 
 
-_CLAIM_ROWS = (
-    "SELECT slug, path, project_id, agent, session_id,"
+_CLAIM_ROWS = "SELECT slug, path, project_id, agent, session_id FROM session_projects"
+
+# The directory a record's session ran in. Only a record that names no path needs it - a
+# record of this build carries its path - so this query reads it for those alone, keeping
+# the session-start record's cost flat in the tables' growth (T31).
+_CLAIM_CWDS = (
+    "SELECT agent, session_id,"
     " (SELECT j.cwd FROM jobs j WHERE j.agent = session_projects.agent"
     "   AND j.session_id = session_projects.session_id"
     "  ORDER BY j.event_time DESC, j.created_time DESC, j.id DESC LIMIT 1) AS cwd"
-    " FROM session_projects"
+    " FROM session_projects WHERE path IS NULL"
 )
+
+
+def _claim_rows(
+    conn: sqlite3.Connection,
+) -> list[tuple[str, str | None, str | None, str, str, str | None]]:
+    """Every session-start record as (slug, path, project id, agent, session id, cwd).
+
+    The session's directory is fetched only for the records that name no path (T31): the
+    settlement walk consults it for a pathless record alone, and a record of this build
+    carries its path, so the hook that writes one record does not pay a lookup into jobs
+    for every row the table holds. A record whose session left no row in jobs reads as
+    None, and its claim is then a claim of no directory the queue can name.
+    """
+    rows = [
+        (slug, path, project_id, agent, session_id, None)
+        for slug, path, project_id, agent, session_id in conn.execute(_CLAIM_ROWS)
+    ]
+    cwds = {(agent, session_id): cwd for agent, session_id, cwd in conn.execute(_CLAIM_CWDS)}
+    return [row[:5] + (cwds.get((row[3], row[4])),) for row in rows]
 
 
 def _settled_slug(
@@ -364,7 +388,7 @@ def _settled_slug(
     before and after the upgrade file under one name and the dream makes one project of
     them.
     """
-    rows = conn.execute(_CLAIM_ROWS).fetchall()
+    rows = _claim_rows(conn)
     settled, own = _settle_from(rows, registry, config, root, base)
     for agent, session_id in own:
         conn.execute(
@@ -432,7 +456,7 @@ def settle_slug(config: Config, registry: Registry, root: Path, base: str) -> st
     counted as the claim of the directory its session ran in.
     """
     with _reading(config) as conn:
-        rows = conn.execute(_CLAIM_ROWS).fetchall()
+        rows = _claim_rows(conn)
     settled, _ = _settle_from(rows, registry, config, root, base)
     return settled
 
@@ -480,7 +504,7 @@ def adopt_claim(config: Config, registry: Registry, root: Path, base: str) -> st
     name whose session ran anywhere else holds the name against this directory.
     """
     with _writing(config) as conn:
-        rows = conn.execute(_CLAIM_ROWS).fetchall()
+        rows = _claim_rows(conn)
         settled, own = _settle_from(rows, registry, config, root, base)
         for agent, session_id in own:
             conn.execute(
@@ -504,7 +528,7 @@ def claimed_slugs(config: Config, registry: Registry, *, keep: Collection[str] =
     being renamed.
     """
     with _reading(config) as conn:
-        rows = conn.execute(_CLAIM_ROWS).fetchall()
+        rows = _claim_rows(conn)
     keep_paths = {Path(path) for path in keep}
     roots: dict[str | None, Path | None] = {}
 

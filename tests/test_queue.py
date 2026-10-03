@@ -41,6 +41,13 @@ HOOK_BUDGET_MS = 50.0
 # its two extremes.
 HOOK_SAMPLES = 100
 
+# The record step of the session-start hook settles a name against the claim table after
+# the block is out (DESIGN 7, F49). The hook stops bothering to record when less than
+# HOOK_RECORD_MIN_SECONDS of its budget is left, so the step is held to twice that: the
+# whole hook stays far inside its working share, and a claim query that reads the whole
+# table per row falls outside the bound by hundreds of milliseconds (T31).
+RECORD_BUDGET_MS = 100.0
+
 
 def event(
     session_id: str = "s1",
@@ -239,6 +246,99 @@ def test_the_hook_path_holds_its_budget_with_a_thousand_row_queue(cfg: Config) -
         f"{tail_budget:.0f} ms bound {said}"
     )
     assert query(cfg, "SELECT count(*) FROM jobs") == [(1000 + HOOK_SAMPLES,)]
+
+
+def fill_records(config: Config, records: int, jobs_per: int, path: Path) -> None:
+    """Put ``records`` session-start records in the queue, each with ``jobs_per`` job rows.
+
+    The record test measures what one record write costs against a full claim table, so the
+    rows go in bulk: one commit per record would spend the test's time on fsyncs instead of
+    on the thing it claims to measure. The first record goes in through ``record_project``,
+    which is what builds the queue file and its tables. Every record carries its path, the
+    way this build writes them, and every session keeps the rows its events left in jobs,
+    the way the queue keeps them for good.
+    """
+    registry = Registry.load(config.registry_path)
+    queue.record_project(
+        config, CLAUDE, "record-0", None, "record-slug-0", path / "proj000000", registry
+    )
+    conn = sqlite3.connect(config.home / queue.QUEUE_NAME, isolation_level=None)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany(
+            "INSERT INTO session_projects (agent, session_id, project_id, slug, path)"
+            " VALUES (?, ?, NULL, ?, ?)",
+            [
+                (
+                    CLAUDE,
+                    f"record-{index:06d}",
+                    f"record-slug-{index:06d}",
+                    str(path / f"proj{index:06d}"),
+                )
+                for index in range(1, records)
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO jobs (id, agent, session_id, cwd, transcript_path, kind,"
+            " event_time, status, created_time, updated_time)"
+            " VALUES (?, ?, ?, ?, NULL, 'session_end', ?, 'done', ?, ?)",
+            [
+                (
+                    f"job-{index:06d}-{part:03d}",
+                    CLAUDE,
+                    f"record-{index:06d}",
+                    str(path / f"proj{index:06d}"),
+                    f"2026-10-01T12:{part // 60:02d}:{part % 60:02d}+00:00",
+                    "2026-10-01T12:00:00+00:00",
+                    "2026-10-01T12:00:00+00:00",
+                )
+                for index in range(records)
+                for part in range(jobs_per)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_the_record_step_holds_its_budget_with_a_five_thousand_record_table(
+    cfg: Config, tmp_path
+) -> None:
+    """DESIGN 7 (F49), T31: the session-start record settles its name against the claim
+    table, and only a record with no path needs the directory its session ran in. The claim
+    table grows with every session and the jobs table keeps every row its sessions left, so
+    the step is timed at the grown state: five thousand records, each session holding two
+    hundred job rows - what a home of long-lived sessions carries. The step is held to twice
+    the 50 ms below which the hook stops bothering to record (HOOK_RECORD_MIN_SECONDS), so
+    the whole hook stays far inside its working share while the bound is still far under
+    what a claim query over the whole table costs."""
+    grown = tmp_path / "grown"
+    grown.mkdir()
+    fill_records(cfg, 5000, jobs_per=200, path=grown)
+    assert query(cfg, "SELECT count(*) FROM session_projects") == [(5000,)]
+    assert query(cfg, "SELECT count(*) FROM jobs") == [(5000 * 200,)]
+
+    registry = Registry.load(cfg.registry_path)
+    samples = []
+    for index in range(HOOK_SAMPLES):
+        started = time.perf_counter()
+        queue.record_project(
+            cfg, CLAUDE, f"timed-{index}", None, "timed-slug", tmp_path / "fresh", registry
+        )
+        samples.append((time.perf_counter() - started) * 1000)
+
+    ordered = sorted(samples)
+    p95 = ordered[math.ceil(0.95 * len(ordered)) - 1]
+    worst = ordered[-1]
+    median = statistics.median(samples)
+    tail_budget = RECORD_BUDGET_MS * 10 if os.environ.get("CI") else RECORD_BUDGET_MS
+    said = f"(worst {worst:.1f} ms, median {median:.1f} ms, fastest {ordered[0]:.1f} ms)"
+    assert median < RECORD_BUDGET_MS, f"the median record took {median:.1f} ms {said}"
+    assert p95 < tail_budget, (
+        f"a record at the 95th percentile took {p95:.1f} ms against a "
+        f"{tail_budget:.0f} ms bound {said}"
+    )
+    assert query(cfg, "SELECT count(*) FROM session_projects") == [(5000 + HOOK_SAMPLES,)]
 
 
 def test_the_queue_is_the_file_and_mode_the_design_names(cfg: Config) -> None:

@@ -372,6 +372,54 @@ def test_maintenance_leaves_a_project_with_waiting_digests(widget, initialized):
     assert "The rewrite is paused." in recent.read_text()
 
 
+def test_an_expiry_failure_is_reported_once_a_day(widget, initialized, monkeypatch):
+    """A project whose short-term expiry keeps failing hands its error to the day's report
+    once (T30): the failure stays in every run's result, and the day's page does not grow
+    by one error section per run."""
+    recent = initialized.vault / "projects" / "widget" / "recent.md"
+    recent.parent.mkdir(parents=True)
+    recent.write_text(
+        "---\ntype: Project\ntitle: t\ndescription: d\n"
+        "sources:\n  - {id: s1, resource: 'aft://session/c/s0#e1', quote: q}\n"
+        "aft:\n  project: p_1\n---\n\n"
+        "## State\n\n- The rewrite is paused. [observed] 2026-08-01 [^s1]\n"
+    )
+    vault.commit(initialized.vault, ["projects/widget/recent.md"], "seed recent")
+
+    error = "the expiry said no"
+
+    def failing_expiry(cfg, slug, now=None):
+        raise RuntimeError(error)
+
+    monkeypatch.setattr(apply, "expire_short_term", failing_expiry)
+
+    first = schedule.run(initialized, Recorder(), now=NOW)
+    assert first.failures == {"widget": error}
+    report_path = initialized.vault / "reports" / "2026" / "09" / "2026-09-29.md"
+    body = report_path.read_text()
+    assert "# widget" in body
+    assert f"- Error: {error}" in body
+
+    # The second run of the day still records the failure, and writes nothing: the page
+    # and the commit log stand as the first run left them.
+    commits = subjects(initialized)
+    second = schedule.run(initialized, Recorder(), now=NOW)
+    assert second.failures == {"widget": error}
+    assert report_path.read_text() == body
+    assert subjects(initialized) == commits
+
+    # A different error is news again, the day's page carrying one section for it.
+    def other_failure(cfg, slug, now=None):
+        raise RuntimeError("the expiry said something else")
+
+    monkeypatch.setattr(apply, "expire_short_term", other_failure)
+    third = schedule.run(initialized, Recorder(), now=NOW)
+    assert third.failures == {"widget": "the expiry said something else"}
+    grown = report_path.read_text()
+    assert grown != body
+    assert "- Error: the expiry said something else" in grown
+
+
 def test_uncommitted_reports_deletions_and_renames(initialized):
     root = initialized.vault
     run_git(["mv", "log.md", "history.md"], root)
