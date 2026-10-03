@@ -337,8 +337,9 @@ difference is what a fact is about, never how old it is.
   never ages. It leaves memory only when newer evidence supersedes it, an anchor marks it
   stale, or you withdraw it with `aft forget`.
 - **Short-term memory** is `projects/<slug>/recent.md`: what is true now and matters for the
-  next few sessions, but will change as the work moves on. Who is working on what, what is
-  paused and why, a setting changed for a test. The page uses the same sections and line
+  next few sessions, but will change as the work moves on: a temporary condition that
+  changes how an agent should act, such as what is paused and why or a setting changed for
+  a test. Progress on the work belongs in the session's handoff. The page uses the same sections and line
   grammar as any fact page, has no Candidates section, and holds only `[stated]` and
   `[observed]` lines: a conclusion or an idea about the current work belongs in the session's
   handoff, not in memory.
