@@ -28,6 +28,12 @@ INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on the user)"}
 
 HOW_TO = 'Search memory: aft search "<words>". Read a page: aft read <path>.'
+RECORD_MARKERS = (
+    'A prompt starting with "aft off", "aft on", "off the record" or "on the record" sets what'
+    " afterthought keeps; it is not a request. Acknowledge it in a few words and do what the"
+    " rest of the prompt asks."
+)
+MARKER_LINE = RECORD_MARKERS
 NOTES_HEADING = "Needs your decision"
 
 # What the block says when the budget leaves no room for a layer's first line (design 10).
@@ -365,18 +371,18 @@ def _block(
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
-    The fixed costs come first - the block's title and the closing line on how to
-    search and read - and then every part holds its floor, the heading and first line
-    that name a layer (``_trim``). What the floors leave is the budget of the two
-    producers that grow with the vault, divided evenly between them: the project's own
-    text and its page map, each capped from that remainder rather than from the block,
-    so they cannot over-subscribe it and neither can reach what the other needs. The
-    global preferences layer, which the plan gives no limit of its own, takes whatever
+    The fixed costs come first - the block's title and the closing lines on how to
+    search and read and the capture markers - and then every part holds its floor, the
+    heading and first line that name a layer (``_trim``). What the floors leave is the
+    budget of the two producers that grow with the vault, divided evenly between them: the
+    project's own text and its page map, each capped from that remainder rather than from
+    the block, so they cannot over-subscribe it and neither can reach what the other needs.
+    The global preferences layer, which the plan gives no limit of its own, takes whatever
     those two leave. When the budget leaves no room for a layer's first line, the block
     keeps its title and says under ``Cut`` that the rest was cut: a short block is
     acceptable, a layer missing without a word is the defect (design 10).
     """
-    closing: list[Part] = [("", [HOW_TO])]
+    closing: list[Part] = [("", [HOW_TO, RECORD_MARKERS])]
     recent = list(recent)
     head = _trim(title, max_chars)
     # Notes waiting on the user come straight under the title, ahead of every layer, so an
@@ -386,13 +392,14 @@ def _block(
     preferences_floor = _floors(preferences)
     recent_floor = _floors(recent)
     map_floor = _floors(page_map)
-    floors = [*head, *waiting, *own_floor, *preferences_floor, *recent_floor, *map_floor, *closing]
+    floors = [*head, *waiting, *closing, *own_floor, *preferences_floor, *recent_floor, *map_floor]
     minimal = _trim(floors, max_chars)
     extra = (max_chars - _width(minimal)) // 2
-    project_layer = _trim(own, min(_width(own_floor) + extra, max_chars))
+    room = max(0, max_chars - _width([*head, *waiting, *closing]) - 2)
+    project_layer = _trim(own, min(_width(own_floor) + extra, room))
     # Global preferences (layer 4) is ahead of page pointers (layer 5).
     # Reserve map_floor and closing so page pointers keep their floor.
-    pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, max_chars))
+    pref_layer = _trim(preferences, min(_width(preferences_floor) + extra, room))
     # Short-term memory (the recent layer) comes after long-term memory and takes only what
     # the long-term layers leave, less the page map's floor, so it never crowds out what
     # stays true (design 10).
@@ -408,6 +415,8 @@ def _block(
     pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
     body = [*project_layer, *pref_layer, *recent_layer, *pages]
     cut: list[Part] = [(CUT_HEADING, [CUT_NOTE])] if len(minimal) < len(floors) else []
+    body_room = max(0, max_chars - _width([*head, *cut, *waiting, *closing]) - 2)
+    body = _trim(body, body_room)
     parts = [*head, *cut, *waiting, *body, *closing]
     return "\n\n".join(_blocks(_trim(parts, max_chars)))
 

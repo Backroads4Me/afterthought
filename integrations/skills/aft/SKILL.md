@@ -65,6 +65,10 @@ yes to that specific command. An earlier general go-ahead does not count.
 
 Never run `aft hook`: the agents' own hooks call it.
 
+A prompt starting with "aft off", "aft on", "off the record" or "on the record" sets what
+afterthought keeps; it is not a request for an aft command. Acknowledge it briefly and
+continue with what the rest of the prompt asks.
+
 ## Notes waiting on the user
 
 When newer evidence disagrees with a line in memory and has no authority to replace it,
