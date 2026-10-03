@@ -177,7 +177,8 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent
   6. one line per other page in `projects/<slug>/` (not `recent.md`) and per reference
      collection whose `aft.projects` includes the project:
      `- <title>: <description> (aft read <path>)`
-  7. `Search memory: aft search "<words>". Read a page: aft read <path>.`
+  7. `Search memory: aft search "<words>". Read a page: aft read <path>.`, then the marker
+     line (F44).
 
   An unregistered or unresolved directory gets only layers 4 and 7. Candidates, stale,
   superseded and withdrawn lines are never included.
@@ -998,6 +999,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `ghp_` token survives and a configured pattern still redacts; the setting loads,
   defaults to true and refuses a non-boolean. Existing tests that relied on the deleted
   rules change to assert the value survives. Review checkpoint: no (lead reads it).
+- **F44 Agents know the off-the-record markers** (ruling 2026-10-03). DESIGN 6, 12. An
+  agent given a prompt starting with `aft off` read it as a request for a command aft does
+  not have; nothing told it the markers exist. The block closes with one more line after
+  the search line: `A prompt starting with "aft off", "aft on", "off the record" or "on
+  the record" sets what afterthought keeps; it is not a request. Acknowledge it in a few
+  words and do what the rest of the prompt asks.` It is part of the closing floor, kept
+  whatever the budget. The `aft` skill says the same, near its command map. The filter is
+  unchanged. Tests: the block ends with the line, under every budget the closing line
+  survives; the echo filter still drops a repeated marker line; the skill text holds it.
+  Review checkpoint: no (lead reads it).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
