@@ -1353,3 +1353,76 @@ def test_off_the_record_filter_not_triggered_by_marker_line():
 
     assert filtermod.OFF_MARKER.match(inject.RECORD_MARKERS) is None
     assert filtermod.ON_MARKER.match(inject.RECORD_MARKERS) is None
+
+
+def test_block_at_400_with_own_preferences_and_pages_reports_cut():
+    title = [("my-project", ["A test project."])]
+    own = [
+        ("State", ["- Doing something in state section here now."]),
+        ("Facts", ["- Something is true in facts section here."]),
+    ]
+    preferences = [("Preferences", ["- Prefer concise output always and everywhere."])]
+    page_map = [("Pages", ["- Other: something else (aft read other.md)."])]
+    block = inject._block(title, own, preferences, page_map, 400)
+    assert len(block) <= 400
+    assert f"## {inject.CUT_HEADING}" in block
+    assert block.endswith(inject.RECORD_MARKERS)
+
+
+@pytest.mark.parametrize("max_chars", [250, 300, 400, 500, 600, 800, 1200, 2000, 8000])
+@pytest.mark.parametrize("with_waiting", [False, True])
+def test_block_closing_markers_and_cut_notice_across_budgets(max_chars, with_waiting):
+    title = [("my-project-long", ["A test project."])]
+    waiting = (
+        [("Needs your decision", ["- Note 1: some decision to make (aft note resolve rv-1)"])]
+        if with_waiting
+        else []
+    )
+    own = [
+        ("State", ["- Doing something in state section here now."]),
+        ("Facts", ["- Something is true in facts section here."]),
+    ]
+    preferences = [("Preferences", ["- Prefer concise output always and everywhere."])]
+    recent = [
+        ("Recent (last 3 sessions, newest 2026-10-02)", ["- A recent thing happened in session."])
+    ]
+    page_map = [("Pages", ["- Other: something else (aft read other.md)."])]
+
+    block = inject._block(
+        title, own, preferences, page_map, max_chars, recent=recent, waiting=waiting
+    )
+    assert len(block) <= max_chars
+
+    # No line is split: every line in block is a complete intact line
+    all_input_lines = {
+        line
+        for part in [*title, *waiting, *own, *preferences, *recent, *page_map]
+        for line in part[1]
+    }
+    all_input_lines.update([inject.HOW_TO, inject.RECORD_MARKERS, inject.CUT_NOTE])
+    for line in block.splitlines():
+        if line and not line.startswith("#"):
+            assert line in all_input_lines
+
+    # The block ends with RECORD_MARKERS whenever max_chars is at least the title plus closing
+    full_closing = [("", [inject.HOW_TO, inject.RECORD_MARKERS])]
+    head = inject._trim(title, max_chars)
+    if max_chars >= inject._width([*head, *full_closing]):
+        assert block.endswith(inject.RECORD_MARKERS)
+
+    # Every input layer that had a line is either present or ## Cut is present
+    layers = [
+        ("waiting", waiting),
+        ("own", own),
+        ("preferences", preferences),
+        ("recent", recent),
+        ("page_map", page_map),
+    ]
+    cut_present = f"## {inject.CUT_HEADING}" in block
+    for name, layer in layers:
+        had_line = any(lines for _, lines in layer)
+        if had_line:
+            present = any(any(line in block for line in lines) for _, lines in layer)
+            assert present or cut_present, (
+                f"layer {name} missing and no Cut under mc={max_chars}, waiting={with_waiting}"
+            )
