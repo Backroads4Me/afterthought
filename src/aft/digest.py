@@ -1532,16 +1532,15 @@ def redigest(
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=entries[-1].id)
 
 
-def unfiled_sessions(config: Config) -> list[str]:
-    """The session ids of every digest filed as unfiled whose session is still archived.
+def _unfiled_digests(config: Config) -> dict[str, list[Path]]:
+    """The digest files filed as unfiled, by the session the rebuild names.
 
-    The backfill of DESIGN 7 (F49, ``aft redigest --unfiled``) rebuilds exactly these: a
-    session whose digests sit under ``digests/_unfiled`` and whose words the evidence archive
-    still holds. A session `aft forget` removed has no archive left, so it is not here, and
-    the multipart parts of one session name it once.
+    The parts of one session - the ``-2``, ``-3`` files a second chunk of a day takes - are
+    listed under the session the rebuild names, so a coverage check sees them all. A longer
+    id the archive holds a session of its own stays its own session (DESIGN 7).
     """
     root = config.vault / "digests" / UNFILED
-    named: set[str] = set()
+    named: dict[str, list[Path]] = {}
     if root.is_dir():
         for path in root.rglob("*.md"):
             match = _DIGEST_NAME.match(path.stem)
@@ -1552,10 +1551,87 @@ def unfiled_sessions(config: Config) -> list[str]:
             if sep and suffix.isdigit() and evidence.session_info(config, session) is None:
                 # A later part of one session, unless the archive holds the longer id itself.
                 session = prefix
-            named.add(session)
-    return sorted(
-        session for session in named if evidence.session_info(config, session) is not None
-    )
+            named.setdefault(session, []).append(path)
+    return named
+
+
+def _cited_entries(config: Config, session_id: str, digests: Sequence[Path]) -> set[str]:
+    """The entry ids of ``session_id`` that ``digests`` cite in their sources (DESIGN 8).
+
+    A digest page's sources name the entries its facts were verified against, one
+    ``aft://session/<agent>/<session>#<entry>`` each. A page citing nothing - a part that
+    kept no fact - cites no entry. Citations of some other session's entries are not this
+    session's coverage.
+    """
+    cited: set[str] = set()
+    for path in digests:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        frontmatter, _, _, _ = page.split_frontmatter(text)
+        if not isinstance(frontmatter, dict):
+            continue
+        sources = frontmatter.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            resource = str(source.get("resource", ""))
+            entry = resource.rpartition("#")[2] if "#" in resource else ""
+            if entry and _is_session_resource(resource, session_id):
+                cited.add(entry)
+    return cited
+
+
+def uncovered_unfiled(config: Config) -> list[tuple[str, str]]:
+    """The unfiled sessions the backfill must skip because the archive no longer covers them,
+    each with the reason (DESIGN 7, F49).
+
+    A rebuild replaces the session's digests with one built from the entries the evidence
+    archive still holds. When the digests cite entries the archive no longer holds - an
+    ``aft forget`` that took entries after the digests were written - the rebuild would
+    replace the fuller memory with a thinner one, so the session is named instead of
+    rebuilt, and the person decides between re-archiving and letting it stand.
+    """
+    uncovered: list[tuple[str, str]] = []
+    for session, digests in sorted(_unfiled_digests(config).items()):
+        if evidence.session_info(config, session) is None:
+            continue  # not archived at all: the backfill never sees it
+        archived = {entry.id for entry in evidence.entries(config, session)}
+        missing = sorted(_cited_entries(config, session, digests) - archived)
+        if missing:
+            noun = "entry" if len(missing) == 1 else "entries"
+            span = missing[0] if len(missing) == 1 else f"{missing[0]} through {missing[-1]}"
+            uncovered.append(
+                (
+                    session,
+                    f"its digests cite {len(missing)} {noun} the archive no longer holds ({span})",
+                )
+            )
+    return uncovered
+
+
+def unfiled_sessions(config: Config) -> list[str]:
+    """The session ids of every digest filed as unfiled the backfill can rebuild (DESIGN 7,
+    F49, ``aft redigest --unfiled``).
+
+    A session whose digests sit under ``digests/_unfiled`` is rebuilt when its words are
+    still archived and its digests cite nothing the archive has lost: a session `aft forget`
+    removed has no archive left, so it is not here, and one whose digests cite entries the
+    archive no longer holds is named by `uncovered_unfiled` instead, so a rebuild never
+    replaces the fuller memory with a thinner one. The multipart parts of one session name
+    it once.
+    """
+    backfillable: list[str] = []
+    for session, digests in sorted(_unfiled_digests(config).items()):
+        if evidence.session_info(config, session) is None:
+            continue
+        archived = {entry.id for entry in evidence.entries(config, session)}
+        if _cited_entries(config, session, digests) <= archived:
+            backfillable.append(session)
+    return backfillable
 
 
 def redigest_estimate(config: Config, session_id: str) -> int | None:

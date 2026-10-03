@@ -990,19 +990,25 @@ def cmd_redigest(args) -> int:
 def _redigest_unfiled(config: Config, args) -> int:
     """The unfiled backfill (DESIGN 7, F49).
 
-    Every still-archived session whose digests are filed as unfiled and whose directory
-    answers a project is rebuilt, so it files under that project; the dream turns the
-    refiled digests into memory. A session whose directory still answers no project has
-    nowhere to move to: it is listed as staying unfiled and skipped, and waits for its
-    directory's answer to change. ``--dry-run`` lists the sessions, the tokens a rebuild
-    would charge, and the ones staying unfiled, and writes nothing. A session the day's
-    token budget has no room for stops the run with the rest still waiting; one that fails
-    for its own reason is named and the rest go on.
+    Every still-archived session whose digests are filed as unfiled, cite nothing the archive
+    has lost, and whose directory answers a project is rebuilt, so it files under that
+    project; the dream turns the refiled digests into memory. A session whose directory still
+    answers no project has nowhere to move to: it is listed as staying unfiled and skipped,
+    and waits for its directory's answer to change. A session whose digests cite entries the
+    archive no longer holds is not rebuilt at all: a rebuild would replace the fuller memory
+    with a thinner one, so it is named with the reason and the person decides (DESIGN 7, F49).
+    ``--dry-run`` lists the sessions, the tokens a rebuild would charge, and the ones staying
+    unfiled, and writes nothing. A session the day's token budget has no room for stops the
+    run with the rest still waiting; one that fails for its own reason is named and the rest
+    go on.
     """
     from aft import digest, model
 
     sessions = digest.unfiled_sessions(config)
     staying_line = "stays unfiled: its directory answers no project"
+    uncovered = digest.uncovered_unfiled(config)
+    for session_id, reason in uncovered:
+        print(f"{session_id}\tcannot rebuild: {reason}")
     if args.dry_run:
         estimate = 0
         movable = 0
@@ -1019,7 +1025,10 @@ def _redigest_unfiled(config: Config, args) -> int:
             estimate += cost
             movable += 1
             print(f"{session_id}\t~{cost} tokens")
-        print(f"{movable} session(s) would rebuild, ~{estimate} tokens; {staying} staying unfiled")
+        print(
+            f"{movable} session(s) would rebuild, ~{estimate} tokens; {staying} staying"
+            f" unfiled; {len(uncovered)} cannot rebuild"
+        )
         return 0
     budget = config.settings.work.daily_token_budget
     now = datetime.now(UTC)

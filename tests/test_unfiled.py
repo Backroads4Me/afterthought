@@ -340,7 +340,7 @@ def test_the_backfill_leaves_a_session_whose_directory_answers_no_project(
         "move1\t~900 tokens\n"
         "stay1\tstays unfiled: its directory answers no project\n"
         "stay2\tstays unfiled: its directory answers no project\n"
-        "1 session(s) would rebuild, ~900 tokens; 2 staying unfiled\n"
+        "1 session(s) would rebuild, ~900 tokens; 2 staying unfiled; 0 cannot rebuild\n"
     )
 
     rebuilt: list[str] = []
@@ -360,3 +360,57 @@ def test_the_backfill_leaves_a_session_whose_directory_answers_no_project(
     )
     assert rebuilt == ["move1"], "a session with nowhere to move was put to the model"
     assert digest.unfiled_sessions(cfg) == ["move1", "stay1", "stay2"]
+
+
+def test_the_backfill_skips_and_names_a_session_the_archive_no_longer_covers(
+    initialized, home, fake, tmp_path, capsys, monkeypatch
+):
+    """A rebuild replaces the session's digests with one built from the entries the archive
+    still holds, so a session whose digests cite entries an `aft forget` has since taken is
+    not rebuilt at all: the run names it with the reason, and the digests stand (DESIGN 7,
+    F49). A session the archive still covers is rebuilt as before."""
+    import sqlite3
+
+    from aft.cli import main
+    from aft.readers import USER, Entry
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    fieldwork = tmp_path / "fieldwork"
+    fieldwork.mkdir()
+    _unfiled_session(cfg, "u1", "fieldwork", fieldwork)
+    other = tmp_path / "otherfield"
+    other.mkdir()
+    _unfiled_session(cfg, "u2", "otherfield", other)
+    # The archive holds another entry of u1's, so the session is still archived at all -
+    # what is gone is the one entry its digest cites.
+    evidence.store(
+        cfg,
+        agent="c",
+        session_id="u1",
+        project_id=None,
+        entries=[Entry(id="e2", time=NOW, role=USER, text="still archived", is_error=False)],
+    )
+    with sqlite3.connect(cfg.home / "evidence.sqlite") as conn:
+        conn.execute("DELETE FROM evidence WHERE session_id = 'u1' AND entry_id = 'e1'")
+    conn.close()
+
+    assert digest.unfiled_sessions(cfg) == ["u2"]
+    assert digest.uncovered_unfiled(cfg) == [
+        ("u1", "its digests cite 1 entry the archive no longer holds (e1)")
+    ]
+
+    fake.script = [Reply(content=EMPTY_ANSWER)]
+    assert main(["redigest", "--unfiled", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "u1\tcannot rebuild: its digests cite 1 entry the archive no longer holds (e1)" in out
+    assert "u2\t~" in out and "1 session(s) would rebuild, ~" in out
+    assert "0 staying unfiled; 1 cannot rebuild" in out
+    assert not (cfg.vault / "digests/otherfield").exists(), "the dry run wrote nothing"
+
+    assert main(["redigest", "--unfiled"]) == 0
+    out = capsys.readouterr().out
+    assert "u1\tcannot rebuild: its digests cite 1 entry the archive no longer holds (e1)" in out
+    assert "rebuilt digest at digests/otherfield/" in out
+    unfiled = [p.name for p in (cfg.vault / "digests" / digest.UNFILED).rglob("*.md")]
+    assert f"{TODAY}-c-u1.md" in unfiled, "the uncovered digest was rebuilt over"
+    assert f"{TODAY}-c-u2.md" not in unfiled, "the covered session was not rebuilt"
