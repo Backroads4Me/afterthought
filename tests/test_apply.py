@@ -3076,3 +3076,33 @@ def test_a_dream_registers_a_directory_of_a_taken_name_under_its_parent(
         in (cfg.vault / "projects/yard-foo/overview.md").read_text()
     )
     assert rep is not None and rep.project == "yard-foo"
+
+
+def test_the_dream_splits_one_slug_by_each_digests_own_record(initialized, home, fake, tmp_path):
+    """The review case (DESIGN 7, F49): /b/foo's session files its digest under foo, a
+    project is registered over foo, then /c/foo's session files its digest under foo too.
+    The dream decides each digest's project from its own record, so the two never share
+    one, and a digest whose session left no record at all runs by itself."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    bfoo = (tmp_path / "b" / "foo").resolve()
+    bfoo.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-b1", None, "foo", bfoo)
+    registry = Registry.load(cfg.registry_path)
+    registered = registry.add("foo", "Foo")
+    registry.add_path(registered, path_key("testhost", bfoo))
+    registry.save()
+    assert queue.record_project(cfg, "claude", "s-c1", registered.id, "foo")
+    cfoo = (tmp_path / "c" / "foo").resolve()
+    cfoo.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-c2", None, "foo", cfoo)
+
+    named_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-c1", "claude", "s-c1", TODAY)
+    path_digest = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-c2", "claude", "s-c2", TODAY)
+    orphan = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s-x9", "claude", "s-x9", TODAY)
+
+    groups = apply.digest_groups(cfg, registry, "foo", [named_digest, path_digest, orphan])
+
+    assert len(groups) == 3
+    assert groups[0] == [named_digest]
+    assert groups[1] == [path_digest]
+    assert groups[2] == [orphan]

@@ -19,7 +19,7 @@ from aft import __version__
 from aft.config import HOME_ENV, Config, ConfigError, load, resolve_home
 from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
 from aft.gitutil import GitError
-from aft.registry import Registry, RegistryError, path_key, slugify
+from aft.registry import Registry, RegistryError, path_key, slugify, split_key
 
 
 class UsageError(Exception):
@@ -471,7 +471,7 @@ def cmd_project_list(args) -> int:
 
 
 def cmd_project_add(args) -> int:
-    from aft import gitutil, vault
+    from aft import gitutil, queue, vault
 
     config = load()
     vault.require(config)
@@ -479,9 +479,31 @@ def cmd_project_add(args) -> int:
     root = info.main if info else Path(args.path).resolve()
     if not args.allow_temp:
         _refuse_temporary_project(root)
-    slug = args.slug or slugify(root.name)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
+        held = registry.by_path_key(path_key(config.host, root))
+        if held is not None:
+            # The directory is already someone's project, so this is a rename's business,
+            # not a second project under a name its own walk would step aside from.
+            raise UsageError(
+                f"a project {held.slug!r} already exists for {root};"
+                " `aft project rename` changes its name"
+            )
+        if args.slug:
+            # The name a person chose is theirs to choose again: one another path's session
+            # records claim is refused, not quietly prefixed (DESIGN 7, F49).
+            if args.slug in queue.claimed_slugs(config, registry):
+                raise UsageError(
+                    f"the name {args.slug!r} is claimed by the session records of another"
+                    " directory; pick another name, or leave it off to have one settled"
+                    " (DESIGN 7, F49)"
+                )
+            slug = args.slug
+        else:
+            # The default name settles the way a session-start record settles it, against
+            # the registry and every claim, and a pathless record of the name this
+            # directory resolves to is given the directory (DESIGN 7, F49).
+            slug = queue.adopt_claim(config, registry, root, slugify(root.name))
         project = registry.add(slug, args.title)
         registry.add_path(project, path_key(config.host, root))
         if info and info.origin:
@@ -512,12 +534,22 @@ def _refuse_temporary_project(root: Path) -> None:
 
 
 def cmd_project_rename(args) -> int:
-    from aft import vault
+    from aft import queue, vault
 
     config = load()
     vault.require(config)
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
+        project = registry.by_slug(args.old)
+        if project is not None:
+            # The new name is a person's choice, so a name another path's session records
+            # claim is refused with the claim named, never silently prefixed (DESIGN 7, F49).
+            keep = {str(path) for _, path in (split_key(key) for key in project.paths)}
+            if args.new in queue.claimed_slugs(config, registry, keep=keep):
+                raise UsageError(
+                    f"the name {args.new!r} is claimed by the session records of another"
+                    " directory; pick another name (DESIGN 7, F49)"
+                )
         registry.rename(args.old, args.new)
         registry.save()
         changed = ["registry.yaml"]
@@ -856,8 +888,11 @@ def _dream(config: Config) -> None:
         rep = result.reports.get(slug)
         n = len(rep.expired) if rep is not None else 0
         print(f"aft dream: {slug}: expired {n} short-term line(s)")
-    for slug in result.ran:
-        print(f"aft dream: {slug}: {len(result.waiting[slug])} digest(s) taken up")
+    for slug in dict.fromkeys(result.ran):
+        # One slug may split into several runs (two directories that once claimed one name,
+        # DESIGN 7, F49), so the line counts the digests the runs together took up.
+        taken = result.taken.get(slug, len(result.waiting[slug]))
+        print(f"aft dream: {slug}: {taken} digest(s) taken up")
     for slug, err in result.failures.items():
         print(f"aft dream: {slug}: failed: {err}")
     for slug in result.active:

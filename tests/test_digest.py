@@ -3318,3 +3318,44 @@ def test_the_digest_prompt_names_no_one_and_guesses_no_pronoun():
     words = prompt_words()
     assert 'the summary and handoff as much as each fact, calls the user "the user"' in words
     assert "never by name, and never with he, she or another pronoun" in words
+
+
+def test_a_digest_of_an_unregistered_directory_carries_its_path(initialized: Config):
+    """A digest of an unregistered directory carries the path its sessions ran in as
+    ``aft.path`` (DESIGN 7, F49), so the index files its facts into that directory's own
+    scope and not into whatever directory once claimed the name the digest is filed under.
+    A digest of a registered project carries the project's id, and an unfiled one carries
+    neither, being nobody's project."""
+    import datetime as dt
+
+    cfg = initialized
+    registered = registry.Registry.load(cfg.registry_path).add("widget")
+    when = dt.date(2026, 10, 5)
+    stamp = dt.datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    handoff = {"in_flight": [], "failed": [], "open": []}
+
+    def frontmatter(resolution: keys.Resolution) -> dict:
+        return digest._frontmatter(
+            cfg,
+            resolution,
+            "widget",
+            [],
+            handoff,
+            [],
+            [],
+            when,
+            stamp,
+        )["aft"]
+
+    in_project = frontmatter(keys.Resolution(keys.PATH, cfg.vault, registered, "widget", cfg.vault))
+    assert in_project["project"] == registered.id
+    assert "path" not in in_project
+
+    unregistered = frontmatter(
+        keys.Resolution(keys.UNREGISTERED, cfg.vault, None, "widget", cfg.vault / "notes")
+    )
+    assert "project" not in unregistered
+    assert unregistered["path"] == str(cfg.vault / "notes")
+
+    unfiled = frontmatter(keys.Resolution(keys.NONE, cfg.vault))
+    assert "project" not in unfiled and "path" not in unfiled

@@ -132,7 +132,7 @@ from pathlib import Path
 from aft import inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
-from aft.registry import Registry, RegistryError
+from aft.registry import Registry, RegistryError, path_key
 
 INDEX_NAME = "index.sqlite"
 
@@ -581,7 +581,7 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         if current is None:
             continue  # gone from the vault: the drop above was the whole job
         try:
-            rows = _file_rows(rel, current, projects.registry)
+            rows = _file_rows(rel, current, projects.registry, config.host)
         except _Unreadable as exc:
             report.append(f"{rel}: {exc}")
             continue  # its rows and hash went with the drop, so a repaired page reads again
@@ -800,7 +800,7 @@ def _collection_of(rel: str) -> str | None:
     return None
 
 
-def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[Row]]:
+def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[str, list[Row]]:
     """The rows one file contributes, under each collection they belong to.
 
     Usually one collection, the one named by the directory the file sits in. A live fact page is
@@ -829,14 +829,13 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
         raise _Unreadable(f"cannot be indexed: {error}")
     title = inject.one_line((frontmatter or {}).get("title")) or Path(rel).stem
     description = inject.one_line((frontmatter or {}).get("description"))
-    scopes = _project_scopes(rel, frontmatter, registry)
+    scopes = _project_scopes(rel, frontmatter, registry, host)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
     sections: dict[str, list[tuple[str, str]]] = {}
-    # An archived project's memory answers only ``aft search --archive`` (DESIGN 10, F49):
     # its pages and digests are read into the archive collection instead of their own,
     # exactly as a page's resting lines are, until the person unarchives the project.
-    home = _file_home(rel, frontmatter, registry)
+    home = _file_home(rel, frontmatter, registry, host)
     if admitted is None:
         chunks = _prose_chunks(body)
         if current.collection == DIGESTS:
@@ -877,13 +876,14 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
     }
 
 
-def _file_home(rel: str, frontmatter: dict | None, registry: Registry) -> str | None:
+def _file_home(rel: str, frontmatter: dict | None, registry: Registry, host: str) -> str | None:
     """The collection an archived project's file is read into, or None to keep its own (F49).
 
     When a project is archived with ``aft project archive`` (DESIGN 10, F49) its pages and
     digests stop answering an ordinary search and answer only ``aft search --archive``, so
     each of its files is read into the archive collection whatever directory it sits in. The
-    project is named by the file's own ``aft.project`` when it has one, and otherwise by the
+    project is named by the file's own ``aft.project`` when it has one, by the path its
+    ``aft.path`` names when the file carries one (DESIGN 7, F49), and otherwise by the
     directory it is filed under, the way `_project_scopes` reads it. A file scoped to several
     projects is not re-homed: one of the projects being archived does not make the other
     one's lines archived. A file whose project is unknown, or known and not archived, keeps
@@ -899,6 +899,12 @@ def _file_home(rel: str, frontmatter: dict | None, registry: Registry) -> str | 
     if isinstance(project_value, str) and project_value:
         project = registry.by_id(project_value)
         return ARCHIVE if project is not None and project.archived else None
+    recorded = aft.get("path")
+    if isinstance(recorded, str) and recorded:
+        project = registry.by_path_key(path_key(host, Path(recorded)))
+        if project is not None and project.archived:
+            return ARCHIVE
+        return None
     slug = _path_slug(rel)
     if slug is not None:
         project = registry.by_slug(slug)
@@ -1052,21 +1058,25 @@ def _project_registry(config: Config) -> _Projects:
 
 
 def _project_scopes(
-    rel: str, frontmatter: dict | None, registry: Registry
+    rel: str, frontmatter: dict | None, registry: Registry, host: str
 ) -> list[tuple[str | None, str | None]]:
     """The project each row of this file belongs to, and what its row key carries to say so.
 
     A page's own ``aft.project`` (DESIGN 6) wins. A reference page is one collection of lines
     covering several projects at once (DESIGN 11), so ``aft.projects`` gives a row per project
-    and each row names itself in its key. Failing both, the directory a file is filed under
-    names the project it belongs to and the registry turns that slug into an id; a slug the
-    registry does not know is no error and gives no id.
+    and each row names itself in its key. A digest of an unregistered directory (DESIGN 7, F49)
+    carries the path its sessions ran in as ``aft.path``, and that path decides the project:
+    the one the registry holds for the path when it has one, and nothing when it does not.
+    Failing all of these, the directory a file is filed under names the project it belongs to
+    and the registry turns that slug into an id; a slug the registry does not know is no error
+    and gives no id.
 
     A row with no id is every project's memory - the global pages of DESIGN 6, a report day,
-    or a reference page that covers nothing yet - and not a page whose project went missing.
-    A digest filed under a slug the registry does not answer for lands here too, so no id says
-    nothing about which of the two it is, and `aft search` reads an id-less row as shared memory
-    only for the collections where a page could not have a project to begin with.
+    a reference page that covers nothing yet, or a digest of a directory that belongs to no
+    project - and not a page whose project went missing. A digest filed under a slug the
+    registry does not answer for lands here too, so no id says nothing about which of the
+    two it is, and `aft search` reads an id-less row as shared memory only for the collections
+    where a page could not have a project to begin with.
     """
     aft = (frontmatter or {}).get("aft")
     if isinstance(aft, dict):
@@ -1081,6 +1091,16 @@ def _project_scopes(
                     ids.append(value)
             if ids:
                 return [(project_id, project_id) for project_id in ids]
+        recorded = aft.get("path")
+        if isinstance(recorded, str) and recorded:
+            # The directory the digest's sessions ran in decides, not the name the digest
+            # is filed under: two directories that once claimed one name file their digests
+            # under one name, and the file's directory would give every one of them the
+            # first directory's project (DESIGN 7, F49).
+            found = registry.by_path_key(path_key(host, Path(recorded)))
+            if found is not None:
+                return [(found.id, None)]
+            return [(None, None)]
     slug = _path_slug(rel)
     if slug is not None:
         found = registry.by_slug(slug)

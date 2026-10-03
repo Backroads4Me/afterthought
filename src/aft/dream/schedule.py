@@ -55,6 +55,10 @@ class Run:
     waiting: dict[str, list[Path]] = field(default_factory=dict)
     """Every project with waiting digests, by slug, each list in session order."""
 
+    taken: dict[str, int] = field(default_factory=dict)
+    """The digests each project was given, summed over the runs one slug splits into
+    (DESIGN 7, F49), when the dream ran it."""
+
     ran: list[str] = field(default_factory=list)
     active: list[str] = field(default_factory=list)
     """Projects skipped because a session was active within the quiet period."""
@@ -130,40 +134,51 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             config, result, now, result.checkpoint, result.tag_commit
         )
         budget = config.settings.work.daily_token_budget
+        registry = Registry.load(config.registry_path)
         for slug in ready:
             # The daily cap counts the dream's model calls with the digests' (DESIGN 13): a
             # project waits for the next day once it is spent, its digests still waiting.
             if model.tokens_used_today(config, now) >= budget:
                 result.over_budget.append(slug)
                 continue
-            # Any failure in one project is that project's own: its writes are rolled back by
-            # run_project, its error reaches the day's report, and the other projects still run
-            # (DESIGN 9, and BUILD-PLAN M4 follow-up).
-            try:
-                if process is not None:
-                    rep = process(config, slug, result.waiting[slug])
-                else:
-                    rep = apply.run_project(config, slug, result.waiting[slug], now=now)
-                result.ran.append(slug)
-            except Exception as exc:
-                result.failures[slug] = str(exc)
-                rep = ProjectRunReport(project=slug, error=str(exc))
-            if rep is None:
-                continue
-            result.reports[slug] = rep
-            # A failed run has nothing to revert of its own, but it still names the checkpoint
-            # and tag commits, so the run's Revert item is never lost (DESIGN 9 item 9).
-            if getattr(rep, "commit", None) is not None or slug in result.failures:
-                checkpoint, tag_commit = (
-                    (None, None) if checkpoint_reported else (result.checkpoint, result.tag_commit)
-                )
-                failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
-                if failure is None:
-                    checkpoint_reported = True
-                elif slug in result.failures:
-                    result.failures[slug] = f"{result.failures[slug]}; its report failed: {failure}"
-                else:
-                    result.failures[slug] = f"report not written: {failure}"
+            # One slug's digests may hold two directories' sessions (a project registered
+            # over the claim, or a record from before paths were kept), so they are run by
+            # the project each digest's own record names (DESIGN 7, F49).
+            groups = apply.digest_groups(config, registry, slug, result.waiting[slug])
+            result.taken[slug] = sum(len(group) for group in groups)
+            for group in groups:
+                # Any failure in one project is that project's own: its writes are rolled back
+                # by run_project, its error reaches the day's report, and the other projects
+                # still run (DESIGN 9, and BUILD-PLAN M4 follow-up).
+                try:
+                    if process is not None:
+                        rep = process(config, slug, group)
+                    else:
+                        rep = apply.run_project(config, slug, group, now=now)
+                    result.ran.append(slug)
+                except Exception as exc:
+                    result.failures[slug] = str(exc)
+                    rep = ProjectRunReport(project=slug, error=str(exc))
+                if rep is None:
+                    continue
+                result.reports[slug] = rep
+                # A failed run has nothing to revert of its own, but it still names the checkpoint
+                # and tag commits, so the run's Revert item is never lost (DESIGN 9 item 9).
+                if getattr(rep, "commit", None) is not None or slug in result.failures:
+                    checkpoint, tag_commit = (
+                        (None, None)
+                        if checkpoint_reported
+                        else (result.checkpoint, result.tag_commit)
+                    )
+                    failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
+                    if failure is None:
+                        checkpoint_reported = True
+                    elif slug in result.failures:
+                        result.failures[slug] = (
+                            f"{result.failures[slug]}; its report failed: {failure}"
+                        )
+                    else:
+                        result.failures[slug] = f"report not written: {failure}"
         # Projects with nothing new in 90 days and projects whose recorded paths are all
         # gone are named in the report; nothing is archived or forgotten without the
         # person's go-ahead (DESIGN 7, F49).

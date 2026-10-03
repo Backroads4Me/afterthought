@@ -21,7 +21,7 @@ from aft import evidence, forget, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
-from aft.registry import Project, Registry
+from aft.registry import Project, Registry, path_key
 
 REL = "projects/widget/overview.md"
 
@@ -96,6 +96,21 @@ The widget gained a flange.
 ## Handoff
 
 In flight: the flange tests.
+"""
+
+# A digest an unregistered directory wrote (DESIGN 7, F49): its frontmatter carries the
+# path its sessions ran in instead of a project's id.
+DIGEST_OF_PATH = """---
+type: Session Digest
+title: foo session
+description: What the session on 2026-09-28 did.
+aft:
+  path: {path}
+---
+
+## Summary
+
+The foo gained a flange.
 """
 
 REPORT = """---
@@ -1294,6 +1309,49 @@ def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
     assert _column(rested_mirrored_row, "project_id") == widget.id
     assert _column(unknown_row, "project_id") is None
     assert _column(global_row, "project_id") is None
+
+
+def test_a_digests_recorded_path_decides_its_project_not_the_name_it_is_filed_under(
+    initialized: Config, tmp_path: Path
+) -> None:
+    """A digest of an unregistered directory carries the path its sessions ran in (DESIGN 7,
+    F49), and the index reads its project from that path, not from the name the digest is
+    filed under: two directories that once claimed one name share one digest directory, and
+    the name would give every one of them the first directory's project. A path the registry
+    holds for names that project even where the digest moved, one it does not names nothing,
+    and a digest with no path at all keeps the old filing."""
+    first = tmp_path / "b" / "foo"
+    first.mkdir(parents=True)
+    registry = Registry.load(initialized.registry_path)
+    project = registry.add("foo")
+    assert project is not None
+    registry.add_path(project, path_key(initialized.host, first))
+    registry.save()
+
+    registered_digest = write(initialized, "digests/foo/2026/09/2026-09-28-claude-s1.md", DIGEST)
+    stranger = tmp_path / "c" / "foo"
+    stranger.mkdir(parents=True)
+    stranger_digest = write(
+        initialized,
+        "digests/foo/2026/09/2026-09-28-claude-s2.md",
+        DIGEST_OF_PATH.format(path=stranger),
+    )
+    moved = write(
+        initialized,
+        "digests/foo/2026/09/2026-09-28-claude-s3.md",
+        DIGEST_OF_PATH.format(path=first),
+    )
+    ancient = write(initialized, "digests/foo/2026/09/2026-09-28-claude-s4.md", DIGEST)
+    assert index.update(initialized) == []
+
+    named = row_for(initialized, "digests", f"{registered_digest}#Summary")
+    stranger_row = row_for(initialized, "digests", f"{stranger_digest}#Summary")
+    moved_row = row_for(initialized, "digests", f"{moved}#Summary")
+    ancient_row = row_for(initialized, "digests", f"{ancient}#Summary")
+    assert _column(named, "project_id") == project.id
+    assert _column(stranger_row, "project_id") is None
+    assert _column(moved_row, "project_id") == project.id
+    assert _column(ancient_row, "project_id") == project.id
 
 
 def test_a_registry_that_will_not_parse_stops_the_run_rather_than_guessing(

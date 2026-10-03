@@ -209,6 +209,43 @@ def _record_of(config: Config, digest_path: Path) -> tuple[str, str, queue.Proje
     return agent, session, record
 
 
+def digest_groups(
+    config: Config, registry: Registry, slug: str, digests: Sequence[Path]
+) -> list[list[Path]]:
+    """One slug's waiting digests split into the projects their own records name (DESIGN 7,
+    F49).
+
+    Two directories that once claimed one name can file their digests under one directory -
+    ``digests/<slug>/`` - when a project was registered over the claim, or when a record
+    predates the paths records carry. The records still say which directory each session
+    ran in, so a digest whose record names a different project, or a different directory
+    that would register one, is a run of its own, whatever the group's first record says.
+    A digest whose session left no record at all is run by itself, falling back to the
+    group's name as it did before records carried a path.
+
+    The groups come back in session order, each list in the order its digests were given.
+    """
+    groups: dict[tuple[str, str], list[Path]] = {}
+    for digest_path in digests:
+        named = _record_of(config, digest_path)
+        if named is None:
+            key = ("recordless", slug)
+        else:
+            _, _, record = named
+            project = registry.by_id(record.project_id) if record.project_id else None
+            if project is not None:
+                key = ("project", project.id)
+            elif record.path is not None:
+                path = Path(record.path)
+                project = registry.by_path_key(path_key(config.host, path))
+                key = ("project", project.id) if project is not None else ("path", record.path)
+            else:
+                project = registry.by_slug(record.slug)
+                key = ("project", project.id) if project is not None else ("slug", record.slug)
+        groups.setdefault(key, []).append(digest_path)
+    return list(groups.values())
+
+
 def _project_of_group(
     config: Config, registry: Registry, slug: str, digests: Sequence[Path]
 ) -> tuple[Project | None, Path | None]:

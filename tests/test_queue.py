@@ -1077,16 +1077,34 @@ def test_a_records_slug_is_settled_against_the_registry_and_the_other_paths_clai
     assert queue.recorded_project(cfg, "claude", "s-2").slug == "yard-foo"
 
 
-def test_a_record_that_names_no_path_still_holds_its_name(cfg: Config, tmp_path) -> None:
-    """A record an earlier build wrote carries a slug and no directory. The name it holds
-    stays taken, so a later directory of that name does not file its digests over the
-    first one's."""
+def test_a_pathless_record_of_the_name_a_directory_resolves_to_is_its_own(
+    cfg: Config, tmp_path
+) -> None:
+    """A record an earlier build wrote carries a slug and no directory. When a directory
+    resolves to the name it holds, that record is this directory's (DESIGN 7, F49): the
+    name stays with it instead of a prefixed one splitting one directory into two projects
+    after the upgrade, and the record is given the path it was missing."""
     registry = Registry(cfg.registry_path)
     plain = (tmp_path / "other" / "foo").resolve()
     plain.mkdir(parents=True)
     assert queue.record_project(cfg, "claude", "s-old", None, "foo")
     assert queue.record_project(cfg, "claude", "s-new", None, "foo", plain, registry=registry)
-    assert queue.recorded_project(cfg, "claude", "s-new").slug == "other-foo"
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "foo"
+    old = queue.recorded_project(cfg, "claude", "s-old")
+    assert (old.slug, old.path) == ("foo", str(plain))
+
+
+def test_a_pathless_record_of_another_name_still_holds_its_name(cfg: Config, tmp_path) -> None:
+    """A record an earlier build wrote with no path holds its name against a directory that
+    resolves to another name (DESIGN 7, F49): only the directory the name resolves to may
+    claim it, and every other walk prefixes."""
+    registry = Registry(cfg.registry_path)
+    plain = (tmp_path / "other" / "bar").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+    assert queue.record_project(cfg, "claude", "s-new", None, "bar", plain, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "bar"
+    assert queue.recorded_project(cfg, "claude", "s-old").path is None
 
 
 def test_a_registered_projects_name_is_not_a_free_slug(cfg: Config, tmp_path) -> None:

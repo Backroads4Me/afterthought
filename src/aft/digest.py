@@ -996,6 +996,11 @@ def _frontmatter(
         aft["role"] = rules.WORKER
     if resolution.project is not None:
         aft["project"] = resolution.project.id
+    elif resolution.root is not None:
+        # A digest of an unregistered directory carries the path its sessions ran in, so
+        # the index files its facts into that directory's own scope and not into whatever
+        # directory once claimed the name the digest is filed under (DESIGN 7, F49).
+        aft["path"] = str(resolution.root)
     aft["handoff"] = {
         "in_flight": handoff["in_flight"],
         "failed": list(handoff["failed"]),

@@ -133,6 +133,28 @@ def test_waiting_digests_in_session_order(initialized):
     assert process.calls == [("gadget", [other]), ("widget", [first, part, later])]
 
 
+def test_one_slugs_digests_run_once_per_directory_their_records_name(widget, initialized, tmp_path):
+    """Two directories that once claimed one name hold one digest directory, but never one
+    project: the dream decides each digest's project from its own record, so one slug's
+    waiting digests run as two runs (DESIGN 7, F49)."""
+    second = (tmp_path / "yard" / "widget").resolve()
+    second.mkdir(parents=True)
+    # A record that names a project's id (a session that started in a registered project)
+    # and one that names only a path the registry has never met.
+    assert queue.record_project(initialized, "claude", "s-w1", "p_1", "widget")
+    assert queue.record_project(initialized, "claude", "s-w2", None, "widget", second)
+    digest(initialized, "widget", "2026-09-29-claude-s-w1", "2026-09-29T08:00:00Z")
+    digest(initialized, "widget", "2026-09-29-claude-s-w2", "2026-09-29T07:00:00Z")
+
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+
+    assert [slug for slug, _ in process.calls] == ["widget", "widget"]
+    assert all(len(digests) == 1 for _, digests in process.calls)
+    assert result.ran == ["widget", "widget"]
+    assert result.taken == {"widget": 2}
+
+
 def test_recent_hand_edit_skips_the_project(widget, initialized):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
     hand_edit(initialized, NOW - timedelta(minutes=5))

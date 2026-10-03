@@ -12,7 +12,7 @@ import pytest
 from aft import vault
 from aft.cli import main
 from aft.config import load
-from aft.registry import Registry
+from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
 
 
@@ -248,6 +248,82 @@ def test_a_chosen_home_registers_a_temporary_project_without_the_flag(
 
     assert [p.slug for p in Registry.load(initialized.registry_path).projects] == ["widget"]
     shutil.rmtree(repo)
+
+
+# A name an unregistered directory has claimed is not free for a project made by hand
+# (DESIGN 7, F49)
+
+
+def test_project_add_of_a_claimed_name_is_prefixed(initialized, tmp_path, capsys):
+    """``aft project add`` with no name of its own settles one the way a session-start
+    record does: the name another directory's records claim is stepped aside from, so two
+    directories never share a project (DESIGN 7, F49)."""
+    import aft.queue as queue
+
+    claimed = (tmp_path / "b" / "foo").resolve()
+    claimed.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-1", None, "foo", claimed)
+    making = (tmp_path / "c" / "foo").resolve()
+    making.mkdir(parents=True)
+
+    assert main(["project", "add", str(making)]) == 0
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.by_path_key(path_key("testhost", making))
+    assert project is not None and project.slug == "c-foo"
+    assert "registered c-foo" in capsys.readouterr().out
+
+
+def test_project_add_refuses_a_chosen_name_another_directory_claimed(initialized, tmp_path, capsys):
+    """A name the person chose is refused when another directory's session records claim
+    it, with the claim named (DESIGN 7, F49)."""
+    import aft.queue as queue
+
+    claimed = (tmp_path / "b" / "foo").resolve()
+    claimed.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-1", None, "foo", claimed)
+    making = (tmp_path / "c" / "foo").resolve()
+    making.mkdir(parents=True)
+
+    assert main(["project", "add", str(making), "--slug", "foo"]) == 2
+
+    assert "claimed" in capsys.readouterr().err
+    assert Registry.load(initialized.registry_path).projects == []
+
+
+def test_project_rename_refuses_a_name_another_directory_claimed(initialized, tmp_path, capsys):
+    """A rename may not take a name another path's session records claim (DESIGN 7, F49)."""
+    import aft.queue as queue
+
+    repo = make_repo(tmp_path / "widget")
+    assert main(["project", "add", str(repo)]) == 0
+    claimed = (tmp_path / "b" / "gizmo").resolve()
+    claimed.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-1", None, "gizmo", claimed)
+
+    assert main(["project", "rename", "widget", "gizmo"]) == 2
+
+    assert "claimed" in capsys.readouterr().err
+    assert Registry.load(initialized.registry_path).by_slug("widget") is not None
+
+
+def test_project_add_adopts_the_pathless_record_of_the_directory_it_names(initialized, tmp_path):
+    """A record an earlier build wrote with no path is the claim of the directory that
+    resolves to its name: `aft project add` of that directory registers the project under
+    the name and gives the record the path (DESIGN 7, F49)."""
+    import aft.queue as queue
+
+    plain = (tmp_path / "other" / "foo").resolve()
+    plain.mkdir(parents=True)
+    assert queue.record_project(initialized, "claude", "s-old", None, "foo")
+
+    assert main(["project", "add", str(plain)]) == 0
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.by_path_key(path_key("testhost", plain))
+    assert project is not None and project.slug == "foo"
+    record = queue.recorded_project(initialized, "claude", "s-old")
+    assert record is not None and record.path == str(plain)
 
 
 # The unfiled backfill's command surface (DESIGN 7, F49)
