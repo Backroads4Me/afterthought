@@ -315,7 +315,7 @@ markdown:
 | Conflict | Active line followed by a `[!conflict]` callout | Yes, with the conflict noted |
 | Needs you | Active line followed by a `[!question]` callout | Yes, with the question noted |
 | Stale | Line ending `(stale <date>: <reason>)` | No |
-| Withdrawn | Struck through, with `withdrawn <date>` after `aft forget` or `aft settle --withdraw` | No |
+| Withdrawn | Struck through, with `withdrawn <date>` after `aft forget`, `aft settle --withdraw` or `aft review --withdraw` | No |
 
 A conflict or a question waits on the user, and the dream never settles one. `aft settle
 <page>:<line>` does, with the user's choice: `--keep` leaves the line standing,
@@ -893,6 +893,9 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
   queue, the index and the digests, withdraws curated lines that rested only on it, and
   scrubs its quotes wherever afterthought copied them: page sources, reports and
   `needs-you.md`.
+- **`aft review <project|global>`** asks the model which active lines fail the test of what
+  memory keeps, saves the numbered list to `reports/review-<scope>.md` and changes nothing;
+  `--withdraw <numbers|all>` strikes the lines you choose, each with its reason recorded.
 - **`aft forget pattern <regex>`** replaces matching text with `[redacted]` in the archive
   and everywhere afterthought copied it (digest quotes, page sources and statements, reports),
   updates the index to match, and prints the line that adds the pattern to future redaction.
