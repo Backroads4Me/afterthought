@@ -518,7 +518,7 @@ structured output:
 ```
 
 The prompt asks only for facts a future session could not get from the code or git
-history, and for what was decided, surprising, or learned the hard way. It tags tentative
+history and would make a mistake or ask you again without, and for what was decided, surprising, or learned the hard way. It tags tentative
 statements ("I think I'll switch to SGLang") as `[suggested]`, and requests, questions and
 pasted text as section 6 describes, never as `[stated]`. What the session did and where it
 stopped goes in the summary and handoff, not in facts. Each fact carries a term: `long` when
@@ -586,7 +586,7 @@ so later evidence is applied after earlier evidence.
 | `confirm` | Already known. Add the new source and date, and count it toward recurrence. |
 | `supersede` | Replaces an existing line, which is struck through, dated and linked. |
 | `conflict` | Contradicts an existing line without the authority to replace it. |
-| `skip` | Routine, re-derivable from code or git, too vague to act on, or, for a long-term fact, not durable. |
+| `skip` | Fails the value test (a future session would make a mistake or ask you again without it), is on the never-a-fact list (status of a PR, task, branch or commit; who is working on what; a test's name or result; a review's outcome; what a change did to the code; what the repository's documents say), routine, re-derivable from code or git, too vague to act on, or, for a long-term fact, not durable. |
 
 A short-term fact goes only to `recent.md`. Its `add` adds a line there; its `confirm`
 adds the source to the line it names, on `recent.md` or a long-term page; its
