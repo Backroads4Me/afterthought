@@ -400,26 +400,88 @@ def test_project_filter_scoping(populated_vault: Config):
     assert any("global/preferences.md" in h.path for h in hits_global)
 
 
-def test_search_scopes_to_the_project_of_the_current_directory(
-    populated_vault: Config, monkeypatch
-):
-    """Inside a registered project search covers it plus global pages; from outside every
-    project it covers global pages only."""
-    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
-    hits = search.search(populated_vault, "titanium bolt")
-    assert any(h.path == "projects/widget/assembly.md" for h in hits)
-    hits = search.search(populated_vault, "dark theme")
-    assert any(h.path == "global/preferences.md" for h in hits)
-    hits = search.search(populated_vault, "monochrome OLED screen")
-    assert not any(h.path.startswith("projects/gadget") for h in hits)
+GADGET_ASSEMBLY_TWIN = """---
+type: Project
+title: Widget Assembly
+description: Procedures for assembling the widget.
+sources: []
+aft:
+  project: p_gadget
+---
 
-    outside = populated_vault.vault.parent / "unregistered"
-    outside.mkdir(parents=True, exist_ok=True)
-    monkeypatch.chdir(outside)
-    hits = search.search(populated_vault, "titanium bolt")
-    assert not any(h.path.startswith(("projects/", "digests/")) for h in hits)
-    hits = search.search(populated_vault, "dark theme")
-    assert any(h.path == "global/preferences.md" for h in hits)
+# Widget Assembly
+
+## State
+
+- Fastening requires titanium bolt tightening to 15 Nm. [observed] 2026-09-22 [^s1]
+"""
+
+GADGET_TEAM_PREFERENCES = """---
+type: Preferences
+title: Gadget Preferences
+description: The gadget team's editor preferences.
+sources: []
+aft:
+  project: p_gadget
+---
+
+# Gadget Preferences
+
+## Preferences
+
+- The gadget runs dark theme syntax in dark theme colors for contrast. [stated] 2026-09-26 [^s1]
+"""
+
+
+def test_the_default_search_ranks_this_projects_memory_first(populated_vault: Config, monkeypatch):
+    """F50: the default search reaches every project that is not archived, with the current
+    directory's project ranked first. An equal match in another project answers behind this
+    project's, the global pages answer ahead of the other projects' memory even when the other
+    project's row outscores theirs, and every hit names the project it belongs to."""
+    (populated_vault.vault / "projects/gadget/assembly.md").write_text(
+        GADGET_ASSEMBLY_TWIN, encoding="utf-8"
+    )
+    (populated_vault.vault / "projects/gadget/preferences.md").write_text(
+        GADGET_TEAM_PREFERENCES, encoding="utf-8"
+    )
+    monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
+
+    hits = search.search(populated_vault, "titanium bolt", limit=20)
+    widget = [hit for hit in hits if hit.path == "projects/widget/assembly.md"]
+    gadget = [hit for hit in hits if hit.path == "projects/gadget/assembly.md"]
+    assert widget and gadget, "the same fact in both projects is indexed and reaches the search"
+    assert hits.index(widget[0]) < hits.index(gadget[0]), (
+        "the fact answers from this project first, the equal match in the other behind it"
+    )
+    assert widget[0].project == "widget" and gadget[0].project == "gadget", (
+        "each hit names the project it belongs to"
+    )
+
+    # The gadget page carries "dark theme" twice in one row and outscores the global page's
+    # single mention; the global page still answers first, on the tier and not on the words.
+    hits = search.search(populated_vault, "dark theme", limit=20)
+    assert [hit.path for hit in hits][:2] == [
+        "global/preferences.md",
+        "projects/gadget/preferences.md",
+    ]
+    assert [hit.project for hit in hits][:2] == ["global", "gadget"]
+
+
+def test_the_all_flag_changes_nothing(populated_vault: Config, monkeypatch) -> None:
+    """F50: `--all` named a cross-project search while the default still scoped to one project.
+    The default reaches every project that is not archived now (DESIGN 10), so the flag is
+    accepted and changes nothing, and the scripts that pass it keep working."""
+    cfg = populated_vault
+    plant_unfiled(cfg)
+    monkeypatch.chdir(cfg.vault / "projects" / "widget")
+
+    plain = [hit.path for hit in search.search(cfg, "zirconium", limit=20)]
+    flagged = [hit.path for hit in search.search(cfg, "zirconium", all_projects=True, limit=20)]
+    assert plain == flagged != [], "the unfiled text answers by default, --all or not"
+    assert {(hit.project, hit.collection) for hit in search.search(cfg, "zirconium", limit=20)} == {
+        ("unfiled", "digests"),
+        ("unfiled", "evidence"),
+    }, "the unfiled text answers as the unfiled group, named, from either collection"
 
 
 def test_search_json_and_limit(populated_vault: Config, capsys):
@@ -431,25 +493,29 @@ def test_search_json_and_limit(populated_vault: Config, capsys):
     assert isinstance(data, list)
     assert len(data) <= 2
     assert "path" in data[0]
+    assert "path" in data[0]
+    assert "project" in data[0]
     assert "description" in data[0]
     assert "snippet" in data[0]
 
 
 def test_search_cli_plain_text(populated_vault: Config, capsys):
     """The plain-text line names where the hit came from as well as what matched: document,
-    collection, section, description, snippet, tab-separated on one line (DESIGN 10 asks a result
-    to name its document and its section, and a hit from the archive reads differently once the
-    line says which collection it came from)."""
-    ret = main(["search", "titanium", "--all", "--limit", "5"])
+    collection, section, project, description, snippet, tab-separated on one line. DESIGN 10
+    asks a result to name its document and its section, F50 its project, and a hit from the
+    archive, the library or another project's memory reads differently once the line says
+    which collection and project it came from."""
+    ret = main(["search", "titanium", "--limit", "5"])
     assert ret == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert len(lines) >= 1
     for line in lines:
-        assert len(line.split("\t")) == 5
-    path, collection, heading, description, snippet = lines[0].split("\t")
+        assert len(line.split("\t")) == 6
+    path, collection, heading, project, description, snippet = lines[0].split("\t")
     assert path == "projects/widget/assembly.md"
     assert collection == "pages"
     assert heading == "State"
+    assert project == "widget"
     assert description == "Procedures for assembling the widget."
     assert "titanium" in snippet.lower()
 
@@ -791,8 +857,9 @@ def test_a_global_pages_struck_line_answers_the_archive_flag_as_shared_history(
     populated_vault: Config, monkeypatch, tmp_path
 ) -> None:
     """The archive mirrors the pages: a global page's line is every project's memory while it is
-    active, so once struck it answers every project's `--archive`, and `--archive` from a
-    directory in no project. Another project's archived line still answers neither."""
+    active, so once struck it answers every project's `--archive` as shared history, a tier
+    ahead of the projects. F50 takes `--archive` further from the same query: a project's own
+    resting line answers from every working directory too, and names the project it belongs to."""
     (populated_vault.vault / "global/environment.md").write_text(
         GLOBAL_ENVIRONMENT_WITH_A_STRUCK_LINE, encoding="utf-8"
     )
@@ -801,9 +868,10 @@ def test_a_global_pages_struck_line_answers_the_archive_flag_as_shared_history(
     assert search.search(populated_vault, "zeppelin") == [], "out of memory, not in a hit"
     hits = search.search(populated_vault, "zeppelin", archive=True)
     assert [(hit.path, hit.collection) for hit in hits] == [("global/environment.md", "archive")]
-    assert search.search(populated_vault, "Bluetooth", archive=True) == [], (
-        "the gadget project's archived line is not the widget project's history"
-    )
+    hits = search.search(populated_vault, "Bluetooth", archive=True)
+    assert [(hit.path, hit.project) for hit in hits] == [
+        ("archive/projects/gadget/overview.md", "gadget")
+    ], "the gadget project's resting line answers --archive from here, behind the shared history"
 
     outside = tmp_path / "nowhere"
     outside.mkdir()
@@ -811,7 +879,10 @@ def test_a_global_pages_struck_line_answers_the_archive_flag_as_shared_history(
     assert search.search(populated_vault, "zeppelin") == []
     hits = search.search(populated_vault, "zeppelin", archive=True)
     assert [(hit.path, hit.collection) for hit in hits] == [("global/environment.md", "archive")]
-    assert search.search(populated_vault, "Bluetooth", archive=True) == []
+    hits = search.search(populated_vault, "Bluetooth", archive=True)
+    assert [(hit.path, hit.project) for hit in hits] == [
+        ("archive/projects/gadget/overview.md", "gadget")
+    ]
 
 
 # What a search asks SQLite for (the M3 performance review). A hit is a document and a row is a
@@ -916,8 +987,7 @@ def test_one_document_with_many_rows_does_not_take_the_whole_limit(
     assert any(path.startswith("aft://session/pi/s-shim") for path in paths), paths
 
 
-# ------------------------------------------- scoping: an unfiled row is no project's memory
-
+# ------------------------------------------- narrowed scoping: unfiled is no project's memory
 UNFILED_DIGEST = """---
 type: Session Digest
 title: Scratch session
@@ -947,34 +1017,51 @@ def plant_unfiled(cfg: Config) -> None:
 
 
 def test_a_project_search_leaves_out_memory_that_names_no_project(populated_vault: Config) -> None:
-    """`aft search` defaults to the current project plus the global pages (BUILD-PLAN M3.2), and
-    only a page row's empty project means global (DESIGN 6). An entry whose session resolved to no
-    project and a digest under a slug the registry has never heard of are text that was never
-    filed, so neither belongs in widget's results - while ``--all`` still reaches them."""
+    """A query narrowed with ``--project`` takes that project's memory plus the global pages
+    (DESIGN 10), and only a page row's empty project means shared (DESIGN 6). An entry whose
+    session resolved to no project and a digest under a slug the registry has never heard of
+    are text that was never filed, so neither belongs in a project's narrowed results - while
+    the default search reaches them, named the unfiled group (F50)."""
     cfg = populated_vault
     plant_unfiled(cfg)
 
-    everywhere = {hit.path for hit in search.search(cfg, "zirconium", all_projects=True, limit=20)}
-    assert "digests/scratchdir/2026/09/2026-09-28-pi-s-scratch.md" in everywhere
-    assert "aft://session/pi/s-unreg#e-7" in everywhere, "both unfiled rows are indexed"
+    named = {(hit.project, hit.collection) for hit in search.search(cfg, "zirconium", limit=20)}
+    assert ("unfiled", "digests") in named and ("unfiled", "evidence") in named, (
+        "the default search answers the unfiled text from both of its collections"
+    )
 
-    assert search.search(cfg, "zirconium", project="widget") == []
+    assert search.search(cfg, "zirconium", project="widget") == [], (
+        "a narrowed query takes no text that was never filed under a project"
+    )
 
 
-def test_search_from_outside_every_project_reaches_only_the_shared_pages(
+def test_search_from_outside_every_project_reaches_every_project(
     populated_vault: Config, monkeypatch
 ) -> None:
-    """From a working directory inside no project, the query is the person's whole memory minus
-    what belongs to somebody's project: the shared pages answer, and unfiled conversation and
-    digests do not sneak in because they carry no project either."""
+    """F50: from a working directory inside no project, the default search still reaches every
+    project that is not archived, and memory that names no project answers under its own name:
+    the other projects' pages, and the unfiled text of a session whose directory belonged to no
+    project, with its digest beside it."""
     cfg = populated_vault
     plant_unfiled(cfg)
     outside = cfg.vault.parent / "unregistered"
     outside.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(outside)
 
-    assert [hit.path for hit in search.search(cfg, "dark theme")] == ["global/preferences.md"]
-    assert search.search(cfg, "zirconium") == []
+    hits = search.search(cfg, "dark theme")
+    assert [hit.path for hit in hits] == ["global/preferences.md"]
+    assert hits[0].project == "global"
+
+    hits = search.search(cfg, "titanium bolt", limit=20)
+    assert [hit.path for hit in hits if hit.project == "widget"] == [
+        "projects/widget/assembly.md"
+    ], "the other project's page answers from here, named for the project it belongs to"
+
+    hits = search.search(cfg, "zirconium", limit=20)
+    assert {(hit.project, hit.collection) for hit in hits} == {
+        ("unfiled", "digests"),
+        ("unfiled", "evidence"),
+    }, "the unfiled text answers as the unfiled group, named, from either collection"
 
 
 def test_a_known_answer_pass_at_the_default_scope_reaches_every_collection(
@@ -1021,13 +1108,15 @@ def test_an_evidence_hit_names_its_entry_so_a_trace_opens_it(
 
 def test_json_hits_carry_their_collection_and_section(populated_vault: Config, capsys) -> None:
     """The machine-readable hit answers the same question the plain-text line does: which
-    collection, and which section of it (DESIGN 10 names a library result by its page or section,
-    and there is no reason to make a person read the page to learn where a hit came from)."""
+    collection, which section of it, and which project it belongs to (DESIGN 10 names a library
+    result by its page or section, F50 has every result name its project, and there is no reason
+    to make a person read the page to learn where a hit came from)."""
     assert main(["search", "titanium", "--all", "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     (first,) = [hit for hit in data if hit["path"] == "projects/widget/assembly.md"]
     assert first["collection"] == "pages"
     assert first["heading"] == "State"
+    assert first["project"] == "widget"
 
 
 # ------------------------------------------- the abstract carries what the block injects
@@ -1153,7 +1242,8 @@ def test_an_archived_projects_memory_answers_only_the_archive_flag(
     populated_vault: Config, monkeypatch, capsys
 ) -> None:
     """F49: archiving a project takes its pages and digests out of the everyday search and
-    leaves them to `aft search --archive`, without moving the files (DESIGN 10, F49). A file
+    leaves them to `aft search --archive`, without moving the files (DESIGN 10, F49). F50 gives
+    `--archive` its reach from any working directory and names every hit's project. A file
     with no project of its own follows the project its directory names. Unarchiving puts
     them back, because the registry's change re-derives every row the project named."""
     digest_rel = "digests/widget/2026/09/2026-09-27-claude-s-widget-7.md"
@@ -1180,9 +1270,19 @@ def test_an_archived_projects_memory_answers_only_the_archive_flag(
         ("projects/widget/flange.md", "archive")
     ]
 
-    # Another project's scope does not reach it; the archived project's own does.
+    # F50: the archived project answers `--archive` from every working directory, another
+    # project's and one in no project at all, while the everyday search reaches it from none
+    # of them. Each hit names the project its resting memory belongs to.
     monkeypatch.chdir(populated_vault.vault / "projects" / "gadget")
-    assert search.search(populated_vault, "kumquat", archive=True) == []
+    assert search.search(populated_vault, "kumquat") == []
+    assert [hit.project for hit in search.search(populated_vault, "kumquat", archive=True)] == [
+        "widget"
+    ]
+    monkeypatch.chdir(populated_vault.vault.parent)
+    assert search.search(populated_vault, "kumquat") == []
+    assert [hit.path for hit in search.search(populated_vault, "kumquat", archive=True)] == [
+        digest_rel
+    ]
     monkeypatch.chdir(populated_vault.vault / "projects" / "widget")
     assert [hit.path for hit in search.search(populated_vault, "kumquat", archive=True)] == [
         digest_rel

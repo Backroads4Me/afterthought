@@ -1,18 +1,22 @@
 """Search, read and trace: query memory, inspect pages, and trace evidence.
 
-The search index is queried with BM25 ranking over active memory (pages, digests,
-and evidence) by default. The archive is searched only with --archive, and dream
-reports only with --reports. Reading opens pages at outline, abstract, or full depth.
-Tracing links a curated fact's source quote to its session context in the evidence archive.
+The search index is queried with BM25 ranking over active memory (pages, digests, and
+evidence) by default. The archive is searched only with --archive, and dream reports only
+with --reports. Reading opens pages at outline, abstract, or full depth. Tracing links a
+curated fact's source quote to its session context in the evidence archive.
 
-A hit says where it came from as well as what matched: its document, its collection and its
-section (`search_command`). An evidence hit names the one archived entry it holds, so the path
-printed by a search is the path `aft trace` takes to open that entry's context - otherwise a
-hit from the archive of conversation leads nowhere, since no page holds it.
+A hit says where it came from as well as what matched: its document, its collection, its
+section and its project (`search_command`). An evidence hit names the one archived entry
+it holds, so the path printed by a search is the path `aft trace` takes to open that
+entry's context - otherwise a hit from the archive of conversation leads nowhere, since no
+page holds it.
 
-Scoping is `_scope`'s: a project's search takes the project's own memory plus the global pages,
-and a row with no project counts as global memory only in the collection where a page could not
-have had a project at all.
+The default search reaches every project that is not archived (DESIGN 10): the current
+directory's project ranks first, the global pages next, then the other projects' memory
+and the unfiled text, each tier fixed ahead of the BM25 order inside it. A project named
+with --project narrows the query to that project and the global pages. Memory that names
+no project is named rather than hidden: the global pages, a digest or an archived entry
+whose session resolved to no project, and the library each answer under their own name.
 """
 
 from __future__ import annotations
@@ -50,6 +54,7 @@ class Hit:
     snippet: str
     collection: str = ""
     heading: str = ""
+    project: str = ""
     rank: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -57,23 +62,39 @@ class Hit:
             "path": self.path,
             "collection": self.collection,
             "heading": self.heading,
+            "project": self.project,
             "description": self.description,
             "snippet": self.snippet,
         }
+
+
+#: The rank tier of a row that names the project the query is pinned to, and of a row that
+#: names no project in a collection a page can be shared through (DESIGN 10): the current
+#: directory's project first, the global pages next, everything else last, each tier fixed
+#: ahead of the BM25 order inside it. A query with no project to pin passes the empty string,
+#: which no row's project answers, so tier 0 stays empty and the global pages keep tier 1.
+_TIER_SHARED = "CASE WHEN project_id IS ? THEN 0 WHEN project_id IS NULL THEN 1 ELSE 2 END"
+_TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 2 END"
+
+#: The collections whose rows are one per document: an evidence row is one archived entry and
+#: its path names that entry, so a document there has no second row, and the fold that narrows
+#: a sectioned document to its best row has nothing to fold. Asking those collections without
+#: the fold reads their matches once instead of sorting them twice.
+SINGLE_ROW_COLLECTIONS: tuple[str, ...] = (index.EVIDENCE,)
 
 
 def _ask(
     conn: sqlite3.Connection,
     collections: list[str],
     fts5_query: str,
-    target_project_id: str | None,
-    filter_global_only: bool,
+    narrow_id: str | None,
+    tier0_id: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Ask each collection for its ``limit`` best-ranked documents, best row first.
+    """Ask each collection for its ``limit`` best-ranked documents, best tier and row first.
 
-    A collection `_scope` rules out entirely is not asked at all, so a project's search never
-    sends a statement against memory that was never filed under it.
+    A collection `_scope` rules out entirely is not asked at all, so a narrowed search never
+    sends a statement against memory it does not admit.
 
     The limit belongs in SQL. Without it a search builds every match - the snippet, the row, the
     Python object - to keep eight of them, which is what a vault whose every line carries the
@@ -86,7 +107,9 @@ def _ask(
     the only row of it any search could have kept - and the limit goes after that. That is what
     makes the limit mean what it says, and it is done in SQL over the whole collection rather
     than after the rows arrive, because a search that reads every row to discover the eight it
-    wanted has already paid for the ones it threw away.
+    wanted has already paid for the ones it threw away. A collection whose rows are one per
+    document (``SINGLE_ROW_COLLECTIONS``) skips the fold: there is nothing to narrow, and the
+    statement reads its matches once instead of sorting them twice.
 
     Which rows survived comes back before what they say, because a snippet is cut by the match
     scan it is written into: a statement that joins back to its table by rowid snippets whatever
@@ -97,22 +120,41 @@ def _ask(
     """
     rows: list[dict[str, Any]] = []
     for col in collections:
-        scope = _scope(col, target_project_id, filter_global_only)
-        if scope is None:
-            continue  # this collection holds no memory the query is allowed to reach
-        clause, extra = scope
-        args: list[Any] = [fts5_query, *extra]
+        clause, extra = _scope(col, narrow_id)
+        shared = col in index.GLOBAL_COLLECTIONS
+        if narrow_id is not None and not shared:
+            # The clause above admits only this project's own rows, so every row that
+            # survives is tier 0 and the tier expression has nothing left to decide.
+            tier = "0"
+            tier_args: list[Any] = []
+        else:
+            tier = _TIER_SHARED if shared else _TIER_OWNED
+            # A pinned project id goes in the tier; the empty string goes when nothing is
+            # pinned, which no row answers, so tier 0 stays empty and the ranking is tier 1
+            # and tier 2.
+            tier_args = [tier0_id if tier0_id is not None else ""]
 
-        keep = conn.execute(
-            f"SELECT rid, path, description, heading, score FROM (SELECT rid, path,"
-            f" description, heading, score,"
-            f" row_number() OVER (PARTITION BY path ORDER BY score) AS best"
-            f" FROM (SELECT rowid AS rid, path, description, heading,"
-            f" {index.rank_expression(col)} AS score"
-            f" FROM {col} WHERE {col} MATCH ?{clause})) WHERE best = 1"
-            " ORDER BY score ASC LIMIT ?",
-            (*args, limit),
-        ).fetchall()
+        if col in SINGLE_ROW_COLLECTIONS:
+            # One row per document: the fold below has nothing to fold, and skipping it is
+            # the difference between reading the matches once and sorting them twice.
+            keep = conn.execute(
+                f"SELECT rowid AS rid, path, description, heading, project_id,"
+                f" {index.rank_expression(col)} AS score, {tier} AS tier"
+                f" FROM {col} WHERE {col} MATCH ?{clause}"
+                " ORDER BY tier ASC, score ASC LIMIT ?",
+                (*tier_args, fts5_query, *extra, limit),
+            ).fetchall()
+        else:
+            keep = conn.execute(
+                f"SELECT rid, path, description, heading, score, tier, project_id FROM"
+                f" (SELECT rid, path, description, heading, score, tier, project_id,"
+                f" row_number() OVER (PARTITION BY path ORDER BY tier, score) AS best"
+                f" FROM (SELECT rowid AS rid, path, description, heading, project_id,"
+                f" {index.rank_expression(col)} AS score, {tier} AS tier"
+                f" FROM {col} WHERE {col} MATCH ?{clause})) WHERE best = 1"
+                " ORDER BY tier ASC, score ASC LIMIT ?",
+                (*tier_args, fts5_query, *extra, limit),
+            ).fetchall()
         if not keep:
             continue
 
@@ -132,11 +174,13 @@ def _ask(
                 "heading": row["heading"],
                 "snippet": snippets.get(row["rid"], ""),
                 "rank": row["score"],
+                "tier": row["tier"],
+                "project_id": row["project_id"],
             }
             for row in keep
         )
 
-    rows.sort(key=lambda row: row["rank"])
+    rows.sort(key=lambda row: (row["tier"], row["rank"]))
     return rows
 
 
@@ -152,9 +196,11 @@ def search(
 ) -> list[Hit]:
     """Query the search index with BM25 ranking across active collections.
 
-    Without ``all_projects`` the query is scoped to one project, and what that admits per
-    collection is `_scope`'s call: the project's own memory plus, for pages alone, the global
-    pages of DESIGN 6.
+    The query reaches every project that is not archived (DESIGN 10): the current
+    directory's project ranks first, the global pages next, then the other projects and the
+    unfiled text, a fixed tier ahead of the BM25 order inside each. ``project`` names one
+    project to narrow the query to, with the global pages. ``all_projects`` is accepted and
+    changes nothing, since the default already reaches every project.
     """
     vault.require(config)
     index.update(config)
@@ -163,22 +209,20 @@ def search(
     if not fts5_query:
         return []
 
-    target_project_id: str | None = None
-    filter_global_only = False
+    registry = Registry.load(config.registry_path)
+    narrow_id: str | None = None
+    tier0_id: str | None = None
 
-    if not all_projects:
-        registry = Registry.load(config.registry_path)
-        if project is not None:
-            proj = registry.by_slug(project)
-            if proj is None:
-                raise SearchError(f"unknown project {project!r}")
-            target_project_id = proj.id
-        else:
-            resolution = keys.resolve(Path.cwd(), registry, config.host)
-            if resolution.project is not None:
-                target_project_id = resolution.project.id
-            else:
-                filter_global_only = True
+    if project is not None:
+        proj = registry.by_slug(project)
+        if proj is None:
+            raise SearchError(f"unknown project {project!r}")
+        narrow_id = proj.id
+        tier0_id = proj.id
+    else:
+        resolution = keys.resolve(Path.cwd(), registry, config.host)
+        if resolution.project is not None:
+            tier0_id = resolution.project.id
 
     db_path = config.home / index.INDEX_NAME
     if not db_path.exists():
@@ -204,10 +248,9 @@ def search(
         if not active_collections:
             return []
 
-        rows = _ask(
-            conn, active_collections, fts5_query, target_project_id, filter_global_only, limit
-        )
+        rows = _ask(conn, active_collections, fts5_query, narrow_id, tier0_id, limit)
 
+        slugs = {proj.id: proj.slug for proj in registry.projects}
         seen_paths: set[str] = set()
         hits: list[Hit] = []
 
@@ -227,6 +270,7 @@ def search(
                     snippet=snip,
                     collection=row["collection"],
                     heading=row["heading"] or "",
+                    project=_project_name(row["project_id"], row["collection"], slugs),
                     rank=float(row["rank"]),
                 )
             )
@@ -240,31 +284,55 @@ def search(
         conn.close()
 
 
-def _scope(
-    collection: str, project_id: str | None, outside_every_project: bool
-) -> tuple[str, list[Any]] | None:
-    """The project clause one collection contributes to a scoped query, or None for no rows.
+#: The name a hit carries for memory that names no project, by collection (DESIGN 10): the
+#: global pages are shared, a digest or an archived entry whose session resolved to no
+#: project is unfiled (DESIGN 7), the library is reference text, and a report day spans
+#: the projects.
+_UNPROJECTED_NAMES = {
+    index.PAGES: "global",
+    index.ARCHIVE: "global",
+    index.DIGESTS: "unfiled",
+    index.EVIDENCE: "unfiled",
+    index.LIBRARY: "library",
+    index.REPORTS: "reports",
+}
 
-    BUILD-PLAN M3.2 scopes the default to "the current directory's project plus global pages",
-    and an empty project means global only for a page row and for the archive row of a page's
-    line that left memory (`index.GLOBAL_COLLECTIONS`). A digest
-    filed under a slug no registry answers for, and an archived entry whose session resolved to
-    no project (DESIGN 7 step 4), are text that was never filed rather than memory every project
-    shares, so neither answers a project's query. A report day names no project because it spans
-    them all, and DESIGN 10 reaches it only through ``--reports``, which is the request for it.
-    From a working directory inside no project, only the shared pages answer, and under
-    ``--archive`` the lines those pages hold back.
+
+def _project_name(project_id: str | None, collection: str, slugs: dict[str, str]) -> str:
+    """The name a hit carries for the project its row belongs to, when it has one to name.
+
+    A row filed under a registered project names its slug. A row that names no project says
+    what it is instead (DESIGN 7, DESIGN 10): the global pages, the unfiled text of a
+    session whose directory answered no project, the library's reference text, or a report
+    day that spans the projects. An id the registry no longer answers for names nothing.
+    """
+    if project_id:
+        return slugs.get(project_id, "")
+    return _UNPROJECTED_NAMES.get(collection, "")
+
+
+def _scope(collection: str, narrow_id: str | None) -> tuple[str, list[Any]]:
+    """The project clause one collection contributes to the query.
+
+    With no project to narrow to, the collection is asked whole: the default search reaches
+    every project that is not archived (DESIGN 10), and an archived project's rows live in
+    the ``archive`` collection alone (F49), so an unscoped query reads nothing of them
+    unless ``--archive`` asks for that collection.
+
+    A narrowed query takes the project's own rows, and, in the collections a page can be
+    shared through (``index.GLOBAL_COLLECTIONS``), the rows that name no project: the global
+    pages and, under ``--archive``, their resting lines. An id-less row of any other
+    collection is unfiled text - a session whose directory answered no project (DESIGN 7),
+    a digest under a slug no registry answers for - and is no project's memory, so a
+    narrowed query does not reach it. A report day names no project because it spans them
+    all, and answers any query that asks for reports at all.
     """
     if collection in index.SPANNING_COLLECTIONS:
         return "", []
-    if project_id is not None:
+    if narrow_id is not None:
         if collection in index.GLOBAL_COLLECTIONS:
-            return " AND (project_id = ? OR project_id IS NULL)", [project_id]
-        return " AND project_id = ?", [project_id]
-    if outside_every_project:
-        if collection in index.GLOBAL_COLLECTIONS:
-            return " AND project_id IS NULL", []
-        return None
+            return " AND (project_id IS ? OR project_id IS NULL)", [narrow_id]
+        return " AND project_id IS ?", [narrow_id]
     return "", []
 
 
@@ -281,10 +349,12 @@ def search_command(
 ) -> int:
     """Run search and print one tab-separated line per hit.
 
-    The line names the document, the collection it came from and the section it sits in before
-    the description and the snippet: DESIGN 10 requires a result to name its document and its
-    section, and a hit from the archive or the library reads differently once it says so. An
-    evidence hit's path carries the entry id, which is what makes `aft trace <path>` open it.
+    The line names the document, the collection it came from, the section it sits in and
+    the project it belongs to before the description and the snippet: DESIGN 10 requires a
+    result to name its document and its section, F50 its project, and a hit from the
+    archive, the library or another project reads differently once the line says so. An
+    evidence hit's path carries the entry id, which is what makes `aft trace <path>` open
+    it.
     """
     hits = search(
         config,
@@ -301,7 +371,13 @@ def search_command(
         for hit in hits:
             print(
                 "\t".join(
-                    (hit.path, hit.collection or "-", hit.heading or "-", hit.description or "-")
+                    (
+                        hit.path,
+                        hit.collection or "-",
+                        hit.heading or "-",
+                        hit.project or "-",
+                        hit.description or "-",
+                    )
                 )
                 + f"\t{hit.snippet}"
             )

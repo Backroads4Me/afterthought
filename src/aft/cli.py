@@ -205,7 +205,11 @@ def _parser() -> argparse.ArgumentParser:
     p = sub.add_parser("search", help="search memory with BM25 ranking")
     p.add_argument("query", help="words to search for")
     p.add_argument("--project", help="search within a project and global pages")
-    p.add_argument("--all", action="store_true", help="search across all projects")
+    p.add_argument(
+        "--all",
+        action="store_true",
+        help="accepted and unused: the search already reaches every project (F50)",
+    )
     p.add_argument("--archive", action="store_true", help="include archived superseded facts")
     p.add_argument("--reports", action="store_true", help="include dream reports")
     p.add_argument("--json", action="store_true", help="output hits as JSON")

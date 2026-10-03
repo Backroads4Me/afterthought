@@ -29,7 +29,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | Command | What it does |
 |---|---|
 | `aft inject [path]` | Prints the memory block a session in `path` starts with. Reads files only and calls no model. |
-| `aft search "WORDS" [--project P] [--all] [--archive] [--reports] [--limit N] [--json]` | Searches memory, digests, evidence and library text with BM25 ranking, scoped to the current directory's project and the global pages. `--all` searches every project; `--archive` adds superseded and stale lines and resolved notes; `--reports` adds dream reports. |
+| `aft search "WORDS" [--project P] [--archive] [--reports] [--limit N] [--json]` | Searches every project that is not archived, with BM25 ranking inside a fixed order: the current directory's project first, the global pages next, the other projects and the unfiled text last; each hit names its project. `--project P` narrows to P and the global pages; `--all` is accepted and changes nothing; `--archive` adds every project's superseded and stale lines and resolved notes; `--reports` adds dream reports. |
 | `aft read PATH [--level outline\|abstract\|full]` | Prints a page at the depth a task needs. |
 | `aft trace PAGE SOURCE` | Prints a fact's quote and the session entries around it. With an evidence hit's `aft://session/<agent>/<id>#<entry>` path, it opens that entry. |
 | `aft notes [path] [--all] [--json]` | Lists the notes waiting on your decision for `path`'s project and the global and reference pages: each line, its note, the quotes behind both with their dates, and the `aft settle` command for it. `--all` lists every project's. Reads files only. |

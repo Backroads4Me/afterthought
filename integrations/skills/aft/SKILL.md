@@ -18,7 +18,7 @@ These read and change nothing:
 
 | The user wants | Run |
 |---|---|
-| To find something in memory | `aft search <words>`; add `--all` for every project, `--archive` for superseded lines, `--reports` for dream reports |
+| To find something in memory | `aft search <words>`: every project answers, the current one first, and each hit names its project; add `--project <slug>` to narrow, `--archive` for superseded lines, `--reports` for dream reports |
 | To read a page | `aft read <path>`, with `--level outline` or `--level abstract` for less |
 | Where a fact came from | `aft trace <page> <source>`: the page's path and the footnote id the fact cites, such as s3; or a search hit's evidence path on its own |
 | What a session starts with | `aft inject <path>` |
