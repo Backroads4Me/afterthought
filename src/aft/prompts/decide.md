@@ -8,6 +8,12 @@ short-term fact is what the project's last few sessions were working with, and i
 to change. The new fact says which term it is, and an existing line marked recent is
 short-term memory.
 
+A fact earns its place in memory only when a future session would make a mistake, or ask
+the user again, without it. Never a fact, long or short term: the status of a pull
+request, task, branch or commit; who is working on what; a test's name or result; a
+review's outcome; what a change or fix did to the code; and anything the repository's own
+documents already say.
+
 Choose one action:
 - add: the fact is new; no existing line says the same thing or contradicts it.
 - confirm: an existing line already says the same thing. Name it.
@@ -15,10 +21,10 @@ Choose one action:
   changed. Name the line.
 - conflict: the fact and an existing line say different things about the same thing, so
   both cannot be true, and it is not clear that the thing has changed. Name the line.
-- skip: the fact is not worth keeping: it is routine, re-derivable from the code or git
-  history, or too vague to act on. A long-term fact that will not stay true is not worth
-  keeping either. A short-term fact is meant to be temporary, so that alone is no reason
-  to skip it.
+- skip: the fact is not worth keeping: it fails that test, is on the never-a-fact list
+  above, or it is routine, re-derivable from the code or git history, or too vague to act
+  on. A long-term fact that will not stay true is not worth keeping either. A short-term
+  fact is meant to be temporary, so that alone is no reason to skip it.
 
 Two lines say the same thing when an agent reading either would act the same way, even if
 the wording differs. Before naming a line for supersede or conflict, check that it is about

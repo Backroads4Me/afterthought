@@ -1963,18 +1963,17 @@ def test_the_work_reports_a_failure_as_a_nonzero_exit(session: Session, capsys):
 # --------------------------------------------------------- the prompt and the schema shipped
 
 
-def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
-    """The plan's own words are the prompt; a quietly rewritten prompt is a new system."""
-    lines = PLAN.read_text(encoding="utf-8").splitlines(keepends=True)
-    start = next(index for index, line in enumerate(lines) if line.startswith("- **Prompt**"))
-    stop = next(index for index, line in enumerate(lines) if line.startswith("- **Schema**"))
-    fences = [
-        index
-        for index, line in enumerate(lines[start:stop], start=start)
-        if line.strip() in ("```text", "```")
-    ]
-    assert len(fences) == 2, "the plan's prompt block is not the fenced pair this reads"
-    assert digest.prompt_text() == "".join(lines[fences[0] + 1 : fences[1]])
+def test_the_prompt_shipped_is_the_blessed_text():
+    """The shipped prompt is the blessed copy, byte for byte; a quiet rewrite is a new system.
+
+    The plan's M2.6 block held these words until F46 moved the prompt past it, and
+    planning/ is read-only for builders, so the copy that must match is held in the
+    fixtures and changes only when a ruling changes the prompt.
+    """
+    blessed = (Path(__file__).resolve().parent / "fixtures" / "digest-prompt.md").read_text(
+        encoding="utf-8"
+    )
+    assert digest.prompt_text() == blessed
 
 
 def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
@@ -3143,7 +3142,40 @@ def test_the_digest_prompt_narrows_stated_to_the_users_own_assertions():
 
 def test_the_digest_prompt_sends_session_progress_to_the_handoff():
     """DESIGN 6: what a session did is no fact; the summary and handoff carry it."""
-    assert "is not a fact. It goes in the summary and the handoff." in prompt_words()
+    assert (
+        "where the work stood goes in the handoff, which only the next session "
+        "sees as Last session" in prompt_words()
+    )
+
+
+def test_the_digest_prompt_gives_every_fact_one_value_test():
+    """F46: a fact earns memory only when a future session would stumble or re-ask."""
+    assert "a future session would make a mistake, or ask the user again, without it" in (
+        prompt_words()
+    )
+
+
+def test_the_digest_prompt_names_what_is_never_a_fact():
+    """F46: progress and repository facts are never facts, long or short term."""
+    words = prompt_words()
+    assert "Never a fact, long or short term" in words
+    for item in (
+        "the status of a pull request, task, branch or commit",
+        "who is working on what",
+        "a test's name or result",
+        "a review's outcome",
+        "what a change or fix did to the code",
+        "anything the repository's own documents already say",
+    ):
+        assert item in words
+
+
+def test_the_digest_prompt_defines_short_term_as_a_temporary_condition():
+    """F46: short term is a condition that changes how an agent acts, never progress."""
+    words = prompt_words()
+    assert "a temporary condition that changes how an agent should act" in words
+    assert "(something paused, a temporary setting, a freeze), not progress on the work" in words
+    assert "such as who is working on what, what is paused, or a temporary setting" not in words
 
 
 def test_the_digest_prompt_defines_both_terms_and_defaults_to_short():

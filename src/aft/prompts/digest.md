@@ -12,9 +12,16 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
+Every fact passes one test: a future session would make a mistake, or ask the user
+again, without it. Never a fact, long or short term: the status of a pull request, task,
+branch or commit; who is working on what; a test's name or result; a review's outcome;
+what a change or fix did to the code; and anything the repository's own documents
+already say.
+
 What this part of the session did and where the work stood when it ended (the task in
-progress, what was merged or run, what comes next) is not a fact. It goes in the summary
-and the handoff.
+progress, what was merged or run, what comes next) is not a fact. What was done goes
+in the summary; where the work stood goes in the handoff, which only the next session
+sees as Last session.
 
 The session began with a block of memory, and the agent may repeat it. A fact whose only
 support is that memory being restated is already known: skip it. Extract a fact from
@@ -43,8 +50,8 @@ For each fact:
   - long: it will still be true and useful the next time someone opens this project,
     even a year from now.
   - short: it is true now and matters for the next few sessions, but will change as the
-    work moves on, such as who is working on what, what is paused, or a temporary
-    setting.
+    work moves on. It is a temporary condition that changes how an agent should act
+    (something paused, a temporary setting, a freeze), not progress on the work.
   When unsure, use short. A short fact is stated or observed, and its scope is project.
 - quote: copy the words that support the fact exactly as they appear in one entry, at
   most 300 characters. Do not paraphrase or join words from different entries.
