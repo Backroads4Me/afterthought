@@ -1115,6 +1115,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   in this one; `--project`; an archived project answers only with `--archive`; the
   known-answer suite still passes; search time on the 20,000-row bench stays within 10% of
   main. Review checkpoint: no.
+- **F51 One word settles the notes** (ruling 2026-10-03). DESIGN 10. The block asked "settle
+  now or skip for now?" with no reply named, and "yes" to that question is ambiguous. The
+  block's notes line, the hook's notice and the aft skill name one reply: "settle" goes
+  through the notes now; any other reply, including carrying on, skips them. Also: the
+  recent layer's floor no longer shares in the room the long-term layers divide (DESIGN 10:
+  short-term memory takes only what they leave). Tests: the notes line and the notice name
+  the reply; the short-term crowd-out test at 1,200 characters. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
