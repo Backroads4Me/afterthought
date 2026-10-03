@@ -476,3 +476,39 @@ def test_the_dry_run_records_no_claim_for_a_session_with_no_record(
     assert record is not None and (record.slug, record.path) == ("plain", str(plain))
     moved = list((cfg.vault / "digests/plain").rglob(f"{TODAY}-c-u9.md"))
     assert moved, "the run refiled u9"
+
+
+def test_the_backfill_names_a_session_the_model_fails_and_the_rest_go_on(
+    initialized, home, fake, tmp_path, capsys, monkeypatch
+):
+    """A session the model cannot digest is that session's own failure: the run names it
+    and carries on with the rest, instead of one session's model error stopping the
+    backfill of every session waiting behind it (DESIGN 7, F49)."""
+    from aft.cli import main
+    from aft.model import ModelError
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    fieldwork = tmp_path / "fieldwork"
+    fieldwork.mkdir()
+    _unfiled_session(cfg, "u1", "fieldwork", fieldwork)
+    other = tmp_path / "otherfield"
+    other.mkdir()
+    _unfiled_session(cfg, "u2", "otherfield", other)
+
+    real_parts = digest._digest_parts
+
+    def parts(config, session_id, chunks, role):
+        if session_id == "u1":
+            raise ModelError("the model endpoint said no")
+        return real_parts(config, session_id, chunks, role)
+
+    monkeypatch.setattr(digest, "_digest_parts", parts)
+    fake.script = [Reply(content=EMPTY_ANSWER)]
+
+    assert main(["redigest", "--unfiled"]) == 1
+    out = capsys.readouterr()
+    assert "u1: the model endpoint said no" in out.err
+    assert "rebuilt digest at digests/otherfield/" in out.out
+    assert list((cfg.vault / "digests/otherfield").rglob(f"{TODAY}-c-u2.md"))
+    unfiled = [p.name for p in (cfg.vault / "digests" / digest.UNFILED).rglob("*.md")]
+    assert f"{TODAY}-c-u1.md" in unfiled, "the failed session's digest was torn down"

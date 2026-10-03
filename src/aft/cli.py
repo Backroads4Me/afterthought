@@ -1049,7 +1049,7 @@ def _redigest_unfiled(config: Config, args) -> int:
             return 1
         try:
             wrote = digest.redigest(config, session_id, now=now, unfiled=True)
-        except digest.DigestError as exc:
+        except (digest.DigestError, model.ModelError) as exc:
             print(f"{session_id}: {exc}", file=sys.stderr)
             failed += 1
             continue
