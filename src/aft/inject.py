@@ -53,17 +53,30 @@ PREFERENCES = Path("global/preferences.md")
 Part = tuple[str, list[str]]
 
 
+def block_project(resolution: Resolution) -> Project | None:
+    """The project a memory block is built for (DESIGN 7, F49).
+
+    An archived project is left out, so a session in its directory is given the global
+    pages alone, exactly as a session of no project is: the project keeps its files and its
+    sessions are still captured and dreamed, but its memory does not reach the block until
+    ``aft project unarchive`` brings it back.
+    """
+    project = resolution.project
+    return None if project is not None and project.archived else project
+
+
 def build(config: Config, resolution: Resolution, waiting: int | None = None) -> str:
     """The block for ``resolution``.
 
     A registered project gets its name and description, the newest digest's handoff, its
     overview's facts, the pages and collections that cover it, and the lines on how to
     search and read. An unregistered or unresolved directory gets only global preferences
-    and those lines. Either way, notes waiting on the user's decision come first:
-    ``waiting`` of them, counted here when the caller has not counted them already.
+    and those lines, and so does a session in an archived project's directory (DESIGN 7,
+    F49). Either way, notes waiting on the user's decision come first: ``waiting`` of them,
+    counted here when the caller has not counted them already.
     """
     max_chars = config.settings.inject.max_chars
-    project = resolution.project
+    project = block_project(resolution)
     title: list[Part] = []
     own: list[Part] = []
     page_map: list[Part] = []

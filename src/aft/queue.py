@@ -33,6 +33,7 @@ from pathlib import Path
 from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
+from aft.registry import path_key
 
 QUEUE_NAME = "queue.sqlite"
 
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS session_projects (
     session_id  TEXT NOT NULL,
     project_id  TEXT,
     slug        TEXT NOT NULL,
+    path        TEXT,
     PRIMARY KEY (agent, session_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -167,6 +169,23 @@ class SessionState:
     read_at: datetime | None = None
     failed_at: datetime | None = None
     forgotten: bool = False
+
+
+@dataclass(frozen=True)
+class ProjectRecord:
+    """The session-start record: the project a session started in, and where (DESIGN 7).
+
+    ``project_id`` is set when the registry knew the project at session start and None when
+    it was still to be made. ``slug`` is the name the session's digests file under - the
+    project's slug, or the name an unregistered directory resolved to. ``path`` is the
+    directory the project would be registered at, kept so the dream can register a
+    still-unregistered project with it and find a registered one by it; it is None on a
+    record an earlier build wrote, which kept no directory.
+    """
+
+    project_id: str | None
+    slug: str
+    path: str | None = None
 
 
 def enqueue(
@@ -271,16 +290,24 @@ RECORD_BUSY_TIMEOUT_MS = 200
 
 
 def record_project(
-    config: Config, agent: str, session_id: str, project_id: str | None, slug: str
+    config: Config,
+    agent: str,
+    session_id: str,
+    project_id: str | None,
+    slug: str,
+    path: Path | str | None = None,
 ) -> bool:
-    """Remember which project a session started in (DESIGN 7).
+    """Remember which project a session started in, and where (DESIGN 7).
 
     A session's directory can be gone by the time its words are digested: a worktree is made,
     worked in and removed. The project is decided while the directory still exists, at
     session start, and the digest reads it from here when the directory no longer answers.
     ``project_id`` is None for a project the registry does not hold yet, which is named by its
-    slug alone. A session `aft forget` removed is not recorded again. Returns whether a row
-    was written.
+    slug alone; ``path`` is the directory the project would be registered at, which is what
+    the dream registers a still-unregistered project from. A digest that settles an
+    unregistered directory's slug rewrites the record with the slug it filed under, so every
+    digest of the session agrees on one place. A session `aft forget` removed is not recorded
+    again. Returns whether a row was written.
     """
     with _writing(config, busy_timeout_ms=RECORD_BUSY_TIMEOUT_MS) as conn:
         if conn.execute(
@@ -288,23 +315,64 @@ def record_project(
         ).fetchone():
             return False
         conn.execute(
-            "INSERT INTO session_projects (agent, session_id, project_id, slug)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO session_projects (agent, session_id, project_id, slug, path)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT (agent, session_id) DO UPDATE SET"
-            " project_id = excluded.project_id, slug = excluded.slug",
-            (agent, session_id, project_id, slug),
+            " project_id = excluded.project_id, slug = excluded.slug, path = excluded.path",
+            (agent, session_id, project_id, slug, None if path is None else str(path)),
         )
     return True
 
 
-def recorded_project(config: Config, agent: str, session_id: str) -> tuple[str | None, str] | None:
-    """The ``(project id, slug)`` a session started in, or None when none was recorded."""
+def recorded_project(config: Config, agent: str, session_id: str) -> ProjectRecord | None:
+    """The project a session started in, as its session-start record keeps it (DESIGN 7)."""
     with _reading(config) as conn:
         row = conn.execute(
-            "SELECT project_id, slug FROM session_projects WHERE agent = ? AND session_id = ?",
+            "SELECT project_id, slug, path FROM session_projects"
+            " WHERE agent = ? AND session_id = ?",
             (agent, session_id),
         ).fetchone()
-    return (row[0], row[1]) if row else None
+    return ProjectRecord(row[0], row[1], row[2]) if row else None
+
+
+def holders(config: Config, slug: str) -> list[str]:
+    """Every recorded path that holds this slug, from every session-start record (DESIGN 7).
+
+    A slug is held by another path once a session in it has started: the record is the
+    durable claim that the directory's project files under this name, kept so two
+    directories of one name never share a digest directory before either project is
+    registered.
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT path FROM session_projects WHERE slug = ? AND path IS NOT NULL",
+            (slug,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+def recorded_paths(config: Config, host: str, project_id: str) -> list[Path]:
+    """Every recorded path this project's session-start records carry on one host.
+
+    A project that was only ever registered by the dream, from a session that left no
+    record, has no recorded path; an empty answer is what the report reads as "never had
+    one", which is not "its paths are gone".
+    """
+    with _reading(config) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT path FROM session_projects"
+            " WHERE project_id = ? AND path IS NOT NULL",
+            (project_id,),
+        ).fetchall()
+    paths: list[Path] = []
+    for text, in rows:
+        path = Path(text)
+        try:
+            if path_key(config.host, path) == path_key(host, path):
+                paths.append(path)
+        except ValueError:
+            continue
+    return paths
 
 
 def next_job(config: Config, *, role: str | None = None) -> Job | None:
@@ -755,6 +823,11 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
     if _journal_mode(conn) != WAL_MODE:
         _enter_wal(conn, timeout_ms=timeout)
     conn.executescript(_SCHEMA)
+    if "path" not in {row[1] for row in conn.execute("PRAGMA table_info(session_projects)")}:
+        # A queue an earlier build wrote names no path on a session-start record. The column
+        # is nullable, so its records read as ones kept before the directory was recorded
+        # (F49) rather than refusing an upgrade that would cost every record.
+        conn.execute("ALTER TABLE session_projects ADD COLUMN path TEXT")
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
     if "off_record" not in sessions or "digest_due" not in sessions or "claimed_time" not in jobs:

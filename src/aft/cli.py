@@ -12,7 +12,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from aft import __version__
@@ -111,6 +111,12 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("old")
     q.add_argument("new")
     q.set_defaults(handler=cmd_project_rename)
+    q = psub.add_parser("archive", help="take a project out of memory without deleting anything")
+    q.add_argument("slug")
+    q.set_defaults(handler=cmd_project_archive)
+    q = psub.add_parser("unarchive", help="bring an archived project back into memory")
+    q.add_argument("slug")
+    q.set_defaults(handler=cmd_project_unarchive)
     q = psub.add_parser("forget", help="remove a project from the registry")
     q.add_argument("slug")
     q.set_defaults(handler=cmd_project_forget)
@@ -183,9 +189,19 @@ def _parser() -> argparse.ArgumentParser:
     q.set_defaults(handler=cmd_forget_pattern)
 
     p = sub.add_parser("redigest", help="rebuild a session digest from archived evidence")
-    p.add_argument("session_id", help="the session id to redigest")
+    p.add_argument("session_id", nargs="?", help="the session id to redigest")
+    p.add_argument(
+        "--unfiled",
+        action="store_true",
+        help="rebuild every still-archived session filed as unfiled, so each files under the"
+        " project its recorded directory now resolves to",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --unfiled, list the sessions and the tokens a rebuild would charge",
+    )
     p.set_defaults(handler=cmd_redigest)
-
     p = sub.add_parser("search", help="search memory with BM25 ranking")
     p.add_argument("query", help="words to search for")
     p.add_argument("--project", help="search within a project and global pages")
@@ -373,7 +389,13 @@ def cmd_key(args) -> int:
     registry = Registry.load(config.registry_path)
     from aft import keys
 
-    result = keys.resolve(Path(args.path), registry, config.host, on_alias=_alias_writer(config))
+    result = keys.resolve(
+        Path(args.path),
+        registry,
+        config.host,
+        on_alias=_alias_writer(config),
+        never=config.settings.capture.exclude_paths,
+    )
     if args.json:
         print(
             json.dumps(
@@ -410,8 +432,12 @@ def _injection_block(path: Path) -> str:
 
     config = load()
     registry = Registry.load(config.registry_path)
+    config = load()
+    registry = Registry.load(config.registry_path)
     try:
-        result = keys.resolve(path, registry, config.host)
+        result = keys.resolve(
+            path, registry, config.host, never=config.settings.capture.exclude_paths
+        )
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=path)
     return inject.build(config, result)
@@ -539,6 +565,39 @@ def cmd_project_forget(args) -> int:
         print(
             f"its pages remain in projects/{args.slug}; delete them yourself if you want them gone"
         )
+    return 0
+
+
+def cmd_project_archive(args) -> int:
+    """Take a project out of memory without deleting anything (DESIGN 7, F49).
+
+    Its directory is then given the global pages alone, and its pages and digests answer
+    only ``aft search --archive``. Nothing is archived by this run or by any other: the
+    command is the person's to run, and `aft project unarchive` undoes it.
+    """
+    return _set_archived(args, True)
+
+
+def cmd_project_unarchive(args) -> int:
+    """Bring an archived project back into memory (DESIGN 7, F49)."""
+    return _set_archived(args, False)
+
+
+def _set_archived(args, archived: bool) -> int:
+    from aft import vault
+
+    config = load()
+    vault.require(config)
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        project = registry.set_archived(args.slug, date.today().isoformat() if archived else "")
+        registry.save()
+        vault.commit(
+            config.vault,
+            ["registry.yaml"],
+            f"aft: {'archive' if archived else 'unarchive'} {args.slug}",
+        )
+    print(f"{'archived' if archived else 'unarchived'} {args.slug} ({project.id})")
     return 0
 
 
@@ -865,8 +924,64 @@ def cmd_redigest(args) -> int:
 
     config = load()
     vault.require(config)
+    if args.unfiled:
+        return _redigest_unfiled(config, args)
+    if args.dry_run:
+        raise UsageError("--dry-run lists the unfiled backfill; give --unfiled with it")
+    if args.session_id is None:
+        # The parser keeps the id optional so --unfiled can name the backfill alone (F49);
+        # without it a session id is what rebuilds.
+        print(
+            "usage: aft redigest <session-id> | aft redigest --unfiled [--dry-run]", file=sys.stderr
+        )
+        raise SystemExit(2)
     result = digest.redigest(config, args.session_id)
     print(f"rebuilt digest at {result.path}")
+    return 0
+
+
+def _redigest_unfiled(config: Config, args) -> int:
+    """The unfiled backfill (DESIGN 7, F49).
+
+    Every still-archived session whose digests are filed as unfiled is rebuilt, so each
+    files under the project its recorded directory now resolves to; the dream turns the
+    refiled digests into memory. ``--dry-run`` lists the sessions and the tokens a rebuild
+    would charge, and writes nothing. A session the day's token budget has no room for stops
+    the run with the rest still waiting; one that fails for its own reason is named and the
+    rest go on.
+    """
+    from aft import digest, model
+
+    sessions = digest.unfiled_sessions(config)
+    if args.dry_run:
+        estimate = 0
+        for session_id in sessions:
+            cost = digest.redigest_estimate(config, session_id)
+            if cost is None:
+                print(f"{session_id}\tno archived entries")
+                continue
+            estimate += cost
+            print(f"{session_id}\t~{cost} tokens")
+        print(f"{len(sessions)} session(s), ~{estimate} tokens")
+        return 0
+    budget = config.settings.work.daily_token_budget
+    now = datetime.now(UTC)
+    rebuilt = 0
+    for session_id in sessions:
+        if model.tokens_used_today(config, now) >= budget:
+            waiting = len(sessions) - rebuilt
+            print(
+                f"the day's token budget of {budget} tokens is spent;"
+                f" {waiting} session(s) wait for a day with room in it"
+            )
+            return 1
+        try:
+            wrote = digest.redigest(config, session_id, now=now, unfiled=True)
+        except digest.DigestError as exc:
+            print(f"{session_id}: {exc}", file=sys.stderr)
+            continue
+        rebuilt += 1
+        print(f"rebuilt digest at {wrote.path}")
     return 0
 
 
@@ -1234,12 +1349,17 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         return "", None
     registry = Registry.load(config.registry_path)
     try:
-        result = keys.resolve(event.cwd, registry, config.host)
+        result = keys.resolve(
+            event.cwd, registry, config.host, never=config.settings.capture.exclude_paths
+        )
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
     from aft import notes
 
-    waiting = notes.count(config, result.slug)
+    # An archived project's directory is given the global pages alone (DESIGN 7, F49), so
+    # its notes are counted on the shared pages, as a session of no project's are.
+    for_block = inject.block_project(result)
+    waiting = notes.count(config, for_block.slug if for_block else None)
     block = _start_output(event.agent, inject.build(config, result, waiting), waiting)
     if result.slug is None or is_excluded(event.cwd, config):
         return block, None
@@ -1251,7 +1371,9 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         # the hook's time is for.
         from aft import queue
 
-        queue.record_project(config, event.agent, event.session_id, project_id, slug)
+        queue.record_project(
+            config, event.agent, event.session_id, project_id, slug, result.root
+        )
 
     return block, remember
 

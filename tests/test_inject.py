@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -668,8 +669,11 @@ def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path)
 
 
 def test_a_directory_with_no_project_gets_the_same_two_layers(widget, tmp_path):
-    plain = tmp_path / "plain"
-    plain.mkdir()
+    """A directory that is no project carries only the global layers, the same block an
+    unregistered repository carries (DESIGN 7, F49). Its directory is under the system
+    temporary directory, which resolves to none."""
+    plain = (Path(tempfile.gettempdir()) / "aft-inject-plain").resolve()
+    plain.mkdir(exist_ok=True)
     resolution = resolve(widget, plain)
     assert resolution.kind == keys.NONE
     assert resolution.slug is None
@@ -942,10 +946,11 @@ def test_a_session_start_records_the_project_the_session_started_in(
 def test_a_session_start_outside_every_project_records_nothing(
     widget, tmp_path, capsys, monkeypatch
 ):
-    """A directory that resolves to no project has no project to record."""
+    """A directory that resolves to no project has no project to record. Its directory is
+    under the system temporary directory, which resolves to none (DESIGN 7, F49)."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
-    plain = tmp_path / "plain"
-    plain.mkdir()
+    plain = (Path(tempfile.gettempdir()) / "aft-start-plain").resolve()
+    plain.mkdir(exist_ok=True)
     run_session_start(monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, plain)
     assert recorded_projects(widget) == []
 

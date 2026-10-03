@@ -312,8 +312,12 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     vault.require(config)
     registry = registrymod.Registry.load(config.registry_path)
     resolution: keys.Resolution | None
+    registry = registrymod.Registry.load(config.registry_path)
+    resolution: keys.Resolution | None
     try:
-        resolution = keys.resolve(job.cwd, registry, config.host)
+        resolution = keys.resolve(
+            job.cwd, registry, config.host, never=config.settings.capture.exclude_paths
+        )
     except GitError:
         # The directory belongs to whatever ran the session and goes away with it: a worktree
         # is made, worked in and removed. The project was decided while it still stood, at
@@ -327,10 +331,16 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
             # outside the exclusion, so it is treated as inside it and leaves no queue row.
             queue.drop_job(config, job)
             return None
+    if resolution is not None and resolution.project is None and resolution.slug is not None:
+        # A directory with no project yet files its digests under a name that stays its own:
+        # the claim settles the slug against every other path that holds it and keeps the
+        # record in step (DESIGN 7, F49).
+        resolution = _claim(config, registry, resolution, job.session_id, job.agent)
     if resolution is None or resolution.slug is None:
-        # No project: a directory outside every registered project and every repository, or
-        # one gone with no record. The session is still digested, filed as unfiled, so what
-        # it says about the user and their machines reaches global memory (DESIGN 7).
+        # No project: a directory under the temporary directory or the downloads, one capture
+        # excludes, or one gone with no record. The session is still digested, filed as
+        # unfiled, so what it says about the user and their machines reaches global memory
+        # (DESIGN 7).
         resolution = keys.Resolution(kind=keys.NONE, cwd=job.cwd)
     if job.transcript_path is None:
         raise DigestError(f"job {job.id} names no transcript for session {job.session_id}")
@@ -475,20 +485,56 @@ def _recorded_resolution(
 ) -> keys.Resolution | None:
     """The project a session started in, as the queue recorded it, or None.
 
-    The record holds the project's id when the registry knew it at session start, and its
-    slug either way. A project registered since then is found by that slug; one still
-    unregistered is digested under its own name, as its directory would have been.
+    The record holds the project's id when the registry knew it at session start, its slug
+    either way, and the directory the session ran in (DESIGN 7). A project registered since
+    then is found by that id, or by the recorded path when the id names nothing; a record an
+    earlier build wrote kept no directory, and is matched by its slug, which is all it named.
+    What is still unregistered keeps the name its directory resolved to, and the directory,
+    so the digest that files it can settle the slug against the paths that hold it.
     """
     recorded = queue.recorded_project(config, job.agent, job.session_id)
     if recorded is None:
         return None
-    project_id, slug = recorded
-    project = registry.by_id(project_id) if project_id else None
-    if project is None:
-        project = registry.by_slug(slug)
+    root = Path(recorded.path) if recorded.path is not None else None
+    project = registry.by_id(recorded.project_id) if recorded.project_id else None
+    if project is None and root is not None:
+        project = registry.by_path_key(registrymod.path_key(config.host, root))
+    if project is None and root is None:
+        project = registry.by_slug(recorded.slug)
     if project is not None:
-        return keys.Resolution(kind="recorded", cwd=job.cwd, project=project, slug=project.slug)
-    return keys.Resolution(kind="recorded", cwd=job.cwd, slug=slug)
+        return keys.Resolution(
+            kind="recorded", cwd=job.cwd, project=project, slug=project.slug, root=root
+        )
+    return keys.Resolution(kind="recorded", cwd=job.cwd, slug=recorded.slug, root=root)
+
+
+def _claim(
+    config: Config,
+    registry: registrymod.Registry,
+    resolution: keys.Resolution,
+    session_id: str,
+    agent: str,
+) -> keys.Resolution:
+    """An unregistered resolution whose slug is settled against the paths that hold it.
+
+    ``keys.resolve`` makes the slug unique against the registry; this makes it unique against
+    every other path that has already claimed the name (DESIGN 7, F49): a session that
+    started in a directory of the same name holds the slug through its session-start record,
+    and its digests file under it. The parents of this directory are prefixed until the name
+    is free, the session's record is rewritten with what its digests file under, and the
+    resolution is returned with the settled slug.
+    """
+    root = resolution.root
+    if root is None or resolution.slug is None:
+        # A record an earlier build wrote names no directory, so nothing can be prefixed:
+        # the slug the record holds is what there is to file under.
+        return resolution
+    taken = {path for path in queue.holders(config, resolution.slug) if path != str(root)}
+    slug = registrymod.unique_slug(root, registry, base=resolution.slug, taken=taken)
+    if slug == resolution.slug:
+        return resolution
+    queue.record_project(config, agent, session_id, None, slug, root)
+    return replace(resolution, slug=slug)
 
 
 def archive_worker_job(config: Config, job: queue.Job) -> bool:
@@ -537,7 +583,9 @@ def archive_worker_job(config: Config, job: queue.Job) -> bool:
     if kept:
         registry = registrymod.Registry.load(config.registry_path)
         try:
-            resolution = keys.resolve(job.cwd, registry, config.host)
+            resolution = keys.resolve(
+                job.cwd, registry, config.host, never=config.settings.capture.exclude_paths
+            )
         except GitError:
             # Archiving files no page, so the project is a label rather than a requirement:
             # a directory that has gone away takes the project its session start recorded,
@@ -1213,10 +1261,57 @@ def _redacted_entries(config: Config, entries: Sequence[Entry]) -> list[Entry]:
     ]
 
 
+def _recorded_target(
+    config: Config,
+    registry: registrymod.Registry,
+    session_id: str,
+    agent: str | None,
+    cwd: Path | None,
+    *,
+    unfiled: bool,
+) -> keys.Resolution | None:
+    """What a rebuild resolves this session's directory to (DESIGN 7, F49).
+
+    The backfill resolves the directory the session-start record keeps - its sessions' own
+    directories are gone more often than not - and falls back to the queue's record of where
+    the session last ran. An ordinary rebuild resolves the queue's record alone, as it did
+    before the record existed. A project registered at the directory is answered even when
+    the directory itself is gone, by the path key it was registered under; a directory that
+    resolves to none is no target at all.
+    """
+    directory: Path | None = None
+    if unfiled:
+        recorded = queue.recorded_project(config, agent or "claude", session_id)
+        if recorded is not None and recorded.path is not None:
+            directory = Path(recorded.path)
+    if directory is None and cwd is not None and Path(cwd).is_dir():
+        directory = Path(cwd)
+    if directory is None:
+        return None
+    if not directory.is_dir():
+        project = registry.by_path_key(registrymod.path_key(config.host, directory))
+        if project is None:
+            return None
+        return keys.Resolution(
+            kind="recorded", cwd=directory, project=project, slug=project.slug, root=directory
+        )
+    try:
+        resolution = keys.resolve(
+            directory, registry, config.host, never=config.settings.capture.exclude_paths
+        )
+    except GitError:
+        return None
+    if resolution.project is None and resolution.slug is not None:
+        return _claim(config, registry, resolution, session_id, agent or "claude")
+    return resolution
+
+
 def redigest(
     config: Config,
     session_id: str,
     now: datetime | None = None,
+    *,
+    unfiled: bool = False,
 ) -> Digest:
     """Rebuild a digest from archived evidence alone (DESIGN 8, BUILD-PLAN M2.8).
 
@@ -1230,6 +1325,12 @@ def redigest(
     against (BUILD-PLAN M2.7, rules.py). A session whose directory is now excluded is refused
     outright - exclusion says its words are not the vault's, and a rebuild of an archive
     written before that decision was added does not change the answer.
+
+    With ``unfiled`` the rebuild is the backfill of DESIGN 7 (F49): the session's digests sit
+    under ``digests/_unfiled`` and it is rebuilt to file under the project its recorded
+    directory now resolves to. The directory it already sits in names nothing on purpose,
+    and the session-start record is what says where the session ran, so the backfill resolves
+    that record's directory first and the queue's own record of it second.
 
     Two costs the rebuild owns. Its calls are charged to the day's token budget as any
     digest's are, and a rebuild asked for after that budget is spent refuses rather than
@@ -1277,21 +1378,25 @@ def redigest(
                 if _is_session_digest(f, session_id, config):
                     rel_parts = f.relative_to(config.vault).parts
                     if len(rel_parts) >= 2:
+                        if unfiled and rel_parts[1] == UNFILED:
+                            # The backfill's whole point is a digest that sits under
+                            # _unfiled moving out of it, so that directory names nothing
+                            # here: the session's directory decides instead (DESIGN 7, F49).
+                            continue
                         slug = rel_parts[1]
                         project = registry.by_slug(slug)
                         break
 
-    if slug is None and cwd is not None and Path(cwd).is_dir():
-        # An unregistered repository has a name of its own and no project id to record it.
-        try:
-            slug = keys.resolve(Path(cwd), registry, config.host).slug
-        except GitError:
-            slug = None
+    if slug is None:
+        resolution = _recorded_target(config, registry, session_id, agent, cwd, unfiled=unfiled)
+        if resolution is not None and resolution.project is not None:
+            project, slug = resolution.project, resolution.project.slug
+        elif resolution is not None and resolution.slug is not None:
+            slug = resolution.slug
 
     if slug is None:
         # A session of no project is digested as unfiled (DESIGN 7).
         slug = UNFILED
-
     if agent is None:
         agent = "claude"
 
@@ -1307,7 +1412,7 @@ def redigest(
             project=project,
             slug=slug,
             root=None,
-            alias_added=False,
+            alias_added=None,
         )
     )
 
@@ -1378,3 +1483,44 @@ def redigest(
 
     index.update(config)
     return Digest(path=rel, facts=on_page, dropped=tuple(dropped), watermark=entries[-1].id)
+
+
+def unfiled_sessions(config: Config) -> list[str]:
+    """The session ids of every digest filed as unfiled whose session is still archived.
+
+    The backfill of DESIGN 7 (F49, ``aft redigest --unfiled``) rebuilds exactly these: a
+    session whose digests sit under ``digests/_unfiled`` and whose words the evidence archive
+    still holds. A session `aft forget` removed has no archive left, so it is not here, and
+    the multipart parts of one session name it once.
+    """
+    root = config.vault / "digests" / UNFILED
+    named: set[str] = set()
+    if root.is_dir():
+        for path in root.rglob("*.md"):
+            match = _DIGEST_NAME.match(path.stem)
+            if match is None:
+                continue
+            session = match.group("session")
+            prefix, sep, suffix = session.rpartition("-")
+            if sep and suffix.isdigit() and evidence.session_info(config, session) is None:
+                # A later part of one session, unless the archive holds the longer id itself.
+                session = prefix
+            named.add(session)
+    return sorted(
+        session for session in named if evidence.session_info(config, session) is not None
+    )
+
+
+def redigest_estimate(config: Config, session_id: str) -> int | None:
+    """The tokens one rebuild of this session would charge, or None with no archived entries.
+
+    The estimate counts what the calls would cost, the way the cap is counted (DESIGN 13):
+    each part's prompt and chunk at three characters to the token, plus the answer's own
+    room. It is an estimate, not a promise: an answer may be shorter than its room, and a
+    refused answer spends a retry.
+    """
+    entries = _redacted_entries(config, evidence.entries(config, session_id))
+    if not entries:
+        return None
+    prompt = tokens(prompt_text())
+    return sum(prompt + tokens(render(part)) + MAX_OUTPUT_TOKENS for part in parts(entries))

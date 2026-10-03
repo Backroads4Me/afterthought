@@ -22,13 +22,14 @@ raised it.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft import lint, page
+from aft import lint, page, queue, vault
 from aft.config import Config
-from aft.dream import apply
+from aft.dream import apply, schedule
 from aft.model import tokens_used_today
+from aft.registry import Registry
 
 
 def _lookup_quote(vault_path: Path, page_rel_path: str, source_id: str) -> str:
@@ -410,3 +411,69 @@ def _report_link(date_str: str, heading_id: str) -> str:
         yyyy, mm = parts[0], parts[1]
         return f"raised in [{date_str} report]({yyyy}/{mm}/{date_str}.md#{heading_id})"
     return "raised in dream report"
+
+
+IDLE_DAYS = 90
+
+
+def idle_and_gone(config: Config, now: datetime | None = None) -> list[str]:
+    """One line per project that is idle, or whose recorded paths are all gone (F49).
+
+    A project is idle when the queue holds no session event for it at all, or its newest
+    is older than ``IDLE_DAYS``. A project is gone when at least one session-start record
+    names a path for it on this host and every one of them is missing from the disk. An
+    archived project is already out of the way and is not named. Nothing is archived or
+    forgotten here; the lines wait for the person's go-ahead (DESIGN 10, F49).
+    """
+    now = now or datetime.now(UTC)
+    registry = Registry.load(config.registry_path)
+    activity = schedule.last_activity(config)
+    cutoff = now - timedelta(days=IDLE_DAYS)
+    lines: list[str] = []
+    for project in registry.projects:
+        if project.archived:
+            continue
+        recorded = queue.recorded_paths(config, config.host, project.id)
+        if recorded and all(not path.exists() for path in recorded):
+            lines.append(f"{project.slug}: recorded paths are all gone")
+            continue
+        last = activity.get(project.slug)
+        if last is None:
+            lines.append(f"{project.slug}: no session in the queue")
+        elif last < cutoff:
+            lines.append(f"{project.slug}: no session since {last.date().isoformat()}")
+    return lines
+
+
+def write_idle_gone(config: Config, now: datetime | None = None) -> Path | None:
+    """Append an ``Idle and gone`` section to the day's report, once a day (F49).
+
+    Returns the report page when the section was written, or None when there is nothing
+    to say or the day's report already has the section. A section that will not write is
+    an error for the caller to carry; nothing is archived or forgotten by this.
+    """
+    lines = idle_and_gone(config, now=now)
+    if not lines:
+        return None
+    now = now or datetime.now(UTC)
+    date_str = now.date().isoformat()
+    report_path = (
+        config.vault / "reports" / f"{now.year:04d}" / f"{now.month:02d}" / f"{date_str}.md"
+    )
+    section = "## Idle and gone\n\n" + "\n".join(f"- {line}" for line in lines) + "\n"
+    if report_path.exists():
+        existing = report_path.read_text(encoding="utf-8")
+        if "## Idle and gone" in existing:
+            return None
+        if not existing.endswith("\n"):
+            existing += "\n"
+        section = existing + "\n" + section
+    else:
+        section = f'---\ntype: Dream Report\ntitle: "{date_str}"\n---\n\n' + section
+    report_path.write_text(section, encoding="utf-8")
+    vault.commit(
+        config.vault,
+        [report_path.relative_to(config.vault).as_posix()],
+        "aft: report idle and gone",
+    )
+    return report_path

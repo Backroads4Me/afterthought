@@ -833,11 +833,28 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
     sections: dict[str, list[tuple[str, str]]] = {}
+    # An archived project's memory answers only ``aft search --archive`` (DESIGN 10, F49):
+    # its pages and digests are read into the archive collection instead of their own,
+    # exactly as a page's resting lines are, until the person unarchives the project.
+    home = _file_home(rel, frontmatter, registry)
     if admitted is None:
         chunks = _prose_chunks(body)
         if current.collection == DIGESTS:
             chunks = [*chunks, *_handoff_chunks(frontmatter)]
-        sections[current.collection] = chunks
+        sections[home or current.collection] = chunks
+    elif home == ARCHIVE:
+        parsed = page.parse(current.text, Path(rel))
+        # The whole file reads as archived: every state a page admits beside its resting
+        # lines, in one collection - and no resting step, because the rows are already home.
+        fact_chunks = _fact_chunks(parsed, inject.INJECTED + FACT_STATES[ARCHIVE])
+        fact_sections = {h for h, _ in fact_chunks}
+        archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
+        prose_chunks = [
+            (heading, text)
+            for heading, text in _prose_chunks(body)
+            if heading not in fact_sections and heading in archive_prose
+        ]
+        sections[ARCHIVE] = [*fact_chunks, *prose_chunks]
     else:
         parsed = page.parse(current.text, Path(rel))
         fact_chunks = _fact_chunks(parsed, admitted)
@@ -858,6 +875,36 @@ def _file_rows(rel: str, current: _File, registry: Registry) -> dict[str, list[R
         collection: _section_rows(rel, title, description, scopes, agent, session_id, chunks)
         for collection, chunks in sections.items()
     }
+
+
+def _file_home(rel: str, frontmatter: dict | None, registry: Registry) -> str | None:
+    """The collection an archived project's file is read into, or None to keep its own (F49).
+
+    When a project is archived with ``aft project archive`` (DESIGN 10, F49) its pages and
+    digests stop answering an ordinary search and answer only ``aft search --archive``, so
+    each of its files is read into the archive collection whatever directory it sits in. The
+    project is named by the file's own ``aft.project`` when it has one, and otherwise by the
+    directory it is filed under, the way `_project_scopes` reads it. A file scoped to several
+    projects is not re-homed: one of the projects being archived does not make the other
+    one's lines archived. A file whose project is unknown, or known and not archived, keeps
+    its own collection.
+    """
+    aft = (frontmatter or {}).get("aft")
+    if not isinstance(aft, dict):
+        return None
+    listed = aft.get("projects")
+    if isinstance(listed, list) and listed:
+        return None
+    project_value = aft.get("project")
+    if isinstance(project_value, str) and project_value:
+        project = registry.by_id(project_value)
+        return ARCHIVE if project is not None and project.archived else None
+    slug = _path_slug(rel)
+    if slug is not None:
+        project = registry.by_slug(slug)
+        if project is not None and project.archived:
+            return ARCHIVE
+    return None
 
 
 def _section_rows(

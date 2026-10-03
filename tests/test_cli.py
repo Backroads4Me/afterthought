@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -105,6 +107,33 @@ def test_rename_moves_directories(initialized, tmp_path):
     assert (initialized.vault / "archive" / "gadget.md").exists()
     assert not (initialized.vault / "archive" / "widget.md").exists()
     assert Registry.load(initialized.registry_path).by_slug("gadget") is not None
+
+
+def test_project_archive_and_unarchive(initialized, tmp_path, capsys, monkeypatch):
+    """`aft project archive` dates the project and commits the registry; its block stops
+    being injected and its pages answer only `aft search --archive`; `aft project
+    unarchive` brings it back (DESIGN 10, F49). Both are the user's say-so, and nothing
+    archives a project by itself."""
+    monkeypatch.setenv("AFT_HOME", str(initialized.home))
+    repo = make_repo(tmp_path / "widget")
+    main(["project", "add", str(repo)])
+    capsys.readouterr()
+
+    assert main(["project", "archive", "widget"]) == 0
+    registry = Registry.load(initialized.registry_path)
+    widget = registry.by_slug("widget")
+    assert widget is not None and widget.archived == date.today().isoformat()
+    assert run_git(["log", "-1", "--format=%s"], initialized.vault) == "aft: archive widget"
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+    assert main(["project", "unarchive", "widget"]) == 0
+    registry = Registry.load(initialized.registry_path)
+    widget = registry.by_slug("widget")
+    assert widget is not None and widget.archived == ""
+    assert run_git(["log", "-1", "--format=%s"], initialized.vault) == "aft: unarchive widget"
+
+    capsys.readouterr()
+    assert main(["project", "archive", "no-such-project"]) == 2
+    assert "no project" in capsys.readouterr().err
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
 
 
@@ -171,10 +200,17 @@ def default_home(tmp_path, monkeypatch) -> Path:
     return home
 
 
-def test_the_default_home_refuses_a_temporary_project(default_home, tmp_path, capsys):
+def temp_repo(name: str) -> Path:
+    """A repository under the system temporary directory, whatever run gave it."""
+    repo = (Path(tempfile.gettempdir()) / name).resolve()
+    shutil.rmtree(repo, ignore_errors=True)
+    return make_repo(repo)
+
+
+def test_the_default_home_refuses_a_temporary_project(default_home, capsys):
     """With AFT_HOME unset the vault is the user's real one, and a project under the system
     temporary directory is a scratch run that lost its way (BUILD-PLAN F25)."""
-    repo = make_repo(tmp_path / "widget")
+    repo = temp_repo("widget")
     registry_before = load().registry_path.read_bytes()
     log_before = run_git(["log", "--format=%H"], load().vault)
 
@@ -188,26 +224,27 @@ def test_the_default_home_refuses_a_temporary_project(default_home, tmp_path, ca
     assert "--allow-temp" in captured.err
     assert load().registry_path.read_bytes() == registry_before
     assert run_git(["log", "--format=%H"], load().vault) == log_before
+    shutil.rmtree(repo)
 
 
-def test_allow_temp_registers_a_temporary_project_in_the_default_home(
-    default_home, tmp_path, capsys
-):
-    repo = make_repo(tmp_path / "widget")
+def test_allow_temp_registers_a_temporary_project_in_the_default_home(default_home):
+    repo = temp_repo("widget")
 
     assert main(["project", "add", str(repo), "--allow-temp"]) == 0
 
     assert [p.slug for p in Registry.load(load().registry_path).projects] == ["widget"]
+    shutil.rmtree(repo)
 
 
 def test_a_chosen_home_registers_a_temporary_project_without_the_flag(
-    initialized, tmp_path, monkeypatch, capsys
+    initialized, monkeypatch, capsys
 ):
     """A run that set AFT_HOME chose its home, so tests and benchmarks are unaffected."""
     assert os.environ.get("AFT_HOME")
-    repo = make_repo(tmp_path / "widget")
+    repo = temp_repo("widget")
     assert tempfile.gettempdir() in str(repo.resolve())
 
     assert main(["project", "add", str(repo)]) == 0
 
     assert [p.slug for p in Registry.load(initialized.registry_path).projects] == ["widget"]
+    shutil.rmtree(repo)

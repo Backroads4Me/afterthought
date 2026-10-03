@@ -142,6 +142,14 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                     result.failures[slug] = f"{result.failures[slug]}; its report failed: {failure}"
                 else:
                     result.failures[slug] = f"report not written: {failure}"
+        # Projects with nothing new in 90 days and projects whose recorded paths are all
+        # gone are named in the report; nothing is archived or forgotten without the
+        # person's go-ahead (DESIGN 10, F49).
+        from aft.dream import report as reportmod
+        try:
+            reportmod.write_idle_gone(config, now=now)
+        except Exception as exc:
+            result.failures["idle-gone report"] = str(exc)
         return result
 
 
@@ -367,8 +375,14 @@ def last_activity(config: Config) -> dict[str, datetime]:
     for cwd, moment in queue.last_events(config).items():
         if not cwd.is_dir():
             continue
-        # A directory of no project files its sessions as unfiled (DESIGN 7).
-        slug = keys.resolve(cwd, registry, config.host).slug or digest.UNFILED
+        # A directory of no project files its sessions as unfiled (DESIGN 7); one capture
+        # excludes resolves to none, and files them as unfiled too.
+        slug = (
+            keys.resolve(
+                cwd, registry, config.host, never=config.settings.capture.exclude_paths
+            ).slug
+            or digest.UNFILED
+        )
         if slug not in newest or moment > newest[slug]:
             newest[slug] = moment
     return newest

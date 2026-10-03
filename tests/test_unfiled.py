@@ -7,6 +7,9 @@ the digest, and are reported.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from aft import digest, evidence, lint, page
 from aft.dream import apply, schedule
 from aft.readers import USER, Entry
@@ -128,15 +131,18 @@ def test_redigest_files_an_unregistered_repository_under_its_own_name(
 
 
 def test_an_unfiled_dream_waits_while_an_unfiled_session_is_active(
-    initialized, home, fake, tmp_path, monkeypatch
+    initialized, home, fake, monkeypatch
 ):
     """The quiet period holds for unfiled sessions too, so a dream never takes up a session
     that is still talking."""
     from aft import queue
 
     cfg = config_with_fake(home, initialized.vault, fake)
-    nowhere = (tmp_path / "loose").resolve()
-    nowhere.mkdir()
+    cfg = config_with_fake(home, initialized.vault, fake)
+    # The session of an unfiled digest ran in a directory that resolves to none, which is
+    # one under the system temporary directory (DESIGN 7, F49).
+    nowhere = (Path(tempfile.gettempdir()) / "loose").resolve()
+    nowhere.mkdir(exist_ok=True)
     unfiled_digest(cfg)
     monkeypatch.setattr(queue, "last_events", lambda config: {nowhere: NOW})
     run = schedule.run(cfg, now=NOW)

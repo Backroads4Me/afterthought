@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -36,6 +37,12 @@ class Project:
     paths: list[str] = field(default_factory=list)
     remotes: list[str] = field(default_factory=list)
     created: str = ""
+    archived: str = ""
+    """The date the project was archived, or empty while it is in memory (DESIGN 7, F49).
+
+    Archiving takes a project out of memory without deleting anything: its directory gets
+    the global pages alone, and its pages and digests answer only ``aft search --archive``.
+    Nothing archives a project by itself; only ``aft project archive`` does."""
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +52,7 @@ class Project:
             "paths": list(self.paths),
             "remotes": list(self.remotes),
             "created": self.created,
+            "archived": self.archived,
         }
 
 
@@ -62,6 +70,33 @@ def split_key(key: str) -> tuple[str, Path]:
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "project"
+
+
+def unique_slug(
+    path: Path, registry: Registry, *, base: str | None = None, taken: Collection[str] = ()
+) -> str:
+    """A slug no project holds and no other path has claimed (DESIGN 7, F49).
+
+    It starts as the directory's name (or ``base``) and prefixes parent directory names
+    until it is unique: ``foo`` taken beside ``work`` becomes ``work-foo``. ``taken`` holds
+    the slugs other paths have already claimed through their session-start records, so two
+    directories of one name do not share a project before either is registered; the registry
+    answers for the ones that are. Past the filesystem root a number is appended.
+    """
+    claimed = set(taken)
+    original = candidate = base if base is not None else slugify(path.name)
+    for parent in path.parents:
+        if candidate not in claimed and registry.by_slug(candidate) is None:
+            return candidate
+        name = slugify(parent.name) if parent.name else ""
+        if not name:
+            break  # the filesystem root has no name to prefix
+        candidate = f"{name}-{candidate}"
+    number = 2
+    while candidate in claimed or registry.by_slug(candidate) is not None:
+        candidate = f"{original}-{number}"
+        number += 1
+    return candidate
 
 
 class Registry:
@@ -95,6 +130,7 @@ class Registry:
                         paths=[str(p) for p in entry.get("paths") or []],
                         remotes=[str(r) for r in entry.get("remotes") or []],
                         created=str(entry.get("created") or ""),
+                        archived=str(entry.get("archived") or ""),
                     )
                 )
             except KeyError as exc:
@@ -144,6 +180,15 @@ class Registry:
     def by_id(self, project_id: str) -> Project | None:
         return next((p for p in self.projects if p.id == project_id), None)
 
+    def by_path_key(self, key: str) -> Project | None:
+        """The project whose recorded paths hold this ``host:path`` key, or None (DESIGN 7).
+
+        This is how a step that knows a directory - the dream, reading the path a
+        session-start record kept - finds the project the directory became, whatever slug
+        the registry gave it.
+        """
+        return next((p for p in self.projects if key in p.paths), None)
+
     def add(self, slug: str, title: str | None = None) -> Project:
         if not SLUG_RE.match(slug):
             raise RegistryError(f"invalid slug {slug!r}: use lowercase letters, digits and -")
@@ -167,6 +212,29 @@ class Registry:
         project.paths.append(key)
         return True
 
+    def add_for_path(
+        self,
+        host: str,
+        path: Path,
+        title: str | None = None,
+        *,
+        base: str | None = None,
+        taken: Collection[str] = (),
+    ) -> Project:
+        """Register the project a directory stands for (DESIGN 7, F49).
+
+        Its slug is the directory's name, prefixed with parent directory names until no
+        project holds it and no other path claimed it, and the directory itself is recorded
+        as the project's path key, so the dream that found the directory by path finds this
+        project again. ``base`` proposes the name the directory's sessions already file it
+        under, when that is not the directory's own name; ``taken`` holds the slugs other
+        paths have already claimed through their session-start records.
+        """
+        slug = unique_slug(path, self, base=base or slugify(path.name), taken=taken)
+        project = self.add(slug, title or slug.capitalize())
+        self.add_path(project, path_key(host, path))
+        return project
+
     def add_remote(self, project: Project, remote: str) -> bool:
         if remote in project.remotes:
             return False
@@ -184,6 +252,26 @@ class Registry:
         if self.by_slug(new):
             raise RegistryError(f"project {new!r} already exists")
         project.slug = new
+        project.slug = new
+        return project
+
+    def set_archived(self, slug: str, archived: str = "") -> Project:
+        """Mark a project archived, or bring it back (DESIGN 7, F49).
+
+        An archived project keeps its id, slug, paths and pages; memory stops reaching its
+        directory, and its pages and digests answer only ``aft search --archive``. Nothing is
+        deleted and nothing archives a project by itself, so ``archived`` is a date the
+        command that called this chose.
+        """
+        project = self.by_slug(slug)
+        if project is None:
+            raise RegistryError(f"no project {slug!r}")
+        if archived:
+            try:
+                date.fromisoformat(archived)
+            except ValueError as exc:
+                raise RegistryError(f"{archived!r} is not a date") from exc
+        project.archived = archived
         return project
 
     def remove(self, slug: str) -> Project:

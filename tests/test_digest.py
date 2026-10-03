@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1274,13 +1275,15 @@ def test_a_part_filed_while_the_model_answered_is_left_standing(
     assert watermark(cfg) == wrote.watermark
 
 
-def test_a_directory_that_is_no_project_is_digested_unfiled(session: Session, tmp_path):
+def test_a_directory_that_is_no_project_is_digested_unfiled(session: Session):
     """A session outside every project still reaches memory through its global facts.
 
     DESIGN 7: the session is digested and filed as unfiled, so what it says about the user
     and their machines is kept, while its project facts stay in the digest. No job fails.
+    Under F49 a plain directory is a project, so the directory a session of no project runs
+    in is under the system temporary directory, which resolves to none (DESIGN 7, F49).
     """
-    nowhere = (tmp_path / "just-a-directory").resolve()
+    nowhere = (Path(tempfile.gettempdir()) / "just-a-directory").resolve()
     nowhere.mkdir()
     fake, cfg = serve(session.cfg, answer(said()))
     try:
@@ -1472,7 +1475,7 @@ def test_forgetting_a_session_forgets_the_project_it_started_in(session: Session
     forgotten session is not recorded again."""
     cfg = session.cfg
     assert queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
-    assert queue.recorded_project(cfg, CLAUDE, SESSION) == (None, SLUG)
+    assert queue.recorded_project(cfg, CLAUDE, SESSION) == queue.ProjectRecord(None, SLUG, None)
     queue.forget_session(cfg, SESSION)
     assert queue.recorded_project(cfg, CLAUDE, SESSION) is None
     assert not queue.record_project(cfg, CLAUDE, SESSION, None, SLUG)
