@@ -1087,11 +1087,71 @@ def test_a_pathless_record_of_the_name_a_directory_resolves_to_is_its_own(
     registry = Registry(cfg.registry_path)
     plain = (tmp_path / "other" / "foo").resolve()
     plain.mkdir(parents=True)
+    # The queue saw the old session running in that directory: its rows are what tell the
+    # record apart from a same-named directory's claim.
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=plain))
     assert queue.record_project(cfg, "claude", "s-old", None, "foo")
     assert queue.record_project(cfg, "claude", "s-new", None, "foo", plain, registry=registry)
     assert queue.recorded_project(cfg, "claude", "s-new").slug == "foo"
     old = queue.recorded_project(cfg, "claude", "s-old")
     assert (old.slug, old.path) == ("foo", str(plain))
+
+
+def test_a_pathless_record_is_adopted_only_by_the_directory_its_session_ran_in(
+    cfg: Config, tmp_path
+) -> None:
+    """A pathless record of a name is the claim of the directory its own session ran in,
+    never of the first same-named directory to record next (DESIGN 7, F49): a session in
+    /scratch/foo settles its own name and leaves the record alone, and the record's own
+    directory keeps the plain name when a session there records after it."""
+    registry = Registry(cfg.registry_path)
+    recorded = (tmp_path / "src" / "foo").resolve()
+    recorded.mkdir(parents=True)
+    other = (tmp_path / "scratch" / "foo").resolve()
+    other.mkdir(parents=True)
+    # The queue saw the old session running in /src/foo; its rows are what tell the
+    # record apart from a same-named directory's claim.
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=recorded))
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+
+    # A session in the other directory of the same name records next: the name is
+    # /src/foo's claim, so this one walks aside and the record is left pathless.
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", other, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "scratch-foo"
+    assert queue.recorded_project(cfg, "claude", "s-old").path is None
+
+    # A session in the record's own directory: the record is its claim, and is given the
+    # path it was missing.
+    assert queue.record_project(cfg, "claude", "s-newer", None, "foo", recorded, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-newer").slug == "foo"
+    old = queue.recorded_project(cfg, "claude", "s-old")
+    assert (old.slug, old.path) == ("foo", str(recorded))
+
+
+def test_a_path_is_never_written_into_a_record_of_a_registered_project(
+    cfg: Config, tmp_path
+) -> None:
+    """A record that names a project the registry holds is that project's own (DESIGN 7,
+    F49): adopting a pathless record gives a path to the records of unregistered
+    directories alone, and a registered record keeps the registry as the only place its
+    directory is written."""
+    registry = Registry(cfg.registry_path)
+    project = registry.add("widget")
+    registry.save()
+    # A record of a session that started in the registered project, written before paths
+    # were kept, still names only the slug; beside it, a pathless record of an
+    # unregistered directory of the same name.
+    assert queue.record_project(cfg, "claude", "s-reg", project.id, "foo")
+    recorded = (tmp_path / "src" / "foo").resolve()
+    recorded.mkdir(parents=True)
+    queue.enqueue(cfg, replace(event(session_id="s-old"), cwd=recorded))
+    assert queue.record_project(cfg, "claude", "s-old", None, "foo")
+
+    # A session in the unregistered record's own directory adopts that record alone.
+    assert queue.record_project(cfg, "claude", "s-new", None, "foo", recorded, registry=registry)
+    assert queue.recorded_project(cfg, "claude", "s-new").slug == "foo"
+    assert queue.recorded_project(cfg, "claude", "s-old").path == str(recorded)
+    assert queue.recorded_project(cfg, "claude", "s-reg").path is None
 
 
 def test_a_pathless_record_of_another_name_still_holds_its_name(cfg: Config, tmp_path) -> None:

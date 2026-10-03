@@ -2876,6 +2876,67 @@ def test_a_dream_registers_the_directory_a_session_ran_in(initialized, home, fak
     assert run_git(["status", "--porcelain"], cfg.vault) == ""
 
 
+def test_a_pathless_record_is_adopted_only_by_its_own_directory_in_the_dream(
+    initialized, home, fake, tmp_path
+):
+    """The review case (DESIGN 7, F49): a session in /src/foo claimed ``foo`` before paths
+    were kept and its digest waits under digests/foo; then a session records in
+    /scratch/foo, and then one in /src/foo. The record is adopted by /src/foo alone, so
+    the dream registers foo at /src/foo and files /src/foo's facts there, while
+    /scratch/foo settles its own name and never sees them."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    src_foo = (tmp_path / "src" / "foo").resolve()
+    src_foo.mkdir(parents=True)
+    scratch_foo = (tmp_path / "scratch" / "foo").resolve()
+    scratch_foo.mkdir(parents=True)
+    queue.enqueue(
+        cfg,
+        SessionEvent(
+            agent="claude",
+            kind=SESSION_END,
+            session_id="s0",
+            cwd=src_foo,
+            transcript_path=None,
+            time=NOW - timedelta(hours=1),
+            detail=None,
+        ),
+    )
+    assert queue.record_project(cfg, "claude", "s0", None, "foo")
+    old = _unregistered_digest(cfg, "foo", f"{TODAY}-claude-s0", "claude", "s0", TODAY)
+
+    # A session in another directory of the same name records next: the name is
+    # /src/foo's claim, so this one settles its own name and the record is left pathless.
+    assert queue.record_project(
+        cfg, "claude", "s1", None, "foo", scratch_foo, registry=Registry.load(cfg.registry_path)
+    )
+    assert queue.recorded_project(cfg, "claude", "s1").slug == "scratch-foo"
+    assert queue.recorded_project(cfg, "claude", "s0").path is None
+
+    # A session in the record's own directory adopts it, so the dream files the old
+    # digest by /src/foo's path and makes one project of the directory.
+    assert queue.record_project(
+        cfg, "claude", "s2", None, "foo", src_foo, registry=Registry.load(cfg.registry_path)
+    )
+    assert queue.recorded_project(cfg, "claude", "s0").path == str(src_foo)
+
+    registry = Registry.load(cfg.registry_path)
+    groups = apply.digest_groups(cfg, registry, "foo", [old])
+    assert groups == [[old]]
+    assert apply._project_of_group(cfg, registry, "foo", groups[0]) == (None, src_foo)
+
+    fake.script = [reply("add", None, "add fact")]
+    rep = apply.run_project(cfg, "foo", groups[0], now=NOW)
+
+    project = Registry.load(cfg.registry_path).by_path_key(path_key("testhost", src_foo))
+    assert project is not None and project.slug == "foo"
+    assert (
+        "The tester prefers plain hyphens." in (cfg.vault / "projects/foo/overview.md").read_text()
+    )
+    fm, _, _, _ = page.split_frontmatter(old.read_text())
+    assert fm is not None and fm["aft"]["consumed"]
+    assert rep is not None and rep.project == "foo"
+
+
 def test_a_dream_finds_a_registered_project_by_path(initialized, home, fake, tmp_path):
     """A later session in the same directory is dreamed into the same project by the path its
     record names, not by making a second project (DESIGN 7, F49)."""

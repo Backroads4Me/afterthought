@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 import tempfile
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ import pytest
 from aft import vault
 from aft.cli import main
 from aft.config import load
+from aft.events import SESSION_END, SessionEvent
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
 
@@ -307,6 +308,19 @@ def test_project_rename_refuses_a_name_another_directory_claimed(initialized, tm
     assert Registry.load(initialized.registry_path).by_slug("widget") is not None
 
 
+def hook_event(session_id: str, cwd: Path, at: datetime) -> SessionEvent:
+    """One session-start-shaped event, so a test can put a session's directory in the queue."""
+    return SessionEvent(
+        agent="claude",
+        kind=SESSION_END,
+        session_id=session_id,
+        cwd=cwd,
+        transcript_path=None,
+        time=at,
+        detail=None,
+    )
+
+
 def test_project_add_adopts_the_pathless_record_of_the_directory_it_names(initialized, tmp_path):
     """A record an earlier build wrote with no path is the claim of the directory that
     resolves to its name: `aft project add` of that directory registers the project under
@@ -315,6 +329,9 @@ def test_project_add_adopts_the_pathless_record_of_the_directory_it_names(initia
 
     plain = (tmp_path / "other" / "foo").resolve()
     plain.mkdir(parents=True)
+    # The queue saw the old session running in that directory, so its record is this
+    # directory's own claim and `aft project add` may adopt it.
+    queue.enqueue(initialized, hook_event("s-old", plain, datetime(2026, 10, 1, 12, 0, tzinfo=UTC)))
     assert queue.record_project(initialized, "claude", "s-old", None, "foo")
 
     assert main(["project", "add", str(plain)]) == 0

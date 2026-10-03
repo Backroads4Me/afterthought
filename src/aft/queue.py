@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from aft import keys
 from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
@@ -323,7 +324,7 @@ def record_project(
         ).fetchone():
             return False
         if project_id is None and path is not None and registry is not None:
-            slug = _settled_slug(conn, registry, Path(path), slug)
+            slug = _settled_slug(conn, registry, config, Path(path), slug)
         conn.execute(
             "INSERT INTO session_projects (agent, session_id, project_id, slug, path)"
             " VALUES (?, ?, ?, ?, ?)"
@@ -334,75 +335,105 @@ def record_project(
     return True
 
 
-_CLAIM_ROWS = "SELECT slug, path, project_id FROM session_projects"
+_CLAIM_ROWS = (
+    "SELECT slug, path, project_id, agent, session_id,"
+    " (SELECT j.cwd FROM jobs j WHERE j.agent = session_projects.agent"
+    "   AND j.session_id = session_projects.session_id"
+    "  ORDER BY j.event_time DESC, j.created_time DESC, j.id DESC LIMIT 1) AS cwd"
+    " FROM session_projects"
+)
 
 
-def _settled_slug(conn: sqlite3.Connection, registry: Registry, root: Path, base: str) -> str:
+def _settled_slug(
+    conn: sqlite3.Connection, registry: Registry, config: Config, root: Path, base: str
+) -> str:
     """A slug this directory can file its digests under, decided against the whole claim table.
 
-    Every session-start record is a claim: the slug it holds belongs to the path it names, so
-    a slug another path holds is not free for this one, whatever named it first (DESIGN 7,
-    F49). A record naming a project the registry holds is that project's own claim, whose
-    name the registry governs. The registry's own slugs ``unique_slug`` answers for; the walk
-    it makes is prefixed with parent directory names until nothing claims the name.
+    Every session-start record is a claim: the slug it holds belongs to the directory its
+    session ran in, so a slug another directory holds is not free for this one, whatever
+    named it first (DESIGN 7, F49). A record naming a project the registry holds is that
+    project's own claim, whose name the registry governs. The registry's own slugs
+    ``unique_slug`` answers for; the walk it makes is prefixed with parent directory names
+    until nothing claims the name.
 
-    A record that names no path is one an earlier build wrote, which cannot be told apart
-    from a claim of the same name by a directory now gone - unless ``root`` resolves to the
-    name it holds, in which case it is this directory's claim: the name stays with ``root``
-    and the record is given the path it was missing, so the sessions recorded before and
-    after the upgrade file under one name and the dream makes one project of them.
+    A record that names no path is one an earlier build wrote. Its session's directory is
+    what the queue last saw for that session, so the record is this directory's own claim
+    only when that directory resolves to ``root`` - a record of the same name whose session
+    ran anywhere else is another directory's claim, and the name walks aside for it. A
+    record that is adopted is given the path it was missing, so the sessions recorded
+    before and after the upgrade file under one name and the dream makes one project of
+    them.
     """
     rows = conn.execute(_CLAIM_ROWS).fetchall()
-    settled, adopt = _settle_from(rows, registry, root, base)
-    if adopt:
+    settled, own = _settle_from(rows, registry, config, root, base)
+    for agent, session_id in own:
         conn.execute(
-            "UPDATE session_projects SET path = ? WHERE path IS NULL AND slug = ?",
-            (str(root), base),
+            "UPDATE session_projects SET path = ?"
+            " WHERE agent = ? AND session_id = ? AND path IS NULL",
+            (str(root), agent, session_id),
         )
     return settled
 
 
 def _settle_from(
-    rows: Iterable[tuple[str, str | None, str | None]],
+    rows: Iterable[tuple[str, str | None, str | None, str, str, str | None]],
     registry: Registry,
+    config: Config,
     root: Path,
     base: str,
-) -> tuple[str, bool]:
-    """The name ``root`` may file under, read off the claim table, and whether to adopt.
+) -> tuple[str, list[tuple[str, str]]]:
+    """The name ``root`` may file under, read off the claim table, and the records to adopt.
 
-    ``rows`` holds every session-start record as (slug, path, project id). A claim is a name
-    another path holds, so it takes the name away from ``root``: a claim naming a project
-    the registry holds is the registry's to govern, and a claim naming ``root`` itself is
-    the directory's own. A claim with no path and exactly ``base`` is treated as this
-    directory's, the one ``root`` resolves to (DESIGN 7, F49). Returns the settled name and
-    whether such a pathless claim was adopted, which is so only when ``base`` survived the
-    walk - the caller may then give the record ``root`` as its path.
+    ``rows`` holds every session-start record as (slug, path, project id, agent, session
+    id, the session's directory). A claim is a name another directory holds, so it takes
+    the name away from ``root``: a claim naming a project the registry holds is the
+    registry's to govern, and a claim naming ``root`` itself is the directory's own. A
+    claim with no path and exactly ``base`` is this directory's own only when the record's
+    session ran in a directory that resolves to ``root``; the same name claimed by a
+    session that ran anywhere else, or a session the queue no longer knows the directory
+    of, holds the name against ``root`` (DESIGN 7, F49). Returns the settled name and the
+    (agent, session id) pairs of the pathless claims that were adopted - so only when
+    ``base`` survived the walk - each of which the caller may give ``root`` as its path.
     """
     taken: set[str] = set()
-    claimed = False
-    for slug, path, project_id in rows:
+    own: list[tuple[str, str]] = []
+    roots: dict[str | None, Path | None] = {}
+
+    def session_root(cwd: str | None) -> Path | None:
+        """The directory the record's session ran in, resolved the way a digest resolves."""
+        if cwd not in roots:
+            roots[cwd] = (
+                None
+                if cwd is None
+                else keys.resolve(
+                    Path(cwd), registry, config.host, never=config.settings.capture.exclude_paths
+                ).root
+            )
+        return roots[cwd]
+
+    for slug, path, project_id, agent, session_id, cwd in rows:
         if project_id is not None and registry.by_id(project_id) is not None:
             continue  # a registered project's claim: the registry's names answer for it
         if path == str(root):
             continue  # this directory's own claim
-        if path is None and slug == base:
-            claimed = True  # a pathless record of the name this directory resolves to
+        if path is None and slug == base and session_root(cwd) == root:
+            own.append((agent, session_id))  # a pathless record of this directory's own
             continue
         taken.add(slug)
     settled = unique_slug(root, registry, base=base, taken=taken)
-    return settled, claimed and settled == base
+    return settled, own if settled == base else []
 
 
 def settle_slug(config: Config, registry: Registry, root: Path, base: str) -> str:
     """The name ``root`` would settle for itself, decided without writing (DESIGN 7, F49).
 
     The same decision a session-start record makes, asked by a step that must not claim
-    anything: the walk against the registry and every live claim, with a pathless record of
-    the name this directory resolves to counted as that directory's own.
+    anything: the walk against the registry and every live claim, with a pathless record
+    counted as the claim of the directory its session ran in.
     """
     with _reading(config) as conn:
         rows = conn.execute(_CLAIM_ROWS).fetchall()
-    settled, _ = _settle_from(rows, registry, root, base)
+    settled, _ = _settle_from(rows, registry, config, root, base)
     return settled
 
 
@@ -443,17 +474,19 @@ def adopt_claim(config: Config, registry: Registry, root: Path, base: str) -> st
 
     A project made by hand - ``aft project add`` with no name of its own - takes the name
     the same walk gives a session-start record: against the registry and every live claim
-    (DESIGN 7, F49). A pathless record of the name this directory resolves to is this
-    directory's, and is given the path it was missing, so the project made here and the
-    sessions already recorded under the name are one project.
+    (DESIGN 7, F49). A pathless record whose session ran in this directory is this
+    directory's claim, and is given the path it was missing, so the project made here and
+    the sessions already recorded under the name are one project. A record of the same
+    name whose session ran anywhere else holds the name against this directory.
     """
     with _writing(config) as conn:
         rows = conn.execute(_CLAIM_ROWS).fetchall()
-        settled, adopt = _settle_from(rows, registry, root, base)
-        if adopt:
+        settled, own = _settle_from(rows, registry, config, root, base)
+        for agent, session_id in own:
             conn.execute(
-                "UPDATE session_projects SET path = ? WHERE path IS NULL AND slug = ?",
-                (str(root), base),
+                "UPDATE session_projects SET path = ?"
+                " WHERE agent = ? AND session_id = ? AND path IS NULL",
+                (str(root), agent, session_id),
             )
     return settled
 
@@ -461,20 +494,42 @@ def adopt_claim(config: Config, registry: Registry, root: Path, base: str) -> st
 def claimed_slugs(config: Config, registry: Registry, *, keep: Collection[str] = ()) -> set[str]:
     """The names the queue's records hold for directories other than ``keep`` (DESIGN 7, F49).
 
-    Every session-start record is a claim: the slug it holds belongs to the path it names,
-    so a project made another way may not take the name. A record naming a project the
-    registry holds is left out, the registry governing that name, and a record with no path
-    is one an earlier build wrote, kept as taken. ``keep`` names the paths whose own claims
-    do not count against the caller: the directory a project is being made from, or the
-    directories of a project being renamed.
+    Every session-start record is a claim: the slug it holds belongs to the directory its
+    session ran in, so a project made another way may not take the name. A record naming a
+    project the registry holds is left out, the registry governing that name. A record with
+    no path is one an earlier build wrote; its claim's directory is what the queue last saw
+    for its session, and one whose session's directory resolves to a ``keep`` path is that
+    directory's own claim. ``keep`` names the paths whose own claims do not count against
+    the caller: the directory a project is being made from, or the directories of a project
+    being renamed.
     """
     with _reading(config) as conn:
         rows = conn.execute(_CLAIM_ROWS).fetchall()
-    return {
-        slug
-        for slug, path, project_id in rows
-        if path not in keep and not (project_id is not None and registry.by_id(project_id))
-    }
+    keep_paths = {Path(path) for path in keep}
+    roots: dict[str | None, Path | None] = {}
+
+    def session_root(cwd: str | None) -> Path | None:
+        """The directory the record's session ran in, resolved the way a digest resolves."""
+        if cwd not in roots:
+            roots[cwd] = (
+                None
+                if cwd is None
+                else keys.resolve(
+                    Path(cwd), registry, config.host, never=config.settings.capture.exclude_paths
+                ).root
+            )
+        return roots[cwd]
+
+    claimed: set[str] = set()
+    for slug, path, project_id, _, _, cwd in rows:
+        if project_id is not None and registry.by_id(project_id) is not None:
+            continue
+        if path is not None:
+            if Path(path) not in keep_paths:
+                claimed.add(slug)
+        elif session_root(cwd) not in keep_paths:
+            claimed.add(slug)
+    return claimed
 
 
 def recorded_project(config: Config, agent: str, session_id: str) -> ProjectRecord | None:
