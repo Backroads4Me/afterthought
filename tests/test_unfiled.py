@@ -366,8 +366,8 @@ def test_the_backfill_skips_and_names_a_session_the_archive_no_longer_covers(
     initialized, home, fake, tmp_path, capsys, monkeypatch
 ):
     """A rebuild replaces the session's digests with one built from the entries the archive
-    still holds, so a session whose digests cite entries an `aft forget` has since taken is
-    not rebuilt at all: the run names it with the reason, and the digests stand (DESIGN 7,
+    still holds, so a session whose digests cite entries retention has since purged is not
+    rebuilt at all: the run names it with the reason, and the digests stand (DESIGN 7,
     F49). A session the archive still covers is rebuilt as before."""
     import sqlite3
 
@@ -414,6 +414,28 @@ def test_the_backfill_skips_and_names_a_session_the_archive_no_longer_covers(
     unfiled = [p.name for p in (cfg.vault / "digests" / digest.UNFILED).rglob("*.md")]
     assert f"{TODAY}-c-u1.md" in unfiled, "the uncovered digest was rebuilt over"
     assert f"{TODAY}-c-u2.md" not in unfiled, "the covered session was not rebuilt"
+
+
+def test_the_backfill_skips_a_part_that_cites_no_entry_of_its_session(
+    initialized, home, fake, tmp_path
+):
+    """Coverage is judged part by part (DESIGN 7, F49): a part of the session's digests
+    that cites no entry of its own session - the chunk the model kept no fact from - stands
+    for a span of the session no surviving entry can be named for, so the session is not
+    rebuilt on the strength of its other parts, and the run names the part instead."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    fieldwork = tmp_path / "fieldwork"
+    fieldwork.mkdir()
+    _unfiled_session(cfg, "u3", "fieldwork", fieldwork)
+    # A second part of the same session, whose chunk the model kept no fact from: no
+    # sources, so no entry of the session can be named for what it covered.
+    write_digest(cfg, digest.UNFILED, f"{TODAY}-c-u3-2", facts=[], sources=[])
+
+    assert digest.unfiled_sessions(cfg) == []
+    [(session, reason)] = digest.uncovered_unfiled(cfg)
+    assert session == "u3"
+    assert "1 part that cites no entry of its own session" in reason
+    assert f"{TODAY}-c-u3-2.md" in reason
 
 
 def test_the_dry_run_records_no_claim_for_a_session_with_no_record(
