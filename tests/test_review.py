@@ -8,6 +8,7 @@ refuses the whole withdrawal; the budget is counted (DESIGN 13). The model only 
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pytest
 
 from aft import config as configmod
 from aft import page, pagewrite, review, vault
-from aft.registry import Registry
+from aft.registry import Registry, RegistryError
 from conftest import run_git
 from fakes.model_server import Reply
 from test_apply import NOW, TODAY, config_with_fake, fake
@@ -57,9 +58,22 @@ GLOBAL_BODY = """## Preferences
 - No RGB lighting on the GPU host. [stated] 2026-09-01 [^s1]
 """
 
+SEED_FRONTMATTER = """---
+type: Project
+title: {slug}
+description: The {slug} project.
+sources:
+  - id: s1
+    resource: file:planning/DESIGN.md#9. Dreaming
+    quote: "Ask the model for one decision per candidate, as JSON:"
+aft:
+  project: {project}
+---
+"""
+
 RECENT_BODY = """## State
 
-- The digest run is paused until the model server is back. [stated] {date} [^s1]
+- The digest run is paused until the model server is back. [observed] {date} [^s1]
 """
 
 
@@ -71,12 +85,19 @@ def register(cfg: configmod.Config, slug: str = "widget") -> None:
 
 
 def seed_page(
-    cfg: configmod.Config, rel: str, body: str, *, project: str = RUN_PROJECT, slug: str = "widget"
+    cfg: configmod.Config,
+    rel: str,
+    body: str,
+    *,
+    project: str = RUN_PROJECT,
+    slug: str = "widget",
+    frontmatter_template: str | None = None,
 ) -> Path:
     path = cfg.vault / rel
     path.parent.mkdir(parents=True, exist_ok=True)
-    frontmatter = FRONTMATTER.format(slug=slug, project=project)
-    path.write_text(f"{frontmatter}\n\n{body}", encoding="utf-8")
+    template = frontmatter_template or FRONTMATTER
+    text = template.format(slug=slug, project=project)
+    path.write_text(f"{text}\n\n{body}", encoding="utf-8")
     vault.commit(cfg.vault, [rel], f"seed {rel}")
     return path
 
@@ -305,7 +326,6 @@ def test_a_budget_spent_partway_leaves_the_rest_waiting(initialized, home, fake)
         + [f"- Line {n} stands in memory. [observed] 2026-09-30 [^s1]" for n in range(1, 22)]
     )
     seed_page(cfg, "projects/widget/overview.md", body)
-    seed_page(cfg, "projects/widget/overview.md", body)
     spend(cfg, cfg.settings.work.daily_token_budget - 250)  # one call costs 200 + 50
     fake.script = [withdraw_reply("L1"), withdraw_reply("L1")]
 
@@ -319,6 +339,7 @@ def test_a_budget_spent_partway_leaves_the_rest_waiting(initialized, home, fake)
     assert frontmatter["aft"]["review"]["waiting"] == 1
     assert "Incomplete" in body_text
     assert "1 part(s) wait, the day's token budget is spent" in body_text
+    assert "The other 19 line(s) the model saw stay as they are." in body_text
 
 
 def test_lines_are_reviewed_in_parts_of_twenty_with_continuing_numbers(initialized, home, fake):
@@ -394,26 +415,40 @@ def test_the_global_scope_reviews_the_global_pages(initialized, home, fake):
     assert "# Review global" in body
 
 
-def test_a_project_named_global_loses_to_the_literal(initialized, home, fake):
-    """A project whose slug is ``global`` is reached by its slug in the registry, but
-    the literal scope ``global`` always reviews the global pages."""
+def test_the_slug_global_is_reserved(initialized, home, fake):
+    """The literal scope ``global`` reviews the global pages, so no project may take
+    the slug: the registry refuses it, and the global pages still review (review fix 5)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     register(cfg)
-    register(cfg, "global")
     seed_page(cfg, "global/preferences.md", GLOBAL_BODY, project="", slug="preferences")
-    seed_page(cfg, "projects/global/overview.md", OVERVIEW_BODY, slug="global")
-    fake.script = [withdraw_reply("L1"), withdraw_reply("L1")]
+    registry = Registry.load(cfg.registry_path)
+    with pytest.raises(RegistryError) as raised:
+        registry.add("global")
+    assert "reserved" in str(raised.value)
+    with pytest.raises(RegistryError):
+        registry.rename("widget", "global")
 
-    assert review.review(cfg, "global", now=NOW).reviewed == 1
-    assert review.review(cfg, "widget", now=NOW).reviewed == 0
+    fake.script = [withdraw_reply("L1")]
+    outcome = review.review(cfg, "global", now=NOW)
+    assert outcome.reviewed == 1
+    assert outcome.findings[0].page == "global/preferences.md"
+    assert "review-global.md" in str(review.report_path(cfg.vault, "global"))
+    _, body = read_report(cfg, "global")
+    assert "# Review global" in body
 
 
 def test_a_seeded_recent_line_is_reviewed_like_any_other(initialized, home, fake):
-    """``recent.md`` is short-term memory, and its lines are reviewed like every
-    other line (BUILD-PLAN F48)."""
+    """``recent.md`` is short-term memory, and a line written the way
+    ``scripts/seed_afterthought.py`` writes one, with its ``file:`` source, is reviewed
+    like every other line (BUILD-PLAN F48)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     register(cfg)
-    seed_page(cfg, "projects/widget/recent.md", RECENT_BODY.format(date=TODAY))
+    seed_page(
+        cfg,
+        "projects/widget/recent.md",
+        RECENT_BODY.format(date=TODAY),
+        frontmatter_template=SEED_FRONTMATTER,
+    )
     fake.script = [withdraw_reply("L1")]
 
     outcome = review.review(cfg, "widget", now=NOW)
@@ -421,6 +456,7 @@ def test_a_seeded_recent_line_is_reviewed_like_any_other(initialized, home, fake
     assert outcome.reviewed == 1
     assert outcome.findings[0].page == "projects/widget/recent.md"
     assert outcome.findings[0].section == "State"
+    assert outcome.findings[0].tag == "observed", "the seed writes an observed tag"
     review.withdraw(cfg, "widget", "1", now=NOW)
     text = (cfg.vault / "projects/widget/recent.md").read_text(encoding="utf-8")
     assert "withdrawn 2026-10-05" in text
@@ -556,3 +592,292 @@ def test_the_cli_parses_review_and_the_error_is_named():
     assert args.scope == "global"
     assert args.withdraw == "1,2"
     assert "ReviewError" in _CLI_ERROR_NAMES
+
+
+def test_a_line_that_only_moved_is_withdrawn(initialized, home, fake):
+    """A dream add above a saved line moves every line below it; the withdrawal still
+    finds the line by what it says, not by the number it was saved at (review fix 1)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [withdraw_reply("L3")]
+    review.review(cfg, "widget", now=NOW)
+    page_rel = "projects/widget/overview.md"
+    with vault.locked(cfg):
+        doc = pagewrite.PageDoc.read(cfg.vault / page_rel, vault=cfg.vault)
+        doc.add_fact("state", "The digest run moved to the GPU host.", "observed", TODAY, ["s1"])
+        (cfg.vault / page_rel).write_text(doc.render(), encoding="utf-8")
+
+    outcome = review.withdraw(cfg, "widget", "1", now=NOW)
+
+    assert [f.number for f in outcome.withdrawn] == [1]
+    text = (cfg.vault / page_rel).read_text(encoding="utf-8")
+    assert "~~Capture runs at session end.~~ [stated] 2026-09-20 [^s1] withdrawn 2026-10-05" in text
+    assert "- The digest run moved to the GPU host." in text, "the line the dream added stands"
+
+
+def test_identical_lines_are_told_apart_by_the_saved_number(initialized, home, fake):
+    """Two identical lines are told apart by the saved line number: the one nearest it
+    is struck, and its twin stands (review fix 1)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    body = OVERVIEW_BODY.replace(
+        "- Capture runs at session end. [stated] 2026-09-20 [^s1]",
+        "- Capture runs at session end. [stated] 2026-09-20 [^s1]\n"
+        "- Capture runs at session end. [stated] 2026-09-20 [^s1]",
+    )
+    seed_page(cfg, "projects/widget/overview.md", body)
+    fake.script = [withdraw_reply("L3")]
+    review.review(cfg, "widget", now=NOW)
+    page_rel = "projects/widget/overview.md"
+    with vault.locked(cfg):
+        doc = pagewrite.PageDoc.read(cfg.vault / page_rel, vault=cfg.vault)
+        doc.add_fact("state", "The digest run moved to the GPU host.", "observed", TODAY, ["s1"])
+        (cfg.vault / page_rel).write_text(doc.render(), encoding="utf-8")
+
+    outcome = review.withdraw(cfg, "widget", "1", now=NOW)
+
+    assert [f.number for f in outcome.withdrawn] == [1]
+    text = (cfg.vault / page_rel).read_text(encoding="utf-8")
+    assert text.count("~~Capture runs at session end.~~") == 1, "only one twin is struck"
+    assert text.count("- Capture runs at session end. [stated]") == 1, "the twin stands"
+
+
+def test_a_number_with_a_result_is_left_as_it_is(initialized, home, fake):
+    """A number whose finding already carries its result is left as it is, as ``all``
+    leaves it: the dated record stands and nothing is committed (review fix 2)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [withdraw_reply("L1", "L3")]
+    review.review(cfg, "widget", now=NOW)
+    review.withdraw(cfg, "widget", "2", now=NOW)
+    after_first = review.report_path(cfg.vault, "widget").read_text(encoding="utf-8")
+    page_before = (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8")
+
+    outcome = review.withdraw(cfg, "widget", "2", now=NOW)
+
+    assert outcome.withdrawn == ()
+    assert outcome.skipped == ()
+    assert not outcome.committed, "nothing changed, so nothing is committed"
+    assert review.report_path(cfg.vault, "widget").read_text(encoding="utf-8") == after_first
+    assert (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8") == page_before
+    frontmatter, _ = read_report(cfg, "widget")
+    results = {f["number"]: f["result"] for f in frontmatter["aft"]["review"]["findings"]}
+    assert results == {1: None, 2: "withdrawn 2026-10-05"}
+
+    later = review.withdraw(cfg, "widget", "1,2", now=NOW)
+
+    assert [f.number for f in later.withdrawn] == [1], "the line with a result is passed over"
+    frontmatter, _ = read_report(cfg, "widget")
+    results = {f["number"]: f["result"] for f in frontmatter["aft"]["review"]["findings"]}
+    assert results == {1: "withdrawn 2026-10-05", 2: "withdrawn 2026-10-05"}
+
+
+def test_a_list_saved_before_the_lock_is_not_lost(initialized, home, fake, monkeypatch):
+    """The saved list is read and the numbers resolved under the vault lock (review fix
+    3): a review that saves a new list before the withdrawal takes the lock is acted
+    on, not overwritten by the withdrawal's stale copy."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [withdraw_reply("L2")]
+    review.review(cfg, "widget", now=NOW)
+    decisions = next(
+        fact
+        for fact in page.parse(
+            (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8"),
+            Path("projects/widget/overview.md"),
+        ).facts
+        if fact.statement == "Capture runs at session end."
+    )
+    newer = review.ReviewOutcome(
+        scope="widget",
+        reviewed=3,
+        pages_read=1,
+        findings=(
+            review.Finding(
+                number=1,
+                page="projects/widget/overview.md",
+                line=decisions.line,
+                section="Decisions",
+                statement="Capture runs at session end.",
+                tag="stated",
+                date="2026-09-20",
+                refs=("s1",),
+                reason="progress on the work",
+            ),
+        ),
+        calls=1,
+        shown=3,
+    )
+
+    from aft import vault as vaultmod
+
+    real_locked = vaultmod.locked
+
+    @contextmanager
+    def locked(config):
+        with real_locked(config):
+            # A concurrent review saved a new list while this withdrawal waited for the
+            # lock; the withdrawal reads it under the lock, never writes the old copy back.
+            path = review.report_path(config.vault, "widget")
+            path.write_text(review.report_text(newer, NOW), encoding="utf-8")
+            vaultmod.commit(config.vault, ["reports/review-widget.md"], "aft: review widget")
+            yield
+
+    monkeypatch.setattr(vaultmod, "locked", locked)
+
+    outcome = review.withdraw(cfg, "widget", "1", now=NOW)
+
+    assert [f.number for f in outcome.withdrawn] == [1]
+    assert outcome.withdrawn[0].statement == "Capture runs at session end."
+    text = (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8")
+    assert "~~Capture runs at session end.~~" in text
+    assert "~~The GPU host runs vLLM" not in text, "the stale copy's line is left alone"
+    frontmatter, _ = read_report(cfg, "widget")
+    assert (
+        frontmatter["aft"]["review"]["findings"][0]["statement"] == "Capture runs at session end."
+    )
+    assert frontmatter["aft"]["review"]["findings"][0]["result"] == "withdrawn 2026-10-05"
+
+
+def test_a_noted_line_is_reviewed_but_the_withdrawal_skips_it(initialized, home, fake):
+    """A line with an open note is active memory too (DESIGN 6 injects it), so the
+    review asks about it; the withdrawal still skips it for ``aft settle`` (review
+    fix 4)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    page_rel = "projects/widget/overview.md"
+    with vault.locked(cfg):
+        doc = pagewrite.PageDoc.read(cfg.vault / page_rel, vault=cfg.vault)
+        doc.add_callout(
+            doc.fact("The capture hook enqueues work and returns."),
+            "conflict",
+            "A session says the hook runs at session start.",
+            TODAY,
+        )
+        doc.add_callout(
+            doc.fact("The GPU host runs vLLM for the digest model."),
+            "question",
+            "Which card does the digest model run on?",
+            TODAY,
+        )
+        (cfg.vault / page_rel).write_text(doc.render(), encoding="utf-8")
+    fake.script = [withdraw_reply("L1")]
+
+    outcome = review.review(cfg, "widget", now=NOW)
+
+    assert outcome.reviewed == 3, "the noted lines are active memory and are asked about"
+    user = fake.requests[0]["messages"][1]["content"]
+    assert "L1 (state, observed, overview.md" in user
+    assert "L2 (state, observed, overview.md" in user
+    assert outcome.findings[0].statement == "The capture hook enqueues work and returns."
+
+    withdrawal = review.withdraw(cfg, "widget", "1", now=NOW)
+
+    assert withdrawal.withdrawn == ()
+    assert withdrawal.skipped[0][1] == "it has an open note; aft settle settles it"
+    text = (cfg.vault / page_rel).read_text(encoding="utf-8")
+    assert "~~The capture hook" not in text
+
+
+def test_a_page_outside_the_fact_pages_refuses_the_withdrawal(initialized, home, fake):
+    """A saved finding's page is validated the way ``aft settle`` validates the page it
+    is given (review fix 6): inside the vault, under a directory fact pages live in."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [withdraw_reply("L1")]
+    review.review(cfg, "widget", now=NOW)
+    page_before = (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8")
+    report = review.report_path(cfg.vault, "widget")
+    escaped = report.read_text(encoding="utf-8").replace(
+        "projects/widget/overview.md", "projects/widget/../widget/overview.md"
+    )
+    report.write_text(escaped, encoding="utf-8")
+
+    with pytest.raises(review.ReviewError) as raised:
+        review.withdraw(cfg, "widget", "1", now=NOW)
+    assert "not a fact page" in str(raised.value)
+
+    outside = report.read_text(encoding="utf-8").replace(
+        "projects/widget/../widget/overview.md", "digests/widget/2026/10/05.md"
+    )
+    report.write_text(outside, encoding="utf-8")
+    with pytest.raises(review.ReviewError) as raised:
+        review.withdraw(cfg, "widget", "1", now=NOW)
+    assert "not a fact page" in str(raised.value)
+    assert (cfg.vault / "projects/widget/overview.md").read_text(encoding="utf-8") == page_before
+
+
+def test_a_list_saved_for_another_scope_is_refused(initialized, home, fake):
+    """The saved list is checked to be the requested scope's list (review fix 6): a
+    copy filed under another slug is refused, not withdrawn as that scope's memory."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    register(cfg, "gadget")
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    seed_page(cfg, "projects/gadget/overview.md", OVERVIEW_BODY, project="p_gadget", slug="gadget")
+    fake.script = [withdraw_reply("L1")]
+    review.review(cfg, "widget", now=NOW)
+    saved = review.report_path(cfg.vault, "widget").read_text(encoding="utf-8")
+    copy = review.report_path(cfg.vault, "gadget")
+    copy.write_text(saved, encoding="utf-8")
+    vault.commit(cfg.vault, ["reports/review-gadget.md"], "copy the list by hand")
+
+    with pytest.raises(review.ReviewError) as raised:
+        review.withdraw(cfg, "gadget", "1", now=NOW)
+    assert "is for widget, not gadget" in str(raised.value)
+
+
+def test_the_cli_names_unreadable_pages_when_nothing_is_active(initialized, home, fake, capsys):
+    """A scope with no active lines but an unreadable page names the page, instead of
+    only saying there is nothing to review (review fix 7)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    scratch = cfg.vault / "projects/widget/scratch.md"
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.write_text("# Scratch\n\n- Not a fact page.\n", encoding="utf-8")
+    vault.commit(cfg.vault, ["projects/widget/scratch.md"], "seed scratch")
+    from aft.cli import main
+
+    assert main(["review", "widget"]) == 0
+    out = capsys.readouterr().out
+    assert "no active memory lines in widget" in out
+    assert "projects/widget/scratch.md" in out, "the unreadable page is named"
+    assert "not a fact page" in out
+
+
+def test_a_part_that_judged_nothing_is_not_counted_as_kept(initialized, home, fake):
+    """A review whose every part failed says so: no line was judged, and the Kept
+    sentence counts only the lines the model saw (review fix 8)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [Reply(status=500)]
+
+    outcome = review.review(cfg, "widget", now=NOW)
+
+    assert outcome.calls == 0
+    assert outcome.shown == 0
+    _, body = read_report(cfg, "widget")
+    assert "Nothing. No line was judged; see Incomplete for why." in body
+    assert "The other 0 line(s) the model saw stay as they are." in body
+
+
+def test_a_withdrawn_report_keeps_the_review_date(initialized, home, fake):
+    """A report a withdrawal rewrites keeps the review date in its body: the sentence
+    counts the review's model calls, not the withdrawal's day (review fix 8)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg)
+    seed_page(cfg, "projects/widget/overview.md", OVERVIEW_BODY)
+    fake.script = [withdraw_reply("L1")]
+    review.review(cfg, "widget", now=NOW)
+
+    review.withdraw(cfg, "widget", "1", now=NOW + timedelta(days=1))
+
+    _, body = read_report(cfg, "widget")
+    assert "in 1 model call(s) on 2026-10-05" in body
+    assert "call(s) on 2026-10-06" not in body, "the withdrawal's day is not the review's"

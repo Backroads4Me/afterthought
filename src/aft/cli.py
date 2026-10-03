@@ -684,6 +684,8 @@ def cmd_review(args) -> int:
         outcome = review.review(config, args.scope)
         if outcome.report is None:
             print(f"aft review: no active memory lines in {args.scope}; nothing to review")
+            for entry in outcome.unreadable:
+                print(f"aft review: {entry}")
         else:
             print(
                 f"aft review: the model would withdraw {len(outcome.findings)} of"
