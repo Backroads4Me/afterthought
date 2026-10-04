@@ -193,11 +193,12 @@ def key_fact(
     kind: str = "decision",
     term: str = "long",
     scope: str = "project",
-    statement: str = "The session settled it.",
+    statement: str | None = None,
 ) -> dict:
-    """One fact of an answer key, as the lead settles it."""
+    """One fact of an answer key, as the lead settles it; its statement says what its quote
+    says, as a real fact's does."""
     return {
-        "statement": statement,
+        "statement": statement if statement is not None else f"The session said: {quote}",
         "quote": quote,
         "source": source,
         "kind": kind,
@@ -685,7 +686,7 @@ def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path):
     assert session["wrong"][0]["quote"] == "should the report go out at noon?"
     assert session["missed"][0]["quote"] == "the endpoint moved to port 8008"
     assert session["tags"][0] == {
-        "statement": "The session settled it.",
+        "statement": "The session said: run the full suite before pushing",
         "tag": "source",
         "run": "observed",
         "key": "stated",
@@ -803,3 +804,19 @@ def test_a_broken_key_is_refused(ev, tmp_path):
 def test_score_refuses_an_unknown_backend(ev, tmp_path):
     with pytest.raises(ev.EvalError, match="unknown backend"):
         ev.score_run(tmp_path / "data", "base", "openai", tmp_path)
+
+
+def test_two_quotes_of_one_fact_are_matched_by_what_the_statements_say(ev):
+    """Models quote different lines for one fact; the statements still pair them."""
+    local = {
+        "statement": "Greptile is the automated reviewer whose findings gate every firstmate PR.",
+        "quote": "greptile flagged two P1 issues on the PR",
+    }
+    claude = {
+        "statement": "Firstmate PRs are gated by Greptile's automated reviewer findings.",
+        "quote": "wait for the greptile check before merging",
+    }
+    other = {"statement": "The user prefers small commits.", "quote": "keep commits small"}
+    groups = ev.match_facts({"local": [local, other], "claude": [claude]})
+    paired = [group for group in groups if len(group.facts) == 2]
+    assert len(paired) == 1 and paired[0].facts == {"local": local, "claude": claude}
