@@ -283,7 +283,6 @@ def synthetic_sessions(directory: Path, cfg: Config) -> list[SessionInput]:
             )
         )
     return sessions
-    return sessions
 
 
 def _optional(value: object, where: str) -> str | None:

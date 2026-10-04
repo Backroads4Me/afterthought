@@ -1,0 +1,24 @@
+{
+  "session_id": "synthetic-pasted-document",
+  "agent": "claude",
+  "case": "a pasted document",
+  "notes": "The pasted runbook is reference material the session reads, not a record of what the session did. A digest that turns the runbook's four steps into session facts, such as 'freeze the deploy window daily', has mistaken the document for the conversation. The key holds the pointer to the document and the actual pager problem.",
+  "facts": [
+    {
+      "statement": "The session worked from a pasted deploy runbook.",
+      "quote": "Here is the deploy runbook for reference",
+      "source": "stated",
+      "kind": "reference",
+      "term": "short",
+      "scope": "project"
+    },
+    {
+      "statement": "The pager routes schema migrations to the second on-call and should route them to the primary.",
+      "quote": "routes schema migrations to the second on-call",
+      "source": "stated",
+      "kind": "state",
+      "term": "short",
+      "scope": "project"
+    }
+  ]
+}

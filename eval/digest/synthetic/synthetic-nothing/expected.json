@@ -1,0 +1,7 @@
+{
+  "session_id": "synthetic-nothing",
+  "agent": "claude",
+  "case": "a session with nothing worth keeping",
+  "notes": "A flaky-test recheck that passed, a license text reminder, and goodbyes. Nothing here outlives the session: no commitment, no changed state, no preference, no reusable lesson. The key holds no facts, so a digest that keeps anything has kept noise.",
+  "facts": []
+}

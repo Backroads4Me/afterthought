@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "f-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "Heads up, the staging database moved to db-staging-03.internal last week."}]}}
+{"type": "assistant", "uuid": "f-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "Thanks, I will point the staging checks at db-staging-03.internal."}]}}
+{"type": "user", "uuid": "f-u2", "timestamp": "2026-10-04T10:00:40Z", "message": {"content": [{"type": "text", "text": "Wait, I had it backwards: staging is still on db-staging-02.internal. Only the read replica moved to db-staging-03.internal."}]}}
+{"type": "assistant", "uuid": "f-a2", "timestamp": "2026-10-04T10:00:55Z", "message": {"content": [{"type": "text", "text": "Got it: staging itself stays on db-staging-02.internal, and only the replica runs on db-staging-03.internal."}]}}

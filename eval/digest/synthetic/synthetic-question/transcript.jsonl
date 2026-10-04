@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "q-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "Should we switch the nightly backup from 2am to 4am? The 2am slot keeps colliding with the sync job."}]}}
+{"type": "assistant", "uuid": "q-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "Moving it to 4am would clear the collision, but the backup would then overlap the morning report job. Both slots have a cost."}]}}
+{"type": "user", "uuid": "q-u2", "timestamp": "2026-10-04T10:00:40Z", "message": {"content": [{"type": "text", "text": "Right. I am not deciding today. I want to see when the report job actually runs first."}]}}
+{"type": "assistant", "uuid": "q-a2", "timestamp": "2026-10-04T10:00:55Z", "message": {"content": [{"type": "text", "text": "Sounds good. The backup stays at 2am for now and the move stays an open question."}]}}

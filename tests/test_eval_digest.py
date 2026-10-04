@@ -321,6 +321,19 @@ def test_synthetic_sessions_run_through_the_filter(ev, tmp_path, cfg):
     assert [entry.id for entry in sessions[0].entries] == ["u1", "a1"]
 
 
+def test_the_repository_synthetic_sessions_load(ev, cfg):
+    sessions = ev.synthetic_sessions(REPO_ROOT / "eval" / "digest" / "synthetic", cfg)
+    assert [session.session_id for session in sessions] == [
+        "synthetic-made-false",
+        "synthetic-nothing",
+        "synthetic-pasted-document",
+        "synthetic-question",
+        "synthetic-reversed-rule",
+        "synthetic-tentative",
+    ]
+    assert all(session.source == "synthetic" and session.entries for session in sessions)
+
+
 def test_select_sessions_names_the_set_when_asked_for_an_unknown_one(ev, tmp_path):
     data = write_data(tmp_path, {"sess-1": [row("e1", "user", "hello")]})
     sessions = ev.real_sessions(data)

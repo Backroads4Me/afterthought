@@ -1,0 +1,6 @@
+{"type": "user", "uuid": "r-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "New rule for releases: always deploy the canary first. Every release goes out to the canary before the fleet, no exceptions."}]}}
+{"type": "assistant", "uuid": "r-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "Noted: canary first for every release."}]}}
+{"type": "user", "uuid": "r-u2", "timestamp": "2026-10-04T10:00:40Z", "message": {"content": [{"type": "text", "text": "While you are here, the metrics pipeline is dropping about one event in a hundred after the schema change."}]}}
+{"type": "assistant", "uuid": "r-a2", "timestamp": "2026-10-04T10:00:55Z", "message": {"content": [{"type": "text", "text": "I will look at the schema change as the likely cause of the dropped events."}]}}
+{"type": "user", "uuid": "r-u3", "timestamp": "2026-10-04T10:01:20Z", "message": {"content": [{"type": "text", "text": "Change of plan on the release rule: drop the canary step entirely, ship every release straight to production. The canary never caught anything in six months."}]}}
+{"type": "assistant", "uuid": "r-a3", "timestamp": "2026-10-04T10:01:35Z", "message": {"content": [{"type": "text", "text": "Understood: releases ship straight to production now, no canary step."}]}}

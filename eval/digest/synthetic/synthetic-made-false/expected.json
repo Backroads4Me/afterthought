@@ -1,0 +1,16 @@
+{
+  "session_id": "synthetic-made-false",
+  "agent": "claude",
+  "case": "a fact made false later in the session",
+  "notes": "The first claim about the staging host is retracted two turns later. Only the correction is true at the end of the session, so a digest that keeps the moved-staging claim records something false. The key holds only the corrected state.",
+  "facts": [
+    {
+      "statement": "The staging database is on db-staging-02.internal and only the read replica moved to db-staging-03.internal.",
+      "quote": "staging is still on db-staging-02.internal",
+      "source": "stated",
+      "kind": "state",
+      "term": "short",
+      "scope": "project"
+    }
+  ]
+}

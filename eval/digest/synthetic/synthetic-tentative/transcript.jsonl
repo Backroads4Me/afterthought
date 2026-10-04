@@ -1,0 +1,5 @@
+{"type": "user", "uuid": "t-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "Honestly I might rewrite the CSV exporter in Rust someday, if the Python one keeps getting slower. No plans yet."}]}}
+{"type": "assistant", "uuid": "t-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "That rewrite would be a big lift; the exporter is about two thousand lines with the plugins."}]}}
+{"type": "user", "uuid": "t-u2", "timestamp": "2026-10-04T10:00:40Z", "message": {"content": [{"type": "text", "text": "Anyway, what I need today is narrower: fix the flaky retry test in tests/test_sync.py."}]}}
+{"type": "assistant", "uuid": "t-a2", "timestamp": "2026-10-04T10:00:55Z", "message": {"content": [{"type": "text", "text": "On it. The retry test fails roughly once in ten runs on this machine."}]}}
+{"type": "user", "uuid": "t-u3", "timestamp": "2026-10-04T10:01:20Z", "message": {"content": [{"type": "text", "text": "Yes, about one in ten for me too."}]}}
