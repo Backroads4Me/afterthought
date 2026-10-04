@@ -1175,24 +1175,37 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   (1) Input: a tool call becomes one compact action line naming the tool and its target (`Edit
   src/aft/digest.py`, `Bash: uv run pytest`), with no arguments or output; error lines are kept
   only from commands that failed; code blocks, diffs and tables in assistant text collapse to a
-  placeholder naming them.
+  placeholder naming them. The archive holds a tool's output, not its call, so a successful
+  command shows nothing until capture keeps the call's name and target.
   (2) Per user turn, with the end of the assistant message before it and the action lines
   between: one call over a batch of turns asking, for each, which decisions, preferences,
   rules or facts about the user's setup the user settled, each with a statement and the
   user's exact words; a question, a proposal, a request for the task at hand and pasted
-  material are never one of those. The wording asks for the fewest items that capture what
-  was settled.
+  material are never one of those. Every turn gets at least one item, an outlet label when it
+  settles nothing, and a turn the answer skips is asked again once on its own: asking for the
+  fewest items left turns unanswered (measured 2026-10-04). Batches hold at most 15 turns and
+  DESIGN 13's input cap. A `[stated]` statement is grounded in the user's turn alone, and a
+  quote holding a question mark is refused (F52).
   (3) Observed facts: one call over assistant prose and action lines for what the session
   observed about the system that the repository does not record.
   (4) Final state: one call over the session's items in order: a later item on the same
   subject replaces an earlier one only when the user stated the change explicitly ("change of
   plan", "instead", "no longer"); speculation never replaces anything; the replaced item is
   dropped and named in the digest's report.
-  (5) Summary and handoff in their own call. The script sets the source tag from whose words
+  (5) Summary and handoff in their own call. A refused summary does not drop its part: the
+  part's other calls still run, the refusal is listed with the dropped items, and a job is
+  refused only when it gives neither a summary nor a fact. An approval ("yes, do option B") is a decision
+  item carrying the exact words of the proposal it approves from BEFORE; the script verifies
+  the user's words in the turn and the proposal's words in the assistant entry the turn
+  answers, grounds the statement in both, and writes the line with both as sources
+  (DESIGN R2, ruling 2026-10-04). The script sets the source tag from whose words
   the quote is (`[stated]` only from a user turn) and verifies every quote as today.
   Scoring: `scripts/eval_digest.py score-turns` scores a run against key-turns.json (durable
   items found, wrong items, per writing model); the PR carries base and turns scores for the
   local model. The default moves to "turns" only if it finds more and is wrong less often.
+  Known limit, for the scores to show: the turns calls have no `[suggested]` or `[inferred]`
+  outlet, and the observed call reads no user entry, so a log the user pastes gives no
+  `[observed]` fact as the base pipeline's does.
   Review checkpoint: yes (prompts, schema, filter).
 - **F56 The digest checks its own answers** (ruling 2026-10-04; after F55). DESIGN 8. Each
   proposed item gets one short call with its quote and the two entries before and after it,

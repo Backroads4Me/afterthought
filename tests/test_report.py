@@ -10,6 +10,7 @@ Verifies:
 7. Temp dirs only
 """
 
+import os
 import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,16 @@ from fakes.model_server import FakeEndpoint, Reply
 
 NOW = datetime(2026, 10, 4, 14, 30, tzinfo=UTC)
 TODAY = "2026-10-04"
+
+
+def _before_now(cfg: Config) -> None:
+    """Dates every file in the vault an hour before NOW: the dream's quiet period reads
+    real modification times, and a file the test wrote moments ago would otherwise be a
+    hand edit made after NOW."""
+    stamp = (NOW - timedelta(hours=1)).timestamp()
+    for path in cfg.vault.rglob("*"):
+        if ".git" not in path.relative_to(cfg.vault).parts:
+            os.utime(path, (stamp, stamp), follow_symlinks=False)
 
 
 def _make_dummy_report(
@@ -495,6 +506,8 @@ def test_dream_run_wires_report_and_needs_you(initialized: Config, monkeypatch):
     def fake_process(c, s, digs):
         return mock_report
 
+    _before_now(cfg)
+
     res = schedule.run(cfg, process=fake_process, now=NOW)
     assert "widget" in res.reports
 
@@ -674,6 +687,8 @@ def test_dream_run_with_no_changes_does_not_append_report(initialized: Config):
     def fake_process_no_changes(c, s, digs):
         return empty_report
 
+    _before_now(cfg)
+
     res = schedule.run(cfg, process=fake_process_no_changes, now=NOW)
     assert "widget" in res.reports
 
@@ -762,6 +777,8 @@ def test_run_with_only_rejected_facts_creates_report_and_revert(initialized: Con
 
     def fake_process_rejects(c, s, digs):
         return rejected_rep
+
+    _before_now(cfg)
 
     res = schedule.run(cfg, process=fake_process_rejects, now=NOW)
     assert "widget" in res.reports
@@ -887,6 +904,8 @@ def test_needs_you_regenerated_when_resolved_by_hand(initialized: Config):
 
     # Process makes a dream commit with no fact changes (e.g. only logged/consumed)
     no_memory_changes_report = apply.ProjectRunReport(project="widget", commit="11223344")
+
+    _before_now(cfg)
 
     schedule.run(cfg, process=lambda c, s, d: no_memory_changes_report, now=NOW)
 
@@ -1023,6 +1042,8 @@ def test_schedule_run_drives_real_apply_with_fake_endpoint(initialized, home, fa
     )
 
     fake.script = [Reply(content={"action": "add", "line": None, "reason": "new decision"})]
+
+    _before_now(cfg)
 
     res = schedule.run(cfg, now=NOW)
     assert "widget" in res.ran
