@@ -403,7 +403,8 @@ A working directory resolves to one project:
    are prefixed until it is unique (`foo`, `work-foo`, `ted-work-foo`). The path, not the
    name, is the identity: a later `git init` or a rename with `aft project rename` keeps
    the project. The system temporary directory, `~/Downloads` and `capture.exclude_paths`
-   never become projects, and they are refused before any lookup, so no registered path
+   never become projects, nor do the directories `capture.exclude_dirs` names (each alone,
+   nothing below it), and they are refused before any lookup, so no registered path
    above them claims them. `home` is the home directory itself: its path matches only that
    directory, never one below it. A name is unique across registered projects and the
    names unregistered directories have already claimed, whichever way the project is made.

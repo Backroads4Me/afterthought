@@ -1122,6 +1122,34 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   recent layer's floor no longer shares in the room the long-term layers divide (DESIGN 10:
   short-term memory takes only what they leave). Tests: the notes line and the notice name
   the reply; the short-term crowd-out test at 1,200 characters. Review checkpoint: no.
+- **F52 Memory says only what was said** (ruling 2026-10-04; FINDINGS T32). DESIGN 6, 8,
+  9, R2. Four wrong lines reached the memory block: a question of the user's recorded as a
+  `[stated]` decision ("approved sending smaller subsections", quoting "Should we send
+  smaller subsections...?"), a rule the user replaced (F51) left standing beside its
+  replacement, a line made false by a later change (`aft settle` exists), and a statement
+  naming a word its quote does not hold ("zebrafish" for "zebrafjord"). Script checks, the
+  same in the digest and the dream: (1) R2: a fact whose quote holds a question mark is never
+  `[stated]`; it is refused as stated and kept, if at all, as `[suggested]`. (2) Grounding: a
+  statement's distinctive words (identifiers, words with digits, underscores, slashes or
+  backticks, and words of seven letters or more outside a short common-word list) must each
+  appear in the fact's quote or in the entry it cites; a statement that names one that does
+  not is refused and reported. Prompts: the digest and decide prompts say a question, a
+  proposal or a request from the user is never a decision or a preference; the decide
+  prompt says a new fact that changes how something is done, which an existing line
+  describes, supersedes that line rather than adding beside it. Tests: each of the four
+  real cases as a fixture (the question, the replaced rule, the made-false line, the
+  ungrounded word), each refused or superseded; a stated fact with no question mark and
+  grounded words still passes. Review checkpoint: yes (prompts, rules).
+- **F53 A directory excluded alone** (ruling 2026-10-04). DESIGN 7, 12. `~/src` holds every
+  repository, so `capture.exclude_paths` (which reaches everything below a path) cannot
+  exclude it, and the project `src` the backfill registered at it claims every plain
+  directory below. New setting `capture.exclude_dirs`: directories excluded by themselves,
+  nothing below them: a session run in one is not captured, it is never a project, it is
+  refused before any lookup like the temporary directory, and a registered path equal to
+  it claims nothing. Ted's config gets `exclude_dirs = ["~/src"]`, and the `src` project is
+  archived (its five digests stay). Tests: a session in the directory is not captured, one
+  in a plain subdirectory and one in a repository below are, and neither resolves to the
+  excluded directory's project. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
