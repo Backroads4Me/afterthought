@@ -348,7 +348,7 @@ class Backend:
         """One answer that satisfies ``schema``, asked for the way this backend asks."""
         if self.command is None:
             return model.complete_json(cfg, system, user, schema, max_tokens)
-        return self._shell(system + "\n\n" + user, schema)
+        return self._shell(system + "\n\n" + user + _schema_note(schema), schema)
 
     def _shell(self, prompt: str, schema: dict) -> dict:
         assert self.command is not None
@@ -383,6 +383,19 @@ class Backend:
             return model._checked(found, schema)
         except SchemaError as exc:
             raise model.ModelError(f"{digestmod.ANSWER_REFUSED}: {exc}") from None
+
+
+def _schema_note(schema: dict) -> str:
+    """What a shell backend is told about the answer's form.
+
+    The local endpoint enforces the schema through ``response_format``; a CLI only reads
+    the prompt, so the same schema is written into it, with the instruction to answer in
+    one JSON object and nothing else.
+    """
+    return (
+        "\n\nAnswer with exactly one JSON object that satisfies this JSON schema, and"
+        " nothing else: no prose, no code fence.\n\n" + json.dumps(schema)
+    )
 
 
 def build_backend(name: str, command: tuple[str, ...] | None = None) -> Backend:

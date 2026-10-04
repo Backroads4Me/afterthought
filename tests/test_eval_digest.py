@@ -534,6 +534,9 @@ def test_gemini_backend_answers_through_a_fake_command(ev, tmp_path, cfg, monkey
     prompt = (tmp_path / "prompt.txt").read_text(encoding="utf-8")
     assert prompt.startswith(ev.digestmod.prompt_text())
     assert "[#1] USER" in prompt
+    # A CLI cannot be handed a response_format, so the prompt carries the schema itself.
+    assert "Answer with exactly one JSON object that satisfies this JSON schema" in prompt
+    assert json.dumps(ev.digestmod.digest_schema()) in prompt
 
 
 def test_claude_backend_refuses_an_answer_with_no_json(ev, tmp_path, cfg, monkeypatch):
