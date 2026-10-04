@@ -332,3 +332,18 @@ def test_a_turn_the_answer_skipped_is_asked_again(session: Session):
     assert [(f.statement, f.entry) for f in wrote.facts] == [
         ("The retry has its own setting.", "e4")
     ]
+
+
+def test_a_refused_summary_still_keeps_what_the_user_settled(session: Session):
+    """The turns and observed questions do not read the summary (BUILD-PLAN F55)."""
+    wrote = run(
+        session,
+        summary("..."),
+        summary("..."),
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+        ),
+        {"items": []},
+    )
+    assert [f.statement for f in wrote.facts] == ["Capture runs at session end."]
+    assert any(d.reason.startswith("summary refused") for d in wrote.dropped)

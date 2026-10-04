@@ -1177,13 +1177,14 @@ def _digest_parts_turns(
     ``verify`` as the base pipeline's facts do, so a quote must stand in its entry and
     ``[stated]`` must cite one of the user's turns; a turn item whose statement names words
     the session never used is refused first. Across the job, a later item replaces an earlier
-    one only where the user said so. A part whose summary is refused twice gives the page
-    nothing and is recorded as the base pipeline records it; a refused turns or observed
-    call is recorded beside the refused facts, since its part was still filed.
+    one only where the user said so. A refused summary, turns or observed call is recorded
+    beside the refused facts and the part's other calls still run; a job that gives neither
+    a summary nor a fact is refused.
     """
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
     last_refused = False
+    summary_refused = ""
     before, before_id = "", ""
     # Grounding reads the whole session: a statement may name what the session talked about,
     # never a word it did not hold (BUILD-PLAN F52, F55).
@@ -1206,11 +1207,11 @@ def _digest_parts_turns(
             if summary is None:
                 raise AnswerRefused("the summary is empty or a placeholder")
         except AnswerRefused as exc:
-            result.refused_parts.append(
-                {"first": part[0].id, "last": part[-1].id, "reason": str(exc)}
-            )
-            last_refused = True
-            continue
+            # The turns and observed questions do not read the summary: the part still
+            # gives what its user settled and what it observed.
+            result.dropped.append(_call_refused(part, "summary", str(exc)))
+            summary_refused = str(exc)
+            summary = None
         turn_facts = partial(
             _turn_facts,
             part=part,
@@ -1263,11 +1264,14 @@ def _digest_parts_turns(
                 result.dropped.extend(dropped)
             except AnswerRefused as exc:
                 result.dropped.append(_call_refused(part, "observed", str(exc)))
+        if summary is None:
+            last_refused = True
+            continue
         result.summaries.append(summary["summary"])
         result = replace(result, handoff=grounded_handoff(summary["handoff"], part))
         last_refused = False
-    if not result.summaries:
-        raise AnswerRefused(result.refused_parts[-1]["reason"])
+    if not result.summaries and not result.facts:
+        raise AnswerRefused(summary_refused)
     if last_refused:
         result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
     facts, replaced = _final_state(config, result.facts, order)
