@@ -930,30 +930,42 @@ def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
     return "\n\n".join(blocks)
 
 
-# Words a statement may use that its quote need not hold: they say how, not what.
-_PLAIN = frozenset(
-    "about after again agent always before being could every their there these those"
-    " through under until using where which while would should project session user"
-    " users prefers prefer wants decided decides settled instead never approve approves"
-    " approved approval agreed agrees requested requests".split()
-)
-
-
 def ungrounded(statement: str, said: str) -> list[str]:
-    """The distinctive words of ``statement`` that ``said`` - the user's own turn - does not
-    hold (BUILD-PLAN F52, F55): identifiers and words of seven letters or more outside a
-    short plain list. Punctuation around a word is set aside, and a word matches another
-    form of itself on their shared first five letters."""
+    """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
+    F55): a word holding a digit or one of ``_/.:-``, or a capital letter anywhere but at the
+    statement's start. Plain words say how, not what, and are not checked. Punctuation around
+    a word is set aside, and a word matches another form of itself on their shared first five
+    letters."""
     held = {_bare(w) for w in _WORDS.findall(said)}
     missing: list[str] = []
-    for word in _WORDS.findall(statement):
+    for number, word in enumerate(_WORDS.findall(statement)):
         low = _bare(word)
-        distinctive = any(c.isdigit() or c in "_/" for c in low) or len(low) >= 7
-        if not low or not distinctive or low in _PLAIN or low in held:
+        name = word.strip(".,;:!?\"'()")
+        distinctive = any(c.isdigit() or c in "_/.:-" for c in name) or any(
+            c.isupper() for c in (name[1:] if number == 0 else name)
+        )
+        if not low or not distinctive or low in held:
             continue
         if not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
             missing.append(word.strip(".,;:!?\"'()"))
     return missing
+
+
+def grounding_sentence(text: str, statement: str, said: str) -> str:
+    """The one sentence of ``text`` that, beside ``said``, grounds every name of
+    ``statement``, verbatim; empty when none does or two do equally well."""
+    grounding = [
+        sentence.strip()
+        for sentence in _SENTENCES.split(text)
+        if sentence.strip()
+        and len(sentence.strip()) <= 300
+        and not ungrounded(statement, f"{said}\n{sentence}")
+    ]
+    if not grounding:
+        return ""
+    return best_sentence("\n".join(grounding), statement) or (
+        grounding[0] if len(grounding) == 1 else ""
+    )
 
 
 def best_sentence(text: str, target: str) -> str:
@@ -1065,10 +1077,22 @@ def _turn_facts(
             # of approval nor the proposal they approve says.
             said = f"{said}\n{proposal}"
         missing = ungrounded(fact["statement"], said)
+        before_id = (answered or {}).get(fact["entry"], "")
+        answered_entry = (entries or {}).get(before_id)
+        if missing and "proposal" not in fact and answered_entry is not None and config:
+            # A name the user's reply takes from the message it answers is the agent's word:
+            # the line cites the one sentence of that message that holds what the statement
+            # needs, as an approval cites its proposal (DESIGN R2).
+            sentence = grounding_sentence(answered_entry.text, fact["statement"], said)
+            if sentence and evidence.find_quote(config, session_id, before_id, sentence):
+                fact["proposal"] = (before_id, sentence)
+                missing = []
         if missing:
             refused.append(
                 _refused(
-                    fact, f"the statement names words the session never used: {', '.join(missing)}"
+                    fact,
+                    "the statement names words neither the user's turn nor a proposal holds: "
+                    + ", ".join(missing),
                 )
             )
             continue

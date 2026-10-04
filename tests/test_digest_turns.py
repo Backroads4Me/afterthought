@@ -203,7 +203,7 @@ def test_a_statement_naming_words_the_user_did_not_say_is_refused(session: Sessi
         {"items": []},
     )
     assert not wrote.facts
-    assert any("never used" in d.reason for d in wrote.dropped)
+    assert any("neither the user's turn" in d.reason for d in wrote.dropped)
 
 
 def test_later_means_later_in_the_session_not_in_the_list(session: Session):
@@ -232,9 +232,7 @@ def test_grounding_reads_the_whole_turn_and_ignores_punctuation():
     assert digest.ungrounded("The 2am nightly backup slot collides.", said) == []
     assert digest.ungrounded("Folders go into one dir.", "move the folders into one dir") == []
     assert digest.ungrounded("Do the proposed ProjectionLab improvements.", "yes do 1 and 5") == [
-        "proposed",
-        "ProjectionLab",
-        "improvements",
+        "ProjectionLab"
     ]
 
 
@@ -358,7 +356,7 @@ def test_an_approval_names_only_words_of_the_turn_or_the_proposal(session: Sessi
             item(
                 "e4",
                 "decision",
-                "The hook writes one row and returns, and capture runs at session end.",
+                "The hook writes one row to SQLite and returns.",
                 "Give the retry its own setting",
                 proposal="the hook writes one row and returns",
             )
@@ -366,7 +364,7 @@ def test_an_approval_names_only_words_of_the_turn_or_the_proposal(session: Sessi
         {"items": []},
     )
     assert not wrote.facts
-    assert any("never used: capture" in d.reason for d in wrote.dropped)
+    assert any(d.reason.endswith("holds: SQLite") for d in wrote.dropped)
 
 
 def test_a_statement_naming_the_agents_words_without_a_proposal_is_refused(session: Session):
@@ -376,14 +374,12 @@ def test_a_statement_naming_the_agents_words_without_a_proposal_is_refused(sessi
         session,
         summary(),
         settled(
-            item(
-                "e1", "decision", "The hook returns at session end.", "Capture runs at session end."
-            )
+            item("e1", "decision", "Capture runs in PostgreSQL.", "Capture runs at session end.")
         ),
         {"items": []},
     )
     assert not wrote.facts
-    assert any("never used: returns" in d.reason for d in wrote.dropped)
+    assert any(d.reason.endswith("holds: PostgreSQL") for d in wrote.dropped)
 
 
 def test_a_quoted_question_is_never_stated(session: Session):
@@ -438,3 +434,16 @@ def test_turn_batches_hold_the_count_and_the_token_budget():
 def test_best_sentence_cites_nothing_when_two_sentences_match_equally():
     text = "Option A: keep the hook small. Option B: keep the hook fast."
     assert digest.best_sentence(text, "keep the hook") == ""
+
+
+def test_a_name_from_the_answered_message_cites_its_sentence():
+    """A reply's statement may take a name from the message it answers only with that
+    message's sentence cited beside it (DESIGN R2)."""
+    before = "The sounds come from the theme. Switch voxtype to the Default theme? Or keep it."
+    statement = "The sounds use the Default theme of Voxtype."
+    assert digest.ungrounded(statement, "change to default") == ["Voxtype"]
+    assert (
+        digest.grounding_sentence(before, statement, "change to default")
+        == "Switch voxtype to the Default theme?"
+    )
+    assert digest.grounding_sentence(before, "Use the Classic theme.", "ok") == ""
