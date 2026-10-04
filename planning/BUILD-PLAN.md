@@ -1150,6 +1150,48 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   archived (its five digests stay). Tests: a session in the directory is not captured, one
   in a plain subdirectory and one in a repository below are, and neither resolves to the
   excluded directory's project. Review checkpoint: no.
+- **F54 Measuring what the digest gets right** (ruling 2026-10-04; FINDINGS T32). DESIGN 8,
+  15. Digest quality is judged today by someone happening to notice a wrong line. A fixed test
+  set decides every later change to what the model is given and asked. Test set: 15 to 20 of
+  the user's real archived sessions (the user approved sending them to external models) and a
+  few made-up transcripts for rare cases (a question that sounds like a decision, a rule later
+  reversed, a fact made false later in the session, a tentative remark), stored under
+  `eval/digest/` with each session's filtered entries. Answer key: the same extraction run
+  three ways, by the local model, by Gemini and by a separate `claude -p` session; where they
+  disagree, the lead settles it and the user settles what the lead cannot; the key lists each
+  session's expected facts with their quote, tag, kind and term. `scripts/eval_digest.py
+  [--variant V] [--model M]` runs a pipeline variant over the set and scores it: wrong facts
+  (a fact the key does not hold, or holds differently), missed facts, wrong tags, questions
+  recorded as decisions, and tokens spent; it writes a dated report. The current pipeline is
+  the baseline. No pipeline change in this task. Tests: the scorer on hand-made answers.
+- **F55 What the digest reads** (ruling 2026-10-04; after F54; FINDINGS T33). DESIGN 8. The
+  user's words are 5 to 13% of what a digest call reads; tool output is 34 to 89%, mostly
+  source lines kept for holding a word like "error" (T33). Structural flags from the
+  transcript itself, with no agent cooperation: the filter keeps nothing from file reads,
+  searches and commands that succeeded, keeps error lines only from commands that failed,
+  and collapses code blocks, diffs and tables in assistant text to a placeholder naming
+  them. The digest asks separate, narrow questions: (a) for each user turn, with the
+  assistant message before it as context, whether it states a decision, a preference or a
+  rule, and the quote; (b) over assistant and tool text, what the session observed about the
+  system that the repository does not record; (c) the summary and handoff, in their own
+  call. The script sets the source tag from whose words the quote is. Each piece is kept only
+  if F54 scores it better than the baseline; the PR carries the scores. Review checkpoint:
+  yes (prompts, schema, filter).
+- **F56 The digest checks its own answers** (ruling 2026-10-04; after F55). DESIGN 8. Each
+  proposed fact gets one short call with its quote and the two entries before and after it,
+  asking yes or no: did the user assert this, or ask or propose it; and is it still true by
+  the end of the session. A fact is kept only on yes to both; a refusal is reported. Kept only
+  if F54 scores it better; the PR carries the scores and the extra tokens. Review checkpoint:
+  yes (prompt, schema).
+- **F57 What the working agent points at** (ruling 2026-10-04; an experiment, after F55).
+  DESIGN 8. The working agent sees each decision as it happens. Measured on F54 against F55's
+  structural flags alone: (a) a `Memory:` footer the agent writes when a response settles a
+  decision, a preference or a fact the repository does not record, each line quoting the
+  user's own words where it names a decision; (b) a bare look-here marker. The digest treats
+  either as a pointer only: a `[stated]` fact still quotes the user's own turn, verified by
+  the script, and the pipeline must score no worse when the agent writes none. No skip
+  marker: text the agent marks skippable is never removed. The user's global agent
+  instructions change only if the user adopts the winning form. Review checkpoint: yes.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
