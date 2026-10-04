@@ -43,7 +43,9 @@ def summary(text: str = "Settled where capture runs.") -> dict:
     }
 
 
-def item(turn: str, label: str, statement: str, quote: str, scope: str = "project") -> dict:
+def item(
+    turn: str, label: str, statement: str, quote: str, scope: str = "project", proposal: str = ""
+) -> dict:
     return {
         "turn": turn,
         "label": label,
@@ -51,6 +53,7 @@ def item(turn: str, label: str, statement: str, quote: str, scope: str = "projec
         "quote": quote,
         "scope": scope,
         "term": "long",
+        "proposal": proposal,
     }
 
 
@@ -163,7 +166,7 @@ def test_turn_blocks_show_before_errors_and_the_users_words():
         entry("e5", USER, SECOND_PROMPT),
         entry("e6", USER, "and keep it small"),
     ]
-    text, after = digest.turn_blocks(part)
+    text, after, _, answered = digest.turn_blocks(part)
     first, second, third = text.split("\n\n")
     assert first.startswith(f"[#1] TURN\nBEFORE: {digest.NO_REPLY}\nERRORS:\n(none)\nUSER: ")
     assert f"BEFORE: {ASSISTANT_ANSWER}" in second
@@ -172,15 +175,19 @@ def test_turn_blocks_show_before_errors_and_the_users_words():
     # A turn sent straight after another answers no agent message.
     assert f"BEFORE: {digest.NO_REPLY}" in third
     assert after == ""
+    assert answered == {"e5": "e2"}
 
 
 def test_a_part_opening_with_a_turn_carries_the_answer_before_it():
     def entry(eid: str, role: str, text: str) -> Entry:
         return Entry(eid, NOW.astimezone(UTC), role, text, False)
 
-    _, after = digest.turn_blocks([entry("e1", USER, "go"), entry("e2", ASSISTANT, "Option B?")])
-    text, _ = digest.turn_blocks([entry("e3", USER, "yes")], after)
+    _, after, after_id, _ = digest.turn_blocks(
+        [entry("e1", USER, "go"), entry("e2", ASSISTANT, "Option B?")]
+    )
+    text, _, _, answered = digest.turn_blocks([entry("e3", USER, "yes")], after, after_id)
     assert "BEFORE: Option B?" in text
+    assert answered == {"e3": "e2"}
 
 
 def test_a_statement_naming_words_the_user_did_not_say_is_refused(session: Session):
@@ -239,3 +246,50 @@ def test_grounding_reads_the_whole_turn_and_ignores_punctuation():
         "ProjectionLab",
         "improvements",
     ]
+
+
+def test_an_approval_cites_the_users_words_and_the_proposal(session: Session):
+    """A yes to a proposal is the user's decision, cited with both its sources (DESIGN R2)."""
+    wrote = run(
+        session,
+        summary(),
+        {
+            "items": [
+                item(
+                    "e4",
+                    "decision",
+                    "The hook writes one row and returns.",
+                    "Give the retry its own setting",
+                    proposal="the hook writes one row and returns",
+                )
+            ]
+        },
+        {"items": []},
+    )
+    assert [(f.source, f.entry, f.proposal) for f in wrote.facts] == [
+        ("stated", "e4", ("e2", "the hook writes one row and returns"))
+    ]
+    page = (session.cfg.vault / wrote.path).read_text(encoding="utf-8")
+    assert "(the proposal approved)" in page
+    assert "#e2" in page and "#e4" in page
+
+
+def test_an_approval_of_words_the_agent_never_wrote_is_refused(session: Session):
+    wrote = run(
+        session,
+        summary(),
+        {
+            "items": [
+                item(
+                    "e4",
+                    "decision",
+                    "Capture moves to PostgreSQL.",
+                    "Give the retry its own setting",
+                    proposal="move capture to PostgreSQL",
+                )
+            ]
+        },
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("not in the message the turn answers" in d.reason for d in wrote.dropped)

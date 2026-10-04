@@ -11,8 +11,8 @@ For each turn, give one item for each decision, preference, rule or fact the use
 settled in it, and give the fewest items that capture what was settled.
 
 - decision: the user settles a choice about the work or the project ("use port 8008",
-  "yes, do option B", "exclude src"). A yes to a specific proposal in BEFORE is a decision;
-  say what was decided.
+  "exclude src"). A yes to a specific proposal in BEFORE ("yes, do option B") is a decision
+  too: say what was decided, and give the proposal as described below.
 - preference: how the user likes things done, beyond this task ("I prefer small PRs").
 - rule: a standing instruction for agents from now on ("never push to main").
 - fact: the user states something true about their system, setup or environment that is
@@ -27,8 +27,11 @@ For each item give:
 - turn: the label of the turn it comes from, such as #3.
 - label: decision, preference, rule, or fact.
 - statement: one plain sentence saying what was settled, using the user's own words for every
-  name, number and key term; a statement that needs words only BEFORE holds is not the
-  user's own, so leave that item out.
+  name, number and key term, or, for an approval, the proposal's words.
+- proposal: only for a decision that approves something BEFORE proposed: the exact words of
+  BEFORE that state what was proposed, copied character for character, at most 300
+  characters. The statement may then use those words as well as the user's. For every other
+  item, leave proposal empty.
 - scope: global only for a preference or a fact about the user's environment that holds for
   every project; otherwise project.
 - term: long when it will still be true and useful the next time someone opens this

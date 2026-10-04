@@ -200,6 +200,8 @@ class Fact:
     date: str  # the day of that entry, which is the line's date last evidenced
     role: str = rules.PRIMARY
     term: str = LONG
+    # An approval's second source: the entry and words of the proposal it approves (R2).
+    proposal: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -850,7 +852,9 @@ def _digest_parts_base(
     return result
 
 
-def turn_blocks(part: Sequence[Entry], before: str = "") -> tuple[str, str]:
+def turn_blocks(
+    part: Sequence[Entry], before: str = "", before_id: str = ""
+) -> tuple[str, str, str, dict[str, str]]:
     """The user turns of one part as the turns prompt reads them, and the assistant text the
     next part's first turn answers (BUILD-PLAN F55).
 
@@ -858,25 +862,31 @@ def turn_blocks(part: Sequence[Entry], before: str = "") -> tuple[str, str]:
     entry its quote must come from. BEFORE is the end of the assistant message the turn
     answers, carried in from the part before when the turn opens a part, ERRORS the error
     lines of commands that failed since the user last spoke, USER the user's own words.
+    Returns the blocks, the assistant text and entry the next part's first turn answers,
+    and which assistant entry each user turn answers, by entry id.
     """
+    answered: dict[str, str] = {}
     blocks: list[str] = []
     errors: list[str] = []
     for label, entry in labelled(part).items():
         if entry.role == ASSISTANT:
             before = filtermod.compact(entry)
+            before_id = entry.id
         elif entry.role == TOOL:
             shown = filtermod.compact(entry)
             if shown:
                 errors.append(shown)
         elif entry.role == USER:
+            if before:
+                answered[entry.id] = before_id
             context = before[-BEFORE_CHARS:] if before else NO_REPLY
             failed = "\n".join(errors) if errors else "(none)"
             blocks.append(
                 f"[{label}] TURN\nBEFORE: {context}\nERRORS:\n{failed}\nUSER: {entry.text}"
             )
             errors = []
-            before = ""
-    return "\n\n".join(blocks), before
+            before, before_id = "", ""
+    return "\n\n".join(blocks), before, before_id, answered
 
 
 def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
@@ -929,9 +939,20 @@ def _bare(word: str) -> str:
 _WORDS = re.compile(r"[A-Za-z0-9_./-]+")
 
 
-def _turn_facts(answer: dict, part: Sequence[Entry]) -> tuple[list[dict], list[Dropped]]:
+def _turn_facts(
+    answer: dict,
+    part: Sequence[Entry],
+    config: Config | None = None,
+    session_id: str = "",
+    answered: dict[str, str] | None = None,
+) -> tuple[list[dict], list[Dropped]]:
     """What the user settled, as facts the shared checks read, and the items refused here
-    because their statement says more than the user's own words (BUILD-PLAN F55)."""
+    (BUILD-PLAN F55): a statement naming words neither the user's turn nor an approved
+    proposal holds, or an approval whose proposal is not in the message the turn answers.
+
+    An approval carries ``proposal`` - the entry and words of what it approves - for the
+    page to cite beside the user's own words (DESIGN R2).
+    """
     facts: list[dict] = []
     refused: list[Dropped] = []
     for item in answer["items"]:
@@ -944,13 +965,27 @@ def _turn_facts(answer: dict, part: Sequence[Entry]) -> tuple[list[dict], list[D
             "entry": item["turn"],
             "scope": item["scope"],
         }
-        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
-            refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
-            continue
         turn = _cited(part).get(fact["entry"])
         if turn is not None:
             fact = {**fact, "entry": turn.id}  # a refusal names the entry, not the prompt's label
+        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
+            refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
+            continue
         said = turn.text if turn is not None and turn.role == USER else fact["quote"]
+        proposal = item.get("proposal", "").strip()
+        if proposal:
+            before_id = (answered or {}).get(fact["entry"], "")
+            if (
+                not before_id
+                or config is None
+                or not evidence.find_quote(config, session_id, before_id, proposal)
+            ):
+                refused.append(
+                    _refused(fact, "the approved proposal is not in the message the turn answers")
+                )
+                continue
+            fact["proposal"] = (before_id, proposal)
+            said = f"{said}\n{proposal}"
         missing = ungrounded(fact["statement"], said)
         if missing:
             refused.append(
@@ -1067,6 +1102,17 @@ def _asked(
         made = make(_model_answer(config, prompt, text, schema))
         facts, refused = made if isinstance(made, tuple) else (made, [])
         kept, dropped = verify(config, session_id, part, facts, role=role)
+        proposals = {
+            (fact["statement"], fact["entry"]): fact["proposal"]
+            for fact in facts
+            if "proposal" in fact
+        }
+        kept = [
+            replace(fact, proposal=proposals[(fact.statement, fact.entry)])
+            if (fact.statement, fact.entry) in proposals
+            else fact
+            for fact in kept
+        ]
         dropped = [*refused, *dropped]
         if not unquoted(facts, kept, dropped):
             break
@@ -1090,10 +1136,9 @@ def _digest_parts_turns(
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
     last_refused = False
-    before = ""
+    before, before_id = "", ""
     for part in chunks:
-        turns, next_before = turn_blocks(part, before)
-        before = next_before
+        turns, before, before_id, answered = turn_blocks(part, before, before_id)
         try:
             summary = None
             for _ in range(2):
@@ -1124,7 +1169,13 @@ def _digest_parts_turns(
                     session_id,
                     part,
                     role,
-                    partial(_turn_facts, part=part),
+                    partial(
+                        _turn_facts,
+                        part=part,
+                        config=config,
+                        session_id=session_id,
+                        answered=answered,
+                    ),
                 )
                 result.facts.extend(kept)
                 result.dropped.extend(dropped)
@@ -1488,7 +1539,17 @@ def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) ->
         title=f"{session.agent} session {session.session_id}",
         quote=fact.quote,
     )
-    doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, [source])
+    sources = [source]
+    if fact.proposal is not None:
+        entry, quote = fact.proposal
+        sources.append(
+            doc.add_source(
+                f"aft://session/{session.agent}/{session.session_id}#{entry}",
+                title=f"{session.agent} session {session.session_id} (the proposal approved)",
+                quote=quote,
+            )
+        )
+    doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, sources)
 
 
 def _text(frontmatter: dict) -> str:

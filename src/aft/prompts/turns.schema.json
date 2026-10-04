@@ -49,6 +49,11 @@
               "short"
             ],
             "description": "long or short; short when unsure"
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "For a decision that approves a proposal in BEFORE: the exact words of BEFORE that state what was proposed; otherwise empty."
           }
         },
         "required": [
@@ -57,7 +62,8 @@
           "statement",
           "quote",
           "scope",
-          "term"
+          "term",
+          "proposal"
         ]
       }
     }
