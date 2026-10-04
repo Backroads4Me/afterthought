@@ -93,6 +93,9 @@ SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
 # assistant message it answers, within this many characters of the compacted text. The
 # number is the harness's own bound for the same context (BUILD-PLAN F55).
 BEFORE_CHARS = 800
+# How many user turns one turns call reads: the per-turn key was labelled in batches of
+# this size, and a model given many more answers fewer of them (BUILD-PLAN F55).
+TURN_BATCH = 15
 # The BEFORE line of a turn that answers no assistant message: the session's first turn,
 # or a turn the user sent straight after another.
 NO_REPLY = "(no agent message before this turn)"
@@ -854,7 +857,7 @@ def _digest_parts_base(
 
 def turn_blocks(
     part: Sequence[Entry], before: str = "", before_id: str = ""
-) -> tuple[str, str, str, dict[str, str]]:
+) -> tuple[list[str], str, str, dict[str, str]]:
     """The user turns of one part as the turns prompt reads them, and the assistant text the
     next part's first turn answers (BUILD-PLAN F55).
 
@@ -862,7 +865,7 @@ def turn_blocks(
     entry its quote must come from. BEFORE is the end of the assistant message the turn
     answers, carried in from the part before when the turn opens a part, ERRORS the error
     lines of commands that failed since the user last spoke, USER the user's own words.
-    Returns the blocks, the assistant text and entry the next part's first turn answers,
+    Returns one block per turn, the assistant text and entry the next part's first turn answers,
     and which assistant entry each user turn answers, by entry id.
     """
     answered: dict[str, str] = {}
@@ -886,7 +889,7 @@ def turn_blocks(
             )
             errors = []
             before, before_id = "", ""
-    return "\n\n".join(blocks), before, before_id, answered
+    return blocks, before, before_id, answered
 
 
 def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
@@ -1166,12 +1169,13 @@ def _digest_parts_turns(
             )
             last_refused = True
             continue
-        if turns:
+        for start in range(0, len(turns), TURN_BATCH):
+            batch = "\n\n".join(turns[start : start + TURN_BATCH])
             try:
                 kept, dropped = _asked(
                     config,
                     turns_prompt_text(),
-                    turns,
+                    batch,
                     turns_schema(),
                     session_id,
                     part,

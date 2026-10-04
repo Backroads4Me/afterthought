@@ -166,8 +166,8 @@ def test_turn_blocks_show_before_errors_and_the_users_words():
         entry("e5", USER, SECOND_PROMPT),
         entry("e6", USER, "and keep it small"),
     ]
-    text, after, _, answered = digest.turn_blocks(part)
-    first, second, third = text.split("\n\n")
+    blocks, after, _, answered = digest.turn_blocks(part)
+    first, second, third = blocks
     assert first.startswith(f"[#1] TURN\nBEFORE: {digest.NO_REPLY}\nERRORS:\n(none)\nUSER: ")
     assert f"BEFORE: {ASSISTANT_ANSWER}" in second
     assert "ERRORS:\nFAILED tests/test_x.py\nUSER: " in second
@@ -185,8 +185,8 @@ def test_a_part_opening_with_a_turn_carries_the_answer_before_it():
     _, after, after_id, _ = digest.turn_blocks(
         [entry("e1", USER, "go"), entry("e2", ASSISTANT, "Option B?")]
     )
-    text, _, _, answered = digest.turn_blocks([entry("e3", USER, "yes")], after, after_id)
-    assert "BEFORE: Option B?" in text
+    blocks, _, _, answered = digest.turn_blocks([entry("e3", USER, "yes")], after, after_id)
+    assert "BEFORE: Option B?" in blocks[0]
     assert answered == {"e3": "e2"}
 
 
