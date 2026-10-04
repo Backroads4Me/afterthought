@@ -956,6 +956,8 @@ def _turn_facts(
     facts: list[dict] = []
     refused: list[Dropped] = []
     for item in answer["items"]:
+        if item["label"] not in _TURN_KINDS:
+            continue  # a question, proposal, request or nothing: the outlet, never memory
         fact = {
             "statement": item["statement"],
             "kind": _TURN_KINDS[item["label"]],

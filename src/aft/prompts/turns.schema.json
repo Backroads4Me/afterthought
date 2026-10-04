@@ -5,7 +5,7 @@
     "items": {
       "type": "array",
       "description": "What the user settled in these turns, as few items as say it.",
-      "maxItems": 30,
+      "maxItems": 60,
       "items": {
         "type": "object",
         "properties": {
@@ -21,7 +21,11 @@
               "decision",
               "preference",
               "rule",
-              "fact"
+              "fact",
+              "question",
+              "proposal",
+              "request",
+              "none"
             ]
           },
           "statement": {

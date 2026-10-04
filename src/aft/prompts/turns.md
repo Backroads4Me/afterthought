@@ -7,8 +7,9 @@ is the end of the agent's message the user was answering. ERRORS holds the error
 any command that failed since the user last spoke. USER is the user's own words. Judge only
 the USER text; BEFORE and ERRORS are context, and their words are never quoted.
 
-For each turn, give one item for each decision, preference, rule or fact the user actually
-settled in it, and give the fewest items that capture what was settled.
+Give every turn at least one item. Give one item for each decision, preference, rule or fact
+the user actually settled in the turn, the fewest that capture what was settled. A turn that
+settles none of those gets exactly one item labelled question, proposal, request or none.
 
 - decision: the user settles a choice about the work or the project ("use port 8008",
   "exclude src"). A yes to a specific proposal in BEFORE ("yes, do option B") is a decision
@@ -18,14 +19,22 @@ settled in it, and give the fewest items that capture what was settled.
 - fact: the user states something true about their system, setup or environment that is
   not obvious from code ("vLLM runs on 192.168.100.133").
 
-A question ("should we...?", "is it...?"), a proposal ("maybe we could", "I'm considering"),
-a request for the task at hand ("run the tests", "fix it"), and pasted material (a document,
-a log, another agent's message) are never one of those, and neither is anything else: thanks,
-a reply with no content. A turn that settles none of them gives no items.
+- question: the user asks something, including "should we...?" and "is it...?", even when
+  it hints at what they want. A question is never a decision.
+- proposal: the user floats an idea or thinks aloud without settling it ("maybe we could",
+  "I'm considering").
+- request: an instruction for the task at hand only ("run the tests", "investigate why X",
+  "squash-merge it", "fix it"), with nothing that lasts beyond the task.
+- none: anything else: thanks, pasted material (a document, a log, another agent's message),
+  a reply with no content.
+
+Pasted material is never the user's decision, preference, rule or fact.
 
 For each item give:
 - turn: the label of the turn it comes from, such as #3.
-- label: decision, preference, rule, or fact.
+- label: decision, preference, rule, fact, question, proposal, request, or none.
+For question, proposal, request and none, leave statement, quote and proposal empty. For the
+other labels:
 - statement: one plain sentence saying what was settled, using the user's own words for every
   name, number and key term, or, for an approval, the proposal's words.
 - proposal: only for a decision that approves something BEFORE proposed: the exact words of
