@@ -1170,8 +1170,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   source lines kept for holding a word like "error" (T33). On the F54 per-turn key
   (`<data>/key-turns.json`: 266 user turns, 79 durable items) today's digest finds 23% of the
   durable items with the local model; one narrow question per user turn finds 80% at 82%
-  precision with the same model. Build, as `digest.pipeline = "turns"` (default "base" until
-  the scores decide):
+  precision with the same model. Build, as `digest.pipeline = "turns"` (the default once the
+  scores below decided it; "base" stays selectable):
   (1) Input: a tool call becomes one compact action line naming the tool and its target (`Edit
   src/aft/digest.py`, `Bash: uv run pytest`), with no arguments or output; error lines are kept
   only from commands that failed; code blocks, diffs and tables in assistant text collapse to a
@@ -1184,8 +1184,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   material are never one of those. Every turn gets at least one item, an outlet label when it
   settles nothing, and a turn the answer skips is asked again once on its own: asking for the
   fewest items left turns unanswered (measured 2026-10-04). Batches hold at most 15 turns and
-  DESIGN 13's input cap. A `[stated]` statement is grounded in the user's turn alone, and a
-  quote holding a question mark is refused (F52).
+  DESIGN 13's input cap. A `[stated]` statement's names and numbers are grounded in the
+  user's turn, or in one cited sentence of the message it answers (DESIGN R2, ruling
+  2026-10-05); a quote holding a question mark, or inside a paste or a command block, is
+  refused (F52, DESIGN 6). Measured on the local model: base 18 of 69 durable turns at 60%
+  of `[stated]` on a durable turn, turns 34 at 78%; the default is "turns".
   (3) Observed facts: one call over assistant prose and action lines for what the session
   observed about the system that the repository does not record.
   (4) Final state: one call over the session's items in order: a later item on the same
@@ -1224,6 +1227,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   the script, and the pipeline must score no worse when the agent writes none. No skip
   marker: text the agent marks skippable is never removed. The user's global agent
   instructions change only if the user adopts the winning form. Review checkpoint: yes.
+- **F58 Same-day withdrawal of a recent line** (ruling 2026-10-05). DESIGN 6, R4. When a
+  dreamed session withdraws a short-term line (F47), its evidence is newer when its entry time
+  is later than the line's newest source, not only when its day is: "X is paused" at 09:00 is
+  withdrawn by "X is resumed" at 15:00 the same day. Supersede of long-term lines still
+  compares days. Tests: same-day later entry withdraws; same-day earlier entry does not; an
+  entry with no time falls back to the day. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

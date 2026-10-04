@@ -286,7 +286,9 @@ aft:
   conclusion, `[suggested]` an idea or a musing nobody committed to. `[stated]` is an
   assertion: a fact, a choice, a preference, or a standing rule ("never push to main"). A
   request for the task at hand ("run the tests"), a question, and a tentative remark are not
-  `[stated]`, and neither is text you pasted. A paste is not your own words: what it shows
+  `[stated]`, and neither is text you pasted or a command block (a slash command's text, a
+  shell command you ran and its output): the script refuses `[stated]` for a quote inside
+  either. A paste is not your own words: what it shows
   about the machine or the code (a log, an error, a command's output) is `[observed]`, and any
   other claim in it (a prompt, a document, another agent's message) is `[inferred]`, so it
   must recur before it is trusted.
@@ -356,7 +358,8 @@ line rolls off the page. A line whose newest source is older than `dream.short_t
 (7 by default) rolls off too, so a project with no new sessions does not keep stale
 short-term memory. After each session is dreamed, a line that session shows is done,
 false or replaced is withdrawn on a verified quote from it, under the same authority
-table and R4 as a supersede. Injection shows the date of the newest session beside the
+table and R4 as a supersede, except that newer means a later entry time, not a later day: a
+recent line from this morning is withdrawn by this afternoon's session. Injection shows the date of the newest session beside the
 page, so the reader can judge.
 
 **Rolling off is not forgetting.** The line's evidence stays in its digest, the evidence
@@ -619,7 +622,7 @@ A long-term fact whose `confirm` names a line on `recent.md` promotes that line
 | Rule | What it enforces | Checked by |
 |---|---|---|
 | **R1 Provenance** | Every fact line carries one source tag and at least one source with a verified quote. | Script |
-| **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). Your approval of an agent's proposal ("yes, do option B") is `[stated]` as the decision it approves, and the line cites two sources: your words of approval and the agent's words stating what was proposed, each verified in its own entry; the statement holds no word that neither says. | Script, model |
+| **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). Your approval of an agent's proposal ("yes, do option B") is `[stated]` as the decision it approves, and the line cites two sources: your words of approval and the agent's words stating what was proposed, each verified in its own entry; the statement holds no name or number that neither says (a word with a digit, one of `_/.:-`, or a capital past its first letter, where plain words are not checked). A name your reply takes from the message it answers is cited the same way, with the one sentence of that message that holds it. | Script, model |
 | **R3 Recurrence gate** | An `[inferred]` or `[suggested]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
 | **R4 Authority by kind** | Replacing a line needs a verified quote newer than the line's latest evidence, and the authority the table below gives. Without it the result is a conflict, and the old line stands. | Script |
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
