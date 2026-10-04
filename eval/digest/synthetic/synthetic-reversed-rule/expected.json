@@ -1,0 +1,24 @@
+{
+  "session_id": "synthetic-reversed-rule",
+  "agent": "claude",
+  "case": "a rule reversed in the same session",
+  "notes": "The canary rule is stated and then reversed before the session ends. Only the final rule is true, so a digest that keeps both the canary-first rule and the straight-to-production rule records a contradiction. The key holds the final rule and the unrelated metrics problem, and holds no canary-first fact.",
+  "facts": [
+    {
+      "statement": "Releases ship straight to production with no canary step.",
+      "quote": "drop the canary step entirely, ship every release straight to production",
+      "source": "stated",
+      "kind": "decision",
+      "term": "long",
+      "scope": "project"
+    },
+    {
+      "statement": "The metrics pipeline drops about one event in a hundred since the schema change.",
+      "quote": "dropping about one event in a hundred",
+      "source": "stated",
+      "kind": "state",
+      "term": "short",
+      "scope": "project"
+    }
+  ]
+}

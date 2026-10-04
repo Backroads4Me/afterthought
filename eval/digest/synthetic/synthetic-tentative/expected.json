@@ -1,0 +1,24 @@
+{
+  "session_id": "synthetic-tentative",
+  "agent": "claude",
+  "case": "a tentative remark",
+  "notes": "The Rust rewrite is floated with 'might' and 'no plans yet' and never returns. A digest that records it as a decision or a preference has promoted a daydream. The key holds the session's actual task and the flakiness rate, and holds no rewrite fact.",
+  "facts": [
+    {
+      "statement": "The session's task is to fix the flaky retry test in tests/test_sync.py.",
+      "quote": "fix the flaky retry test in tests/test_sync.py",
+      "source": "stated",
+      "kind": "decision",
+      "term": "short",
+      "scope": "project"
+    },
+    {
+      "statement": "The retry test fails about once in ten runs.",
+      "quote": "fails roughly once in ten runs",
+      "source": "stated",
+      "kind": "state",
+      "term": "short",
+      "scope": "project"
+    }
+  ]
+}
