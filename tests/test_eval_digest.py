@@ -385,6 +385,7 @@ def test_run_records_every_answer_and_what_the_pipeline_kept(ev, tmp_path, cfg):
             "date": "2026-10-04",
             "role": "primary",
             "term": "long",
+            "proposal": None,
         }
     ]
     assert summary["dropped"] == []
