@@ -7,8 +7,7 @@ any command that failed since the user last spoke. USER is the user's own words.
 the USER text; BEFORE and ERRORS are context, and their words are never quoted.
 
 Give every turn at least one item. Give one item for each decision, preference, rule or fact
-the user actually settled in the turn. A turn that
-settles none of those gets exactly one item labelled question, proposal, request or none.
+the user actually settled in the turn. A turn that settles none of those gets exactly one item labelled question, proposal, request or none.
 
 - decision: the user settles a choice about the work or the project ("use port 8008",
   "exclude src"). A yes to a specific proposal in BEFORE ("yes, do option B") is a decision
@@ -48,5 +47,6 @@ other labels:
 - quote: the user's exact words that settle it, copied character for character from USER,
   at most 200 characters.
 
-Write only about what the turns say. Never invent an item, a quote, or a turn label. Never
-write placeholder text such as "..."; leave the items empty when nothing was settled.
+Write only about what the turns say. Never invent an item, a quote, or a turn label, and
+never write placeholder text such as "...". Every turn shown gets at least one item, in turn
+order; a turn that settles nothing gets one item labelled none.

@@ -57,6 +57,14 @@ def item(
     }
 
 
+def settled(*items: dict) -> dict:
+    """A turns answer: the items given, and none for each user turn they leave out, since
+    every turn gets an item (a skipped turn is asked again)."""
+    given = {i["turn"] for i in items}
+    rest = [item(turn, "none", "", "") for turn in ("e1", "e4") if turn not in given]
+    return {"items": [*items, *rest]}
+
+
 def seen(statement: str, quote: str, entry: str) -> dict:
     return {"statement": statement, "quote": quote, "entry": entry, "term": "long"}
 
@@ -76,13 +84,9 @@ def test_a_settled_turn_becomes_a_stated_fact(session: Session):
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e1", "decision", "Capture runs at session end.", "Capture runs at session end."
-                )
-            ]
-        },
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+        ),
         {"items": []},
     )
     assert [(f.statement, f.source, f.entry) for f in wrote.facts] == [
@@ -95,7 +99,7 @@ def test_an_item_quoting_the_assistant_is_never_stated(session: Session):
     wrote = run(
         session,
         summary(),
-        {"items": [item("e2", "decision", "The hook returns without a model.", ASSISTANT_ANSWER)]},
+        settled(item("e2", "decision", "The hook returns without a model.", ASSISTANT_ANSWER)),
         {"items": []},
     )
     assert not wrote.facts
@@ -106,7 +110,7 @@ def test_an_observed_item_is_kept_as_observed(session: Session):
     wrote = run(
         session,
         summary(),
-        {"items": []},
+        settled(),
         {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
     )
     assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e2")]
@@ -116,19 +120,15 @@ def test_a_later_stated_item_replaces_an_earlier_one(session: Session):
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e1", "decision", "Capture runs at session end.", "Capture runs at session end."
-                ),
-                item(
-                    "e4",
-                    "decision",
-                    "The retry has its own setting.",
-                    "Give the retry its own setting",
-                ),
-            ]
-        },
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end."),
+            item(
+                "e4",
+                "decision",
+                "The retry has its own setting.",
+                "Give the retry its own setting",
+            ),
+        ),
         {"items": []},
         {"replacements": [{"later": "#2", "earlier": "#1"}]},
     )
@@ -141,13 +141,9 @@ def test_an_observed_item_replaces_nothing(session: Session):
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e1", "decision", "Capture runs at session end.", "Capture runs at session end."
-                )
-            ]
-        },
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+        ),
         {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
         {"replacements": [{"later": "#2", "earlier": "#1"}]},
     )
@@ -196,16 +192,14 @@ def test_a_statement_naming_words_the_user_did_not_say_is_refused(session: Sessi
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e1",
-                    "decision",
-                    "Capture uses PostgreSQL replication.",
-                    "Capture runs at session end.",
-                )
-            ]
-        },
+        settled(
+            item(
+                "e1",
+                "decision",
+                "Capture uses PostgreSQL replication.",
+                "Capture runs at session end.",
+            )
+        ),
         {"items": []},
     )
     assert not wrote.facts
@@ -217,19 +211,15 @@ def test_later_means_later_in_the_session_not_in_the_list(session: Session):
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e4",
-                    "decision",
-                    "The retry has its own setting.",
-                    "Give the retry its own setting",
-                ),
-                item(
-                    "e1", "decision", "Capture runs at session end.", "Capture runs at session end."
-                ),
-            ]
-        },
+        settled(
+            item(
+                "e4",
+                "decision",
+                "The retry has its own setting.",
+                "Give the retry its own setting",
+            ),
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end."),
+        ),
         {"items": []},
         # In session order e1 is #1 and e4 is #2: e4 replacing e1 is the only order allowed.
         {"replacements": [{"later": "#2", "earlier": "#1"}]},
@@ -253,17 +243,15 @@ def test_an_approval_cites_the_users_words_and_the_proposal(session: Session):
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e4",
-                    "decision",
-                    "The hook writes one row and returns.",
-                    "Give the retry its own setting",
-                    proposal="the hook writes one row and returns",
-                )
-            ]
-        },
+        settled(
+            item(
+                "e4",
+                "decision",
+                "The hook writes one row and returns.",
+                "Give the retry its own setting",
+                proposal="the hook writes one row and returns",
+            )
+        ),
         {"items": []},
     )
     assert [(f.source, f.entry, f.proposal) for f in wrote.facts] == [
@@ -278,17 +266,15 @@ def test_an_approval_of_words_the_agent_never_wrote_is_refused(session: Session)
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e4",
-                    "decision",
-                    "Capture moves to PostgreSQL.",
-                    "Give the retry its own setting",
-                    proposal="move capture to PostgreSQL",
-                )
-            ]
-        },
+        settled(
+            item(
+                "e4",
+                "decision",
+                "Capture moves to PostgreSQL.",
+                "Give the retry its own setting",
+                proposal="move capture to PostgreSQL",
+            )
+        ),
         {"items": []},
     )
     assert not wrote.facts
@@ -301,17 +287,15 @@ def test_an_approval_with_a_loose_copy_cites_the_sentence_it_approves(session: S
     wrote = run(
         session,
         summary(),
-        {
-            "items": [
-                item(
-                    "e4",
-                    "decision",
-                    "The hook writes one row and returns without calling a model.",
-                    "Give the retry its own setting",
-                    proposal="hook should write a single row and return without calling a model",
-                )
-            ]
-        },
+        settled(
+            item(
+                "e4",
+                "decision",
+                "The hook writes one row and returns without calling a model.",
+                "Give the retry its own setting",
+                proposal="hook should write a single row and return without calling a model",
+            )
+        ),
         {"items": []},
     )
     assert [f.proposal for f in wrote.facts] == [
@@ -325,3 +309,26 @@ def test_best_sentence_needs_two_shared_words():
         digest.best_sentence(text, "firstmate runs inside Paseo") == "run firstmate inside Paseo."
     )
     assert digest.best_sentence(text, "something unrelated entirely") == ""
+
+
+def test_a_turn_the_answer_skipped_is_asked_again(session: Session):
+    """Every turn gets an item; a skipped one is asked again on its own (BUILD-PLAN F55)."""
+    wrote = run(
+        session,
+        summary(),
+        {"items": [item("e1", "none", "", "")]},
+        {
+            "items": [
+                item(
+                    "e4",
+                    "decision",
+                    "The retry has its own setting.",
+                    "Give the retry its own setting",
+                )
+            ]
+        },
+        {"items": []},
+    )
+    assert [(f.statement, f.entry) for f in wrote.facts] == [
+        ("The retry has its own setting.", "e4")
+    ]

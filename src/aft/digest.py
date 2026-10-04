@@ -855,6 +855,11 @@ def _digest_parts_base(
     return result
 
 
+def turn_label(block: str) -> str:
+    """The label a turn block opens with, such as #3, as the model gives it back."""
+    return block[1 : block.index("]")]
+
+
 def turn_blocks(
     part: Sequence[Entry], before: str = "", before_id: str = ""
 ) -> tuple[list[str], str, str, dict[str, str]]:
@@ -967,17 +972,22 @@ def _turn_facts(
     answered: dict[str, str] | None = None,
     session_text: str = "",
     entries: dict[str, Entry] | None = None,
+    labelled: set[str] | None = None,
 ) -> tuple[list[dict], list[Dropped]]:
     """What the user settled, as facts the shared checks read, and the items refused here
     (BUILD-PLAN F55): a statement naming words neither the user's turn nor an approved
     proposal holds, or an approval whose proposal is not in the message the turn answers.
 
     An approval carries ``proposal`` - the entry and words of what it approves - for the
-    page to cite beside the user's own words (DESIGN R2).
+    page to cite beside the user's own words (DESIGN R2). ``labelled`` gathers the entry of
+    every turn the answer gave an item, whatever its label.
     """
     facts: list[dict] = []
     refused: list[Dropped] = []
+    cited = _cited(part)
     for item in answer["items"]:
+        if labelled is not None and item["turn"] in cited:
+            labelled.add(cited[item["turn"]].id)
         if item["label"] not in _TURN_KINDS:
             continue  # a question, proposal, request or nothing: the outlet, never memory
         fact = {
@@ -989,7 +999,7 @@ def _turn_facts(
             "entry": item["turn"],
             "scope": item["scope"],
         }
-        turn = _cited(part).get(fact["entry"])
+        turn = cited.get(fact["entry"])
         if turn is not None:
             fact = {**fact, "entry": turn.id}  # a refusal names the entry, not the prompt's label
         if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
@@ -1201,31 +1211,41 @@ def _digest_parts_turns(
             )
             last_refused = True
             continue
+        turn_facts = partial(
+            _turn_facts,
+            part=part,
+            config=config,
+            session_id=session_id,
+            answered=answered,
+            session_text=session_text,
+            entries=entries,
+        )
+        cited = _cited(part)
         for start in range(0, len(turns), TURN_BATCH):
-            batch = "\n\n".join(turns[start : start + TURN_BATCH])
-            try:
-                kept, dropped = _asked(
-                    config,
-                    turns_prompt_text(),
-                    batch,
-                    turns_schema(),
-                    session_id,
-                    part,
-                    role,
-                    partial(
-                        _turn_facts,
-                        part=part,
-                        config=config,
-                        session_id=session_id,
-                        answered=answered,
-                        session_text=session_text,
-                        entries=entries,
-                    ),
-                )
-                result.facts.extend(kept)
-                result.dropped.extend(dropped)
-            except AnswerRefused as exc:
-                result.dropped.append(_call_refused(part, "turns", str(exc)))
+            # A turn the answer skipped is asked again once, on its own with the others
+            # skipped: every turn gets a label, as the prompt asks (BUILD-PLAN F55).
+            pending = turns[start : start + TURN_BATCH]
+            for _ in range(2):
+                labelled: set[str] = set()
+                try:
+                    kept, dropped = _asked(
+                        config,
+                        turns_prompt_text(),
+                        "\n\n".join(pending),
+                        turns_schema(),
+                        session_id,
+                        part,
+                        role,
+                        partial(turn_facts, labelled=labelled),
+                    )
+                    result.facts.extend(kept)
+                    result.dropped.extend(dropped)
+                except AnswerRefused as exc:
+                    result.dropped.append(_call_refused(part, "turns", str(exc)))
+                    break
+                pending = [b for b in pending if cited[turn_label(b)].id not in labelled]
+                if not pending:
+                    break
         seen = compacted_blocks(part, users=False)
         if seen:
             try:
