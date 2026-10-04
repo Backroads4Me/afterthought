@@ -367,3 +367,74 @@ def test_an_approval_names_only_words_of_the_turn_or_the_proposal(session: Sessi
     )
     assert not wrote.facts
     assert any("never used: capture" in d.reason for d in wrote.dropped)
+
+
+def test_a_statement_naming_the_agents_words_without_a_proposal_is_refused(session: Session):
+    """Words the session holds elsewhere do not ground [stated]: only the user's turn does,
+    or, for an approval, the proposal it cites (DESIGN R2)."""
+    wrote = run(
+        session,
+        summary(),
+        settled(
+            item(
+                "e1", "decision", "The hook returns at session end.", "Capture runs at session end."
+            )
+        ),
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("never used: returns" in d.reason for d in wrote.dropped)
+
+
+def test_a_quoted_question_is_never_stated(session: Session):
+    """BUILD-PLAN F52: a quote holding a question mark is never [stated]."""
+    wrote = run(
+        session,
+        summary(),
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end?")
+        ),
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("the quote is a question" in d.reason for d in wrote.dropped)
+
+
+def test_each_settled_label_maps_to_its_kind(session: Session):
+    wrote = run(
+        session,
+        summary(),
+        settled(
+            item("e1", "rule", "Capture runs at session end.", "Capture runs at session end."),
+            item(
+                "e4",
+                "preference",
+                "The retry has its own setting.",
+                "Give the retry its own setting",
+                scope="global",
+            ),
+        ),
+        {"items": []},
+    )
+    assert sorted((f.entry, f.kind, f.scope) for f in wrote.facts) == [
+        ("e1", "decision", "project"),
+        ("e4", "preference", "global"),
+    ]
+
+
+def test_an_observed_placeholder_quote_is_dropped(session: Session):
+    wrote = run(session, summary(), settled(), {"items": [seen("The hook returns.", "...", "e2")]})
+    assert not wrote.facts
+
+
+def test_turn_batches_hold_the_count_and_the_token_budget():
+    blocks = [f"[#{n}] TURN\nUSER: {'x' * 30}" for n in range(1, 21)]
+    assert [len(b) for b in digest.turn_batches(blocks, 10_000)] == [digest.TURN_BATCH, 5]
+    small = digest.turn_batches(blocks, digest.tokens("\n\n".join(blocks[:3])))
+    assert [len(b) for b in small][:2] == [3, 3]
+    assert [len(b) for b in digest.turn_batches(["x" * 100], 1)] == [1]
+
+
+def test_best_sentence_cites_nothing_when_two_sentences_match_equally():
+    text = "Option A: keep the hook small. Option B: keep the hook fast."
+    assert digest.best_sentence(text, "keep the hook") == ""

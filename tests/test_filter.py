@@ -812,8 +812,8 @@ def test_a_long_prompt_that_begins_with_a_marker_is_dropped_whole(cfg):
 
 
 # The turns pipeline reads a compacted version of the same kept entries (BUILD-PLAN
-# F55): a tool call is one action line, a failed command's error lines stand below it,
-# and the assistant's code, diffs and tables are named rather than read. Everything
+# F55): a successful command shows nothing, a failed command's error lines stand, and the
+# assistant's code, diffs and tables are named rather than read. Everything
 # shown is verbatim archived text, so a quote the model takes from it is still found in
 # the evidence archive.
 

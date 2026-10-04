@@ -4,7 +4,7 @@
   "properties": {
     "items": {
       "type": "array",
-      "description": "What the user settled in these turns, as few items as say it.",
+      "description": "Every turn shown, each with at least one item: what the user settled in it, or one outlet label.",
       "maxItems": 60,
       "items": {
         "type": "object",

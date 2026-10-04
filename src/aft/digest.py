@@ -109,7 +109,6 @@ _TURN_KINDS = {
     "rule": "decision",
     "fact": "fact",
 }
-_TURN_SCOPES = {"decision": "project", "preference": "global", "rule": "global", "fact": "global"}
 
 # The per-chunk input cap of DESIGN 13: 12,000 input tokens. A small model given a long
 # chunk loses track of it and writes about things the chunk never held (finding T17).
@@ -855,6 +854,23 @@ def _digest_parts_base(
     return result
 
 
+def turn_batches(turns: Sequence[str], budget: int) -> list[list[str]]:
+    """The turn blocks in order, in batches of at most ``TURN_BATCH`` that each fit
+    ``budget`` input tokens; a turn larger than the budget stands alone (DESIGN 13)."""
+    batches: list[list[str]] = []
+    for block in turns:
+        last = batches[-1] if batches else None
+        if (
+            last is not None
+            and len(last) < TURN_BATCH
+            and tokens("\n\n".join([*last, block])) <= budget
+        ):
+            last.append(block)
+        else:
+            batches.append([block])
+    return batches
+
+
 def turn_label(block: str) -> str:
     """The label a turn block opens with, such as #3, as the model gives it back."""
     return block[1 : block.index("]")]
@@ -942,15 +958,22 @@ def ungrounded(statement: str, said: str) -> list[str]:
 
 def best_sentence(text: str, target: str) -> str:
     """The sentence of ``text`` that shares most content words with ``target``, verbatim, or
-    empty when none shares at least two (BUILD-PLAN F55: an approval's proposal)."""
+    empty when none shares at least two or two share the most (BUILD-PLAN F55: an
+    approval's proposal)."""
     wanted = {_bare(w) for w in _WORDS.findall(target) if len(_bare(w)) >= 4}
-    best, score = "", 1
+    best, score, tied = "", 1, False
     for sentence in _SENTENCES.split(text):
         sentence = sentence.strip()
+        if len(sentence) > 300:
+            continue
         shared = len(wanted & {_bare(w) for w in _WORDS.findall(sentence)})
-        if shared > score and len(sentence) <= 300:
-            best, score = sentence, shared
-    return best
+        if shared > score:
+            best, score, tied = sentence, shared, False
+        elif shared == score and best:
+            tied = True
+    # Two sentences matching equally (option A beside option B) leave which was approved
+    # open: none is cited.
+    return "" if tied else best
 
 
 _SENTENCES = re.compile(r"(?<=[.!?:])\s+|\n+")
@@ -970,7 +993,6 @@ def _turn_facts(
     config: Config | None = None,
     session_id: str = "",
     answered: dict[str, str] | None = None,
-    session_text: str = "",
     entries: dict[str, Entry] | None = None,
     labelled: set[str] | None = None,
 ) -> tuple[list[dict], list[Dropped]]:
@@ -985,6 +1007,8 @@ def _turn_facts(
     facts: list[dict] = []
     refused: list[Dropped] = []
     cited = _cited(part)
+    if labelled is not None:
+        labelled.clear()  # the turns of the answer of record, not of an earlier attempt
     for item in answer["items"]:
         if labelled is not None and item["turn"] in cited:
             labelled.add(cited[item["turn"]].id)
@@ -1005,7 +1029,11 @@ def _turn_facts(
         if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
             refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
             continue
-        said = f"{turn.text if turn is not None else fact['quote']}\n{session_text}"
+        if "?" in fact["quote"]:
+            # BUILD-PLAN F52: a quote holding a question mark is never [stated].
+            refused.append(_refused(fact, "the quote is a question, never a settled item"))
+            continue
+        said = turn.text if turn is not None else fact["quote"]
         proposal = item.get("proposal", "").strip()
         if proposal:
             before_id = (answered or {}).get(fact["entry"], "")
@@ -1034,8 +1062,8 @@ def _turn_facts(
                 continue
             fact["proposal"] = (before_id, proposal)
             # DESIGN R2: an approval's statement holds no word that neither the user's words
-            # of approval nor the proposal they approve says, wherever else the session has it.
-            said = f"{turn.text if turn is not None else fact['quote']}\n{proposal}"
+            # of approval nor the proposal they approve says.
+            said = f"{said}\n{proposal}"
         missing = ungrounded(fact["statement"], said)
         if missing:
             refused.append(
@@ -1064,6 +1092,7 @@ def _observed_facts(answer: dict) -> list[dict]:
         if item["statement"].strip()
         and item["quote"].strip()
         and not placeholder(item["statement"])
+        and not placeholder(item["quote"])
     ]
 
 
@@ -1163,8 +1192,9 @@ def _asked(
             else fact
             for fact in kept
         ]
+        retry = unquoted(facts, kept, dropped)  # only verify's refusals tell T17's case
         dropped = [*refused, *dropped]
-        if not unquoted(facts, kept, dropped):
+        if not retry:
             break
     return kept, dropped
 
@@ -1188,9 +1218,6 @@ def _digest_parts_turns(
     last_refused = False
     summary_refused = ""
     before, before_id = "", ""
-    # Grounding reads the whole session: a statement may name what the session talked about,
-    # never a word it did not hold (BUILD-PLAN F52, F55).
-    session_text = "\n".join(entry.text for chunk in chunks for entry in chunk)
     entries = {entry.id: entry for chunk in chunks for entry in chunk}
     for part in chunks:
         turns, before, before_id, answered = turn_blocks(part, before, before_id)
@@ -1220,14 +1247,13 @@ def _digest_parts_turns(
             config=config,
             session_id=session_id,
             answered=answered,
-            session_text=session_text,
             entries=entries,
         )
         cited = _cited(part)
-        for start in range(0, len(turns), TURN_BATCH):
+        for batch in turn_batches(turns, MAX_CHUNK_TOKENS - tokens(turns_prompt_text())):
             # A turn the answer skipped is asked again once, on its own with the others
             # skipped: every turn gets a label, as the prompt asks (BUILD-PLAN F55).
-            pending = turns[start : start + TURN_BATCH]
+            pending = batch
             for _ in range(2):
                 labelled: set[str] = set()
                 try:
