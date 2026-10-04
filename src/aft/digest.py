@@ -935,6 +935,22 @@ def ungrounded(statement: str, said: str) -> list[str]:
     return missing
 
 
+def best_sentence(text: str, target: str) -> str:
+    """The sentence of ``text`` that shares most content words with ``target``, verbatim, or
+    empty when none shares at least two (BUILD-PLAN F55: an approval's proposal)."""
+    wanted = {_bare(w) for w in _WORDS.findall(target) if len(_bare(w)) >= 4}
+    best, score = "", 1
+    for sentence in _SENTENCES.split(text):
+        sentence = sentence.strip()
+        shared = len(wanted & {_bare(w) for w in _WORDS.findall(sentence)})
+        if shared > score and len(sentence) <= 300:
+            best, score = sentence, shared
+    return best
+
+
+_SENTENCES = re.compile(r"(?<=[.!?:])\s+|\n+")
+
+
 def _bare(word: str) -> str:
     """A word folded and stripped of the punctuation around it."""
     return word.casefold().strip(".,;:!?\"'()[]`")
@@ -950,6 +966,7 @@ def _turn_facts(
     session_id: str = "",
     answered: dict[str, str] | None = None,
     session_text: str = "",
+    entries: dict[str, Entry] | None = None,
 ) -> tuple[list[dict], list[Dropped]]:
     """What the user settled, as facts the shared checks read, and the items refused here
     (BUILD-PLAN F55): a statement naming words neither the user's turn nor an approved
@@ -983,7 +1000,21 @@ def _turn_facts(
         if proposal:
             before_id = (answered or {}).get(fact["entry"], "")
             if (
+                before_id
+                and config is not None
+                and not evidence.find_quote(config, session_id, before_id, proposal)
+            ):
+                # The model's copy of the proposal is not verbatim: cite the sentence of the
+                # answered message that best matches what was decided, verbatim from it.
+                answered_entry = (entries or {}).get(before_id)
+                proposal = (
+                    best_sentence(answered_entry.text, f"{fact['statement']} {proposal}")
+                    if answered_entry is not None
+                    else ""
+                )
+            if (
                 not before_id
+                or not proposal
                 or config is None
                 or not evidence.find_quote(config, session_id, before_id, proposal)
             ):
@@ -1147,6 +1178,7 @@ def _digest_parts_turns(
     # Grounding reads the whole session: a statement may name what the session talked about,
     # never a word it did not hold (BUILD-PLAN F52, F55).
     session_text = "\n".join(entry.text for chunk in chunks for entry in chunk)
+    entries = {entry.id: entry for chunk in chunks for entry in chunk}
     for part in chunks:
         turns, before, before_id, answered = turn_blocks(part, before, before_id)
         try:
@@ -1187,6 +1219,7 @@ def _digest_parts_turns(
                         session_id=session_id,
                         answered=answered,
                         session_text=session_text,
+                        entries=entries,
                     ),
                 )
                 result.facts.extend(kept)

@@ -293,3 +293,35 @@ def test_an_approval_of_words_the_agent_never_wrote_is_refused(session: Session)
     )
     assert not wrote.facts
     assert any("not in the message the turn answers" in d.reason for d in wrote.dropped)
+
+
+def test_an_approval_with_a_loose_copy_cites_the_sentence_it_approves(session: Session):
+    """The model's proposal need not be verbatim: the answered message's best matching
+    sentence is cited instead, word for word (BUILD-PLAN F55)."""
+    wrote = run(
+        session,
+        summary(),
+        {
+            "items": [
+                item(
+                    "e4",
+                    "decision",
+                    "The hook writes one row and returns without calling a model.",
+                    "Give the retry its own setting",
+                    proposal="hook should write a single row and return without calling a model",
+                )
+            ]
+        },
+        {"items": []},
+    )
+    assert [f.proposal for f in wrote.facts] == [
+        ("e2", "the hook writes one row and returns without calling a model.")
+    ]
+
+
+def test_best_sentence_needs_two_shared_words():
+    text = "Two options. Option A: run firstmate inside Paseo. Option B: keep them apart."
+    assert (
+        digest.best_sentence(text, "firstmate runs inside Paseo") == "run firstmate inside Paseo."
+    )
+    assert digest.best_sentence(text, "something unrelated entirely") == ""
