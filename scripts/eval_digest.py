@@ -636,6 +636,7 @@ def run_session(
     evidence.store(cfg, session.agent, session.session_id, session.project_id, session.entries)
     chunks = digestmod.parts(session.entries)
     recorder = CallRecorder(_answer_source(backend), cfg, session, backend, variant, out)
+    summary["parts"] = len(chunks)
     started = time.monotonic()
     original = model.complete_json
     model.complete_json = recorder
@@ -651,7 +652,6 @@ def run_session(
         model.complete_json = original
     summary["seconds"] = round(time.monotonic() - started, 3)
     if digested is not None:
-        summary["parts"] = len(chunks)
         summary["facts"] = [asdict(fact) for fact in digested.facts]
         summary["dropped"] = [asdict(dropped) for dropped in digested.dropped]
         summary["refused_parts"] = digested.refused_parts
