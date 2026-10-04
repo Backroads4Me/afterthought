@@ -15,6 +15,13 @@ reads as a session's "last session" layer (DESIGN 10) - and its facts are ordina
 lines whose footnotes name the session and entry each quote came from, so the quote a
 future dream re-checks is the one on the page.
 
+The pipeline the digest runs is a setting (BUILD-PLAN F55). ``base`` asks one model one
+broad question per chunk of filtered conversation. ``turns`` asks narrower ones over a
+compacted input instead: what the user settled, per turn; what the session observed; what
+a later item replaced; and the summary and handoff. Both pipelines verify the same way -
+the words a quote holds must be the words the evidence archive holds - and both file the
+same kind of page.
+
 The watermark moves last and only once the chunk has been dealt with: a page that was not
 written leaves the session's read position where it was, and a chunk the filter emptied
 moves it with no page at all, because those entries are decided and have nothing left to
@@ -57,7 +64,7 @@ from aft.dream import rules
 from aft.gitutil import GitError, git
 from aft.model import ModelError
 from aft.page import KIND_SECTIONS
-from aft.readers import USER, Entry
+from aft.readers import ASSISTANT, TOOL, USER, Entry
 
 # The page type a digest carries (BUILD-PLAN M2.6).
 PAGE_TYPE = "Session Digest"
@@ -68,6 +75,36 @@ UNFILED = "_unfiled"
 
 PROMPT_FILE = "prompts/digest.md"
 SCHEMA_FILE = "prompts/digest.schema.json"
+
+# The turns pipeline's own prompts and schemas (BUILD-PLAN F55): one question per kind
+# of finding, each with the answer's shape beside it.
+TURNS = "turns"
+TURNS_PROMPT_FILE = "prompts/turns.md"
+TURNS_SCHEMA_FILE = "prompts/turns.schema.json"
+OBSERVED_PROMPT_FILE = "prompts/observed.md"
+OBSERVED_SCHEMA_FILE = "prompts/observed.schema.json"
+FINAL_PROMPT_FILE = "prompts/final.md"
+FINAL_SCHEMA_FILE = "prompts/final.schema.json"
+SUMMARY_PROMPT_FILE = "prompts/summary.md"
+SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
+
+# What a user turn shows the per-turn call besides its own words: the end of the
+# assistant message it answers, within this many characters of the compacted text. The
+# number is the harness's own bound for the same context (BUILD-PLAN F55).
+BEFORE_CHARS = 800
+# The BEFORE line of the session's first turn, which answers no message.
+SESSION_START = "(start of session)"
+# A settled item's kind and scope, set by the script from the label the turns prompt
+# asked for (BUILD-PLAN F55): a rule is the decision the user made about it; a decision
+# is about the project at hand, and a preference, a rule and a stated fact hold for
+# every project.
+_TURN_KINDS = {
+    "decision": "decision",
+    "preference": "preference",
+    "rule": "decision",
+    "fact": "fact",
+}
+_TURN_SCOPES = {"decision": "project", "preference": "global", "rule": "global", "fact": "global"}
 
 # The per-chunk input cap of DESIGN 13: 12,000 input tokens. A small model given a long
 # chunk loses track of it and writes about things the chunk never held (finding T17).
@@ -201,6 +238,66 @@ def digest_schema() -> dict:
         return json.loads(text)
     except ValueError as exc:
         raise DigestError(f"the shipped digest schema at {SCHEMA_FILE} is not JSON: {exc}") from exc
+
+
+def _shipped_text(name: str) -> str:
+    """A shipped prompt's text, read the way an install carries it (BUILD-PLAN F55)."""
+    try:
+        return (files("aft") / name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DigestError(f"the shipped prompt at {name} cannot be read: {exc}") from exc
+
+
+def _shipped_json(name: str) -> dict:
+    """A shipped schema, as the model's answer is constrained and checked by it."""
+    try:
+        text = (files("aft") / name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DigestError(f"the shipped schema at {name} cannot be read: {exc}") from exc
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise DigestError(f"the shipped schema at {name} is not JSON: {exc}") from exc
+
+
+def turns_prompt_text() -> str:
+    """The per-turn prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(TURNS_PROMPT_FILE)
+
+
+def turns_schema() -> dict:
+    """The shape of what the user settled, per turn (BUILD-PLAN F55)."""
+    return _shipped_json(TURNS_SCHEMA_FILE)
+
+
+def observed_prompt_text() -> str:
+    """The observed prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(OBSERVED_PROMPT_FILE)
+
+
+def observed_schema() -> dict:
+    """The shape of what one part of a session observed (BUILD-PLAN F55)."""
+    return _shipped_json(OBSERVED_SCHEMA_FILE)
+
+
+def final_prompt_text() -> str:
+    """The final-state prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(FINAL_PROMPT_FILE)
+
+
+def final_schema() -> dict:
+    """The shape of what one item replaced (BUILD-PLAN F55)."""
+    return _shipped_json(FINAL_SCHEMA_FILE)
+
+
+def summary_prompt_text() -> str:
+    """The summary prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(SUMMARY_PROMPT_FILE)
+
+
+def summary_schema() -> dict:
+    """The shape of a part's summary and handoff (BUILD-PLAN F55)."""
+    return _shipped_json(SUMMARY_SCHEMA_FILE)
 
 
 def tokens(text: str) -> int:
@@ -699,6 +796,16 @@ class Digested:
 def _digest_parts(
     config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
 ) -> Digested:
+    """Each part of one job asked, checked and verified by the pipeline the settings name
+    (BUILD-PLAN F55)."""
+    if config.settings.digest.pipeline == TURNS:
+        return _digest_parts_turns(config, session_id, chunks, role)
+    return _digest_parts_base(config, session_id, chunks, role)
+
+
+def _digest_parts_base(
+    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+) -> Digested:
     """Ask for, check and verify each part of one job (DESIGN 8).
 
     One page per job, whatever the number of parts. Summaries are joined uncut: a page's
@@ -739,6 +846,194 @@ def _digest_parts(
     if last_refused:
         result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
     return result
+
+
+def turn_blocks(part: Sequence[Entry]) -> str:
+    """The user turns of one part as the turns prompt reads them (BUILD-PLAN F55).
+
+    Each turn is labelled as ``render`` labels its entry, so an item's ``turn`` names the
+    entry its quote must come from. BEFORE is the end of the last assistant message ahead
+    of the turn, ACTIONS the compacted tool calls since the user last spoke, USER the
+    user's own words.
+    """
+    blocks: list[str] = []
+    before = ""
+    actions: list[str] = []
+    for label, entry in labelled(part).items():
+        if entry.role == ASSISTANT:
+            before = filtermod.compact(entry)
+        elif entry.role == TOOL:
+            line = filtermod.compact(entry)
+            if line:
+                actions.append(line)
+        elif entry.role == USER:
+            context = before[-BEFORE_CHARS:] if before else SESSION_START
+            done = "\n".join(actions) if actions else "(none)"
+            blocks.append(f"TURN {label}\nBEFORE: {context}\nACTIONS:\n{done}\nUSER: {entry.text}")
+            actions = []
+    return "\n\n".join(blocks)
+
+
+def observed_blocks(part: Sequence[Entry]) -> str:
+    """The assistant's words and the actions of one part, compacted and labelled."""
+    blocks: list[str] = []
+    for label, entry in labelled(part).items():
+        if entry.role == ASSISTANT:
+            blocks.append(
+                f"[{label}] ASSISTANT {entry.time.isoformat()}:\n{filtermod.compact(entry)}"
+            )
+        elif entry.role == TOOL:
+            line = filtermod.compact(entry)
+            if line:
+                blocks.append(f"[{label}] ACTION {entry.time.isoformat()}:\n{line}")
+    return "\n\n".join(blocks)
+
+
+def _turn_facts(answer: dict) -> list[dict]:
+    """What the user settled, as facts the shared checks read: the source is the user's own
+    words, and kind and scope follow from the label (BUILD-PLAN F55)."""
+    return [
+        {
+            "statement": item["statement"],
+            "kind": _TURN_KINDS[item["label"]],
+            "source": "stated",
+            "term": "long",
+            "quote": item["quote"],
+            "entry": item["turn"],
+            "scope": _TURN_SCOPES[item["label"]],
+        }
+        for item in answer["items"]
+        if item["statement"].strip() and item["quote"].strip()
+    ]
+
+
+def _observed_facts(answer: dict) -> list[dict]:
+    """What the session observed, as facts the shared checks read (BUILD-PLAN F55)."""
+    return [
+        {
+            "statement": item["statement"],
+            "kind": "fact",
+            "source": "observed",
+            "term": "long",
+            "quote": item["quote"],
+            "entry": item["entry"],
+            "scope": "project",
+        }
+        for item in answer["items"]
+        if item["statement"].strip() and item["quote"].strip()
+    ]
+
+
+def _final_state(config: Config, facts: list[Fact]) -> tuple[list[Fact], list[Dropped]]:
+    """The facts that stand once a later one has replaced an earlier one, by the user's
+    explicit word only (BUILD-PLAN F55), and the replaced ones as refusals naming why."""
+    if len(facts) < 2:
+        return facts, []
+    listing = "\n".join(
+        f"[#{n}] [{fact.source}] {fact.kind}: {fact.statement} (words: {fact.quote})"
+        for n, fact in enumerate(facts, start=1)
+    )
+    answer = _model_answer(config, final_prompt_text(), listing, final_schema())
+    replaced: dict[int, int] = {}
+    for item in answer["replacements"]:
+        later = _label_number(item["later"])
+        earlier = _label_number(item["earlier"])
+        if later is None or earlier is None or not 1 <= earlier < later <= len(facts):
+            continue
+        if facts[later - 1].source != "stated":
+            continue  # only the user's own words replace anything
+        replaced[earlier] = later
+    kept = [fact for n, fact in enumerate(facts, start=1) if n not in replaced]
+    dropped = [
+        _refused(
+            {
+                "statement": facts[n - 1].statement,
+                "quote": facts[n - 1].quote,
+                "entry": facts[n - 1].entry,
+                "source": facts[n - 1].source,
+                "kind": facts[n - 1].kind,
+            },
+            f"replaced by a later item the user stated: {facts[later - 1].statement}",
+        )
+        for n, later in sorted(replaced.items())
+    ]
+    return kept, dropped
+
+
+def _label_number(label: str) -> int | None:
+    """``#3`` or ``3`` as 3, or None when it is neither."""
+    text = label.strip().removeprefix(LABEL_PREFIX)
+    return int(text) if text.isdigit() else None
+
+
+def _digest_parts_turns(
+    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+) -> Digested:
+    """Each part asked the turns pipeline's narrow questions (BUILD-PLAN F55).
+
+    Per part: what the user settled, turn by turn; what the session observed; and the
+    summary and handoff, each its own call. Every item goes through ``verify`` as the base
+    pipeline's facts do, so a quote must stand in its entry and ``[stated]`` must cite one of
+    the user's turns. Across the job, a later item replaces an earlier one only where the
+    user said so. A part whose summary is refused twice is recorded as the base pipeline
+    records it.
+    """
+    result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
+    last_refused = False
+    for part in chunks:
+        try:
+            summary = None
+            for _ in range(2):
+                summary = _model_answer(
+                    config, summary_prompt_text(), render(part), summary_schema()
+                )
+                if summary["summary"].strip() and not placeholder(summary["summary"]):
+                    break
+                summary = None
+            if summary is None:
+                raise AnswerRefused("the summary is empty or a placeholder")
+        except AnswerRefused as exc:
+            result.refused_parts.append(
+                {"first": part[0].id, "last": part[-1].id, "reason": str(exc)}
+            )
+            last_refused = True
+            continue
+        asked: list[dict] = []
+        turns = turn_blocks(part)
+        if turns:
+            try:
+                asked += _turn_facts(
+                    _model_answer(config, turns_prompt_text(), turns, turns_schema())
+                )
+            except AnswerRefused as exc:
+                result.refused_parts.append(
+                    {"first": part[0].id, "last": part[-1].id, "reason": f"turns: {exc}"}
+                )
+        seen = observed_blocks(part)
+        if seen:
+            try:
+                asked += _observed_facts(
+                    _model_answer(config, observed_prompt_text(), seen, observed_schema())
+                )
+            except AnswerRefused as exc:
+                result.refused_parts.append(
+                    {"first": part[0].id, "last": part[-1].id, "reason": f"observed: {exc}"}
+                )
+        kept, dropped = verify(config, session_id, part, asked, role=role)
+        result.facts.extend(kept)
+        result.dropped.extend(dropped)
+        result.summaries.append(summary["summary"])
+        result = replace(result, handoff=grounded_handoff(summary["handoff"], part))
+        last_refused = False
+    if not result.summaries:
+        raise AnswerRefused(result.refused_parts[-1]["reason"])
+    if last_refused:
+        result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
+    try:
+        facts, replaced = _final_state(config, result.facts)
+    except AnswerRefused:
+        facts, replaced = result.facts, []
+    return replace(result, facts=facts, dropped=[*result.dropped, *replaced])
 
 
 # An answer of at least this many facts, every one of whose quotes is missing from the

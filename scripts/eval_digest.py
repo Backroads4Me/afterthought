@@ -1219,7 +1219,101 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", default="local")
     p.add_argument("--synthetic", type=Path, default=None)
     p.set_defaults(handler=_cmd_score)
+
+    p = sub.add_parser("score-turns", help="score a run against the per-turn key")
+    p.add_argument("--data")
+    p.add_argument("--variant", default=BASE_VARIANT)
+    p.add_argument("--backend", default="local")
+    p.set_defaults(handler=_cmd_score_turns)
     return parser
+
+
+def with_pipeline(cfg: Config, variant: str) -> Config:
+    """The settings a variant runs under: a variant named after a digest pipeline runs that
+    pipeline (BUILD-PLAN F55); any other variant runs the settings as they are."""
+    if variant not in configmod.DIGEST_PIPELINES:
+        return cfg
+    digest = replace(cfg.settings.digest, pipeline=variant)
+    return replace(cfg, settings=replace(cfg.settings, digest=digest))
+
+
+# ---------------------------------------------------------------------------
+# Scoring a run against the per-turn key (BUILD-PLAN F55)
+
+KEY_TURNS = "key-turns.json"
+_STATEMENT_WORD_MIN = 4
+
+
+def _content_words(text: str) -> set[str]:
+    return {
+        w for w in quote_tokens(text or "") if len(w) >= _STATEMENT_WORD_MIN and w not in _COMMON
+    }
+
+
+def same_item(left: dict, right: dict) -> bool:
+    """Whether two items name the same settled thing: their quotes overlap to half their
+    words, or their statements share ``STATEMENT_MATCH_RATIO`` of their content words."""
+    if left.get("quote") and right.get("quote"):
+        if quote_overlap(left["quote"], right["quote"]) >= 0.5:
+            return True
+    return (
+        statement_overlap(left.get("statement", ""), right.get("statement", ""))
+        >= STATEMENT_MATCH_RATIO
+    )
+
+
+def score_turns(data: Path, variant: str, backend: str) -> dict:
+    """A run's facts against the per-turn key: of the key's durable items, how many the run
+    found (any source), and how many of the run's [stated] facts the key does not hold."""
+    key_path = data / KEY_TURNS
+    if not key_path.exists():
+        raise EvalError(f"{key_path}: no per-turn key")
+    key = json.loads(key_path.read_text(encoding="utf-8"))
+    expected: dict[str, list[dict]] = {}
+    for name, turn in key.items():
+        expected.setdefault(name.rsplit("#", 1)[0], []).extend(turn["durable"])
+    totals = {"sessions": 0, "key_items": 0, "found": 0, "stated": 0, "stated_wrong": 0}
+    sessions = []
+    for session_id, items in sorted(expected.items()):
+        summary_path = run_dir(data, backend, variant, session_id) / "summary.json"
+        if not summary_path.exists():
+            continue
+        facts = json.loads(summary_path.read_text(encoding="utf-8")).get("facts", [])
+        stated = [fact for fact in facts if fact.get("source") == "stated"]
+        found = [item for item in items if any(same_item(item, fact) for fact in facts)]
+        wrong = [fact for fact in stated if not any(same_item(fact, item) for item in items)]
+        totals["sessions"] += 1
+        totals["key_items"] += len(items)
+        totals["found"] += len(found)
+        totals["stated"] += len(stated)
+        totals["stated_wrong"] += len(wrong)
+        sessions.append(
+            {
+                "session": session_id,
+                "key_items": len(items),
+                "found": len(found),
+                "stated": len(stated),
+                "wrong": [fact["statement"] for fact in wrong],
+            }
+        )
+    return {"variant": variant, "backend": backend, "totals": totals, "sessions": sessions}
+
+
+def _cmd_score_turns(args: argparse.Namespace) -> int:
+    data = _data_dir(args)
+    report = score_turns(data, args.variant, args.backend)
+    t = report["totals"]
+    out = (
+        data
+        / "reports"
+        / f"{time.strftime('%Y%m%dT%H%M%S')}-turns-{args.variant}-{args.backend}.json"
+    )
+    _write_json(out, report)
+    print(
+        f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items;"
+        f" {t['stated_wrong']} of {t['stated']} [stated] facts not in the key; report {out}"
+    )
+    return 0
 
 
 def _data_dir(args: argparse.Namespace) -> Path:
@@ -1239,6 +1333,7 @@ def _synthetic_dir(args: argparse.Namespace) -> Path:
 def _cmd_run(args: argparse.Namespace) -> int:
     data = _data_dir(args)
     cfg = with_model(load_config(), args.endpoint, args.model_name, args.extra_body)
+    cfg = with_pipeline(cfg, args.variant)
     variant_dir(data / "answers" / args.backend, args.variant)
     backend = build_backend(args.backend)
     sessions = select_sessions(

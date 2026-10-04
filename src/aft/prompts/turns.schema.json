@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "description": "What the user settled, per turn (BUILD-PLAN F55).",
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "What the user settled in these turns, as few items as say it.",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "properties": {
+          "turn": {
+            "type": "string",
+            "description": "The label of the turn the item comes from, such as #3.",
+            "maxLength": 8
+          },
+          "label": {
+            "type": "string",
+            "description": "What kind of settled thing it is.",
+            "enum": ["decision", "preference", "rule", "fact"]
+          },
+          "statement": {
+            "type": "string",
+            "description": "One plain sentence saying what was settled, with no words the user did not use for names and numbers.",
+            "maxLength": 300
+          },
+          "quote": {
+            "type": "string",
+            "description": "The user's exact words that settle it, copied from the turn's USER text.",
+            "maxLength": 200
+          }
+        },
+        "required": ["turn", "label", "statement", "quote"]
+      }
+    }
+  },
+  "required": ["items"]
+}

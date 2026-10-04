@@ -1,0 +1,33 @@
+{
+  "type": "object",
+  "description": "What one part of a session observed (BUILD-PLAN F55).",
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "What the session observed that the repository does not record, as few items as say it.",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "properties": {
+          "statement": {
+            "type": "string",
+            "description": "One sentence, in plain present tense, that stands on its own, calling the user \"the user\" and the agent \"the agent\".",
+            "maxLength": 300
+          },
+          "quote": {
+            "type": "string",
+            "description": "Words copied from one entry, which the script finds in that entry or drops the item.",
+            "maxLength": 300
+          },
+          "entry": {
+            "type": "string",
+            "description": "The label of the entry the quote comes from, such as #3.",
+            "maxLength": 8
+          }
+        },
+        "required": ["statement", "quote", "entry"]
+      }
+    }
+  },
+  "required": ["items"]
+}

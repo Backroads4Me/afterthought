@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "description": "What one item replaced, as the final prompt asks for it (BUILD-PLAN F55).",
+  "properties": {
+    "replacements": {
+      "type": "array",
+      "description": "The items a later item replaces, only where the user stated the change explicitly.",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "later": {
+            "type": "string",
+            "description": "The label of the item that replaces the other, such as #3.",
+            "maxLength": 8
+          },
+          "earlier": {
+            "type": "string",
+            "description": "The label of the item replaced, such as #1.",
+            "maxLength": 8
+          }
+        },
+        "required": ["later", "earlier"]
+      }
+    }
+  },
+  "required": ["replacements"]
+}
