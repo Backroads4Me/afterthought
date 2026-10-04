@@ -1033,7 +1033,9 @@ def _turn_facts(
                 )
                 continue
             fact["proposal"] = (before_id, proposal)
-            said = f"{said}\n{proposal}"
+            # DESIGN R2: an approval's statement holds no word that neither the user's words
+            # of approval nor the proposal they approve says, wherever else the session has it.
+            said = f"{turn.text if turn is not None else fact['quote']}\n{proposal}"
         missing = ungrounded(fact["statement"], said)
         if missing:
             refused.append(

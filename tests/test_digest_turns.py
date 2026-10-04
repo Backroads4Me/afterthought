@@ -347,3 +347,23 @@ def test_a_refused_summary_still_keeps_what_the_user_settled(session: Session):
     )
     assert [f.statement for f in wrote.facts] == ["Capture runs at session end."]
     assert any(d.reason.startswith("summary refused") for d in wrote.dropped)
+
+
+def test_an_approval_names_only_words_of_the_turn_or_the_proposal(session: Session):
+    """DESIGN R2: words found elsewhere in the session do not ground an approval."""
+    wrote = run(
+        session,
+        summary(),
+        settled(
+            item(
+                "e4",
+                "decision",
+                "The hook writes one row and returns, and capture runs at session end.",
+                "Give the retry its own setting",
+                proposal="the hook writes one row and returns",
+            )
+        ),
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("never used: capture" in d.reason for d in wrote.dropped)
