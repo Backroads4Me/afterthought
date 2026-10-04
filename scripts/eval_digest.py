@@ -108,6 +108,18 @@ REPORT_CHARS = 500
 # land far below.
 QUOTE_MATCH_RATIO = 0.6
 
+# Two statements name the same fact when they share this share of their content words
+# (see ``statement_overlap``). Models quote different lines for one fact often enough that
+# quotes alone split a single fact into two apparent disagreements.
+STATEMENT_MATCH_RATIO = 0.4
+
+# Words too common to say which fact a statement is about.
+_COMMON = frozenset(
+    "the a an and or but of to in on at for from with by is are was were be been it its this"
+    " that these those as not no so than then when which who what user agent session"
+    " uses use used has have had can will would should must may into over".split()
+)
+
 
 class EvalError(Exception):
     """A test set, run, key or report the harness refuses rather than guesses about."""
@@ -764,10 +776,33 @@ def quote_overlap(left: str, right: str) -> float:
     return SequenceMatcher(None, quote_tokens(left), quote_tokens(right)).ratio()
 
 
+def statement_overlap(left: str, right: str) -> float:
+    """How many content words two statements share, 0.0 to 1.0 (Jaccard over words of four
+    letters or more that are not in ``_COMMON``)."""
+    words = [
+        {w for w in quote_tokens(text) if len(w) >= 4 and w not in _COMMON}
+        for text in (left, right)
+    ]
+    if not words[0] or not words[1]:
+        return 0.0
+    return len(words[0] & words[1]) / len(words[0] | words[1])
+
+
+def fact_overlap(left: dict, right: dict) -> float | None:
+    """How strongly two facts name the same thing, or None when they do not: their quotes
+    overlap to ``QUOTE_MATCH_RATIO`` or their statements to ``STATEMENT_MATCH_RATIO``. The
+    larger of the two measures, each scaled to its threshold, orders the pairs."""
+    quote = quote_overlap(left["quote"], right["quote"])
+    statement = statement_overlap(left.get("statement", ""), right.get("statement", ""))
+    if quote < QUOTE_MATCH_RATIO and statement < STATEMENT_MATCH_RATIO:
+        return None
+    return max(quote / QUOTE_MATCH_RATIO, statement / STATEMENT_MATCH_RATIO)
+
+
 def match_facts(by_backend: dict[str, list[dict]]) -> list[Group]:
     """Group facts that name the same thing across the given lists.
 
-    Two facts are paired when their quotes overlap to at least ``QUOTE_MATCH_RATIO``. The
+    Two facts are paired when ``fact_overlap`` names them the same thing. The
     strongest pairs are taken first, and a fact joins at most one group, so a fact is
     never counted as agreeing with two others at once. A fact no pair claimed stands as a
     group of its own, which is how a difference reads: the lists do not hold the same
@@ -779,8 +814,8 @@ def match_facts(by_backend: dict[str, list[dict]]) -> list[Group]:
         for right in range(left + 1, len(names)):
             for left_index, left_fact in enumerate(by_backend[names[left]]):
                 for right_index, right_fact in enumerate(by_backend[names[right]]):
-                    ratio = quote_overlap(left_fact["quote"], right_fact["quote"])
-                    if ratio >= QUOTE_MATCH_RATIO:
+                    ratio = fact_overlap(left_fact, right_fact)
+                    if ratio is not None:
                         candidates.append((ratio, left, left_index, right, right_index))
     candidates.sort(key=lambda item: (-item[0], item[1], item[2], item[3], item[4]))
     groups: list[Group] = []
