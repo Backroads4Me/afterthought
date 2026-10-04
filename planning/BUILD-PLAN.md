@@ -1163,26 +1163,45 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   [--variant V] [--model M]` runs a pipeline variant over the set and scores it: wrong facts
   (a fact the key does not hold, or holds differently), missed facts, wrong tags, questions
   recorded as decisions, and tokens spent; it writes a dated report. The current pipeline is
-  the baseline. No pipeline change in this task. Tests: the scorer on hand-made answers.
+  the baseline. Reports break every score down by the model that wrote the answer. No pipeline
+  change in this task. Tests: the scorer on hand-made answers.
 - **F55 What the digest reads** (ruling 2026-10-04; after F54; FINDINGS T33). DESIGN 8. The
   user's words are 5 to 13% of what a digest call reads; tool output is 34 to 89%, mostly
-  source lines kept for holding a word like "error" (T33). Structural flags from the
-  transcript itself, with no agent cooperation: the filter keeps nothing from file reads,
-  searches and commands that succeeded, keeps error lines only from commands that failed,
-  and collapses code blocks, diffs and tables in assistant text to a placeholder naming
-  them. The digest asks separate, narrow questions: (a) for each user turn, with the
-  assistant message before it as context, whether it states a decision, a preference or a
-  rule, and the quote; (b) over assistant and tool text, what the session observed about the
-  system that the repository does not record; (c) the summary and handoff, in their own
-  call. The script sets the source tag from whose words the quote is. Each piece is kept only
-  if F54 scores it better than the baseline; the PR carries the scores. Review checkpoint:
-  yes (prompts, schema, filter).
+  source lines kept for holding a word like "error" (T33). On the F54 per-turn key
+  (`<data>/key-turns.json`: 266 user turns, 79 durable items) today's digest finds 23% of the
+  durable items with the local model; one narrow question per user turn finds 80% at 82%
+  precision with the same model. Build, as `digest.pipeline = "turns"` (default "base" until
+  the scores decide):
+  (1) Input: a tool call becomes one compact action line naming the tool and its target (`Edit
+  src/aft/digest.py`, `Bash: uv run pytest`), with no arguments or output; error lines are kept
+  only from commands that failed; code blocks, diffs and tables in assistant text collapse to a
+  placeholder naming them.
+  (2) Per user turn, with the end of the assistant message before it and the action lines
+  between: one call over a batch of turns asking, for each, which decisions, preferences,
+  rules or facts about the user's setup the user settled, each with a statement and the
+  user's exact words; a question, a proposal, a request for the task at hand and pasted
+  material are never one of those. The wording asks for the fewest items that capture what
+  was settled.
+  (3) Observed facts: one call over assistant prose and action lines for what the session
+  observed about the system that the repository does not record.
+  (4) Final state: one call over the session's items in order: a later item on the same
+  subject replaces an earlier one only when the user stated the change explicitly ("change of
+  plan", "instead", "no longer"); speculation never replaces anything; the replaced item is
+  dropped and named in the digest's report.
+  (5) Summary and handoff in their own call. The script sets the source tag from whose words
+  the quote is (`[stated]` only from a user turn) and verifies every quote as today.
+  Scoring: `scripts/eval_digest.py score-turns` scores a run against key-turns.json (durable
+  items found, wrong items, per writing model); the PR carries base and turns scores for the
+  local model. The default moves to "turns" only if it finds more and is wrong less often.
+  Review checkpoint: yes (prompts, schema, filter).
 - **F56 The digest checks its own answers** (ruling 2026-10-04; after F55). DESIGN 8. Each
-  proposed fact gets one short call with its quote and the two entries before and after it,
-  asking yes or no: did the user assert this, or ask or propose it; and is it still true by
-  the end of the session. A fact is kept only on yes to both; a refusal is reported. Kept only
-  if F54 scores it better; the PR carries the scores and the extra tokens. Review checkpoint:
-  yes (prompt, schema).
+  proposed item gets one short call with its quote and the two entries before and after it,
+  asking yes or no: did the user assert this, or ask, propose or paste it; and is it still in
+  effect by the end of the session. Kept only on yes to both; a refusal is reported. A verifier
+  from the same family as the writer shares its blind spots, so F56 measures on the F54 key a
+  same-model verifier against a small model of a different family (run locally, short inputs
+  only) and keeps whichever scores better; a different family, not a stronger model. The PR
+  carries the scores and the extra tokens. Review checkpoint: yes (prompt, schema).
 - **F57 What the working agent points at** (ruling 2026-10-04; an experiment, after F55).
   DESIGN 8. The working agent sees each decision as it happens. Measured on F54 against F55's
   structural flags alone: (a) a `Memory:` footer the agent writes when a response settles a
