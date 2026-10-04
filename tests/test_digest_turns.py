@@ -228,3 +228,14 @@ def test_later_means_later_in_the_session_not_in_the_list(session: Session):
         {"replacements": [{"later": "#2", "earlier": "#1"}]},
     )
     assert [f.statement for f in wrote.facts] == ["The retry has its own setting."]
+
+
+def test_grounding_reads_the_whole_turn_and_ignores_punctuation():
+    said = "Should we switch the nightly backup from 2am to 4am? The 2am slot collides."
+    assert digest.ungrounded("The 2am nightly backup slot collides.", said) == []
+    assert digest.ungrounded("Folders go into one dir.", "move the folders into one dir") == []
+    assert digest.ungrounded("Do the proposed ProjectionLab improvements.", "yes do 1 and 5") == [
+        "proposed",
+        "ProjectionLab",
+        "improvements",
+    ]

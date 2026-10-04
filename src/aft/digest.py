@@ -39,6 +39,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from importlib.resources import files
 from pathlib import Path
 
@@ -903,26 +904,32 @@ _PLAIN = frozenset(
 )
 
 
-def ungrounded(statement: str, quote: str) -> list[str]:
-    """The distinctive words of ``statement`` that ``quote`` does not hold (BUILD-PLAN F52,
-    F55): identifiers and long words outside a short plain list, each matched on its first
-    five letters so a word's other forms still count."""
-    held = [w.casefold() for w in _WORDS.findall(quote)]
+def ungrounded(statement: str, said: str) -> list[str]:
+    """The distinctive words of ``statement`` that ``said`` - the user's own turn - does not
+    hold (BUILD-PLAN F52, F55): identifiers and words of seven letters or more outside a
+    short plain list. Punctuation around a word is set aside, and a word matches another
+    form of itself on their shared first five letters."""
+    held = {_bare(w) for w in _WORDS.findall(said)}
     missing: list[str] = []
     for word in _WORDS.findall(statement):
-        low = word.casefold()
-        distinctive = any(c.isdigit() or c in "_/." for c in word) or len(low) >= 7
-        if not distinctive or low in _PLAIN:
+        low = _bare(word)
+        distinctive = any(c.isdigit() or c in "_/" for c in low) or len(low) >= 7
+        if not low or not distinctive or low in _PLAIN or low in held:
             continue
-        if not any(h.startswith(low[:5]) or low.startswith(h[:5]) for h in held if len(h) >= 4):
-            missing.append(word)
+        if not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
+            missing.append(word.strip(".,;:!?\"'()"))
     return missing
+
+
+def _bare(word: str) -> str:
+    """A word folded and stripped of the punctuation around it."""
+    return word.casefold().strip(".,;:!?\"'()[]`")
 
 
 _WORDS = re.compile(r"[A-Za-z0-9_./-]+")
 
 
-def _turn_facts(answer: dict) -> tuple[list[dict], list[Dropped]]:
+def _turn_facts(answer: dict, part: Sequence[Entry]) -> tuple[list[dict], list[Dropped]]:
     """What the user settled, as facts the shared checks read, and the items refused here
     because their statement says more than the user's own words (BUILD-PLAN F55)."""
     facts: list[dict] = []
@@ -940,7 +947,11 @@ def _turn_facts(answer: dict) -> tuple[list[dict], list[Dropped]]:
         if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
             refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
             continue
-        missing = ungrounded(fact["statement"], fact["quote"])
+        turn = _cited(part).get(fact["entry"])
+        if turn is not None:
+            fact = {**fact, "entry": turn.id}  # a refusal names the entry, not the prompt's label
+        said = turn.text if turn is not None and turn.role == USER else fact["quote"]
+        missing = ungrounded(fact["statement"], said)
         if missing:
             refused.append(
                 _refused(
@@ -1113,7 +1124,7 @@ def _digest_parts_turns(
                     session_id,
                     part,
                     role,
-                    _turn_facts,
+                    partial(_turn_facts, part=part),
                 )
                 result.facts.extend(kept)
                 result.dropped.extend(dropped)
