@@ -43,8 +43,19 @@ def summary(text: str = "Settled where capture runs.") -> dict:
     }
 
 
-def item(turn: str, label: str, statement: str, quote: str) -> dict:
-    return {"turn": turn, "label": label, "statement": statement, "quote": quote}
+def item(turn: str, label: str, statement: str, quote: str, scope: str = "project") -> dict:
+    return {
+        "turn": turn,
+        "label": label,
+        "statement": statement,
+        "quote": quote,
+        "scope": scope,
+        "term": "long",
+    }
+
+
+def seen(statement: str, quote: str, entry: str) -> dict:
+    return {"statement": statement, "quote": quote, "entry": entry, "term": "long"}
 
 
 def run(session: Session, *answers: object) -> digest.Digest:
@@ -93,15 +104,7 @@ def test_an_observed_item_is_kept_as_observed(session: Session):
         session,
         summary(),
         {"items": []},
-        {
-            "items": [
-                {
-                    "statement": "The hook writes one row and returns.",
-                    "quote": "the hook writes one row",
-                    "entry": "e2",
-                }
-            ]
-        },
+        {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
     )
     assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e2")]
 
@@ -142,33 +145,86 @@ def test_an_observed_item_replaces_nothing(session: Session):
                 )
             ]
         },
-        {
-            "items": [
-                {
-                    "statement": "The hook writes one row and returns.",
-                    "quote": "the hook writes one row",
-                    "entry": "e2",
-                }
-            ]
-        },
+        {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
         {"replacements": [{"later": "#2", "earlier": "#1"}]},
     )
     assert len(wrote.facts) == 2
 
 
-def test_turn_blocks_show_before_actions_and_the_users_words():
+def test_turn_blocks_show_before_errors_and_the_users_words():
     def entry(eid: str, role: str, text: str, error: bool = False) -> Entry:
         return Entry(eid, NOW.astimezone(UTC), role, text, error)
 
     part = [
         entry("e1", USER, USER_PROMPT),
         entry("e2", ASSISTANT, ASSISTANT_ANSWER),
-        entry("e3", TOOL, "Edit src/aft/digest.py\nsome output"),
-        entry("e4", USER, SECOND_PROMPT),
+        entry("e3", TOOL, "running tests\nok", False),
+        entry("e4", TOOL, "FAILED tests/test_x.py", True),
+        entry("e5", USER, SECOND_PROMPT),
+        entry("e6", USER, "and keep it small"),
     ]
-    text = digest.turn_blocks(part)
-    first, second = text.split("\n\n")
-    assert first.startswith("TURN #1\nBEFORE: (start of session)\nACTIONS:\n(none)\nUSER: ")
+    text, after = digest.turn_blocks(part)
+    first, second, third = text.split("\n\n")
+    assert first.startswith(f"[#1] TURN\nBEFORE: {digest.NO_REPLY}\nERRORS:\n(none)\nUSER: ")
     assert f"BEFORE: {ASSISTANT_ANSWER}" in second
-    assert "ACTIONS:\nEdit src/aft/digest.py\nUSER: " in second
-    assert "some output" not in second
+    assert "ERRORS:\nFAILED tests/test_x.py\nUSER: " in second
+    assert "running tests" not in second
+    # A turn sent straight after another answers no agent message.
+    assert f"BEFORE: {digest.NO_REPLY}" in third
+    assert after == ""
+
+
+def test_a_part_opening_with_a_turn_carries_the_answer_before_it():
+    def entry(eid: str, role: str, text: str) -> Entry:
+        return Entry(eid, NOW.astimezone(UTC), role, text, False)
+
+    _, after = digest.turn_blocks([entry("e1", USER, "go"), entry("e2", ASSISTANT, "Option B?")])
+    text, _ = digest.turn_blocks([entry("e3", USER, "yes")], after)
+    assert "BEFORE: Option B?" in text
+
+
+def test_a_statement_naming_words_the_user_did_not_say_is_refused(session: Session):
+    """A yes to a proposal gives the user's word 'yes' and the assistant's content: the
+    statement is not the user's own, so it is refused rather than written [stated]."""
+    wrote = run(
+        session,
+        summary(),
+        {
+            "items": [
+                item(
+                    "e1",
+                    "decision",
+                    "Capture uses PostgreSQL replication.",
+                    "Capture runs at session end.",
+                )
+            ]
+        },
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("did not say" in d.reason for d in wrote.dropped)
+
+
+def test_later_means_later_in_the_session_not_in_the_list(session: Session):
+    """Items listed out of session order are put back in it before anything is replaced."""
+    wrote = run(
+        session,
+        summary(),
+        {
+            "items": [
+                item(
+                    "e4",
+                    "decision",
+                    "The retry has its own setting.",
+                    "Give the retry its own setting",
+                ),
+                item(
+                    "e1", "decision", "Capture runs at session end.", "Capture runs at session end."
+                ),
+            ]
+        },
+        {"items": []},
+        # In session order e1 is #1 and e4 is #2: e4 replacing e1 is the only order allowed.
+        {"replacements": [{"later": "#2", "earlier": "#1"}]},
+    )
+    assert [f.statement for f in wrote.facts] == ["The retry has its own setting."]

@@ -822,35 +822,6 @@ def test_compact_keeps_a_prompt_verbatim():
     assert compact(said("use port 8008, not 8000", "u1")) == "use port 8008, not 8000"
 
 
-def test_compact_renders_a_tool_call_as_its_first_line():
-    entry = output("  cargo test\n   Compiling aft v0.1.0\n    Finished test [unoptimized]\n", "t1")
-    assert compact(entry) == "cargo test"
-
-
-def test_compact_cuts_a_long_action_line_on_a_word_boundary():
-    line = "word " * 60
-    entry = output(line + "and more", "t1")
-    assert compact(entry) == "word " * 39 + "word" + CAP_MARKER
-
-
-def test_compact_keeps_a_failed_commands_error_lines():
-    entry = output(
-        "python -m pytest\n================= FAILED tests/test_x.py =================\n"
-        "E       assert 1 == 2\n",
-        "t1",
-        is_error=True,
-    )
-    lines = compact(entry).splitlines()
-    assert lines[0] == "python -m pytest"
-    assert "FAILED tests/test_x.py" in lines[1]
-    assert lines[-1] == "E       assert 1 == 2"
-
-
-def test_compact_drops_a_successful_commands_output():
-    entry = output("cargo test\nrunning 12 tests\ntest parse ... ok\n", "t1")
-    assert compact(entry) == "cargo test"
-
-
 def test_compact_of_an_answer_names_a_code_block():
     entry = answered("before\n```python\nx = 1\ny = 2\n```\nafter", "a1")
     assert compact(entry) == "before\n[code block]\nafter"
@@ -879,3 +850,17 @@ def test_compact_of_an_answer_without_blocks_is_verbatim():
 def test_compact_collapses_an_unclosed_fence_to_the_end():
     entry = answered("prose\n```\nleft open at the cap", "a1")
     assert compact(entry) == "prose\n[code block]"
+
+
+def test_compact_shows_nothing_of_a_successful_commands_output():
+    """A tool entry is a command's output, never the call: a command that did not fail
+    leaves nothing for the turns pipeline to read."""
+    entry = Entry("t1", TIME, "tool", "cargo test\nrunning 3 tests\nok", False)
+    assert compact(entry) == ""
+
+
+def test_compact_keeps_a_failed_commands_error_lines():
+    entry = Entry(
+        "t2", TIME, "tool", "FAILED tests/test_x.py::test_y\n\nE       assert 1 == 2", True
+    )
+    assert compact(entry) == "FAILED tests/test_x.py::test_y\nE       assert 1 == 2"

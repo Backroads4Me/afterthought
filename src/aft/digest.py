@@ -92,8 +92,9 @@ SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
 # assistant message it answers, within this many characters of the compacted text. The
 # number is the harness's own bound for the same context (BUILD-PLAN F55).
 BEFORE_CHARS = 800
-# The BEFORE line of the session's first turn, which answers no message.
-SESSION_START = "(start of session)"
+# The BEFORE line of a turn that answers no assistant message: the session's first turn,
+# or a turn the user sent straight after another.
+NO_REPLY = "(no agent message before this turn)"
 # A settled item's kind and scope, set by the script from the label the turns prompt
 # asked for (BUILD-PLAN F55): a rule is the decision the user made about it; a decision
 # is about the project at hand, and a preference, a rule and a stated fact hold for
@@ -848,63 +849,107 @@ def _digest_parts_base(
     return result
 
 
-def turn_blocks(part: Sequence[Entry]) -> str:
-    """The user turns of one part as the turns prompt reads them (BUILD-PLAN F55).
+def turn_blocks(part: Sequence[Entry], before: str = "") -> tuple[str, str]:
+    """The user turns of one part as the turns prompt reads them, and the assistant text the
+    next part's first turn answers (BUILD-PLAN F55).
 
     Each turn is labelled as ``render`` labels its entry, so an item's ``turn`` names the
-    entry its quote must come from. BEFORE is the end of the last assistant message ahead
-    of the turn, ACTIONS the compacted tool calls since the user last spoke, USER the
-    user's own words.
+    entry its quote must come from. BEFORE is the end of the assistant message the turn
+    answers, carried in from the part before when the turn opens a part, ERRORS the error
+    lines of commands that failed since the user last spoke, USER the user's own words.
     """
     blocks: list[str] = []
-    before = ""
-    actions: list[str] = []
+    errors: list[str] = []
     for label, entry in labelled(part).items():
         if entry.role == ASSISTANT:
             before = filtermod.compact(entry)
         elif entry.role == TOOL:
-            line = filtermod.compact(entry)
-            if line:
-                actions.append(line)
+            shown = filtermod.compact(entry)
+            if shown:
+                errors.append(shown)
         elif entry.role == USER:
-            context = before[-BEFORE_CHARS:] if before else SESSION_START
-            done = "\n".join(actions) if actions else "(none)"
-            blocks.append(f"TURN {label}\nBEFORE: {context}\nACTIONS:\n{done}\nUSER: {entry.text}")
-            actions = []
-    return "\n\n".join(blocks)
+            context = before[-BEFORE_CHARS:] if before else NO_REPLY
+            failed = "\n".join(errors) if errors else "(none)"
+            blocks.append(
+                f"[{label}] TURN\nBEFORE: {context}\nERRORS:\n{failed}\nUSER: {entry.text}"
+            )
+            errors = []
+            before = ""
+    return "\n\n".join(blocks), before
 
 
-def observed_blocks(part: Sequence[Entry]) -> str:
-    """The assistant's words and the actions of one part, compacted and labelled."""
+def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
+    """One part compacted and labelled: the user's words (when ``users``), the assistant's
+    prose with its code, diffs and tables named, and failed commands' error lines."""
     blocks: list[str] = []
     for label, entry in labelled(part).items():
+        when = entry.time.isoformat()
         if entry.role == ASSISTANT:
-            blocks.append(
-                f"[{label}] ASSISTANT {entry.time.isoformat()}:\n{filtermod.compact(entry)}"
-            )
+            blocks.append(f"[{label}] ASSISTANT {when}:\n{filtermod.compact(entry)}")
         elif entry.role == TOOL:
-            line = filtermod.compact(entry)
-            if line:
-                blocks.append(f"[{label}] ACTION {entry.time.isoformat()}:\n{line}")
+            shown = filtermod.compact(entry)
+            if shown:
+                blocks.append(f"[{label}] ERROR {when}:\n{shown}")
+        elif entry.role == USER and users:
+            blocks.append(f"[{label}] USER {when}:\n{entry.text}")
     return "\n\n".join(blocks)
 
 
-def _turn_facts(answer: dict) -> list[dict]:
-    """What the user settled, as facts the shared checks read: the source is the user's own
-    words, and kind and scope follow from the label (BUILD-PLAN F55)."""
-    return [
-        {
+# Words a statement may use that its quote need not hold: they say how, not what.
+_PLAIN = frozenset(
+    "about after again agent always before being could every their there these those"
+    " through under until using where which while would should project session user"
+    " users prefers prefer wants decided decides settled instead never".split()
+)
+
+
+def ungrounded(statement: str, quote: str) -> list[str]:
+    """The distinctive words of ``statement`` that ``quote`` does not hold (BUILD-PLAN F52,
+    F55): identifiers and long words outside a short plain list, each matched on its first
+    five letters so a word's other forms still count."""
+    held = [w.casefold() for w in _WORDS.findall(quote)]
+    missing: list[str] = []
+    for word in _WORDS.findall(statement):
+        low = word.casefold()
+        distinctive = any(c.isdigit() or c in "_/." for c in word) or len(low) >= 7
+        if not distinctive or low in _PLAIN:
+            continue
+        if not any(h.startswith(low[:5]) or low.startswith(h[:5]) for h in held if len(h) >= 4):
+            missing.append(word)
+    return missing
+
+
+_WORDS = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _turn_facts(answer: dict) -> tuple[list[dict], list[Dropped]]:
+    """What the user settled, as facts the shared checks read, and the items refused here
+    because their statement says more than the user's own words (BUILD-PLAN F55)."""
+    facts: list[dict] = []
+    refused: list[Dropped] = []
+    for item in answer["items"]:
+        fact = {
             "statement": item["statement"],
             "kind": _TURN_KINDS[item["label"]],
             "source": "stated",
-            "term": "long",
+            "term": item["term"],
             "quote": item["quote"],
             "entry": item["turn"],
-            "scope": _TURN_SCOPES[item["label"]],
+            "scope": item["scope"],
         }
-        for item in answer["items"]
-        if item["statement"].strip() and item["quote"].strip()
-    ]
+        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
+            refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
+            continue
+        missing = ungrounded(fact["statement"], fact["quote"])
+        if missing:
+            refused.append(
+                _refused(
+                    fact, f"the statement names words the user did not say: {', '.join(missing)}"
+                )
+            )
+            continue
+        facts.append(fact)
+    return facts, refused
 
 
 def _observed_facts(answer: dict) -> list[dict]:
@@ -914,46 +959,73 @@ def _observed_facts(answer: dict) -> list[dict]:
             "statement": item["statement"],
             "kind": "fact",
             "source": "observed",
-            "term": "long",
+            "term": item["term"],
             "quote": item["quote"],
             "entry": item["entry"],
             "scope": "project",
         }
         for item in answer["items"]
-        if item["statement"].strip() and item["quote"].strip()
+        if item["statement"].strip()
+        and item["quote"].strip()
+        and not placeholder(item["statement"])
     ]
 
 
-def _final_state(config: Config, facts: list[Fact]) -> tuple[list[Fact], list[Dropped]]:
+def _call_refused(part: Sequence[Entry], call: str, reason: str) -> Dropped:
+    """A call of the turns pipeline that was refused, recorded beside the refused facts: the
+    part was still filed, so it is not a refused part."""
+    return Dropped(
+        statement="", kind="", source="", entry=part[0].id, reason=f"{call} refused: {reason}"
+    )
+
+
+def _final_state(
+    config: Config, facts: list[Fact], order: dict[str, int]
+) -> tuple[list[Fact], list[Dropped]]:
     """The facts that stand once a later one has replaced an earlier one, by the user's
-    explicit word only (BUILD-PLAN F55), and the replaced ones as refusals naming why."""
+    explicit word only (BUILD-PLAN F55), and the replaced ones as refusals naming why.
+
+    The facts are listed in the session's own order, by the entry each quote came from, so
+    "later" in the answer is later in the session, whatever order the calls returned them in.
+    """
     if len(facts) < 2:
         return facts, []
+    ordered = sorted(facts, key=lambda fact: order.get(fact.entry, 0))
     listing = "\n".join(
         f"[#{n}] [{fact.source}] {fact.kind}: {fact.statement} (words: {fact.quote})"
-        for n, fact in enumerate(facts, start=1)
+        for n, fact in enumerate(ordered, start=1)
     )
-    answer = _model_answer(config, final_prompt_text(), listing, final_schema())
+    try:
+        answer = _model_answer(config, final_prompt_text(), listing, final_schema())
+    except AnswerRefused as exc:
+        return ordered, [
+            Dropped(
+                statement="",
+                kind="",
+                source="",
+                entry=ordered[0].entry,
+                reason=f"final state refused, nothing replaced: {exc}",
+            )
+        ]
     replaced: dict[int, int] = {}
     for item in answer["replacements"]:
         later = _label_number(item["later"])
         earlier = _label_number(item["earlier"])
-        if later is None or earlier is None or not 1 <= earlier < later <= len(facts):
+        if later is None or earlier is None or not 1 <= earlier < later <= len(ordered):
             continue
-        if facts[later - 1].source != "stated":
+        if ordered[later - 1].source != "stated":
             continue  # only the user's own words replace anything
+        if order.get(ordered[earlier - 1].entry, 0) >= order.get(ordered[later - 1].entry, 0):
+            continue  # a replacement comes later in the session, not only later in a list
         replaced[earlier] = later
-    kept = [fact for n, fact in enumerate(facts, start=1) if n not in replaced]
+    kept = [fact for n, fact in enumerate(ordered, start=1) if n not in replaced]
     dropped = [
-        _refused(
-            {
-                "statement": facts[n - 1].statement,
-                "quote": facts[n - 1].quote,
-                "entry": facts[n - 1].entry,
-                "source": facts[n - 1].source,
-                "kind": facts[n - 1].kind,
-            },
-            f"replaced by a later item the user stated: {facts[later - 1].statement}",
+        Dropped(
+            statement=ordered[n - 1].statement,
+            kind=ordered[n - 1].kind,
+            source=ordered[n - 1].source,
+            entry=ordered[n - 1].entry,
+            reason=f"replaced by a later item the user stated: {ordered[later - 1].statement}",
         )
         for n, later in sorted(replaced.items())
     ]
@@ -966,26 +1038,59 @@ def _label_number(label: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def _asked(
+    config: Config,
+    prompt: str,
+    text: str,
+    schema: dict,
+    session_id: str,
+    part: Sequence[Entry],
+    role: str,
+    make,
+) -> tuple[list[Fact], list[Dropped]]:
+    """One call's items, verified, asked again once when two or more items all quote words
+    their entries do not hold (finding T17), as the base pipeline asks."""
+    kept: list[Fact] = []
+    dropped: list[Dropped] = []
+    for _ in range(2):
+        made = make(_model_answer(config, prompt, text, schema))
+        facts, refused = made if isinstance(made, tuple) else (made, [])
+        kept, dropped = verify(config, session_id, part, facts, role=role)
+        dropped = [*refused, *dropped]
+        if not unquoted(facts, kept, dropped):
+            break
+    return kept, dropped
+
+
 def _digest_parts_turns(
     config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
 ) -> Digested:
     """Each part asked the turns pipeline's narrow questions (BUILD-PLAN F55).
 
-    Per part: what the user settled, turn by turn; what the session observed; and the
-    summary and handoff, each its own call. Every item goes through ``verify`` as the base
-    pipeline's facts do, so a quote must stand in its entry and ``[stated]`` must cite one of
-    the user's turns. Across the job, a later item replaces an earlier one only where the
-    user said so. A part whose summary is refused twice is recorded as the base pipeline
-    records it.
+    Per part: the summary and handoff, what the user settled turn by turn, and what the
+    session observed, each its own call over the part compacted. Every item goes through
+    ``verify`` as the base pipeline's facts do, so a quote must stand in its entry and
+    ``[stated]`` must cite one of the user's turns; a turn item whose statement names words
+    the user did not say is refused first. Across the job, a later item replaces an earlier
+    one only where the user said so. A part whose summary is refused twice gives the page
+    nothing and is recorded as the base pipeline records it; a refused turns or observed
+    call is recorded beside the refused facts, since its part was still filed.
     """
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
+    order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
     last_refused = False
+    before = ""
     for part in chunks:
+        turns, next_before = turn_blocks(part, before)
+        before = next_before
         try:
             summary = None
             for _ in range(2):
                 summary = _model_answer(
-                    config, summary_prompt_text(), render(part), summary_schema()
+                    config,
+                    summary_prompt_text(),
+                    compacted_blocks(part, users=True),
+                    summary_schema(),
                 )
                 if summary["summary"].strip() and not placeholder(summary["summary"]):
                     break
@@ -998,30 +1103,39 @@ def _digest_parts_turns(
             )
             last_refused = True
             continue
-        asked: list[dict] = []
-        turns = turn_blocks(part)
         if turns:
             try:
-                asked += _turn_facts(
-                    _model_answer(config, turns_prompt_text(), turns, turns_schema())
+                kept, dropped = _asked(
+                    config,
+                    turns_prompt_text(),
+                    turns,
+                    turns_schema(),
+                    session_id,
+                    part,
+                    role,
+                    _turn_facts,
                 )
+                result.facts.extend(kept)
+                result.dropped.extend(dropped)
             except AnswerRefused as exc:
-                result.refused_parts.append(
-                    {"first": part[0].id, "last": part[-1].id, "reason": f"turns: {exc}"}
-                )
-        seen = observed_blocks(part)
+                result.dropped.append(_call_refused(part, "turns", str(exc)))
+        seen = compacted_blocks(part, users=False)
         if seen:
             try:
-                asked += _observed_facts(
-                    _model_answer(config, observed_prompt_text(), seen, observed_schema())
+                kept, dropped = _asked(
+                    config,
+                    observed_prompt_text(),
+                    seen,
+                    observed_schema(),
+                    session_id,
+                    part,
+                    role,
+                    _observed_facts,
                 )
+                result.facts.extend(kept)
+                result.dropped.extend(dropped)
             except AnswerRefused as exc:
-                result.refused_parts.append(
-                    {"first": part[0].id, "last": part[-1].id, "reason": f"observed: {exc}"}
-                )
-        kept, dropped = verify(config, session_id, part, asked, role=role)
-        result.facts.extend(kept)
-        result.dropped.extend(dropped)
+                result.dropped.append(_call_refused(part, "observed", str(exc)))
         result.summaries.append(summary["summary"])
         result = replace(result, handoff=grounded_handoff(summary["handoff"], part))
         last_refused = False
@@ -1029,10 +1143,7 @@ def _digest_parts_turns(
         raise AnswerRefused(result.refused_parts[-1]["reason"])
     if last_refused:
         result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
-    try:
-        facts, replaced = _final_state(config, result.facts)
-    except AnswerRefused:
-        facts, replaced = result.facts, []
+    facts, replaced = _final_state(config, result.facts, order)
     return replace(result, facts=facts, dropped=[*result.dropped, *replaced])
 
 

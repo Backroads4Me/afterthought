@@ -1264,7 +1264,8 @@ def same_item(left: dict, right: dict) -> bool:
 
 def score_turns(data: Path, variant: str, backend: str) -> dict:
     """A run's facts against the per-turn key: of the key's durable items, how many the run
-    found (any source), and how many of the run's [stated] facts the key does not hold."""
+    found (any source), and how many of the run's [stated] facts the key does not hold. The
+    key labels the user's turns only, so [observed] facts are counted but not judged."""
     key_path = data / KEY_TURNS
     if not key_path.exists():
         raise EvalError(f"{key_path}: no per-turn key")
@@ -1272,7 +1273,14 @@ def score_turns(data: Path, variant: str, backend: str) -> dict:
     expected: dict[str, list[dict]] = {}
     for name, turn in key.items():
         expected.setdefault(name.rsplit("#", 1)[0], []).extend(turn["durable"])
-    totals = {"sessions": 0, "key_items": 0, "found": 0, "stated": 0, "stated_wrong": 0}
+    totals = {
+        "sessions": 0,
+        "key_items": 0,
+        "found": 0,
+        "stated": 0,
+        "stated_wrong": 0,
+        "observed": 0,
+    }
     sessions = []
     for session_id, items in sorted(expected.items()):
         summary_path = run_dir(data, backend, variant, session_id) / "summary.json"
@@ -1287,6 +1295,7 @@ def score_turns(data: Path, variant: str, backend: str) -> dict:
         totals["found"] += len(found)
         totals["stated"] += len(stated)
         totals["stated_wrong"] += len(wrong)
+        totals["observed"] += sum(1 for fact in facts if fact.get("source") == "observed")
         sessions.append(
             {
                 "session": session_id,
@@ -1311,7 +1320,8 @@ def _cmd_score_turns(args: argparse.Namespace) -> int:
     _write_json(out, report)
     print(
         f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items;"
-        f" {t['stated_wrong']} of {t['stated']} [stated] facts not in the key; report {out}"
+        f" {t['stated_wrong']} of {t['stated']} [stated] facts not in the key;"
+        f" {t['observed']} [observed] facts, not judged by this key; report {out}"
     )
     return 0
 

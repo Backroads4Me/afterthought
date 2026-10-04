@@ -17,7 +17,12 @@
           "label": {
             "type": "string",
             "description": "What kind of settled thing it is.",
-            "enum": ["decision", "preference", "rule", "fact"]
+            "enum": [
+              "decision",
+              "preference",
+              "rule",
+              "fact"
+            ]
           },
           "statement": {
             "type": "string",
@@ -28,11 +33,36 @@
             "type": "string",
             "description": "The user's exact words that settle it, copied from the turn's USER text.",
             "maxLength": 200
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ],
+            "description": "global only for a preference or environment fact that holds for every project"
+          },
+          "term": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ],
+            "description": "long or short; short when unsure"
           }
         },
-        "required": ["turn", "label", "statement", "quote"]
+        "required": [
+          "turn",
+          "label",
+          "statement",
+          "quote",
+          "scope",
+          "term"
+        ]
       }
     }
   },
-  "required": ["items"]
+  "required": [
+    "items"
+  ]
 }

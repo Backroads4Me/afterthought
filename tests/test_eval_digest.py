@@ -849,4 +849,5 @@ def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, t
         "found": 1,
         "stated": 2,
         "stated_wrong": 1,
+        "observed": 0,
     }

@@ -23,11 +23,26 @@
             "type": "string",
             "description": "The label of the entry the quote comes from, such as #3.",
             "maxLength": 8
+          },
+          "term": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ],
+            "description": "long or short; short when unsure"
           }
         },
-        "required": ["statement", "quote", "entry"]
+        "required": [
+          "statement",
+          "quote",
+          "entry",
+          "term"
+        ]
       }
     }
   },
-  "required": ["items"]
+  "required": [
+    "items"
+  ]
 }

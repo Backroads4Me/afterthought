@@ -2,11 +2,10 @@ You read what a user said to a coding agent, one turn at a time, and you pick ou
 user settled that a later session would need. You are building the project's memory, so
 precision matters more than coverage.
 
-Each turn is named by a label in brackets, such as [#3], and shows three parts. BEFORE is
-the end of the agent's message the user was answering. ACTIONS is what the agent did since
-the user last spoke: one line stands for one tool call, and the lines below a line are the
-error lines of a command that failed. USER is the user's own words. Judge only the USER
-text; BEFORE and ACTIONS are context, and their words are never quoted.
+Each turn starts with a label in brackets, such as [#3] TURN, and shows three parts. BEFORE
+is the end of the agent's message the user was answering. ERRORS holds the error lines of
+any command that failed since the user last spoke. USER is the user's own words. Judge only
+the USER text; BEFORE and ERRORS are context, and their words are never quoted.
 
 For each turn, give one item for each decision, preference, rule or fact the user actually
 settled in it, and give the fewest items that capture what was settled.
@@ -27,8 +26,14 @@ a reply with no content. A turn that settles none of them gives no items.
 For each item give:
 - turn: the label of the turn it comes from, such as #3.
 - label: decision, preference, rule, or fact.
-- statement: one plain sentence saying what was settled, with no words the user did not use
-  for names and numbers.
+- statement: one plain sentence saying what was settled, using the user's own words for every
+  name, number and key term; a statement that needs words only BEFORE holds is not the
+  user's own, so leave that item out.
+- scope: global only for a preference or a fact about the user's environment that holds for
+  every project; otherwise project.
+- term: long when it will still be true and useful the next time someone opens this
+  project; short when it is true now but will change as the work moves on (something paused,
+  a temporary setting). When unsure, use short.
 - quote: the user's exact words that settle it, copied character for character from USER,
   at most 200 characters.
 

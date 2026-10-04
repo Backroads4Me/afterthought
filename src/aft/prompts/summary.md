@@ -4,9 +4,8 @@ record, so say only what the entries hold.
 
 Each entry begins with a label in brackets, such as [#3], then who wrote it and when. A
 USER entry is the user's own words. An ASSISTANT entry is the assistant's final text, with
-its code, diffs and tables named by a placeholder. An ACTION entry is one tool call: its
-first line says what the call was about, and the lines below it are the error lines of a
-command that failed.
+its code, diffs and tables named by a placeholder. An ERROR entry holds the error
+lines a failed command left.
 
 Write:
 - summary: one to four sentences on what happened.

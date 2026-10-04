@@ -275,11 +275,10 @@ def _word_end(text: str, limit: int) -> int:
 
 
 # The turns pipeline (BUILD-PLAN F55) reads a compacted rendering of the same kept
-# entries, built after the filter has run: a tool call is one action line, a failed
-# command's error lines stand below it, and the assistant's code, diffs and tables are
-# named rather than read. Everything a model is shown is verbatim archived text, so a
-# quote it takes from this rendering is still found in the evidence archive.
-ACTION_CHARS = 200
+# entries, built after the filter has run: a tool entry shows only a failed command's error
+# lines, and the assistant's code, diffs and tables are named rather than read. Everything a
+# model is shown is verbatim archived text, so a quote it takes from this rendering is still
+# found in the evidence archive.
 CODE_MARKER = "[code block]"
 DIFF_MARKER = "[diff]"
 TABLE_MARKER = "[table]"
@@ -301,33 +300,22 @@ def compact(entry: Entry) -> str:
 
     A prompt or an answer keeps its words, an answer with its fenced blocks and tables
     named by a placeholder - the named text is never longer than what it stands for, so
-    no extra cap is needed. A tool entry is one action line, its first kept line within
-    ``ACTION_CHARS`` on a word boundary; when the command failed the rest of its kept
-    text stands below it as the error lines, and when it did not the output goes.
+    no extra cap is needed. A tool entry holds a command's output, never the call that made
+    it, so it shows only what a failed command left: its kept error lines, and nothing at
+    all for a command that did not fail.
     """
     if entry.role == TOOL:
-        return _action(entry)
+        return _errors(entry)
     if entry.role == ASSISTANT:
         return _collapsed(entry.text)
     return entry.text
 
 
-def _action(entry: Entry) -> str:
-    """One tool entry as its action line, and, for a failed command, its error lines."""
-    lines = [line.strip() for line in entry.text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-    action = _cut(lines[0], ACTION_CHARS)
+def _errors(entry: Entry) -> str:
+    """A failed command's kept lines, or nothing for a command that did not fail."""
     if not entry.is_error:
-        return action
-    rest = "\n".join(lines[1:])
-    return f"{action}\n{rest}" if rest else action
-
-
-def _cut(text: str, limit: int) -> str:
-    """``text`` within ``limit`` characters, cut on a word boundary with the marker."""
-    end = _word_end(text, limit)
-    return text if end == len(text) else text[:end] + CAP_MARKER
+        return ""
+    return "\n".join(line.strip() for line in entry.text.splitlines() if line.strip())
 
 
 def _collapsed(text: str) -> str:
