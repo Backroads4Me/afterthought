@@ -359,7 +359,7 @@ def curated_edits(
         for index, fact in enumerate(facts, start=1)
     }
     filed = {(statement, quote): section for section, statement, quote in seeded}
-    held: dict[tuple[str, str, str], int] = {}
+    held: dict[tuple[str, str, str | None], int] = {}
     for fact in page.facts:
         at = f"line {fact.line}"
         if fact.state == pagemod.CANDIDATE:
