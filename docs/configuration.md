@@ -42,6 +42,13 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 |---|---|---|
 | `evidence.retention_days` | `90` | Days to keep filtered conversation in the evidence archive. Facts keep their quotes after their evidence expires. |
 
+
+## `[digest]`
+
+| Setting | Default | What it does |
+|---|---|---|
+| `digest.pipeline` | `base` | How a digest asks its questions. `base` asks one model one broad question per chunk of filtered conversation. `turns` asks narrower ones over a compacted input instead: one call per batch of user turns for what the user settled, one for what the session observed, one for what a later item replaced, and one for the summary and handoff. |
+
 ## `[dream]`
 
 | Setting | Default | What it does |

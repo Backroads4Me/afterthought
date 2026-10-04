@@ -54,6 +54,17 @@ class EvidenceConfig:
     retention_days: int = 90
 
 
+# The pipelines a digest may run (BUILD-PLAN F55): "base" asks one question per chunk
+# of filtered conversation; "turns" asks narrower ones, one per batch of user turns and
+# one per kind of finding, over a compacted input.
+DIGEST_PIPELINES = ("base", "turns")
+
+
+@dataclass(frozen=True)
+class DigestConfig:
+    pipeline: str = "base"
+
+
 @dataclass(frozen=True)
 class DreamConfig:
     interval_minutes: int = 30
@@ -97,6 +108,7 @@ class Settings:
     work: WorkConfig = field(default_factory=WorkConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
+    digest: DigestConfig = field(default_factory=DigestConfig)
 
 
 @dataclass(frozen=True)
@@ -146,6 +158,11 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         raise ConfigError(
             f"{path}: model.extra_body may not set {', '.join(taken)}; aft sets those itself"
         )
+    if settings.digest.pipeline not in DIGEST_PIPELINES:
+        raise ConfigError(
+            f"{path}: digest.pipeline must be one of {', '.join(DIGEST_PIPELINES)},"
+            f" got {settings.digest.pipeline!r}"
+        )
     if settings.dream.interval_minutes <= 0:
         raise ConfigError(f"{path}: dream.interval_minutes must be positive")
     if settings.dream.short_term_sessions < 1:
@@ -172,7 +189,9 @@ def _build(cls: type, table: dict, where: str):
         if is_dataclass(hint):
             if not isinstance(value, dict):
                 raise ConfigError(f"[{name}] must be a table")
-            values[f.name] = _build(hint, value, where=f"{name}.")
+            # is_dataclass narrows a hint to a class or an instance of one; hints are
+            # always classes, so the instance branch of the narrowing is impossible.
+            values[f.name] = _build(typing.cast(type, hint), value, where=f"{name}.")
         else:
             values[f.name] = _coerce(hint, value, name)
     return cls(**values)
@@ -304,6 +323,13 @@ builtin_redaction = true
 [evidence]
 # Days to keep filtered conversation in the evidence archive.
 retention_days = 90
+
+[digest]
+# How a digest asks its questions. "base" asks one model one broad question per chunk
+# of filtered conversation. "turns" asks narrower ones over a compacted input instead:
+# one call per batch of user turns for what the user settled, one for what the session
+# observed, one for what a later item replaced, and one for the summary and handoff.
+pipeline = "base"
 
 [dream]
 interval_minutes = 30

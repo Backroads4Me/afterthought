@@ -18,6 +18,7 @@ from aft.filter import (
     FLAG_HEAD_CHARS,
     MAX_CHARS,
     MIN_SESSION_PROMPTS,
+    compact,
     filter_entries,
     prompt_count,
 )
@@ -808,3 +809,73 @@ def test_a_long_prompt_that_begins_with_a_marker_is_dropped_whole(cfg):
     # produced from a prompt this long.
     text = "aft off " + "secret planning note. " * 200
     assert kept([said(text, "e1"), answered("as you wish", "e2")], cfg) == []
+
+
+# The turns pipeline reads a compacted version of the same kept entries (BUILD-PLAN
+# F55): a tool call is one action line, a failed command's error lines stand below it,
+# and the assistant's code, diffs and tables are named rather than read. Everything
+# shown is verbatim archived text, so a quote the model takes from it is still found in
+# the evidence archive.
+
+
+def test_compact_keeps_a_prompt_verbatim():
+    assert compact(said("use port 8008, not 8000", "u1")) == "use port 8008, not 8000"
+
+
+def test_compact_renders_a_tool_call_as_its_first_line():
+    entry = output("  cargo test\n   Compiling aft v0.1.0\n    Finished test [unoptimized]\n", "t1")
+    assert compact(entry) == "cargo test"
+
+
+def test_compact_cuts_a_long_action_line_on_a_word_boundary():
+    line = "word " * 60
+    entry = output(line + "and more", "t1")
+    assert compact(entry) == "word " * 39 + "word" + CAP_MARKER
+
+
+def test_compact_keeps_a_failed_commands_error_lines():
+    entry = output(
+        "python -m pytest\n================= FAILED tests/test_x.py =================\n"
+        "E       assert 1 == 2\n",
+        "t1",
+        is_error=True,
+    )
+    lines = compact(entry).splitlines()
+    assert lines[0] == "python -m pytest"
+    assert "FAILED tests/test_x.py" in lines[1]
+    assert lines[-1] == "E       assert 1 == 2"
+
+
+def test_compact_drops_a_successful_commands_output():
+    entry = output("cargo test\nrunning 12 tests\ntest parse ... ok\n", "t1")
+    assert compact(entry) == "cargo test"
+
+
+def test_compact_of_an_answer_names_a_code_block():
+    entry = answered("before\n```python\nx = 1\ny = 2\n```\nafter", "a1")
+    assert compact(entry) == "before\n[code block]\nafter"
+
+
+def test_compact_of_an_answer_names_a_diff_block():
+    entry = answered("```diff\n- old line\n+ new line\n```", "a1")
+    assert compact(entry) == "[diff]"
+
+
+def test_compact_names_a_raw_diff_run():
+    entry = answered("the change:\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1,2 +1,2 @@\ndone", "a1")
+    assert compact(entry) == "the change:\n[diff]\ndone"
+
+
+def test_compact_of_an_answer_names_a_table():
+    entry = answered("| a | b |\n|---|---|\n| 1 | 2 |\n\nprose after", "a1")
+    assert compact(entry) == "[table]\n\nprose after"
+
+
+def test_compact_of_an_answer_without_blocks_is_verbatim():
+    entry = answered("`use` the small model; a - bullet is not a table", "a1")
+    assert compact(entry) == entry.text
+
+
+def test_compact_collapses_an_unclosed_fence_to_the_end():
+    entry = answered("prose\n```\nleft open at the cap", "a1")
+    assert compact(entry) == "prose\n[code block]"

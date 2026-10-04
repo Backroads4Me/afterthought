@@ -272,3 +272,119 @@ def _word_end(text: str, limit: int) -> int:
     head = text[:limit]
     cut = max(head.rfind(space) for space in " \t\n\v\f\r")
     return limit if cut < 0 else len(head[:cut].rstrip())
+
+
+# The turns pipeline (BUILD-PLAN F55) reads a compacted rendering of the same kept
+# entries, built after the filter has run: a tool call is one action line, a failed
+# command's error lines stand below it, and the assistant's code, diffs and tables are
+# named rather than read. Everything a model is shown is verbatim archived text, so a
+# quote it takes from this rendering is still found in the evidence archive.
+ACTION_CHARS = 200
+CODE_MARKER = "[code block]"
+DIFF_MARKER = "[diff]"
+TABLE_MARKER = "[table]"
+
+# A fenced block opens with ``` or ~~~; inline backticks never match, because a fence
+# starts the line.
+_FENCE = re.compile(r"^(```|~~~)")
+_TABLE_ROW = re.compile(r"^\|.*\|\s*$")
+# The row that divides a table's header from its body: pipes, dashes and colons.
+_TABLE_DIVIDER = re.compile(r"^\|?[\s:|-]*-[\s:|-]*$")
+# One line of a diff: a git or unified diff header, or a hunk's own header. A run of
+# two or more such lines is a diff; one line on its own is prose that happens to start
+# with a dash.
+_DIFF_LINE = re.compile(r"^(?:diff --git |@@ -|\+\+\+ |--- \S|Index: )")
+
+
+def compact(entry: Entry) -> str:
+    """One kept entry as the turns pipeline shows it to a model.
+
+    A prompt or an answer keeps its words, an answer with its fenced blocks and tables
+    named by a placeholder - the named text is never longer than what it stands for, so
+    no extra cap is needed. A tool entry is one action line, its first kept line within
+    ``ACTION_CHARS`` on a word boundary; when the command failed the rest of its kept
+    text stands below it as the error lines, and when it did not the output goes.
+    """
+    if entry.role == TOOL:
+        return _action(entry)
+    if entry.role == ASSISTANT:
+        return _collapsed(entry.text)
+    return entry.text
+
+
+def _action(entry: Entry) -> str:
+    """One tool entry as its action line, and, for a failed command, its error lines."""
+    lines = [line.strip() for line in entry.text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    action = _cut(lines[0], ACTION_CHARS)
+    if not entry.is_error:
+        return action
+    rest = "\n".join(lines[1:])
+    return f"{action}\n{rest}" if rest else action
+
+
+def _cut(text: str, limit: int) -> str:
+    """``text`` within ``limit`` characters, cut on a word boundary with the marker."""
+    end = _word_end(text, limit)
+    return text if end == len(text) else text[:end] + CAP_MARKER
+
+
+def _collapsed(text: str) -> str:
+    """An answer with its code, diffs and tables named by a placeholder."""
+    out: list[str] = []
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if _FENCE.match(line.lstrip()):
+            block = [line]
+            index += 1
+            while index < len(lines) and not _FENCE.match(lines[index].lstrip()):
+                block.append(lines[index])
+                index += 1
+            if index < len(lines):
+                block.append(lines[index])  # the closing fence
+                index += 1
+            out.append(_block_marker(block))
+            continue
+        end = _table_run(lines, index)
+        if end > index:
+            out.append(TABLE_MARKER)
+            index = end
+            continue
+        if _DIFF_LINE.match(line):
+            end = index
+            while end < len(lines) and _DIFF_LINE.match(lines[end]):
+                end += 1
+            if end - index >= 2:
+                out.append(DIFF_MARKER)
+                index = end
+                continue
+        out.append(line)
+        index += 1
+    return "\n".join(out)
+
+
+def _table_run(lines: list[str], start: int) -> int:
+    """Where a table that begins at ``start`` ends, or ``start`` when none does.
+
+    A table is two or more consecutive lines that begin and end with a pipe, one of
+    which divides its columns with dashes.
+    """
+    end = start
+    divided = False
+    while end < len(lines) and _TABLE_ROW.match(lines[end].strip()):
+        divided = divided or bool(_TABLE_DIVIDER.match(lines[end].strip()))
+        end += 1
+    return end if divided and end - start >= 2 else start
+
+
+def _block_marker(block: list[str]) -> str:
+    """The name for one collapsed block: a diff when its own words say so."""
+    info = block[0].strip()[3:].strip().lower()
+    if "diff" in info or "patch" in info:
+        return DIFF_MARKER
+    if any(_DIFF_LINE.match(line) for line in block[1:]):
+        return DIFF_MARKER
+    return CODE_MARKER
