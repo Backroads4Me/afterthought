@@ -1188,7 +1188,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   subject replaces an earlier one only when the user stated the change explicitly ("change of
   plan", "instead", "no longer"); speculation never replaces anything; the replaced item is
   dropped and named in the digest's report.
-  (5) Summary and handoff in their own call. The script sets the source tag from whose words
+  (5) Summary and handoff in their own call. An approval ("yes, do option B") is a decision
+  item carrying the exact words of the proposal it approves from BEFORE; the script verifies
+  the user's words in the turn and the proposal's words in the assistant entry the turn
+  answers, grounds the statement in both, and writes the line with both as sources
+  (DESIGN R2, ruling 2026-10-04). The script sets the source tag from whose words
   the quote is (`[stated]` only from a user turn) and verifies every quote as today.
   Scoring: `scripts/eval_digest.py score-turns` scores a run against key-turns.json (durable
   items found, wrong items, per writing model); the PR carries base and turns scores for the
