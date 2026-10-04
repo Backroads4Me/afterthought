@@ -209,7 +209,7 @@ def test_a_statement_naming_words_the_user_did_not_say_is_refused(session: Sessi
         {"items": []},
     )
     assert not wrote.facts
-    assert any("did not say" in d.reason for d in wrote.dropped)
+    assert any("never used" in d.reason for d in wrote.dropped)
 
 
 def test_later_means_later_in_the_session_not_in_the_list(session: Session):

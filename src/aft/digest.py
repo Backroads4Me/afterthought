@@ -910,7 +910,8 @@ def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
 _PLAIN = frozenset(
     "about after again agent always before being could every their there these those"
     " through under until using where which while would should project session user"
-    " users prefers prefer wants decided decides settled instead never".split()
+    " users prefers prefer wants decided decides settled instead never approve approves"
+    " approved approval agreed agrees requested requests".split()
 )
 
 
@@ -945,6 +946,7 @@ def _turn_facts(
     config: Config | None = None,
     session_id: str = "",
     answered: dict[str, str] | None = None,
+    session_text: str = "",
 ) -> tuple[list[dict], list[Dropped]]:
     """What the user settled, as facts the shared checks read, and the items refused here
     (BUILD-PLAN F55): a statement naming words neither the user's turn nor an approved
@@ -973,7 +975,7 @@ def _turn_facts(
         if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
             refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
             continue
-        said = turn.text if turn is not None and turn.role == USER else fact["quote"]
+        said = f"{turn.text if turn is not None else fact['quote']}\n{session_text}"
         proposal = item.get("proposal", "").strip()
         if proposal:
             before_id = (answered or {}).get(fact["entry"], "")
@@ -992,7 +994,7 @@ def _turn_facts(
         if missing:
             refused.append(
                 _refused(
-                    fact, f"the statement names words the user did not say: {', '.join(missing)}"
+                    fact, f"the statement names words the session never used: {', '.join(missing)}"
                 )
             )
             continue
@@ -1130,7 +1132,7 @@ def _digest_parts_turns(
     session observed, each its own call over the part compacted. Every item goes through
     ``verify`` as the base pipeline's facts do, so a quote must stand in its entry and
     ``[stated]`` must cite one of the user's turns; a turn item whose statement names words
-    the user did not say is refused first. Across the job, a later item replaces an earlier
+    the session never used is refused first. Across the job, a later item replaces an earlier
     one only where the user said so. A part whose summary is refused twice gives the page
     nothing and is recorded as the base pipeline records it; a refused turns or observed
     call is recorded beside the refused facts, since its part was still filed.
@@ -1139,6 +1141,9 @@ def _digest_parts_turns(
     order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
     last_refused = False
     before, before_id = "", ""
+    # Grounding reads the whole session: a statement may name what the session talked about,
+    # never a word it did not hold (BUILD-PLAN F52, F55).
+    session_text = "\n".join(entry.text for chunk in chunks for entry in chunk)
     for part in chunks:
         turns, before, before_id, answered = turn_blocks(part, before, before_id)
         try:
@@ -1177,6 +1182,7 @@ def _digest_parts_turns(
                         config=config,
                         session_id=session_id,
                         answered=answered,
+                        session_text=session_text,
                     ),
                 )
                 result.facts.extend(kept)
