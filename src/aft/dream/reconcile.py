@@ -11,7 +11,8 @@ quote, and the entry the quote comes from.
 The script judges nothing. It verifies each quote against its entry as R1 does, and a
 withdrawal passes only when the evidence may replace the line, under the same authority
 table and R4 a supersede answers to (DESIGN 6): a [stated] preference is withdrawn only
-on your own words, and the words have to be newer than the line's own date. Anything
+on your own words, and the words have to be newer than the line: a later day, or a later
+entry the same day than every source the line cites (F58). Anything
 less changes nothing and is reported. The step never touches a long-term line (it can
 name only lines it numbered from ``recent.md``), and a worker session's words never reach
 it: it reads only the newest session this run applied that was a primary session, and the
@@ -235,7 +236,9 @@ def _apply_answers(
             # An answer may name a line an earlier item already withdrew; the withdrawal
             # is counted once, where it happened.
             continue
-        refused = _refused_withdrawal(current, entry, agent, session_id, page_slug, today)
+        refused = _refused_withdrawal(
+            current, entry, agent, session_id, page_slug, today, _source_times(config, doc, current)
+        )
         if refused is not None:
             report.refused.append(refused)
             continue
@@ -268,6 +271,7 @@ def _refused_withdrawal(
     session_id: str,
     page_slug: str,
     today: str,
+    source_times: Sequence[datetime] = (),
 ) -> RefusedWithdrawal | None:
     """Why the rules refuse to withdraw ``current`` on ``entry``'s words, or None when
     they allow it.
@@ -297,7 +301,12 @@ def _refused_withdrawal(
     )
     if isinstance(outcome, rules.Apply):
         return None
-    if tagged not in rules.AUTHORITY.get(current.kind or "", ()):
+    authorized = tagged in rules.AUTHORITY.get(current.kind or "", ())
+    if authorized and quote_date == current.date and _later(entry.time, source_times):
+        # A recent line is withdrawn by a later entry of the same day (DESIGN 6, F58): the
+        # day R4 compares cannot tell this morning's line from this afternoon's word.
+        return None
+    if not authorized:
         reason = (
             f"a {current.kind} line is withdrawn only on your own words"
             if current.kind
@@ -306,6 +315,23 @@ def _refused_withdrawal(
     else:
         reason = f"the quote is from {quote_date}, not newer than the line's {current.date}"
     return RefusedWithdrawal(statement=current.statement, rule=outcome.rule, reason=reason)
+
+
+def _source_times(config: Config, doc: pagewrite.PageDoc, line: page.Fact) -> list[datetime]:
+    """When each source the line cites was written, as far as the archive holds them."""
+    sources = doc.sources
+    times = []
+    for ref in line.refs:
+        resource = str(sources.get(ref, {}).get("resource", ""))
+        when = evidence.entry_time(config, resource) if resource else None
+        if when is not None:
+            times.append(when)
+    return times
+
+
+def _later(when: datetime, source_times: Sequence[datetime]) -> bool:
+    """Whether ``when`` follows every source time; with none known, the day decides alone."""
+    return bool(source_times) and all(when > time for time in source_times)
 
 
 def prompt() -> str:
