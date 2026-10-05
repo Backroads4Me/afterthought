@@ -700,7 +700,8 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
    and the date of the newest
 6. one line per other page from the project's `index.md`, and one line per reference page
    linked to the project
-7. two lines on how to search and read
+7. a line saying that what you say now comes first and a memory line it contradicts is out
+   of date, then two lines on how to search and read
 
 Short-term memory comes after long-term memory, so it never crowds out what stays true when
 the block reaches its cap. Candidates, stale, superseded and withdrawn lines, and dream
