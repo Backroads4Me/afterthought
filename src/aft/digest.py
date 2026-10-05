@@ -888,24 +888,71 @@ def turn_label(block: str) -> str:
     return block[1 : block.index("]")]
 
 
+_MEMORY_FOOTER = re.compile(r"(?:^|\n)\s*(Memory:.*)$", re.IGNORECASE | re.DOTALL)
+_LOOK_HERE = re.compile(
+    r"(?:<!--\s*look[- ]here\s*-->|\[look[- ]here\]|(?:\b|^)look-here(?:\b|$))",
+    re.IGNORECASE,
+)
+
+
+def extract_pointer(text: str) -> str | None:
+    """Extract a decision pointer written by a working agent (BUILD-PLAN F57).
+
+    Returns a 'Memory:' footer or 'look-here' for a bare marker, or None.
+    """
+    mem = _MEMORY_FOOTER.search(text)
+    if mem is not None:
+        footer = mem.group(1).strip()
+        if footer[len("Memory:") :].strip():
+            return footer
+    if _LOOK_HERE.search(text):
+        return "look-here"
+    return None
+
+
 def turn_blocks(
     part: Sequence[Entry], before: str = "", before_id: str = ""
 ) -> tuple[list[str], str, str, dict[str, str]]:
     """The user turns of one part as the turns prompt reads them, and the assistant text the
-    next part's first turn answers (BUILD-PLAN F55).
+    next part's first turn answers (BUILD-PLAN F55, F57).
 
     Each turn is labelled as ``render`` labels its entry, so an item's ``turn`` names the
     entry its quote must come from. BEFORE is the end of the assistant message the turn
     answers, carried in from the part before when the turn opens a part, ERRORS the error
-    lines of commands that failed since the user last spoke, USER the user's own words.
+    lines of commands that failed since the user last spoke, USER the user's own words, and
+    POINTER holds any decision pointer (a Memory: footer or look-here marker) the agent
+    wrote when answering the turn, or (none).
     Returns one block per turn, the assistant text and entry the next part's first turn answers,
     and which assistant entry each user turn answers, by entry id.
     """
     answered: dict[str, str] = {}
     blocks: list[str] = []
     errors: list[str] = []
+    active_turn: tuple[str, Entry, str, str] | None = None
+    active_pointer: str | None = None
+
+    def _flush_active() -> None:
+        nonlocal active_turn, active_pointer
+        if active_turn is None:
+            return
+        lbl, ent, ctx, fld = active_turn
+        ptr_str = active_pointer if active_pointer else "(none)"
+        blocks.append(
+            f"[{lbl}] TURN {ent.time:%Y-%m-%d %A}\n"
+            f"BEFORE: {ctx}\n"
+            f"ERRORS:\n{fld}\n"
+            f"USER: {ent.text}\n"
+            f"POINTER: {ptr_str}"
+        )
+        active_turn = None
+        active_pointer = None
+
     for label, entry in labelled(part).items():
         if entry.role == ASSISTANT:
+            if active_turn is not None:
+                ptr = extract_pointer(entry.text)
+                if ptr and (active_pointer is None or ptr.startswith("Memory:")):
+                    active_pointer = ptr
             before = filtermod.compact(entry)
             before_id = entry.id
         elif entry.role == TOOL:
@@ -913,18 +960,16 @@ def turn_blocks(
             if shown:
                 errors.append(shown)
         elif entry.role == USER:
+            _flush_active()
             if before:
                 answered[entry.id] = before_id
             context = before[-BEFORE_CHARS:] if before else NO_REPLY
             failed = "\n".join(errors) if errors else "(none)"
-            blocks.append(
-                f"[{label}] TURN {entry.time:%Y-%m-%d %A}\n"
-                f"BEFORE: {context}\n"
-                f"ERRORS:\n{failed}\n"
-                f"USER: {entry.text}"
-            )
+            active_turn = (label, entry, context, failed)
             errors = []
             before, before_id = "", ""
+
+    _flush_active()
     return blocks, before, before_id, answered
 
 

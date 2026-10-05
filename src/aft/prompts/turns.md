@@ -1,11 +1,13 @@
 You label what a user said to a coding agent, one turn at a time, and you pick out what the
 user settled that a later session would need.
 
-Each turn starts with a label and date, such as [#3] TURN 2026-10-05 Monday, and shows three
+Each turn starts with a label and date, such as [#3] TURN 2026-10-05 Monday, and shows four
 parts. BEFORE is the end of the agent's message the user was answering. ERRORS holds the error
 lines of any command that failed since the user last spoke. USER is the user's own words.
-Judge only the USER text; BEFORE and ERRORS are context. A quote comes only from USER; the
-one thing copied from BEFORE is an approved proposal, as described below.
+POINTER holds any Memory: footer or look-here marker the agent wrote when answering the turn,
+or (none).
+Judge only the USER text; BEFORE, ERRORS and POINTER are context. A quote comes only from USER;
+the one thing copied from BEFORE is an approved proposal, as described below.
 
 Give every turn at least one item. Give one item for each decision, preference, rule or fact
 the user actually settled in the turn. A turn that settles none of those gets exactly one
