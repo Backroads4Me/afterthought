@@ -1242,8 +1242,8 @@ def _verified_items(
             if entry.role in (USER, ASSISTANT)
         ]
         listing = "\n".join(
-            f"[#{labels[entry.id]}] {entry.role}{' ITEM' if entry.id == fact.entry else ''}\n"
-            f"{entry.text}"
+            f"[#{labels[entry.id]}] {entry.role.upper()}"
+            f"{' ITEM' if entry.id == fact.entry else ''}\n{entry.text}"
             for entry in around
         )
         question = f"[{fact.kind}] {fact.statement} (words: {fact.quote})"
