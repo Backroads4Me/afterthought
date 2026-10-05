@@ -988,7 +988,12 @@ _WEEKDAY_RE = re.compile(
 )
 _ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _MONTH_DATE = re.compile(
-    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b"
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+_DAY_FIRST_DATE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
 )
 
 
@@ -1061,7 +1066,7 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
     statement's start. Plain words say how, not what, and are not checked. Punctuation around
     a word is set aside, and a word matches another form of itself on their shared first five
     letters. A date computed from a relative expression in ``said`` and the turn's ``when`` is
-    grounded when written in ISO (2026-10-06) or 'October 6' style (F59)."""
+    grounded when written in ISO (2026-10-06), 'October 6', or day-first (6 October) style (F59)."""
     if when is not None:
         allowed = relative_dates(said, when)
         if allowed:
@@ -1076,6 +1081,19 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
             for match in _MONTH_DATE.finditer(statement):
                 m = _MONTHS[match.group(1).lower()]
                 d = int(match.group(2))
+                y_str = match.group(3)
+                if y_str is not None:
+                    try:
+                        dt = date(int(y_str), m, d)
+                    except ValueError:
+                        continue
+                    if dt in allowed:
+                        spans.append(match.span())
+                elif any(dt.month == m and dt.day == d for dt in allowed):
+                    spans.append(match.span())
+            for match in _DAY_FIRST_DATE.finditer(statement):
+                d = int(match.group(1))
+                m = _MONTHS[match.group(2).lower()]
                 y_str = match.group(3)
                 if y_str is not None:
                     try:

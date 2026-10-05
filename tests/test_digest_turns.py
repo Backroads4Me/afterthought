@@ -527,7 +527,7 @@ def test_relative_dates_compute_for_each_relative_form():
 
 def test_ungrounded_accepts_iso_and_october_style_computed_dates():
     """BUILD-PLAN F59, R2: statement date is grounded when computed from turn's relative
-    expression, accepting ISO (2026-10-06) and 'October 6' style."""
+    expression, accepting ISO (2026-10-06), 'October 6', and '6 October' styles."""
     when = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
     said = "pause it until tomorrow"
 
@@ -539,10 +539,23 @@ def test_ungrounded_accepts_iso_and_october_style_computed_dates():
     assert digest.ungrounded("The backup is paused until October 6, 2026.", said, when) == []
     assert digest.ungrounded("The backup is paused until October 6th.", said, when) == []
 
+    # Lowercase month names
+    assert digest.ungrounded("The backup is paused until october 6.", said, when) == []
+    assert digest.ungrounded("The backup is paused until october 6th.", said, when) == []
+    assert digest.ungrounded("The backup is paused until october 6, 2026.", said, when) == []
+
+    # Day-first format (6 October)
+    assert digest.ungrounded("The backup is paused until 6 October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th of October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6 October 2026.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th of October, 2026.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6 october.", said, when) == []
+
 
 def test_ungrounded_refuses_date_not_implied_or_unsupported_format():
     """BUILD-PLAN F59: a date the turn does not imply is refused; formats other than ISO
-    and 'October 6' style stay ungrounded."""
+    and month/day styles stay ungrounded."""
     when = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
     said = "pause it until tomorrow"
 
@@ -551,6 +564,10 @@ def test_ungrounded_refuses_date_not_implied_or_unsupported_format():
     assert digest.ungrounded("The backup is paused until October 7.", said, when) == [
         "October",
         "7",
+    ]
+    assert digest.ungrounded("The backup is paused until 7 October.", said, when) == [
+        "7",
+        "October",
     ]
 
     # Unsupported date format (stays ungrounded)

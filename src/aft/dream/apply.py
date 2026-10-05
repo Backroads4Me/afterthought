@@ -385,15 +385,33 @@ def run_project(
                 )
                 return False
             grounding_texts: list[str] = []
+            when_candidates: list[datetime] = []
             for e in verified_evidence:
                 quote_text = str(sources_map.get(e.source, {}).get("quote", ""))
                 if e.yours:
                     turn = _turn_text(config, e.resource)
                     grounding_texts.append(turn if turn is not None else quote_text)
+                    when = evidence.entry_time(config, e.resource)
+                    if when is None and e.date:
+                        try:
+                            when = datetime.fromisoformat(e.date + "T00:00:00+00:00")
+                        except ValueError:
+                            when = None
+                    if when is not None:
+                        when_candidates.append(when)
                 else:
                     grounding_texts.append(quote_text)
             said = "\n".join(t for t in grounding_texts if t)
-            missing = digest.ungrounded(new_fact.statement, said)
+            if when_candidates:
+                missing = digest.ungrounded(new_fact.statement, said, when=when_candidates[0])
+                for when in when_candidates[1:]:
+                    if not missing:
+                        break
+                    cand_missing = digest.ungrounded(new_fact.statement, said, when=when)
+                    if len(cand_missing) < len(missing):
+                        missing = cand_missing
+            else:
+                missing = digest.ungrounded(new_fact.statement, said)
             if missing:
                 report.rejected.append(
                     RejectedFact(
