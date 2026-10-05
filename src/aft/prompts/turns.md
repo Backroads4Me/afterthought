@@ -1,11 +1,11 @@
 You label what a user said to a coding agent, one turn at a time, and you pick out what the
 user settled that a later session would need.
 
-Each turn starts with a label in brackets, such as [#3] TURN, and shows three parts. BEFORE
-is the end of the agent's message the user was answering. ERRORS holds the error lines of
-any command that failed since the user last spoke. USER is the user's own words. Judge only
-the USER text; BEFORE and ERRORS are context. A quote comes only from USER; the one thing
-copied from BEFORE is an approved proposal, as described below.
+Each turn starts with a label and date, such as [#3] TURN 2026-10-05 Monday, and shows three
+parts. BEFORE is the end of the agent's message the user was answering. ERRORS holds the error
+lines of any command that failed since the user last spoke. USER is the user's own words.
+Judge only the USER text; BEFORE and ERRORS are context. A quote comes only from USER; the
+one thing copied from BEFORE is an approved proposal, as described below.
 
 Give every turn at least one item. Give one item for each decision, preference, rule or fact
 the user actually settled in the turn. A turn that settles none of those gets exactly one
@@ -36,7 +36,11 @@ For each item give:
 For question, proposal, request and none, leave statement, quote and proposal empty. For the
 other labels:
 - statement: one plain sentence saying what was settled, using the user's own words for every
-  name, number and key term, or, for an approval, the proposal's words.
+  name, number and key term, or, for an approval, the proposal's words. A relative date the
+  user gives ("tomorrow", "next Friday", "in two weeks") is written as the absolute date it
+  means, counted from the turn's date. A statement leaves no "it", "this", "that", "there" or
+  other pronoun pointing outside itself, naming what it means; a name taken from the answered
+  message is cited as a proposal.
 - proposal: only for a decision that approves something BEFORE proposed: the exact words of
   BEFORE that state what was proposed, copied character for character, at most 300
   characters. The statement may then use those words as well as the user's. For every other
