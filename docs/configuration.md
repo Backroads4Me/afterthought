@@ -24,7 +24,8 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 | `model.endpoint` | `"http://localhost:8000/v1"` | The endpoint's base URL. |
 | `model.name` | `""` | The model name to request. |
 | `model.api_key_env` | `""` | The name of an environment variable holding the endpoint's API key, sent as a bearer token. afterthought stores the variable's name, never the key. Empty means no key. For the background timer, put the variable in `~/.afterthought/env` (mode 600). |
-| `model.extra_body` | `{}` | Fields added to every request, for what one endpoint needs. A reasoning model served by vLLM that spends its whole answer thinking is told not to with `extra_body = { chat_template_kwargs = { enable_thinking = false } }`. It may not set `model`, `messages`, `max_tokens` or `response_format`. |
+| `model.temperature` | `0` | How freely the model picks among likely words, from 0 to 2. At 0 it takes the likeliest word every time, so the same session gives the same memory. |
+| `model.extra_body` | `{}` | Fields added to every request, for what one endpoint needs. A reasoning model served by vLLM that spends its whole answer thinking is told not to with `extra_body = { chat_template_kwargs = { enable_thinking = false } }`. It may not set `model`, `messages`, `max_tokens`, `temperature` or `response_format`. |
 
 ## `[capture]`
 

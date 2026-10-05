@@ -27,6 +27,9 @@ class ModelConfig:
     endpoint: str = "http://localhost:8000/v1"
     name: str = ""
     api_key_env: str = ""
+    # How freely the model picks among likely words. 0 takes the likeliest every time, so
+    # the same session gives the same memory and a sampling accident gives none.
+    temperature: float = 0.0
     # Fields merged into every request body, for what one endpoint needs and another does
     # not: turning a reasoning model's thinking off, for example. The fields aft sets itself
     # are refused here, so this can add to a request and never change what aft asks for.
@@ -34,7 +37,9 @@ class ModelConfig:
 
 
 # The request fields aft sets itself, which model.extra_body may not name.
-MODEL_REQUEST_FIELDS = frozenset({"model", "messages", "max_tokens", "response_format"})
+MODEL_REQUEST_FIELDS = frozenset(
+    {"model", "messages", "max_tokens", "response_format", "temperature"}
+)
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,8 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         raise ConfigError(
             f"{path}: model.extra_body may not set {', '.join(taken)}; aft sets those itself"
         )
+    if not 0 <= settings.model.temperature <= 2:
+        raise ConfigError(f"{path}: model.temperature must be from 0 to 2")
     if settings.digest.pipeline not in DIGEST_PIPELINES:
         raise ConfigError(
             f"{path}: digest.pipeline must be one of {', '.join(DIGEST_PIPELINES)},"
@@ -207,6 +214,10 @@ def _coerce(hint, value, name: str):
         if isinstance(value, bool) or not isinstance(value, int):
             raise ConfigError(f"{name} must be an integer")
         return value
+    if hint is float:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ConfigError(f"{name} must be a number")
+        return float(value)
     if hint is str:
         if not isinstance(value, str):
             raise ConfigError(f"{name} must be a string")
@@ -296,6 +307,9 @@ name = ""
 # aft stores the name of a key and never the key itself. Empty means the endpoint
 # takes no key.
 # api_key_env = ""
+# How freely the model picks among likely words: 0 takes the likeliest every time, so
+# the same session gives the same memory.
+temperature = 0
 # Fields added to every request, for what this endpoint needs. A reasoning model served
 # by vLLM that spends its whole answer thinking is told not to with:
 # extra_body = { chat_template_kwargs = { enable_thinking = false } }

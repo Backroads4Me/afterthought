@@ -93,6 +93,7 @@ def complete_json(
             {"role": "user", "content": user},
         ],
         "max_tokens": max_tokens,
+        "temperature": config.settings.model.temperature,
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": SCHEMA_NAME, "schema": schema},

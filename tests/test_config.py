@@ -67,6 +67,10 @@ def test_the_digest_pipeline_is_configurable(home):
         ("vault = \n", "config.toml"),
         ("[model]\nextra_body = 'x'\n", "model.extra_body must be a table"),
         ("[model]\nextra_body = { max_tokens = 10 }\n", "model.extra_body may not set max_tokens"),
+        ("[model]\nextra_body = { temperature = 1 }\n", "model.extra_body may not set temperature"),
+        ("[model]\ntemperature = 'low'\n", "model.temperature must be a number"),
+        ("[model]\ntemperature = true\n", "model.temperature must be a number"),
+        ("[model]\ntemperature = 3\n", "model.temperature must be from 0 to 2"),
     ],
 )
 def test_invalid_config(home, text, message):
@@ -174,3 +178,9 @@ def test_model_extra_body_is_read_as_a_table(home):
     assert configmod.load().settings.model.extra_body == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
+
+
+def test_model_temperature_defaults_to_zero_and_reads_a_number(home):
+    assert configmod.load().settings.model.temperature == 0.0
+    (home / "config.toml").write_text("[model]\ntemperature = 0.7\n")
+    assert configmod.load().settings.model.temperature == 0.7

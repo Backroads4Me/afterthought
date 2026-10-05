@@ -69,6 +69,7 @@ def test_request_carries_the_prompt_the_cap_and_the_schema(serve):
     sent = fake.requests[0]
     assert sent["model"] == "fake-model"
     assert sent["max_tokens"] == 128
+    assert sent["temperature"] == 0.0
     assert sent["messages"] == [
         {"role": "system", "content": "You answer briefly."},
         {"role": "user", "content": "Is it working?"},
