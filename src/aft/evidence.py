@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft import redact
+from aft import db, redact
 from aft.config import Config
 from aft.readers import Entry
 
@@ -41,9 +41,9 @@ EVIDENCE_NAME = "evidence.sqlite"
 # waited out rather than failed on: `aft trace` runs in front of a person, and whoever holds
 # the write lock is the digest archiving a chunk or one night's purge. SQLite's connect
 # `timeout` is this wait; a PRAGMA of the same name takes no parameter to pass it in.
-BUSY_TIMEOUT_SECONDS = 5.0
+BUSY_TIMEOUT_SECONDS = db.BUSY_TIMEOUT_SECONDS
 
-WAL_MODE = "wal"
+WAL_MODE = db.WAL_MODE
 
 # Whitespace runs, and the single space they become: `find_quote` compares text with its
 # line wrapping and spacing set aside, and nothing else (DESIGN 8, digest).
@@ -500,15 +500,14 @@ def _writing(config: Config) -> Iterator[sqlite3.Connection]:
     path = _db_path(config)
     conn = _connect(config)
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.commit()
-    except sqlite3.Error as exc:
-        conn.rollback()
-        raise EvidenceError(f"cannot write the evidence archive at {path}: {exc}") from exc
-    except BaseException:
-        conn.rollback()
-        raise
+        with db.write_transaction(
+            conn,
+            path=path,
+            error_factory=lambda msg, exc: EvidenceError(
+                f"cannot write the evidence archive at {path}: {exc}"
+            ),
+        ):
+            yield conn
     finally:
         conn.close()
 
@@ -538,7 +537,7 @@ def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
     another process is reading cannot finish. That is reported: pages are still sitting
     outside the archive file then, and returning quietly would say they were not.
     """
-    busy, frames, moved = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    busy, frames, moved = db.wal_checkpoint_truncate(conn)
     if busy:
         raise EvidenceError(
             f"the write-ahead log of {path} is held open by another reader:"
@@ -563,7 +562,7 @@ def _connect(config: Config) -> sqlite3.Connection:
     conn = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
+        conn = db.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
         conn.execute("PRAGMA secure_delete = ON")
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
@@ -586,7 +585,7 @@ def _db_path(config: Config) -> Path:
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
-    return conn.execute("PRAGMA journal_mode").fetchone()[0]
+    return db.journal_mode(conn)
 
 
 def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
@@ -602,7 +601,10 @@ def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
     a writer, so a file that will not do it says so rather than quietly archiving into
     another journal.
     """
-    conn.execute("PRAGMA journal_mode = wal")
-    mode = _journal_mode(conn)
-    if mode != WAL_MODE:
-        raise EvidenceError(f"{path} stays in {mode} mode, not {WAL_MODE}")
+    db.enter_wal(
+        conn,
+        timeout_seconds=BUSY_TIMEOUT_SECONDS,
+        path=path,
+        error_factory=EvidenceError,
+        get_journal_mode=_journal_mode,
+    )

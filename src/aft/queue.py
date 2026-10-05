@@ -24,14 +24,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import time
 from collections.abc import Collection, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from aft import keys
+from aft import db, keys
 from aft.config import Config, is_excluded, is_worker
 from aft.events import SessionEvent
 from aft.ids import new_id
@@ -48,11 +47,11 @@ class QueueError(Exception):
 
 # The journal mode the queue is kept in: one writer and many readers at once, which is
 # what lets a hook write while the digest works (DESIGN 8).
-WAL_MODE = "wal"
+WAL_MODE = db.WAL_MODE
 
 # A writer gives up on the lock only after a long wait, because a row the queue refuses
 # is capture work no hook will hand over again.
-BUSY_TIMEOUT_MS = 5_000
+BUSY_TIMEOUT_MS = db.BUSY_TIMEOUT_MS
 
 # How long enqueue waits for the queue's write lock on the hook path. The hook must
 # return within its 2-second budget even when another process holds the write lock,
@@ -1006,12 +1005,8 @@ def _writing(config: Config, *, busy_timeout_ms: int | None = None):
     """
     conn = _connect(config, busy_timeout_ms=busy_timeout_ms)
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        yield conn
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
+        with db.write_transaction(conn):
+            yield conn
     finally:
         conn.close()
 
@@ -1032,7 +1027,7 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
     path = config.home / QUEUE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     timeout = BUSY_TIMEOUT_MS if busy_timeout_ms is None else int(busy_timeout_ms)
-    conn = sqlite3.connect(path, isolation_level=None)
+    conn = db.connect(path, timeout=timeout / 1000.0)
     conn.execute(f"PRAGMA busy_timeout = {timeout}")
     conn.execute("PRAGMA synchronous = NORMAL")
     if _journal_mode(conn) != WAL_MODE:
@@ -1062,7 +1057,7 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
-    return conn.execute("PRAGMA journal_mode").fetchone()[0]
+    return db.journal_mode(conn)
 
 
 def _enter_wal(conn: sqlite3.Connection, *, timeout_ms: int = BUSY_TIMEOUT_MS) -> None:
@@ -1076,17 +1071,14 @@ def _enter_wal(conn: sqlite3.Connection, *, timeout_ms: int = BUSY_TIMEOUT_MS) -
     A mode that never arrives inside the busy timeout is a queue no writer can count
     on, so it is reported rather than waited on without end.
     """
-    deadline = time.monotonic() + timeout_ms / 1000
-    while _journal_mode(conn) != WAL_MODE and time.monotonic() < deadline:
-        try:
-            conn.execute(f"PRAGMA journal_mode = {WAL_MODE}")
-        except sqlite3.OperationalError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.002)
-    if _journal_mode(conn) != WAL_MODE:
-        # A pragma that refuses by answering with the mode it kept sets no error.
-        raise QueueError(f"queue stays in {_journal_mode(conn)} mode, not {WAL_MODE}")
+    db.enter_wal(
+        conn,
+        timeout_seconds=timeout_ms / 1000.0,
+        error_factory=lambda msg: QueueError(
+            f"queue stays in {_journal_mode(conn)} mode, not {WAL_MODE}"
+        ),
+        get_journal_mode=_journal_mode,
+    )
 
 
 def _job(conn: sqlite3.Connection, row: tuple) -> Job:
