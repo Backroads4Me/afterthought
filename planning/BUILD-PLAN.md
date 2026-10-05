@@ -1127,19 +1127,23 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `[stated]` decision ("approved sending smaller subsections", quoting "Should we send
   smaller subsections...?"), a rule the user replaced (F51) left standing beside its
   replacement, a line made false by a later change (`aft settle` exists), and a statement
-  naming a word its quote does not hold ("zebrafish" for "zebrafjord"). Script checks, the
-  same in the digest and the dream: (1) R2: a fact whose quote holds a question mark is never
-  `[stated]`; it is refused as stated and kept, if at all, as `[suggested]`. (2) Grounding: a
-  statement's distinctive words (identifiers, words with digits, underscores, slashes or
-  backticks, and words of seven letters or more outside a short common-word list) must each
-  appear in the fact's quote or in the entry it cites; a statement that names one that does
-  not is refused and reported. Prompts: the digest and decide prompts say a question, a
-  proposal or a request from the user is never a decision or a preference; the decide
-  prompt says a new fact that changes how something is done, which an existing line
-  describes, supersedes that line rather than adding beside it. Tests: each of the four
-  real cases as a fixture (the question, the replaced rule, the made-false line, the
-  ungrounded word), each refused or superseded; a stated fact with no question mark and
-  grounded words still passes. Review checkpoint: yes (prompts, rules).
+  naming a word its quote does not hold ("zebrafish" for "zebrafjord"). The turns digest
+  (F55) already refuses, for its own items, a quote holding a question mark and a statement
+  naming a name or number neither the user's turn nor a cited proposal holds
+  (`digest.ungrounded`, DESIGN R2). F52 makes those checks the same everywhere a `[stated]`
+  fact is made: (1) the question check moves into `digest.verify`, which both pipelines
+  share; (2) the base pipeline grounds a `[stated]` statement's names and numbers in the
+  entry it cites, with the same `digest.ungrounded`; (3) the dream's decide step refuses a
+  new `[stated]` fact whose statement fails either check against its verified quotes, and
+  reports it. Prompts: the base digest and decide prompts say a question, a proposal or a
+  request from the user is never a decision or a preference; the decide prompt says a new
+  fact that changes how something is done, which an existing line describes, supersedes
+  that line rather than adding beside it. Tests: the question, the replaced rule and the
+  made-false line as fixtures, each refused or superseded; a statement naming a name or
+  number its quote does not hold is refused; a stated fact with no question mark and
+  grounded names still passes. Known limit: grounding checks names and numbers only (R2), so
+  a plain word misread ("zebrafish" for "zebrafjord") is not caught.
+  Review checkpoint: yes (prompts, rules).
 - **F53 A directory excluded alone** (ruling 2026-10-04). DESIGN 7, 12. `~/src` holds every
   repository, so `capture.exclude_paths` (which reaches everything below a path) cannot
   exclude it, and the project `src` the backfill registered at it claims every plain
