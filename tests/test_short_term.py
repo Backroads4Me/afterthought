@@ -526,6 +526,36 @@ def test_a_lifted_line_the_decision_skips_leaves_recent_and_is_reported(cfg, fak
     assert "The hook rewrite is paused." in [skip.statement for skip in rep.skips]
 
 
+def test_a_lifted_line_the_decide_step_refuses_stays_in_recent(cfg, fake):
+    session_digest(cfg, 1)
+    for n in range(2, 6):
+        session_digest(cfg, n)
+    for session in ("s1", "s6"):
+        entry = Entry(
+            id=f"e_{session}",
+            time=NOW,
+            role=USER,
+            text="Should we pause the hook rewrite?",
+            is_error=False,
+        )
+        evidence.store(cfg, agent="c", session_id=session, project_id=None, entries=[entry])
+    seed_recent(
+        cfg,
+        ["- The hook rewrite is paused. [stated] 2026-10-01 [^r0] [^r1]"],
+        [
+            source("r0", "s1", "Should we pause the hook rewrite?", entry="e_s1"),
+            source("r1", "s6", "Should we pause the hook rewrite?", entry="e_s6"),
+        ],
+    )
+    unrelated_waiting(cfg, 6)
+    fake.script = [reply("skip"), LINES_REPLY]
+    rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    assert "The hook rewrite is paused." in recent_text(cfg)
+    assert "The hook rewrite is paused." not in overview_text(cfg)
+    assert not any(lifted.statement == "The hook rewrite is paused." for lifted in rep.lifted)
+    assert any(r.rule == "R2" and "the quote is a question" in r.reason for r in rep.rejected)
+
+
 # --------------------------------------------------------------------- the rules
 
 

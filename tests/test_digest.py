@@ -449,6 +449,65 @@ def test_stated_on_a_users_own_entry_is_kept(session: Session):
     assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
 
 
+def test_base_digest_refuses_quoted_question_for_stated_fact(session: Session):
+    """BUILD-PLAN F52: a quote holding a question mark is never [stated]."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store the digest at session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store the digest at session end.",
+                quote="Should we store the digest at session end?",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_ungrounded_statement_for_stated_fact(session: Session):
+    """BUILD-PLAN F52: the base pipeline grounds stated names and numbers in the entry."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs in PostgreSQL.",
+                quote="Capture runs at session end.",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].endswith("holds: PostgreSQL") for d in dropped)
+
+
+def test_base_digest_keeps_grounded_stated_fact(session: Session):
+    """BUILD-PLAN F52: a stated fact with no question mark and grounded names passes."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs at session end.",
+                quote="Capture runs at session end.",
+                entry="e1",
+            )
+        ),
+    )
+    assert len(wrote.facts) == 1
+    assert wrote.facts[0].statement == "Capture runs at session end."
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
 @pytest.mark.parametrize(
     ("broken", "reason"),
     [
@@ -3209,6 +3268,15 @@ def test_the_digest_prompt_narrows_stated_to_the_users_own_assertions():
     assert "Text the user pasted" in words and "is not the user's own words" in words
 
 
+def test_the_digest_prompt_says_questions_proposals_requests_are_not_decisions():
+    """F52: a question, proposal or request from the user is never a decision or preference."""
+    words = prompt_words()
+    assert (
+        "A question, a proposal or a request from the user is never a decision or a preference."
+        in words
+    )
+
+
 def test_the_digest_prompt_sends_session_progress_to_the_handoff():
     """DESIGN 6: what a session did is no fact; the summary and handoff carry it."""
     assert (
@@ -3362,3 +3430,14 @@ def test_a_digest_of_an_unregistered_directory_carries_its_path(initialized: Con
 
     unfiled = frontmatter(keys.Resolution(keys.NONE, cfg.vault))
     assert "project" not in unfiled and "path" not in unfiled
+
+
+def test_grounding_known_limit_plain_words_not_caught():
+    """BUILD-PLAN F52: grounding checks names and numbers only, so plain words are not caught."""
+    # Plain words say how, not what, and are not checked (e.g. zebrafish for zebrafjord).
+    assert digest.ungrounded("The aquarium has zebrafish.", "The aquarium has zebrafjord.") == []
+    # Names and numbers are checked.
+    assert digest.ungrounded("The aquarium has PostgreSQL.", "The aquarium has SQLite.") == [
+        "PostgreSQL"
+    ]
+    assert digest.ungrounded("Configure port 8080.", "Configure port 9090.") == ["8080"]

@@ -1053,10 +1053,6 @@ def _turn_facts(
         if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
             refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
             continue
-        if "?" in fact["quote"]:
-            # BUILD-PLAN F52: a quote holding a question mark is never [stated].
-            refused.append(_refused(fact, "the quote is a question, never a settled item"))
-            continue
         said = turn.text if turn is not None else fact["quote"]
         proposal = item.get("proposal", "").strip()
         if proposal:
@@ -1559,6 +1555,10 @@ def verify(
             continue
         # A label is the prompt's name for the entry; what is recorded is the entry's own id.
         fact = {**fact, "entry": entry.id}
+        if fact["source"] == "stated" and "?" in fact["quote"]:
+            # BUILD-PLAN F52: a quote holding a question mark is never [stated].
+            dropped.append(_refused(fact, "the quote is a question, never a settled item"))
+            continue
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
@@ -1574,6 +1574,20 @@ def verify(
                 _refused(fact, "[stated] quotes a paste or a command block, not the user's words")
             )
             continue
+        if fact["source"] == "stated":
+            said = entry.text
+            if "proposal" in fact and fact["proposal"]:
+                said = f"{said}\n{fact['proposal'][1]}"
+            missing = ungrounded(fact["statement"], said)
+            if missing:
+                dropped.append(
+                    _refused(
+                        fact,
+                        "the statement names words neither the user's turn nor a proposal holds: "
+                        + ", ".join(missing),
+                    )
+                )
+                continue
         if fact["kind"] not in KIND_SECTIONS.values():
             dropped.append(_refused(fact, f"unknown kind {fact['kind']!r}"))
             continue
