@@ -2100,14 +2100,8 @@ def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
         for index, line in enumerate(lines[start:stop], start=start)
         if line.strip() in ("```text", "```")
     ]
-    expected = "".join(lines[fences[0] + 1 : fences[1]])
-    f52 = (
-        "A question, a proposal or a request from the user is never a\n  decision or a preference. "
-    )
-    assert digest.prompt_text() in (
-        expected,
-        expected.replace("  These are never stated. ", f"  These are never stated. {f52}"),
-    )
+    assert len(fences) == 2, "the plan's prompt block is not the fenced pair this reads"
+    assert digest.prompt_text() == "".join(lines[fences[0] + 1 : fences[1]])
 
 
 def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():

@@ -471,18 +471,7 @@ def test_the_decide_prompt_shipped_is_the_plans_text():
     lines = plan.read_text(encoding="utf-8").splitlines(keepends=True)
     start = next(i for i, line in enumerate(lines) if "(`src/aft/prompts/decide.md`)" in line)
     fences = [i for i in range(start, len(lines)) if lines[i].strip() in ("```text", "```")][:2]
-    expected = "".join(lines[fences[0] + 1 : fences[1]])
-    f52_q = (
-        "A question, a proposal or a request from the user is never a\ndecision or a preference.\n"
-    )
-    f52_s = (
-        "A new fact that changes how something is done, which an existing line\n"
-        "  describes, supersedes that line rather than adding beside it. "
-    )
-    expected_f52 = expected.replace(
-        "documents already say.\n", f"documents already say. {f52_q}"
-    ).replace("Name the line.", f"{f52_s}Name the line.", 1)
-    assert decide.prompt() in (expected, expected_f52)
+    assert decide.prompt() == "".join(lines[fences[0] + 1 : fences[1]])
 
 
 def test_the_decide_prompt_says_questions_proposals_requests_are_not_decisions():
