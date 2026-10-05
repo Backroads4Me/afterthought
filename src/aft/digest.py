@@ -308,7 +308,6 @@ def summary_schema() -> dict:
     return _shipped_json(SUMMARY_SCHEMA_FILE)
 
 
-
 def verify_prompt_text() -> str:
     """The item check's prompt, shipped beside the module (BUILD-PLAN F56)."""
     return _shipped_text(VERIFY_PROMPT_FILE)

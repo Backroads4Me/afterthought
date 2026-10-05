@@ -51,7 +51,7 @@ def test_digest_verify_items_defaults_off(home):
 
 def test_digest_verify_settings_read_from_config(home):
     (home / "config.toml").write_text(
-        '[digest]\nverify_items = true\n'
+        "[digest]\nverify_items = true\n"
         'verifier_endpoint = "http://localhost:9000/v1"\nverifier_model = "small"\n'
     )
     settings = configmod.load().settings.digest
