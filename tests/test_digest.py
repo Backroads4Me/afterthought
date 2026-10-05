@@ -449,6 +449,65 @@ def test_stated_on_a_users_own_entry_is_kept(session: Session):
     assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
 
 
+def test_base_digest_refuses_quoted_question_for_stated_fact(session: Session):
+    """BUILD-PLAN F52: a quote holding a question mark is never [stated]."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store the digest at session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store the digest at session end.",
+                quote="Should we store the digest at session end?",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_ungrounded_statement_for_stated_fact(session: Session):
+    """BUILD-PLAN F52: the base pipeline grounds stated names and numbers in the entry."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs in PostgreSQL.",
+                quote="Capture runs at session end.",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].endswith("holds: PostgreSQL") for d in dropped)
+
+
+def test_base_digest_keeps_grounded_stated_fact(session: Session):
+    """BUILD-PLAN F52: a stated fact with no question mark and grounded names passes."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs at session end.",
+                quote="Capture runs at session end.",
+                entry="e1",
+            )
+        ),
+    )
+    assert len(wrote.facts) == 1
+    assert wrote.facts[0].statement == "Capture runs at session end."
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
 @pytest.mark.parametrize(
     ("broken", "reason"),
     [
