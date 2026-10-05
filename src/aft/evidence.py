@@ -270,6 +270,23 @@ def forget(config: Config, session_id: str) -> None:
     _release(config, rewrite=bool(removed))
 
 
+def entry_time(config: Config, resource: str) -> datetime | None:
+    """When the entry an ``aft://session/<agent>/<session>#<entry>`` resource names was
+    written, or None when the resource names no archived entry."""
+    uri = resource.removeprefix("aft://session/")
+    if uri == resource or "#" not in uri or not _db_path(config).exists():
+        return None
+    path, entry_id = uri.split("#", 1)
+    agent, _, session_id = path.rpartition("/")
+    with _reading(config) as conn:
+        row = conn.execute(
+            "SELECT time FROM evidence WHERE session_id = ? AND entry_id = ?"
+            + (" AND agent = ?" if agent else ""),
+            (session_id, entry_id, agent) if agent else (session_id, entry_id),
+        ).fetchone()
+    return datetime.fromisoformat(row[0]) if row is not None else None
+
+
 def session_info(config: Config, session_id: str) -> tuple[str, str | None] | None:
     """The agent and project id of an archived session, or None if not archived."""
     session_id = _require_name(session_id, "session id")

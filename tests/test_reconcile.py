@@ -721,3 +721,55 @@ def test_the_prompt_and_schema_ship():
     item = schema["properties"]["lines"]["items"]
     assert item["required"] == ["line", "quote", "entry"]
     assert item["properties"]["quote"]["maxLength"] == 300
+
+
+def _same_day(cfg, fake_endpoint, line_at: datetime, said_at: datetime) -> apply.ProjectRunReport:
+    """A recent line from today's earlier session s9, and session s10's words about it."""
+    session_digest(cfg, 10, waiting=True)
+    seed_recent(
+        cfg,
+        [f"- The hook rewrite is paused. [observed] {TODAY} [^r0]"],
+        [source("r0", "s9", "The hook rewrite is paused.", entry="e9")],
+    )
+    paused = Entry(
+        id="e9", time=line_at, role=ASSISTANT, text="The hook rewrite is paused.", is_error=False
+    )
+    evidence.store(cfg, agent="c", session_id="s9", project_id=None, entries=[paused])
+    resumed = Entry(
+        id="e70", time=said_at, role=USER, text="The hook rewrite is resumed.", is_error=False
+    )
+    evidence.store(cfg, agent="c", session_id="s10", project_id=None, entries=[resumed])
+    fake_endpoint.script = [answer(1, "The hook rewrite is resumed.", "#1")]
+    return schedule.run(cfg, now=NOW).reports[SLUG]
+
+
+def test_a_later_entry_the_same_day_withdraws_a_recent_line(cfg, fake):
+    """F58: this morning's line is withdrawn by this afternoon's words, though R4's day
+    is the same."""
+    rep = _same_day(cfg, fake, NOW - timedelta(hours=6), NOW - timedelta(hours=1))
+    assert [w.statement for w in rep.withdrawn] == ["The hook rewrite is paused."]
+    assert rep.refused == []
+
+
+def test_an_earlier_entry_the_same_day_withdraws_nothing(cfg, fake):
+    rep = _same_day(cfg, fake, NOW - timedelta(hours=1), NOW - timedelta(hours=6))
+    assert rep.withdrawn == []
+    assert [r.rule for r in rep.refused] == ["R4"]
+
+
+def test_a_source_the_archive_does_not_hold_leaves_the_day_to_decide(cfg, fake):
+    """With no source time to compare, the same day is not newer (R4's day alone)."""
+    session_digest(cfg, 10, waiting=True)
+    seed_recent(
+        cfg,
+        [f"- The hook rewrite is paused. [observed] {TODAY} [^r0]"],
+        [source("r0", "s9", "The hook rewrite is paused.", entry="e9")],
+    )
+    resumed = Entry(
+        id="e70", time=NOW, role=USER, text="The hook rewrite is resumed.", is_error=False
+    )
+    evidence.store(cfg, agent="c", session_id="s10", project_id=None, entries=[resumed])
+    fake.script = [answer(1, "The hook rewrite is resumed.", "#1")]
+    rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    assert rep.withdrawn == []
+    assert [r.rule for r in rep.refused] == ["R4"]
