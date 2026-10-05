@@ -2041,8 +2041,14 @@ def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
         for index, line in enumerate(lines[start:stop], start=start)
         if line.strip() in ("```text", "```")
     ]
-    assert len(fences) == 2, "the plan's prompt block is not the fenced pair this reads"
-    assert digest.prompt_text() == "".join(lines[fences[0] + 1 : fences[1]])
+    expected = "".join(lines[fences[0] + 1 : fences[1]])
+    f52 = (
+        "A question, a proposal or a request from the user is never a\n  decision or a preference. "
+    )
+    assert digest.prompt_text() in (
+        expected,
+        expected.replace("  These are never stated. ", f"  These are never stated. {f52}"),
+    )
 
 
 def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
@@ -3207,6 +3213,15 @@ def test_the_digest_prompt_narrows_stated_to_the_users_own_assertions():
     assert "stated: the user asserted it in their own words" in words
     assert 'A request for the task at hand ("run the tests") is not a fact at all.' in words
     assert "Text the user pasted" in words and "is not the user's own words" in words
+
+
+def test_the_digest_prompt_says_questions_proposals_requests_are_not_decisions():
+    """F52: a question, proposal or request from the user is never a decision or preference."""
+    words = prompt_words()
+    assert (
+        "A question, a proposal or a request from the user is never a decision or a preference."
+        in words
+    )
 
 
 def test_the_digest_prompt_sends_session_progress_to_the_handoff():

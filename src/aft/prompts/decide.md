@@ -12,13 +12,15 @@ A fact earns its place in memory only when a future session would make a mistake
 the user again, without it. Never a fact, long or short term: the status of a pull
 request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
-documents already say.
+documents already say. A question, a proposal or a request from the user is never a
+decision or a preference.
 
 Choose one action:
 - add: the fact is new; no existing line says the same thing or contradicts it.
 - confirm: an existing line already says the same thing. Name it.
 - supersede: the fact replaces an existing line because the thing it describes has
-  changed. Name the line.
+  changed. A new fact that changes how something is done, which an existing line
+  describes, supersedes that line rather than adding beside it. Name the line.
 - conflict: the fact and an existing line say different things about the same thing, so
   both cannot be true, and it is not clear that the thing has changed. Name the line.
 - skip: the fact is not worth keeping: it fails that test, is on the never-a-fact list
