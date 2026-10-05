@@ -13,7 +13,7 @@ from datetime import UTC
 
 from aft import config as configmod
 from aft import digest
-from aft.config import Config
+from aft.config import Config, Settings
 from aft.readers import ASSISTANT, TOOL, USER, Entry
 from fakes.model_server import FakeEndpoint
 from test_digest import (
@@ -643,9 +643,7 @@ def test_a_refused_check_drops_the_item_and_the_job_still_stands(session: Sessio
     )
 
 
-def verified_two_endpoint_config(
-    cfg: Config, verifier: FakeEndpoint, key_env: str = ""
-) -> Config:
+def verified_two_endpoint_config(cfg: Config, verifier: FakeEndpoint, key_env: str = "") -> Config:
     """The turns config with the item check on a second endpoint, re-read from disk.
 
     The [model] table keeps a key name and an extra_body field of its own, the kind a main
@@ -716,8 +714,120 @@ def test_a_verifier_endpoint_sends_the_key_its_own_setting_names(session, monkey
     verifier = FakeEndpoint([check()])
     verifier.start()
     try:
-        wrote = run_on_two_endpoints(session, cfg, verifier, key_env="CHECK_KEY")
+        run_on_two_endpoints(session, cfg, verifier, key_env="CHECK_KEY")
     finally:
         main.stop()
     assert verifier.headers[0]["authorization"] == "Bearer check-secret"
     assert main.headers[0]["authorization"] == "Bearer main-secret"
+
+
+def transcript_entries(*made: tuple[str, str, str]) -> list[Entry]:
+    """The entries a window test reads, in order: (id, role, text) for each."""
+    return [Entry(id, NOW, role, text, False) for id, role, text in made]
+
+
+def stated_fact(
+    entry_id: str, statement: str, quote: str, proposal: tuple[str, str] | None = None
+) -> digest.Fact:
+    """One [stated] fact the check is asked about, quoting its own entry."""
+    return digest.Fact(
+        statement=statement,
+        kind="decision",
+        source="stated",
+        quote=quote,
+        entry=entry_id,
+        scope="project",
+        date="2025-01-01",
+        proposal=proposal,
+    )
+
+
+def check_sends(tmp_path, fact: digest.Fact, entries: list[Entry], monkeypatch) -> str:
+    """The input the item check sends for this fact, with the answer scripted to yes."""
+    sent: list[str] = []
+
+    def answer(config, prompt, text, schema):
+        sent.append(text)
+        return check()
+
+    monkeypatch.setattr(digest, "_model_answer", answer)
+    kept, dropped = digest._verified_items(
+        Config(home=tmp_path, vault=tmp_path, host="testhost", settings=Settings()),
+        [fact],
+        entries,
+    )
+    assert kept == [fact] and not dropped
+    return sent[0]
+
+
+def test_the_window_counts_past_tool_entries(tmp_path, monkeypatch):
+    """The check reads the two USER or ASSISTANT entries on either side of the item's own,
+    counted past the TOOL entries between them (BUILD-PLAN F56)."""
+    entries = transcript_entries(
+        ("e1", USER, "Capture runs at session end."),
+        ("e2", ASSISTANT, "On it.\n```python\nrow = write_row()\n```\nDone."),
+        ("e3", TOOL, "boom: no such file"),
+        ("e4", TOOL, "boom: no such file"),
+        ("e5", USER, "Scrap that, the retry gets its own setting."),
+        ("e6", ASSISTANT, "The retry got its own setting."),
+    )
+    fact = stated_fact("e1", "Capture runs at session end.", "Capture runs at session end.")
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert "[#1] USER ITEM" in sent and "[#2] ASSISTANT" in sent
+    # Two entries after the item's own, reached past the tool entries: the reversal is in,
+    # the entry after it is not, and no tool output is shown.
+    assert "Scrap that" in sent
+    assert "The retry got its own setting" not in sent
+    assert "boom" not in sent
+    # Each entry in the compacted form the turns calls show: the code is named, not shown.
+    assert "On it." in sent and "write_row" not in sent
+
+
+def test_an_approvals_proposal_entry_joins_the_window(tmp_path, monkeypatch):
+    """The entry an approved item's proposal came from is in the window even when it lies
+    beyond the two USER or ASSISTANT entries on either side (BUILD-PLAN F56)."""
+    entries = transcript_entries(
+        ("e1", USER, "What about the retry?"),
+        (
+            "e2",
+            ASSISTANT,
+            "Give the retry its own setting, so a slow endpoint is not retried forever."
+            " Or keep it?",
+        ),
+        ("e3", USER, "Anyway, the theme stays as it is."),
+        ("e4", ASSISTANT, "Noted, the theme stays."),
+        ("e5", USER, "Yes, give the retry its own setting."),
+        ("e6", ASSISTANT, "Done."),
+    )
+    fact = stated_fact(
+        "e5",
+        "The retry gets its own setting.",
+        "Yes, give the retry its own setting",
+        proposal=("e2", "Give the retry its own setting"),
+    )
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert "Give the retry its own setting, so a slow endpoint" in sent
+    assert "[#2] ASSISTANT" in sent
+    # Without the proposal, the window is the two entries on either side of the approval,
+    # and the proposal's message is beyond them.
+    plain = stated_fact(
+        "e5", "The retry gets its own setting.", "Yes, give the retry its own setting"
+    )
+    sent = check_sends(tmp_path, plain, entries, monkeypatch)
+    assert "Give the retry its own setting, so a slow endpoint" not in sent
+
+
+def test_the_window_is_cut_to_the_input_budget(tmp_path, monkeypatch):
+    """The check's input stays inside MAX_CHUNK_TOKENS less its prompt: the outer entries
+    leave first, the item's own stands (BUILD-PLAN F56, DESIGN 13)."""
+    entries = transcript_entries(
+        ("e1", USER, "Capture runs at session end."),
+        ("e2", ASSISTANT, "On it. The hook writes one row and returns."),
+        ("e3", TOOL, "boom"),
+        ("e4", USER, "Scrap that, use the env var."),
+    )
+    fact = stated_fact("e1", "Capture runs at session end.", "Capture runs at session end.")
+    monkeypatch.setattr(digest, "MAX_CHUNK_TOKENS", 1)
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert sent.count("[#") == 1 and "[#1] USER ITEM" in sent
+    assert "On it." not in sent and "Scrap that" not in sent
