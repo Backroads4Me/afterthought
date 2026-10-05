@@ -38,7 +38,7 @@ import re
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from importlib.resources import files
 from pathlib import Path
@@ -918,7 +918,10 @@ def turn_blocks(
             context = before[-BEFORE_CHARS:] if before else NO_REPLY
             failed = "\n".join(errors) if errors else "(none)"
             blocks.append(
-                f"[{label}] TURN\nBEFORE: {context}\nERRORS:\n{failed}\nUSER: {entry.text}"
+                f"[{label}] TURN {entry.time:%Y-%m-%d %A}\n"
+                f"BEFORE: {context}\n"
+                f"ERRORS:\n{failed}\n"
+                f"USER: {entry.text}"
             )
             errors = []
             before, before_id = "", ""
@@ -942,12 +945,183 @@ def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
     return "\n\n".join(blocks)
 
 
-def ungrounded(statement: str, said: str) -> list[str]:
+_WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
+
+_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+_NUM_WORDS = {
+    "a": 1,
+    "an": 1,
+    "one": 1,
+    "two": 2,
+    "couple": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+}
+
+_RELATIVE_IN = re.compile(
+    r"\bin\s+(?:a\s+couple\s+(?:of\s+)?|(\d+|[a-z]+)\s+)(day|days|week|weeks)\b",
+    re.IGNORECASE,
+)
+_WEEKDAY_RE = re.compile(
+    r"\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_MONTH_DATE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+_DAY_FIRST_DATE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(January|February|March|April|May|June|July|August|September|October|November|December)(?:\s*,?\s*(\d{4}))?\b",
+    re.IGNORECASE,
+)
+
+
+def relative_dates(text: str, when: datetime) -> set[date]:
+    """The dates relative expressions in ``text`` mean, given the turn's ``when`` (BUILD-PLAN F59).
+
+    Computes dates for today, tomorrow, yesterday, a weekday name with or without 'this' or
+    'next', and 'in N days' or 'in N weeks'.
+    """
+    base = when.date()
+    base_w = base.weekday()
+    dates: set[date] = set()
+
+    if re.search(r"\btoday\b", text, re.IGNORECASE):
+        dates.add(base)
+
+    if re.search(r"\btomorrow\b", text, re.IGNORECASE):
+        dates.add(base + timedelta(days=1))
+
+    if re.search(r"\byesterday\b", text, re.IGNORECASE):
+        dates.add(base - timedelta(days=1))
+
+    for match in _WEEKDAY_RE.finditer(text):
+        modifier = match.group(1).lower() if match.group(1) else ""
+        target_w = _WEEKDAYS[match.group(2).lower()]
+        diff = (target_w - base_w) % 7
+        if modifier == "next":
+            if diff == 0:
+                dates.add(base + timedelta(days=7))
+                dates.add(base + timedelta(days=14))
+            else:
+                dates.add(base + timedelta(days=diff))
+                dates.add(base + timedelta(days=diff + 7))
+        elif modifier == "this":
+            cal_diff = target_w - base_w
+            dates.add(base + timedelta(days=cal_diff))
+            if cal_diff < 0:
+                dates.add(base + timedelta(days=cal_diff + 7))
+            if cal_diff == 0:
+                dates.add(base + timedelta(days=7))
+        else:
+            if diff == 0:
+                dates.add(base)
+                dates.add(base + timedelta(days=7))
+            else:
+                dates.add(base + timedelta(days=diff))
+
+    for match in _RELATIVE_IN.finditer(text):
+        num_str = match.group(1)
+        unit = match.group(2).lower()
+        if num_str is None:
+            count = 2
+        elif num_str.isdigit():
+            count = int(num_str)
+        else:
+            count = _NUM_WORDS.get(num_str.lower(), 0)
+        if count <= 0:
+            continue
+        if unit.startswith("day"):
+            dates.add(base + timedelta(days=count))
+        elif unit.startswith("week"):
+            dates.add(base + timedelta(weeks=count))
+
+    return dates
+
+
+def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[str]:
     """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
     F55): a word holding a digit or one of ``_/.:-``, or a capital letter anywhere but at the
     statement's start. Plain words say how, not what, and are not checked. Punctuation around
     a word is set aside, and a word matches another form of itself on their shared first five
-    letters."""
+    letters. A date computed from a relative expression in ``said`` and the turn's ``when`` is
+    grounded when written in ISO (2026-10-06), 'October 6', or day-first (6 October) style (F59)."""
+    if when is not None:
+        allowed = relative_dates(said, when)
+        if allowed:
+            spans: list[tuple[int, int]] = []
+            for match in _ISO_DATE.finditer(statement):
+                try:
+                    dt = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                except ValueError:
+                    continue
+                if dt in allowed:
+                    spans.append(match.span())
+            for match in _MONTH_DATE.finditer(statement):
+                m = _MONTHS[match.group(1).lower()]
+                d = int(match.group(2))
+                y_str = match.group(3)
+                if y_str is not None:
+                    try:
+                        dt = date(int(y_str), m, d)
+                    except ValueError:
+                        continue
+                    if dt in allowed:
+                        spans.append(match.span())
+                elif any(dt.month == m and dt.day == d for dt in allowed):
+                    spans.append(match.span())
+            for match in _DAY_FIRST_DATE.finditer(statement):
+                d = int(match.group(1))
+                m = _MONTHS[match.group(2).lower()]
+                y_str = match.group(3)
+                if y_str is not None:
+                    try:
+                        dt = date(int(y_str), m, d)
+                    except ValueError:
+                        continue
+                    if dt in allowed:
+                        spans.append(match.span())
+                elif any(dt.month == m and dt.day == d for dt in allowed):
+                    spans.append(match.span())
+            if spans:
+                chars = list(statement)
+                for start, end in spans:
+                    for i in range(start, end):
+                        chars[i] = " "
+                statement = "".join(chars)
     held = {_bare(w) for w in _WORDS.findall(said)}
     missing: list[str] = []
     for number, word in enumerate(_WORDS.findall(statement)):
@@ -963,7 +1137,7 @@ def ungrounded(statement: str, said: str) -> list[str]:
     return missing
 
 
-def grounding_sentence(text: str, statement: str, said: str) -> str:
+def grounding_sentence(text: str, statement: str, said: str, when: datetime | None = None) -> str:
     """The one sentence of ``text`` that, beside ``said``, grounds every name of
     ``statement``, verbatim; empty when none does or two do equally well."""
     grounding = [
@@ -971,7 +1145,7 @@ def grounding_sentence(text: str, statement: str, said: str) -> str:
         for sentence in _SENTENCES.split(text)
         if sentence.strip()
         and len(sentence.strip()) <= 300
-        and not ungrounded(statement, f"{said}\n{sentence}")
+        and not ungrounded(statement, f"{said}\n{sentence}", when=when)
     ]
     if not grounding:
         return ""
@@ -1054,6 +1228,7 @@ def _turn_facts(
             refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
             continue
         said = turn.text if turn is not None else fact["quote"]
+        turn_time = turn.time if turn is not None else None
         proposal = item.get("proposal", "").strip()
         if proposal:
             before_id = (answered or {}).get(fact["entry"], "")
@@ -1084,14 +1259,16 @@ def _turn_facts(
             # DESIGN R2: an approval's statement holds no word that neither the user's words
             # of approval nor the proposal they approve says.
             said = f"{said}\n{proposal}"
-        missing = ungrounded(fact["statement"], said)
+        missing = ungrounded(fact["statement"], said, when=turn_time)
         before_id = (answered or {}).get(fact["entry"], "")
         answered_entry = (entries or {}).get(before_id)
         if missing and "proposal" not in fact and answered_entry is not None and config:
             # A name the user's reply takes from the message it answers is the agent's word:
             # the line cites the one sentence of that message that holds what the statement
             # needs, as an approval cites its proposal (DESIGN R2).
-            sentence = grounding_sentence(answered_entry.text, fact["statement"], said)
+            sentence = grounding_sentence(
+                answered_entry.text, fact["statement"], said, when=turn_time
+            )
             if sentence and evidence.find_quote(config, session_id, before_id, sentence):
                 fact["proposal"] = (before_id, sentence)
                 missing = []
@@ -1639,7 +1816,7 @@ def verify(
             said = entry.text
             if "proposal" in fact and fact["proposal"]:
                 said = f"{said}\n{fact['proposal'][1]}"
-            missing = ungrounded(fact["statement"], said)
+            missing = ungrounded(fact["statement"], said, when=entry.time)
             if missing:
                 dropped.append(
                     _refused(

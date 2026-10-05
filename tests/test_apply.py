@@ -3382,6 +3382,46 @@ def test_dream_grounds_stated_fact_in_user_turn_text(initialized, home, fake):
     assert "PostgreSQL stays at version 16." in overview
 
 
+def test_dream_grounds_stated_fact_with_computed_relative_date(initialized, home, fake):
+    """BUILD-PLAN F59: a stated fact with a computed date from a relative expression passes R2."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-relative-date",
+        facts=[
+            {
+                "statement": "The backup is paused until 2026-10-06.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_backup#e1",
+                "quote": "pause it until tomorrow",
+                "text": "Please pause it until tomorrow.",
+                "role": "user",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "pause backup until tomorrow")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].statement == "The backup is paused until 2026-10-06."
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "The backup is paused until 2026-10-06." in overview
+
+
 def test_dream_supersedes_replaced_rule_fixture(initialized, home, fake):
     """BUILD-PLAN F52: a rule the user replaced supersedes the old rule."""
     cfg = config_with_fake(home, initialized.vault, fake)

@@ -9,7 +9,7 @@ later item replaced.
 # ruff: noqa: F811 - the tests take the shared session fixture by name
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, date, datetime
 
 from aft import config as configmod
 from aft import digest, queue, work
@@ -20,6 +20,7 @@ from fakes.model_server import FakeEndpoint, Reply
 from test_digest import (
     ASSISTANT_ANSWER,
     NOW,
+    SECOND_ANSWER,
     SECOND_PROMPT,
     SESSION,
     USER_PROMPT,
@@ -27,10 +28,12 @@ from test_digest import (
     claim,
     event,
     pages,
+    record,
     rows,
     serve,
     session,  # noqa: F401 - the fixture the tests below take
     watermark,
+    write_records,
 )
 
 
@@ -172,7 +175,9 @@ def test_turn_blocks_show_before_errors_and_the_users_words():
     ]
     blocks, after, _, answered = digest.turn_blocks(part)
     first, second, third = blocks
-    assert first.startswith(f"[#1] TURN\nBEFORE: {digest.NO_REPLY}\nERRORS:\n(none)\nUSER: ")
+    assert first.startswith(
+        f"[#1] TURN {NOW:%Y-%m-%d %A}\nBEFORE: {digest.NO_REPLY}\nERRORS:\n(none)\nUSER: "
+    )
     assert f"BEFORE: {ASSISTANT_ANSWER}" in second
     assert "ERRORS:\nFAILED tests/test_x.py\nUSER: " in second
     assert "running tests" not in second
@@ -473,6 +478,181 @@ def test_a_quote_inside_a_paste_or_command_block_is_not_the_users_words():
     assert not digest.own_words(
         "<command-name>/goal</command-name>\n<command-args>never push to main", "never push"
     )
+
+
+def test_turn_blocks_show_date_and_weekday():
+    """BUILD-PLAN F59: each turn block header shows the turn's date and weekday."""
+    when = datetime(2026, 10, 5, 14, 30, tzinfo=UTC)
+    part = [Entry("e1", when, USER, "pause it until tomorrow", False)]
+    blocks, _, _, _ = digest.turn_blocks(part)
+    assert len(blocks) == 1
+    assert blocks[0].startswith("[#1] TURN 2026-10-05 Monday\n")
+
+
+def test_relative_dates_compute_for_each_relative_form():
+    """BUILD-PLAN F59: relative dates computed from relative expressions and the turn's time.
+
+    Covers: today, tomorrow, yesterday, weekday name with or without 'this' or 'next',
+    'in N days' and 'in N weeks'.
+    """
+    # 2026-10-05 is a Monday
+    when = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
+
+    # today
+    assert date(2026, 10, 5) in digest.relative_dates("do it today", when)
+
+    # tomorrow
+    assert date(2026, 10, 6) in digest.relative_dates("pause it until tomorrow", when)
+
+    # yesterday
+    assert date(2026, 10, 4) in digest.relative_dates("it failed yesterday", when)
+
+    # bare weekday
+    assert date(2026, 10, 7) in digest.relative_dates("let's meet Wednesday", when)
+    assert date(2026, 10, 9) in digest.relative_dates("let's meet Friday", when)
+
+    # this <weekday>
+    assert date(2026, 10, 9) in digest.relative_dates("pause until this Friday", when)
+
+    # next <weekday>
+    next_fri = digest.relative_dates("pause until next Friday", when)
+    assert date(2026, 10, 9) in next_fri or date(2026, 10, 16) in next_fri
+
+    # in N days
+    assert date(2026, 10, 8) in digest.relative_dates("pause it in 3 days", when)
+    assert date(2026, 10, 8) in digest.relative_dates("pause it in three days", when)
+    assert date(2026, 10, 6) in digest.relative_dates("pause it in 1 day", when)
+    assert date(2026, 10, 6) in digest.relative_dates("pause it in a day", when)
+    assert date(2026, 10, 7) in digest.relative_dates("pause it in a couple of days", when)
+
+    # in N weeks
+    assert date(2026, 10, 19) in digest.relative_dates("pause it in two weeks", when)
+    assert date(2026, 10, 19) in digest.relative_dates("pause it in 2 weeks", when)
+    assert date(2026, 10, 12) in digest.relative_dates("pause it in a week", when)
+    assert date(2026, 10, 12) in digest.relative_dates("pause it in one week", when)
+
+
+def test_ungrounded_accepts_iso_and_october_style_computed_dates():
+    """BUILD-PLAN F59, R2: statement date is grounded when computed from turn's relative
+    expression, accepting ISO (2026-10-06), 'October 6', and '6 October' styles."""
+    when = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
+    said = "pause it until tomorrow"
+
+    # ISO format (2026-10-06)
+    assert digest.ungrounded("The backup is paused until 2026-10-06.", said, when) == []
+
+    # October 6 style
+    assert digest.ungrounded("The backup is paused until October 6.", said, when) == []
+    assert digest.ungrounded("The backup is paused until October 6, 2026.", said, when) == []
+    assert digest.ungrounded("The backup is paused until October 6th.", said, when) == []
+
+    # Lowercase month names
+    assert digest.ungrounded("The backup is paused until october 6.", said, when) == []
+    assert digest.ungrounded("The backup is paused until october 6th.", said, when) == []
+    assert digest.ungrounded("The backup is paused until october 6, 2026.", said, when) == []
+
+    # Day-first format (6 October)
+    assert digest.ungrounded("The backup is paused until 6 October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th of October.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6 October 2026.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6th of October, 2026.", said, when) == []
+    assert digest.ungrounded("The backup is paused until 6 october.", said, when) == []
+
+
+def test_ungrounded_refuses_date_not_implied_or_unsupported_format():
+    """BUILD-PLAN F59: a date the turn does not imply is refused; formats other than ISO
+    and month/day styles stay ungrounded."""
+    when = datetime(2026, 10, 5, 9, 0, tzinfo=UTC)
+    said = "pause it until tomorrow"
+
+    # Date not implied (tomorrow is 2026-10-06, not 2026-10-07)
+    assert digest.ungrounded("The backup is paused until 2026-10-07.", said, when) == ["2026-10-07"]
+    assert digest.ungrounded("The backup is paused until October 7.", said, when) == [
+        "October",
+        "7",
+    ]
+    assert digest.ungrounded("The backup is paused until 7 October.", said, when) == [
+        "7",
+        "October",
+    ]
+
+    # Unsupported date format (stays ungrounded)
+    assert digest.ungrounded("The backup is paused until Tuesday.", said, when) == ["Tuesday"]
+    assert digest.ungrounded("The backup is paused until 10/06/2026.", said, when) == ["10/06/2026"]
+
+    # Turn without relative date cannot ground a date
+    assert digest.ungrounded(
+        "The backup is paused until 2026-10-06.", "pause the backup", when
+    ) == ["2026-10-06"]
+
+    # Without when, relative date is not computed
+    assert digest.ungrounded("The backup is paused until 2026-10-06.", said) == ["2026-10-06"]
+
+
+def test_pause_it_until_tomorrow_on_monday_turn_becomes_tuesday_date_and_is_kept(session: Session):
+    """BUILD-PLAN F59: 'pause it until tomorrow' on a Monday turn becomes Tuesday's date
+    and is kept."""
+    monday = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "pause it until tomorrow", when=monday),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real", when=monday),
+        record("e3", "user", SECOND_PROMPT, when=monday),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real", when=monday),
+    )
+    stmt = "The backup is paused until 2026-10-06."
+    wrote = run(
+        session,
+        summary(),
+        settled(item("e1", "decision", stmt, "pause it until tomorrow")),
+        {"items": []},
+    )
+    assert [f.statement for f in wrote.facts] == [stmt]
+
+
+def test_pause_it_until_tomorrow_with_october_style_date_is_kept(session: Session):
+    """BUILD-PLAN F59: 'pause it until tomorrow' on a Monday turn is kept with October 6 style."""
+    monday = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "pause it until tomorrow", when=monday),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real", when=monday),
+        record("e3", "user", SECOND_PROMPT, when=monday),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real", when=monday),
+    )
+    stmt = "The backup is paused until October 6."
+    wrote = run(
+        session,
+        summary(),
+        settled(item("e1", "decision", stmt, "pause it until tomorrow")),
+        {"items": []},
+    )
+    assert [f.statement for f in wrote.facts] == [stmt]
+
+
+def test_date_not_implied_by_turn_is_refused(session: Session):
+    """BUILD-PLAN F59: a date the turn does not imply is refused."""
+    monday = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "pause it until tomorrow", when=monday),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real", when=monday),
+        record("e3", "user", SECOND_PROMPT, when=monday),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real", when=monday),
+    )
+    unimplied = "The backup is paused until 2026-10-07."
+    wrote = run(
+        session,
+        summary(),
+        settled(item("e1", "decision", unimplied, "pause it until tomorrow")),
+        {"items": []},
+    )
+    assert not wrote.facts
+    assert any("2026-10-07" in d.reason for d in wrote.dropped)
 
 
 # The item check (BUILD-PLAN F56): after the final state, every [stated] item left is asked
