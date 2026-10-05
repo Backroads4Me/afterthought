@@ -68,6 +68,21 @@ DIGEST_PIPELINES = ("base", "turns")
 @dataclass(frozen=True)
 class DigestConfig:
     pipeline: str = "turns"
+    # BUILD-PLAN F56: when true, every [stated] item a turns digest keeps is asked back to
+    # the model once, whether the user asserted it and whether it still stands by the end
+    # of the entries around it; one that fails either is dropped with the reason on the
+    # page.
+    verify_items: bool = False
+    # Where the item check calls when verify_items is on. Empty means the [model] endpoint
+    # and name, so a small model can check a big one's answers without another table. With
+    # a verifier_endpoint set, the check takes its key from verifier_api_key_env and sends
+    # no extra_body: the [model] table's key and request fields belong to its own endpoint.
+    verifier_endpoint: str = ""
+    verifier_model: str = ""
+    # The environment variable holding the verifier endpoint's API key. Empty means the
+    # endpoint takes no key. Read only with verifier_endpoint set; an empty endpoint uses
+    # the [model] table as it is, its key and extra_body included.
+    verifier_api_key_env: str = ""
 
 
 @dataclass(frozen=True)
@@ -345,6 +360,18 @@ retention_days = 90
 # observed, one for what a later item replaced, and one for the summary and handoff.
 # "turns" finds more of what you settled and records fewer wrong lines (BUILD-PLAN F55).
 pipeline = "turns"
+# After the final state, each kept [stated] item is asked back once: did the user assert
+# it, and is it still in effect by the end of the entries around it? An item that fails
+# either is dropped with the reason recorded on the page (BUILD-PLAN F56).
+verify_items = false
+# The endpoint and model the item check calls when verify_items is on. Empty means the
+# [model] endpoint and name.
+verifier_endpoint = ""
+verifier_model = ""
+# The environment variable holding the verifier endpoint's API key; empty means the
+# endpoint takes no key. Read only with verifier_endpoint set: an empty endpoint uses
+# the [model] table as it is, its key and extra_body included.
+# verifier_api_key_env = ""
 
 [dream]
 interval_minutes = 30

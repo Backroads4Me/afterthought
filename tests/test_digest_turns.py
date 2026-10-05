@@ -12,20 +12,27 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 from aft import config as configmod
-from aft import digest
-from aft.config import Config
+from aft import digest, queue, work
+from aft.config import Config, Settings
+from aft.model import ATTEMPTS
 from aft.readers import ASSISTANT, TOOL, USER, Entry
+from fakes.model_server import FakeEndpoint, Reply
 from test_digest import (
     ASSISTANT_ANSWER,
     NOW,
     SECOND_ANSWER,
     SECOND_PROMPT,
+    SESSION,
     USER_PROMPT,
     Session,
     claim,
+    event,
+    pages,
     record,
+    rows,
     serve,
     session,  # noqa: F401 - the fixture the tests below take
+    watermark,
     write_records,
 )
 
@@ -646,3 +653,393 @@ def test_date_not_implied_by_turn_is_refused(session: Session):
     )
     assert not wrote.facts
     assert any("2026-10-07" in d.reason for d in wrote.dropped)
+
+
+# The item check (BUILD-PLAN F56): after the final state, every [stated] item left is asked
+# back once, whether the user asserted it and whether it still stands. The check is off
+# unless the config turns it on, and its answers follow the job's other calls in order.
+
+
+def check(reason: str = "The user's own words, and nothing later took it back.") -> dict:
+    """A verifier answer that keeps the item: yes to both questions."""
+    return {"asserted": True, "in_effect": True, "reason": reason}
+
+
+def verified_config(cfg: Config, model: str = "") -> Config:
+    """The turns config with the item check turned on, re-read from disk.
+
+    The setting is a config.toml line like every other, appended the way turns_config
+    chooses the pipeline. An empty model name leaves the check on the [model] endpoint.
+    """
+    path = cfg.home / configmod.CONFIG_NAME
+    added = 'pipeline = "turns"\nverify_items = true\n'
+    if model:
+        added += f'verifier_model = "{model}"\n'
+    path.write_text(
+        path.read_text(encoding="utf-8").replace('pipeline = "turns"\n', added),
+        encoding="utf-8",
+    )
+    return configmod.load()
+
+
+def run_checked(
+    session: Session, *answers: object, model: str = ""
+) -> tuple[digest.Digest, FakeEndpoint]:
+    """The digest of the shared session with the item check on, and the fake that served it."""
+    fake, cfg = serve(session.cfg, *answers)
+    cfg = verified_config(turns_config(cfg), model)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    return wrote, fake
+
+
+SETTLED = item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+
+
+def test_an_item_the_verifier_confirms_is_kept(session: Session):
+    wrote, fake = run_checked(session, summary(), settled(SETTLED), {"items": []}, check())
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert wrote.dropped == ()
+    # The check is the job's last call: the summary, the turns, the observed, then one
+    # short call over the entries around the item's own.
+    assert len(fake.requests) == 4
+    sent = fake.requests[-1]["messages"][1]["content"]
+    assert "[decision] Capture runs at session end." in sent
+    assert "[#1] USER ITEM" in sent and "Capture runs at session end." in sent
+    assert "[#2] ASSISTANT" in sent and ASSISTANT_ANSWER in sent
+    # Two entries after the item's own: the second user turn is in, the last one is not.
+    assert "[#3] USER" in sent
+    assert "[#4]" not in sent, "the window holds the item's entry and two on each side"
+
+
+def test_an_item_the_verifier_finds_not_asserted_is_dropped(session: Session):
+    wrote, _ = run_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": []},
+        {"asserted": False, "in_effect": True, "reason": "The words were a question."},
+    )
+    assert not wrote.facts
+    assert [(d.statement, d.reason) for d in wrote.dropped] == [
+        ("Capture runs at session end.", "the verifier found it not asserted")
+    ]
+
+
+def test_an_item_the_verifier_finds_no_longer_in_effect_is_dropped(session: Session):
+    wrote, _ = run_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": []},
+        {"asserted": True, "in_effect": False, "reason": "A later turn reversed it."},
+    )
+    assert not wrote.facts
+    assert [(d.statement, d.reason) for d in wrote.dropped] == [
+        ("Capture runs at session end.", "the verifier found it no longer in effect")
+    ]
+
+
+def test_the_check_makes_no_call_when_the_setting_is_off(session: Session):
+    fake, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []}, check())
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert len(fake.requests) == 3, "the check asked nothing: the setting is off"
+
+
+def test_the_verifier_model_reaches_the_check_call(session: Session):
+    wrote, fake = run_checked(
+        session, summary(), settled(SETTLED), {"items": []}, check(), model="check-model"
+    )
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert [r["model"] for r in fake.requests[:-1]] == ["fake-model", "fake-model", "fake-model"]
+    assert fake.requests[-1]["model"] == "check-model"
+    asked = fake.requests[-1]["messages"][0]["content"]
+    assert "did the user assert this" in asked and "still in effect" in asked
+
+
+def test_the_check_never_asks_about_an_observed_item(session: Session):
+    wrote, fake = run_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
+        {"replacements": []},
+        check(),
+    )
+    assert [(f.source, f.entry) for f in wrote.facts] == [("stated", "e1"), ("observed", "e2")]
+    # Summary, turns, observed, final state, and one check call: the observed item is
+    # never asked about.
+    assert len(fake.requests) == 5
+    assert "the hook writes one row" in fake.requests[-1]["messages"][1]["content"]
+    assert "The hook writes one row and returns." not in fake.requests[-1]["messages"][1]["content"]
+
+
+def test_each_stated_item_gets_its_own_call_after_the_final_state(session: Session):
+    again = item("e4", "fact", "A slow endpoint is not retried forever.", "not retried forever")
+    wrote, fake = run_checked(
+        session,
+        summary(),
+        settled(SETTLED, again),
+        {"items": []},
+        {"replacements": []},
+        {"asserted": False, "in_effect": True, "reason": "Those were the agent's words."},
+        check(),
+    )
+    # Two [stated] items: the final state is asked first, then each item in session order.
+    assert len(fake.requests) == 6
+    assert fake.requests[-2]["messages"][1]["content"].startswith("[decision] Capture runs")
+    assert fake.requests[-1]["messages"][1]["content"].startswith("[fact] A slow endpoint")
+    assert [(f.statement, f.source, f.entry) for f in wrote.facts] == [
+        ("A slow endpoint is not retried forever.", "stated", "e4")
+    ]
+    assert [(d.statement, d.reason) for d in wrote.dropped] == [
+        ("Capture runs at session end.", "the verifier found it not asserted")
+    ]
+
+
+def test_a_refused_check_drops_the_item_and_the_job_still_stands(session: Session):
+    wrote, _ = run_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": []},
+        {"asserted": "yes", "in_effect": True, "reason": "The user asked, never settled."},
+        {"asserted": "yes", "in_effect": True, "reason": "The user asked, never settled."},
+    )
+    assert not wrote.facts
+    reasons = [d.reason for d in wrote.dropped if d.statement]
+    assert len(reasons) == 1
+    assert reasons[0].startswith(
+        "the verifier refused: the answer failed its schema: $.asserted should be boolean"
+    )
+
+
+def verified_two_endpoint_config(cfg: Config, verifier: FakeEndpoint, key_env: str = "") -> Config:
+    """The turns config with the item check on a second endpoint, re-read from disk.
+
+    The [model] table keeps a key name and an extra_body field of its own, the kind a main
+    endpoint needs and a second one must not inherit.
+    """
+    path = cfg.home / configmod.CONFIG_NAME
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        'name = "fake-model"\n',
+        'name = "fake-model"\napi_key_env = "MAIN_KEY"\nextra_body = { top_p = 0.5 }\n',
+    )
+    text = text.replace(
+        'pipeline = "base"\n',
+        'pipeline = "turns"\nverify_items = true\n'
+        f'verifier_endpoint = "{verifier.endpoint}"\n'
+        + (f'verifier_api_key_env = "{key_env}"\n' if key_env else ""),
+    )
+    path.write_text(text, encoding="utf-8")
+    return configmod.load()
+
+
+def run_on_two_endpoints(
+    session: Session,
+    cfg: Config,
+    verifier: FakeEndpoint,
+    key_env: str = "",
+) -> digest.Digest:
+    """The digest of the shared session with the item check on the verifier's endpoint."""
+    try:
+        cfg = verified_two_endpoint_config(cfg, verifier, key_env)
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        verifier.stop()
+    assert wrote is not None
+    return wrote
+
+
+def test_a_verifier_endpoint_gets_no_main_key_and_no_extra_body(session, monkeypatch):
+    """The check's endpoint is its own service: no [model] key and none of the [model]
+    table's extra_body fields reach it (BUILD-PLAN F56)."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([check()])
+    verifier.start()
+    try:
+        wrote = run_on_two_endpoints(session, cfg, verifier)
+    finally:
+        main.stop()
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    # The three turns calls went to the [model] endpoint, the check to the verifier's.
+    assert len(main.requests) == 3
+    assert len(verifier.requests) == 1
+    sent = verifier.requests[0]
+    assert sent["model"] == "fake-model"
+    assert "top_p" not in sent, "the [model] table's extra_body stays with its own endpoint"
+    assert "Authorization" not in verifier.headers[0], "an empty key name sends no key"
+    assert main.headers[0]["authorization"] == "Bearer main-secret"
+
+
+def test_a_verifier_endpoint_sends_the_key_its_own_setting_names(session, monkeypatch):
+    """digest.verifier_api_key_env names the key the check's endpoint takes, and the
+    [model] key stays with the [model] endpoint (BUILD-PLAN F56)."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    monkeypatch.setenv("CHECK_KEY", "check-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([check()])
+    verifier.start()
+    try:
+        run_on_two_endpoints(session, cfg, verifier, key_env="CHECK_KEY")
+    finally:
+        main.stop()
+    assert verifier.headers[0]["authorization"] == "Bearer check-secret"
+    assert main.headers[0]["authorization"] == "Bearer main-secret"
+
+
+def transcript_entries(*made: tuple[str, str, str]) -> list[Entry]:
+    """The entries a window test reads, in order: (id, role, text) for each."""
+    return [Entry(id, NOW, role, text, False) for id, role, text in made]
+
+
+def stated_fact(
+    entry_id: str, statement: str, quote: str, proposal: tuple[str, str] | None = None
+) -> digest.Fact:
+    """One [stated] fact the check is asked about, quoting its own entry."""
+    return digest.Fact(
+        statement=statement,
+        kind="decision",
+        source="stated",
+        quote=quote,
+        entry=entry_id,
+        scope="project",
+        date="2025-01-01",
+        proposal=proposal,
+    )
+
+
+def check_sends(tmp_path, fact: digest.Fact, entries: list[Entry], monkeypatch) -> str:
+    """The input the item check sends for this fact, with the answer scripted to yes."""
+    sent: list[str] = []
+
+    def answer(config, prompt, text, schema):
+        sent.append(text)
+        return check()
+
+    monkeypatch.setattr(digest, "_model_answer", answer)
+    kept, dropped = digest._verified_items(
+        Config(home=tmp_path, vault=tmp_path, host="testhost", settings=Settings()),
+        [fact],
+        entries,
+    )
+    assert kept == [fact] and not dropped
+    return sent[0]
+
+
+def test_the_window_counts_past_tool_entries(tmp_path, monkeypatch):
+    """The check reads the two USER or ASSISTANT entries on either side of the item's own,
+    counted past the TOOL entries between them (BUILD-PLAN F56)."""
+    entries = transcript_entries(
+        ("e1", USER, "Capture runs at session end."),
+        ("e2", ASSISTANT, "On it.\n```python\nrow = write_row()\n```\nDone."),
+        ("e3", TOOL, "boom: no such file"),
+        ("e4", TOOL, "boom: no such file"),
+        ("e5", USER, "Scrap that, the retry gets its own setting."),
+        ("e6", ASSISTANT, "The retry got its own setting."),
+    )
+    fact = stated_fact("e1", "Capture runs at session end.", "Capture runs at session end.")
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert "[#1] USER ITEM" in sent and "[#2] ASSISTANT" in sent
+    # Two entries after the item's own, reached past the tool entries: the reversal is in,
+    # the entry after it is not, and no tool output is shown.
+    assert "Scrap that" in sent
+    assert "The retry got its own setting" not in sent
+    assert "boom" not in sent
+    # Each entry in the compacted form the turns calls show: the code is named, not shown.
+    assert "On it." in sent and "write_row" not in sent
+
+
+def test_an_approvals_proposal_entry_joins_the_window(tmp_path, monkeypatch):
+    """The entry an approved item's proposal came from is in the window even when it lies
+    beyond the two USER or ASSISTANT entries on either side (BUILD-PLAN F56)."""
+    entries = transcript_entries(
+        ("e1", USER, "What about the retry?"),
+        (
+            "e2",
+            ASSISTANT,
+            "Give the retry its own setting, so a slow endpoint is not retried forever."
+            " Or keep it?",
+        ),
+        ("e3", USER, "Anyway, the theme stays as it is."),
+        ("e4", ASSISTANT, "Noted, the theme stays."),
+        ("e5", USER, "Yes, give the retry its own setting."),
+        ("e6", ASSISTANT, "Done."),
+    )
+    fact = stated_fact(
+        "e5",
+        "The retry gets its own setting.",
+        "Yes, give the retry its own setting",
+        proposal=("e2", "Give the retry its own setting"),
+    )
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert "Give the retry its own setting, so a slow endpoint" in sent
+    assert "[#2] ASSISTANT" in sent
+    # Without the proposal, the window is the two entries on either side of the approval,
+    # and the proposal's message is beyond them.
+    plain = stated_fact(
+        "e5", "The retry gets its own setting.", "Yes, give the retry its own setting"
+    )
+    sent = check_sends(tmp_path, plain, entries, monkeypatch)
+    assert "Give the retry its own setting, so a slow endpoint" not in sent
+
+
+def test_the_window_is_cut_to_the_input_budget(tmp_path, monkeypatch):
+    """The check's input stays inside MAX_CHUNK_TOKENS less its prompt: the outer entries
+    leave first, the item's own stands (BUILD-PLAN F56, DESIGN 13)."""
+    entries = transcript_entries(
+        ("e1", USER, "Capture runs at session end."),
+        ("e2", ASSISTANT, "On it. The hook writes one row and returns."),
+        ("e3", TOOL, "boom"),
+        ("e4", USER, "Scrap that, use the env var."),
+    )
+    fact = stated_fact("e1", "Capture runs at session end.", "Capture runs at session end.")
+    monkeypatch.setattr(digest, "MAX_CHUNK_TOKENS", 1)
+    sent = check_sends(tmp_path, fact, entries, monkeypatch)
+    assert sent.count("[#") == 1 and "[#1] USER ITEM" in sent
+    assert "On it." not in sent and "Scrap that" not in sent
+
+
+def test_a_verifier_error_leaves_the_job_as_any_model_error_does(session, monkeypatch):
+    """A ModelError from the check's call is any model error (DESIGN 14): the run stops
+    with the job queued for later, its page unwritten and its watermark unmoved."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([Reply(status=500)])
+    verifier.start()
+    try:
+        cfg = verified_two_endpoint_config(cfg, verifier)
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        report = work.run(cfg)
+    finally:
+        verifier.stop()
+        main.stop()
+    assert report.stopped == work.STOP_UNREACHABLE
+    assert report.digested == 0
+    assert pages(cfg) == []
+    assert watermark(cfg, SESSION) is None
+    assert rows(cfg, queue.FAILED) == []
+    # The job stays claimed only by its lease, so a later run reads the same chunk again.
+    assert rows(cfg, queue.RUNNING) == [SESSION]
+    # The three turns calls went through; the check's call did not survive its endpoint.
+    assert len(main.requests) == 3
+    assert len(verifier.requests) == ATTEMPTS
