@@ -714,7 +714,8 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 current directory's project first, then the global pages, then other projects, so what one
 project learned answers a question asked in another. `--project P` narrows it to one
 project and the global pages. The memory block stays the current project's and the global
-pages' alone (section 10). The default collections are:
+pages' alone (section 10). Words are stemmed by FTS5's Porter tokenizer, so "pause" finds
+"paused". The default collections are:
 
 | Collection | Contents |
 |---|---|

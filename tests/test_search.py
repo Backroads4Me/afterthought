@@ -388,6 +388,26 @@ def test_search_calls_index_update_automatically(populated_vault: Config):
     assert any("projects/widget/gears.md" in h.path for h in hits)
 
 
+def test_search_finds_other_forms_of_a_word(populated_vault: Config):
+    """Words are stemmed (BUILD-PLAN F61): "pause" finds "paused", "configure" finds
+    "configured", whichever form the line used."""
+    (populated_vault.vault / "projects" / "widget" / "hooks.md").write_text(
+        "---\n"
+        "title: Hooks\n"
+        "description: Hook rewrite status.\n"
+        "aft:\n"
+        "  project: p_widget\n"
+        "---\n"
+        "# Hooks\n"
+        "## State\n"
+        "- The hook rewrite is paused until the retries are configured."
+        " [observed] 2026-09-24 [^s1]\n"
+    )
+    for query in ("pause", "pausing", "configure", "retry"):
+        hits = search.search(populated_vault, query, all_projects=True)
+        assert any("projects/widget/hooks.md" in h.path for h in hits), query
+
+
 def test_project_filter_scoping(populated_vault: Config):
     """Project-scoped search includes that project and global pages, excluding others."""
     hits_widget = search.search(populated_vault, "firmware", project="widget")
