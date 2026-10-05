@@ -12,19 +12,25 @@ from __future__ import annotations
 from datetime import UTC
 
 from aft import config as configmod
-from aft import digest
+from aft import digest, queue, work
 from aft.config import Config, Settings
+from aft.model import ATTEMPTS
 from aft.readers import ASSISTANT, TOOL, USER, Entry
-from fakes.model_server import FakeEndpoint
+from fakes.model_server import FakeEndpoint, Reply
 from test_digest import (
     ASSISTANT_ANSWER,
     NOW,
     SECOND_PROMPT,
+    SESSION,
     USER_PROMPT,
     Session,
     claim,
+    event,
+    pages,
+    rows,
     serve,
     session,  # noqa: F401 - the fixture the tests below take
+    watermark,
 )
 
 
@@ -831,3 +837,29 @@ def test_the_window_is_cut_to_the_input_budget(tmp_path, monkeypatch):
     sent = check_sends(tmp_path, fact, entries, monkeypatch)
     assert sent.count("[#") == 1 and "[#1] USER ITEM" in sent
     assert "On it." not in sent and "Scrap that" not in sent
+
+
+def test_a_verifier_error_leaves_the_job_as_any_model_error_does(session, monkeypatch):
+    """A ModelError from the check's call is any model error (DESIGN 14): the run stops
+    with the job queued for later, its page unwritten and its watermark unmoved."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([Reply(status=500)])
+    verifier.start()
+    try:
+        cfg = verified_two_endpoint_config(cfg, verifier)
+        queue.enqueue(cfg, event(session.transcript, session.cwd))
+        report = work.run(cfg)
+    finally:
+        verifier.stop()
+        main.stop()
+    assert report.stopped == work.STOP_UNREACHABLE
+    assert report.digested == 0
+    assert pages(cfg) == []
+    assert watermark(cfg, SESSION) is None
+    assert rows(cfg, queue.FAILED) == []
+    # The job stays claimed only by its lease, so a later run reads the same chunk again.
+    assert rows(cfg, queue.RUNNING) == [SESSION]
+    # The three turns calls went through; the check's call did not survive its endpoint.
+    assert len(main.requests) == 3
+    assert len(verifier.requests) == ATTEMPTS
