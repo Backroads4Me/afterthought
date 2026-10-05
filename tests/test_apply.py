@@ -3342,6 +3342,46 @@ def test_dream_keeps_grounded_stated_fact(initialized, home, fake):
     assert "Capture runs at session end." in overview.read_text()
 
 
+def test_dream_grounds_stated_fact_in_user_turn_text(initialized, home, fake):
+    """BUILD-PLAN F52: the dream grounds a stated fact in turn text from evidence archive."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-turn-grounded",
+        facts=[
+            {
+                "statement": "PostgreSQL stays at version 16.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_pg#e1",
+                "quote": "Keep it at 16.",
+                "text": "We're on PostgreSQL. Keep it at 16.",
+                "role": "user",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "postgresql stays 16")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].statement == "PostgreSQL stays at version 16."
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "PostgreSQL stays at version 16." in overview
+
+
 def test_dream_supersedes_replaced_rule_fixture(initialized, home, fake):
     """BUILD-PLAN F52: a rule the user replaced supersedes the old rule."""
     cfg = config_with_fake(home, initialized.vault, fake)

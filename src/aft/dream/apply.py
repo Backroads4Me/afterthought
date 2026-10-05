@@ -384,7 +384,15 @@ def run_project(
                     )
                 )
                 return
-            said = "\n".join(q for q in verified_quotes if q)
+            grounding_texts: list[str] = []
+            for e in verified_evidence:
+                quote_text = str(sources_map.get(e.source, {}).get("quote", ""))
+                if e.yours:
+                    turn = _turn_text(config, e.resource)
+                    grounding_texts.append(turn if turn is not None else quote_text)
+                else:
+                    grounding_texts.append(quote_text)
+            said = "\n".join(t for t in grounding_texts if t)
             missing = digest.ungrounded(new_fact.statement, said)
             if missing:
                 report.rejected.append(
@@ -1381,3 +1389,16 @@ def _is_quote_yours(config: Config, resource: str, default: bool = False) -> boo
                 except Exception:
                     return False
     return default
+
+
+def _turn_text(config: Config, resource: str) -> str | None:
+    if resource.startswith("aft://session/"):
+        uri = resource.removeprefix("aft://session/")
+        parts = uri.split("#", 1)
+        if len(parts) == 2:
+            agent_sess = parts[0].split("/")
+            agent = agent_sess[0] if len(agent_sess) > 1 else None
+            sess_id = agent_sess[-1]
+            entry_id = parts[1]
+            return evidence.entry_text(config, sess_id, entry_id, agent=agent or None)
+    return None

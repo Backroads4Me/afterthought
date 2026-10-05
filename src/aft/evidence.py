@@ -196,6 +196,30 @@ def find_quote(
     return wanted in _spaced(_unpack(row[0], entry_id))
 
 
+def entry_text(
+    config: Config, session_id: str, entry_id: str, agent: str | None = None
+) -> str | None:
+    """The archived text of one entry, as a string.
+
+    None is the answer when the session or the entry is not in the archive.
+    """
+    session_id = _require_name(session_id, "session id")
+    entry_id = _require_name(entry_id, "entry id")
+    if not _db_path(config).exists():
+        return None
+    if agent is None:
+        statement = "SELECT text FROM evidence WHERE session_id = ? AND entry_id = ?"
+        parameters = (session_id, entry_id)
+    else:
+        statement = "SELECT text FROM evidence WHERE session_id = ? AND entry_id = ? AND agent = ?"
+        parameters = (session_id, entry_id, agent)
+    with _reading(config) as conn:
+        row = conn.execute(statement, parameters).fetchone()
+    if row is None:
+        return None
+    return _unpack(row[0], entry_id)
+
+
 def purge(config: Config, now: datetime) -> int:
     """Drop the archived entries older than ``evidence.retention_days``, and say how many.
 
