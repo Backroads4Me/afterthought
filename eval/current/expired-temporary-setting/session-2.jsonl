@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "e2-u1", "timestamp": "2026-10-12T10:00:00Z", "message": {"content": [{"type": "text", "text": "Let's check the health of the capture queue."}]}}
+{"type": "assistant", "uuid": "e2-a1", "timestamp": "2026-10-12T10:00:05Z", "message": {"content": [{"type": "text", "text": "The capture queue is operating normally."}]}}
+{"type": "user", "uuid": "e2-u2", "timestamp": "2026-10-12T10:01:00Z", "message": {"content": [{"type": "text", "text": "Check if any queue errors occurred."}]}}
+{"type": "assistant", "uuid": "e2-a2", "timestamp": "2026-10-12T10:01:10Z", "message": {"content": [{"type": "text", "text": "No queue errors found."}]}}

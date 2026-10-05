@@ -852,3 +852,244 @@ def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, t
         "stated_wrong": 1,
         "observed": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# F60: current truth evaluation (BUILD-PLAN F60)
+
+
+def test_score_block_on_handmade_blocks(ev):
+    """Scoring checks that the current value is present and the superseded value is absent."""
+    block = (
+        "# afterthought\n\n"
+        "## Preferences\n"
+        "- Commit messages must start with a capitalized imperative verb. [stated] 2026-10-02\n"
+    )
+    current = ["Commit messages must start with a capitalized imperative verb."]
+    superseded = ["always write them in lowercase imperative style"]
+
+    # When current is present and superseded is absent, the scenario passes.
+    score = ev.score_block(block, current, superseded)
+    assert score["current_present"] is True
+    assert score["superseded_absent"] is True
+    assert score["contradiction"] is False
+    assert score["passed"] is True
+    assert score["found_current"] == current
+    assert score["missed_current"] == []
+    assert score["found_superseded"] == []
+
+    # When a superseded value is present, a contradiction is recorded.
+    contradicted_block = block + "- always write them in lowercase imperative style\n"
+    score_bad = ev.score_block(contradicted_block, current, superseded)
+    assert score_bad["current_present"] is True
+    assert score_bad["superseded_absent"] is False
+    assert score_bad["contradiction"] is True
+    assert score_bad["passed"] is False
+    assert score_bad["found_superseded"] == superseded
+
+    # When a required current value is missing, the scenario fails.
+    score_missing = ev.score_block("## Preferences\n", current, superseded)
+    assert score_missing["current_present"] is False
+    assert score_missing["superseded_absent"] is True
+    assert score_missing["contradiction"] is False
+    assert score_missing["passed"] is False
+    assert score_missing["missed_current"] == current
+
+    # When there is no superseded value to check, absence is always satisfied.
+    score_no_sup = ev.score_block(block, current, [])
+    assert score_no_sup["current_present"] is True
+    assert score_no_sup["superseded_absent"] is True
+    assert score_no_sup["passed"] is True
+
+
+def test_load_scenarios_from_repo(ev):
+    """All 5 shipped scenarios in eval/current load with valid sessions and expectations."""
+    scenarios = ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS)
+    assert len(scenarios) == 5
+    names = {s.name for s in scenarios}
+    assert names == {
+        "reversed-preference",
+        "paused-then-resumed",
+        "expired-temporary-setting",
+        "replaced-rule",
+        "restated-fact",
+    }
+    selected = ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["reversed-preference"])
+    assert len(selected) == 1
+    assert selected[0].name == "reversed-preference"
+
+    with pytest.raises(ev.EvalError, match="unknown scenario"):
+        ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["nonexistent"])
+
+
+def test_current_refuses_real_home_and_vault(ev, monkeypatch):
+    """The current command enforces the sandbox checks and refuses real paths."""
+    real = str(Path("~/.afterthought").expanduser().resolve())
+    monkeypatch.setenv(configmod.HOME_ENV, real)
+    with pytest.raises(ev.EvalError, match="refusing"):
+        ev.load_config()
+
+
+def test_current_runs_scenario_with_fake_endpoint(ev, tmp_path, cfg):
+    """Running current over one scenario drives capture, digest, dream, and inject."""
+
+    def said_item(statement: str, quote: str, entry: str) -> dict:
+        return {
+            "statement": statement,
+            "kind": "preference",
+            "source": "stated",
+            "term": "long",
+            "quote": quote,
+            "entry": entry,
+            "scope": "global",
+        }
+
+    def digest_answer(*facts: dict) -> dict:
+        return {
+            "summary": "Updated commit style.",
+            "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+            "facts": list(facts),
+        }
+
+    script = [
+        digest_answer(
+            said_item(
+                "Commit messages must be lowercase imperative.",
+                "always write them in lowercase imperative style",
+                "rp1-u1",
+            )
+        ),
+        {"action": "add", "line": None, "reason": "stated preference"},
+        digest_answer(
+            said_item(
+                "Commit messages must start with a capitalized imperative verb.",
+                "commit messages must start with a capitalized imperative verb",
+                "rp2-u1",
+            )
+        ),
+        {"action": "supersede", "line": "L1", "reason": "reversed preference"},
+    ]
+    with FakeEndpoint(script) as fake:
+        scenarios = ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["reversed-preference"])
+        assert len(scenarios) == 1
+        backend = ev.Backend("local")
+        config = ev.with_model(cfg, fake.endpoint, "fake-model", "{}")
+        report = ev.run_scenarios(scenarios, config, backend, variant="base")
+
+        assert report["totals"]["scenarios"] == 1
+        assert report["totals"]["current_present"] == 1
+        assert report["totals"]["superseded_absent"] == 1
+        assert report["totals"]["contradictions"] == 0
+        assert report["totals"]["passed"] == 1
+        res = report["scenarios"][0]
+        assert res["current_present"] is True
+        assert res["superseded_absent"] is True
+        assert res["contradiction"] is False
+        assert res["passed"] is True
+
+
+def test_current_cli_command_with_report_file(ev, tmp_path, cfg):
+    """The current CLI command runs and writes the JSON report file when asked."""
+
+    def said_item(statement: str, quote: str, entry: str) -> dict:
+        return {
+            "statement": statement,
+            "kind": "preference",
+            "source": "stated",
+            "term": "long",
+            "quote": quote,
+            "entry": entry,
+            "scope": "global",
+        }
+
+    def digest_answer(*facts: dict) -> dict:
+        return {
+            "summary": "Updated commit style.",
+            "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+            "facts": list(facts),
+        }
+
+    script = [
+        digest_answer(
+            said_item(
+                "Commit messages must be lowercase imperative.",
+                "always write them in lowercase imperative style",
+                "rp1-u1",
+            )
+        ),
+        {"action": "add", "line": None, "reason": "stated preference"},
+        digest_answer(
+            said_item(
+                "Commit messages must start with a capitalized imperative verb.",
+                "commit messages must start with a capitalized imperative verb",
+                "rp2-u1",
+            )
+        ),
+        {"action": "supersede", "line": "L1", "reason": "reversed preference"},
+    ]
+    report_file = tmp_path / "reports" / "current-test.json"
+    with FakeEndpoint(script) as fake:
+        code = ev.main(
+            [
+                "current",
+                "--backend",
+                "local",
+                "--endpoint",
+                fake.endpoint,
+                "--variant",
+                "base",
+                "--scenario",
+                "reversed-preference",
+                "--report",
+                str(report_file),
+            ]
+        )
+        assert code == 0
+        assert report_file.is_file()
+        data = json.loads(report_file.read_text(encoding="utf-8"))
+        assert data["command"] == "current"
+        assert data["totals"]["scenarios"] == 1
+        assert data["totals"]["passed"] == 1
+        assert data["totals"]["contradiction_rate"] == 0.0
+        assert data["totals"]["current_rate"] == 1.0
+
+
+def test_current_print_report(ev, capsys):
+    """The human-readable report shows per scenario and overall rates."""
+    report = {
+        "command": "current",
+        "backend": "local",
+        "model": "fake-model",
+        "totals": {
+            "scenarios": 2,
+            "current_present": 2,
+            "current_rate": 1.0,
+            "superseded_absent": 2,
+            "contradictions": 0,
+            "contradiction_rate": 0.0,
+            "passed": 2,
+        },
+        "scenarios": [
+            {
+                "scenario": "reversed-preference",
+                "current_present": True,
+                "superseded_absent": True,
+                "contradiction": False,
+                "passed": True,
+            },
+            {
+                "scenario": "paused-then-resumed",
+                "current_present": True,
+                "superseded_absent": True,
+                "contradiction": False,
+                "passed": True,
+            },
+        ],
+    }
+    ev.print_current_report(report)
+    out = capsys.readouterr().out
+    assert "local (fake-model) - Current truth evaluation:" in out
+    assert "reversed-preference: current=yes, superseded=absent -> PASS" in out
+    assert "paused-then-resumed: current=yes, superseded=absent -> PASS" in out
+    assert "2/2 current present (100.0%)" in out
+    assert "0/2 contradictions (0.0% contradiction rate)" in out

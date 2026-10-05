@@ -279,7 +279,9 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: collection began holding the superseded and stale lines that are still on a live page
 #: (``RESTING_PLACE``, BUILD-PLAN F20): rows an index from ``rows-3`` never built for that page, so
 #: a struck line there stays unreachable under ``--archive`` until the file is rebuilt.
-BUILD_STAMP = "rows-4"
+#: ``rows-5`` is the build whose collections stem their words (``TOKENIZER``): an index from
+#: ``rows-4`` holds whole words only, so a query for "pause" would miss "paused" there.
+BUILD_STAMP = "rows-5"
 BUILD_TABLE = "build"
 
 #: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
@@ -381,11 +383,15 @@ _CREATE_FILES = (
 _CREATE_ORIGINS = (
     f"CREATE TABLE IF NOT EXISTS {ORIGINS_TABLE} (input TEXT PRIMARY KEY, digest TEXT NOT NULL)"
 )
+#: Words are stemmed with SQLite's own Porter stemmer over its unicode61 tokenizer, so a
+#: search for "pause" finds "paused" and "configure" finds "configured" (BUILD-PLAN F61).
+TOKENIZER = "porter unicode61"
 _CREATE_COLLECTION = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS {collection} USING fts5("
     + ", ".join(INDEXED_COLUMNS)
     + ", "
     + ", ".join(f"{column} UNINDEXED" for column in IDENTITY_COLUMNS)
+    + f", tokenize='{TOKENIZER}'"
     + ")"
 )
 _SCHEMA_TABLES: tuple[tuple[str, str], ...] = (

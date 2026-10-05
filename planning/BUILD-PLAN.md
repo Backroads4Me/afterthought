@@ -1273,6 +1273,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   judge: per scenario, the block states the current value, and holds no superseded one
   (contradiction rate). The report gives both per scenario and in total, per model. Review
   checkpoint: no.
+- **F61 Search finds other forms of a word** (ruling 2026-10-05). DESIGN 14 (search). The
+  index's collections use FTS5's built-in `porter unicode61` tokenizer, so "pause" finds
+  "paused" and "configure" finds "configured"; whole-word matching found neither. The build
+  stamp moves to `rows-5`, so an index from before is refused with the `aft reindex` repair.
+  Tests: other forms of a word find the line. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

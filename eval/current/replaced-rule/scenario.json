@@ -1,0 +1,20 @@
+{
+  "name": "replaced-rule",
+  "description": "a rule the user replaces (F51's case)",
+  "current": ["reply 'settle' to go through notes now"],
+  "superseded": ["reply 'yes' to go through notes"],
+  "sessions": [
+    {
+      "session_id": "rule-1",
+      "agent": "claude",
+      "transcript": "session-1.jsonl",
+      "time": "2026-10-04T10:00:00Z"
+    },
+    {
+      "session_id": "rule-2",
+      "agent": "claude",
+      "transcript": "session-2.jsonl",
+      "time": "2026-10-05T10:00:00Z"
+    }
+  ]
+}

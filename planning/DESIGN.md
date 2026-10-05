@@ -700,7 +700,8 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
    and the date of the newest
 6. one line per other page from the project's `index.md`, and one line per reference page
    linked to the project
-7. two lines on how to search and read
+7. a line saying that what you say now comes first and a memory line it contradicts is out
+   of date, then two lines on how to search and read
 
 Short-term memory comes after long-term memory, so it never crowds out what stays true when
 the block reaches its cap. Candidates, stale, superseded and withdrawn lines, and dream
@@ -713,7 +714,8 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 current directory's project first, then the global pages, then other projects, so what one
 project learned answers a question asked in another. `--project P` narrows it to one
 project and the global pages. The memory block stays the current project's and the global
-pages' alone (section 10). The default collections are:
+pages' alone (section 10). Words are stemmed by FTS5's Porter tokenizer, so "pause" finds
+"paused". The default collections are:
 
 | Collection | Contents |
 |---|---|
