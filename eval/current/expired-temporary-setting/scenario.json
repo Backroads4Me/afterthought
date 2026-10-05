@@ -1,0 +1,20 @@
+{
+  "name": "expired-temporary-setting",
+  "description": "a temporary setting that expires",
+  "current": ["The capture queue writes to jobs.sqlite in WAL mode."],
+  "superseded": ["DEBUG logging is active temporarily for troubleshooting capture queue latency."],
+  "sessions": [
+    {
+      "session_id": "exp-1",
+      "agent": "claude",
+      "transcript": "session-1.jsonl",
+      "time": "2026-10-01T10:00:00Z"
+    },
+    {
+      "session_id": "exp-2",
+      "agent": "claude",
+      "transcript": "session-2.jsonl",
+      "time": "2026-10-12T10:00:00Z"
+    }
+  ]
+}

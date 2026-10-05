@@ -1246,6 +1246,38 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   withdrawn by "X is resumed" at 15:00 the same day. Supersede of long-term lines still
   compares days. Tests: same-day later entry withdraws; same-day earlier entry does not; an
   entry with no time falls back to the day. Review checkpoint: no.
+- **F59 Statements that read on their own** (ruling 2026-10-05; from a review of Honcho's
+  extraction prompt). DESIGN 8, R2. (1) Dates: each turn block shows the turn's date and
+  weekday, and the turns prompt says a relative date the user gives ("tomorrow", "next
+  Friday", "in two weeks") is written as the absolute date it means, counted from the turn's
+  date. Grounding accepts a date in the statement when the script computes it from a relative
+  date in the turn and the turn's time (today, tomorrow, yesterday, a weekday name with or
+  without "next" or "this", "in N days" or "in N weeks"); any other date stays a name or
+  number the turn must hold. (2) Pronouns: the prompt says a statement leaves no "it",
+  "this", "that", "there" or other pronoun pointing outside itself, naming what it means;
+  a name taken from the answered message is cited as R2 already allows. Tests: "pause it
+  until tomorrow" on a Monday turn becomes Tuesday's date and is kept; a date the turn does
+  not imply is refused; each relative form above computes its date; the turn block shows the
+  date. Scored on the F54 key with the local model at temperature 0 against the turns
+  pipeline before it; merged only if it scores no worse. Review checkpoint: yes (prompt).
+- **F60 Current truth stays current** (ruling 2026-10-05; the idea from the longmem.dev
+  benchmark). DESIGN 6, 9, R4. An end-to-end eval of what the memory block says after a
+  sequence of sessions, where F54 scores the digest alone. Scenarios in `eval/current/`, each
+  a short scripted sequence of sessions in afterthought's own setting, written as transcripts
+  in the repo: a preference the user reverses; "X is paused" then "X is resumed" the same day
+  (F58); a temporary setting that expires; a rule the user replaces (F51's case); a fact
+  restated unchanged. `scripts/eval_digest.py current` runs each sequence through capture,
+  digest, dream and inject in a fresh temporary AFT_HOME and vault per scenario, refusing the
+  real home and vault as the F54 harness does; no real session and no hook is involved, so
+  nothing reaches the real archive, vault or memory block. Scoring is mechanical, no model
+  judge: per scenario, the block states the current value, and holds no superseded one
+  (contradiction rate). The report gives both per scenario and in total, per model. Review
+  checkpoint: no.
+- **F61 Search finds other forms of a word** (ruling 2026-10-05). DESIGN 14 (search). The
+  index's collections use FTS5's built-in `porter unicode61` tokenizer, so "pause" finds
+  "paused" and "configure" finds "configured"; whole-word matching found neither. The build
+  stamp moves to `rows-5`, so an index from before is refused with the `aft reindex` repair.
+  Tests: other forms of a word find the line. Review checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,

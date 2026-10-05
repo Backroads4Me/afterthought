@@ -622,7 +622,7 @@ A long-term fact whose `confirm` names a line on `recent.md` promotes that line
 | Rule | What it enforces | Checked by |
 |---|---|---|
 | **R1 Provenance** | Every fact line carries one source tag and at least one source with a verified quote. | Script |
-| **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). Your approval of an agent's proposal ("yes, do option B") is `[stated]` as the decision it approves, and the line cites two sources: your words of approval and the agent's words stating what was proposed, each verified in its own entry; the statement holds no name or number that neither says (a word with a digit, one of `_/.:-`, or a capital past its first letter, where plain words are not checked). A name your reply takes from the message it answers is cited the same way, with the one sentence of that message that holds it. | Script, model |
+| **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). Your approval of an agent's proposal ("yes, do option B") is `[stated]` as the decision it approves, and the line cites two sources: your words of approval and the agent's words stating what was proposed, each verified in its own entry; the statement holds no name or number that neither says (a word with a digit, one of `_/.:-`, or a capital past its first letter, where plain words are not checked). A name your reply takes from the message it answers is cited the same way, with the one sentence of that message that holds it. A date the statement gives for a relative one your turn holds ("tomorrow", "next Friday") is grounded when the script computes the same date from the turn's own time. | Script, model |
 | **R3 Recurrence gate** | An `[inferred]` or `[suggested]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
 | **R4 Authority by kind** | Replacing a line needs a verified quote newer than the line's latest evidence, and the authority the table below gives. Without it the result is a conflict, and the old line stands. | Script |
 | **R5 Only what cannot be re-derived** | No file listings, code excerpts over a few lines, or anything git already records. Prefer durable phrasing over figures that go stale. | Model, then script heuristics |
@@ -700,7 +700,8 @@ a map of the project, not a dump of it. It is capped at about 8,000 characters (
    and the date of the newest
 6. one line per other page from the project's `index.md`, and one line per reference page
    linked to the project
-7. two lines on how to search and read
+7. a line saying that what you say now comes first and a memory line it contradicts is out
+   of date, then two lines on how to search and read
 
 Short-term memory comes after long-term memory, so it never crowds out what stays true when
 the block reaches its cap. Candidates, stale, superseded and withdrawn lines, and dream
@@ -713,7 +714,8 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 current directory's project first, then the global pages, then other projects, so what one
 project learned answers a question asked in another. `--project P` narrows it to one
 project and the global pages. The memory block stays the current project's and the global
-pages' alone (section 10). The default collections are:
+pages' alone (section 10). Words are stemmed by FTS5's Porter tokenizer, so "pause" finds
+"paused". The default collections are:
 
 | Collection | Contents |
 |---|---|

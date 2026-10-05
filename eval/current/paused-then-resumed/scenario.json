@@ -1,0 +1,20 @@
+{
+  "name": "paused-then-resumed",
+  "description": "X is paused then X is resumed the same day (F58)",
+  "current": ["The search indexer background worker is resumed."],
+  "superseded": ["The search indexer background worker is paused."],
+  "sessions": [
+    {
+      "session_id": "pause-1",
+      "agent": "claude",
+      "transcript": "session-1.jsonl",
+      "time": "2026-10-03T09:00:00Z"
+    },
+    {
+      "session_id": "resume-1",
+      "agent": "claude",
+      "transcript": "session-2.jsonl",
+      "time": "2026-10-03T15:00:00Z"
+    }
+  ]
+}

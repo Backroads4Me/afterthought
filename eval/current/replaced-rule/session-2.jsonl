@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "rl2-u1", "timestamp": "2026-10-05T10:00:00Z", "message": {"content": [{"type": "text", "text": "New rule for settling notes: reply 'settle' to go through notes now; any other reply skips them."}]}}
+{"type": "assistant", "uuid": "rl2-a1", "timestamp": "2026-10-05T10:00:05Z", "message": {"content": [{"type": "text", "text": "Understood: reply 'settle' to go through notes now, and any other reply skips them."}]}}
+{"type": "user", "uuid": "rl2-u2", "timestamp": "2026-10-05T10:01:00Z", "message": {"content": [{"type": "text", "text": "Verify the notes command handles this input."}]}}
+{"type": "assistant", "uuid": "rl2-a2", "timestamp": "2026-10-05T10:01:10Z", "message": {"content": [{"type": "text", "text": "The notes command is ready for the new input."}]}}
