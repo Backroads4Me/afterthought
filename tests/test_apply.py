@@ -3425,6 +3425,11 @@ def test_dream_supersedes_replaced_rule_fixture(initialized, home, fake):
     res = schedule.run(cfg, now=NOW)
     report = res.reports["widget"]
     assert len(report.superseded) == 1
+    prompt_sent = fake.requests[0]["messages"][0]["content"]
+    assert (
+        "A new fact that changes how something is done, which an existing line describes, "
+        "supersedes that line rather than adding beside it." in " ".join(prompt_sent.split())
+    )
     overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "~~Any reply to the notes prompt goes through the notes.~~" in overview
     assert "Reply settle to go through notes; any other reply skips them. [stated]" in overview
@@ -3470,6 +3475,11 @@ def test_dream_supersedes_made_false_line_fixture(initialized, home, fake):
     res = schedule.run(cfg, now=NOW)
     report = res.reports["widget"]
     assert len(report.superseded) == 1
+    prompt_sent = fake.requests[0]["messages"][0]["content"]
+    assert (
+        "A new fact that changes how something is done, which an existing line describes, "
+        "supersedes that line rather than adding beside it." in " ".join(prompt_sent.split())
+    )
     overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "~~Notes are settled with aft settle.~~" in overview
     assert "The aft settle command was removed. [stated]" in overview
