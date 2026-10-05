@@ -1,0 +1,20 @@
+{
+  "name": "reversed-preference",
+  "description": "a preference the user reverses",
+  "current": ["Commit messages must start with a capitalized imperative verb."],
+  "superseded": ["always write them in lowercase imperative style"],
+  "sessions": [
+    {
+      "session_id": "rev-pref-1",
+      "agent": "claude",
+      "transcript": "session-1.jsonl",
+      "time": "2026-10-01T10:00:00Z"
+    },
+    {
+      "session_id": "rev-pref-2",
+      "agent": "claude",
+      "transcript": "session-2.jsonl",
+      "time": "2026-10-02T10:00:00Z"
+    }
+  ]
+}

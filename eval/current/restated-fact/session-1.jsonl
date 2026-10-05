@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "ft1-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "The evidence archive retention window is 90 days."}]}}
+{"type": "assistant", "uuid": "ft1-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "Noted that the evidence archive retention window is 90 days."}]}}
+{"type": "user", "uuid": "ft1-u2", "timestamp": "2026-10-04T10:01:00Z", "message": {"content": [{"type": "text", "text": "Let's check the purge routine."}]}}
+{"type": "assistant", "uuid": "ft1-a2", "timestamp": "2026-10-04T10:01:10Z", "message": {"content": [{"type": "text", "text": "The purge routine checks against the 90 day window."}]}}

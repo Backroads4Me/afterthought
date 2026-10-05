@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "rl1-u1", "timestamp": "2026-10-04T10:00:00Z", "message": {"content": [{"type": "text", "text": "When settling notes, reply 'yes' to go through notes or 'skip' to skip them."}]}}
+{"type": "assistant", "uuid": "rl1-a1", "timestamp": "2026-10-04T10:00:05Z", "message": {"content": [{"type": "text", "text": "Understood: when settling notes, reply 'yes' or 'skip'."}]}}
+{"type": "user", "uuid": "rl1-u2", "timestamp": "2026-10-04T10:01:00Z", "message": {"content": [{"type": "text", "text": "Show me any notes currently waiting."}]}}
+{"type": "assistant", "uuid": "rl1-a2", "timestamp": "2026-10-04T10:01:10Z", "message": {"content": [{"type": "text", "text": "No notes waiting at this time."}]}}

@@ -61,24 +61,28 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from aft import capture, cli, evidence, gitutil, model, queue, readers, vault, work
 from aft import config as configmod
 from aft import digest as digestmod
-from aft import evidence, model, readers, vault
 from aft import filter as filtermod
 from aft.config import Config, ConfigError
-from aft.dream import rules
+from aft.dream import rules, schedule
+from aft.events import SESSION_END, SessionEvent
+from aft.registry import Registry, path_key
 from aft.schema import SchemaError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SYNTHETIC = REPO_ROOT / "eval" / "digest" / "synthetic"
+DEFAULT_CURRENT_SCENARIOS = REPO_ROOT / "eval" / "current"
 
 BACKENDS = ("local", "gemini", "claude")
 BASE_VARIANT = "base"
@@ -1225,6 +1229,27 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", default=BASE_VARIANT)
     p.add_argument("--backend", default="local")
     p.set_defaults(handler=_cmd_score_turns)
+
+    p = sub.add_parser("current", help="run end-to-end current-truth eval over scenarios")
+    p.add_argument("--data", help="eval data directory for output reports")
+    p.add_argument("--backend", choices=BACKENDS, default="local")
+    p.add_argument("--variant", default=BASE_VARIANT)
+    p.add_argument("--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint")
+    p.add_argument("--model", dest="model_name", default=LOCAL_MODEL, help="local backend model")
+    p.add_argument(
+        "--extra-body", default=LOCAL_EXTRA_BODY, help="local backend extra_body, as JSON"
+    )
+    p.add_argument(
+        "--scenario", action="append", default=[], help="run only this scenario, by name"
+    )
+    p.add_argument(
+        "--scenarios-dir",
+        type=Path,
+        default=None,
+        help="scenarios directory (default: eval/current)",
+    )
+    p.add_argument("--report", type=Path, default=None, help="write JSON report to this file")
+    p.set_defaults(handler=_cmd_current)
     return parser
 
 
@@ -1366,6 +1391,413 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
 def _cmd_score(args: argparse.Namespace) -> int:
     score_run(_data_dir(args), args.variant, args.backend, _synthetic_dir(args))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# F60: current truth evaluation (BUILD-PLAN F60)
+
+
+@dataclass(frozen=True)
+class ScenarioSession:
+    """One session in a scenario sequence."""
+
+    session_id: str
+    agent: str
+    transcript: Path
+    time: datetime
+    dream_time: datetime | None = None
+    dream_only: bool = False
+
+
+@dataclass(frozen=True)
+class Scenario:
+    """One evaluation scenario composed of scripted sessions and expectations."""
+
+    name: str
+    description: str
+    current: tuple[str, ...]
+    superseded: tuple[str, ...]
+    sessions: tuple[ScenarioSession, ...]
+    slug: str = "afterthought"
+    config_overrides: dict[str, Any] = field(default_factory=dict)
+
+
+def score_block(block: str, current: Sequence[str], superseded: Sequence[str]) -> dict[str, Any]:
+    """Score a memory block against expected current and superseded phrases.
+
+    The block states each current value, and holds no superseded one.
+    A superseded value appearing in the block is recorded as a contradiction.
+    """
+    found_current = [item for item in current if item in block]
+    missed_current = [item for item in current if item not in block]
+    found_superseded = [item for item in superseded if item in block]
+    current_present = len(missed_current) == 0
+    superseded_absent = len(found_superseded) == 0
+    contradiction = not superseded_absent
+    passed = current_present and superseded_absent
+    return {
+        "current_present": current_present,
+        "superseded_absent": superseded_absent,
+        "contradiction": contradiction,
+        "passed": passed,
+        "current": list(current),
+        "superseded": list(superseded),
+        "found_current": found_current,
+        "missed_current": missed_current,
+        "found_superseded": found_superseded,
+    }
+
+
+def load_scenario(path: Path) -> Scenario:
+    """Load one scenario directory holding scenario.json and transcripts."""
+    scenario_file = path / "scenario.json"
+    if not scenario_file.is_file():
+        raise EvalError(f"{path}: no scenario.json")
+    raw = _read_json(scenario_file)
+    if not isinstance(raw, dict):
+        raise EvalError(f"{scenario_file}: expected JSON object")
+
+    name = raw.get("name") or path.name
+    description = raw.get("description") or ""
+    slug = raw.get("slug") or "afterthought"
+
+    def _to_tuple(val: object) -> tuple[str, ...]:
+        if val is None:
+            return ()
+        if isinstance(val, str):
+            return (val,)
+        if isinstance(val, list):
+            return tuple(str(x) for x in val)
+        return ()
+
+    current = _to_tuple(raw.get("current"))
+    superseded = _to_tuple(raw.get("superseded"))
+    config_overrides = raw.get("config") or {}
+
+    sessions_raw = raw.get("sessions") or []
+    sessions: list[ScenarioSession] = []
+    for idx, sess in enumerate(sessions_raw, start=1):
+        if not isinstance(sess, dict):
+            continue
+        sess_id = sess.get("session_id") or f"{name}-{idx}"
+        agent = sess.get("agent") or readers.CLAUDE
+        transcript_rel = sess.get("transcript")
+        transcript_path = path / transcript_rel if transcript_rel else path / f"session-{idx}.jsonl"
+        time_raw = sess.get("time")
+        if time_raw:
+            sess_time = datetime.fromisoformat(time_raw)
+            if sess_time.tzinfo is None:
+                sess_time = sess_time.replace(tzinfo=UTC)
+        else:
+            sess_time = datetime.now(UTC)
+
+        dream_time_raw = sess.get("dream_time")
+        dream_time = None
+        if dream_time_raw:
+            dream_time = datetime.fromisoformat(dream_time_raw)
+            if dream_time.tzinfo is None:
+                dream_time = dream_time.replace(tzinfo=UTC)
+
+        dream_only = bool(sess.get("dream_only", False))
+        sessions.append(
+            ScenarioSession(
+                session_id=sess_id,
+                agent=agent,
+                transcript=transcript_path,
+                time=sess_time,
+                dream_time=dream_time,
+                dream_only=dream_only,
+            )
+        )
+
+    return Scenario(
+        name=name,
+        description=description,
+        current=current,
+        superseded=superseded,
+        sessions=tuple(sessions),
+        slug=slug,
+        config_overrides=config_overrides,
+    )
+
+
+def load_scenarios(directory: Path, wanted: list[str] | None = None) -> list[Scenario]:
+    """Load all scenarios from directory, optionally filtered by name."""
+    if not directory.is_dir():
+        raise EvalError(f"{directory}: no scenarios directory")
+    scenarios = []
+    for path in sorted(directory.iterdir()):
+        if path.is_dir() and (path / "scenario.json").is_file():
+            scenarios.append(load_scenario(path))
+
+    if not wanted:
+        return scenarios
+
+    by_name = {s.name: s for s in scenarios}
+    selected = []
+    for name in wanted:
+        if name not in by_name:
+            raise EvalError(
+                f"unknown scenario {name!r}; scenarios are {', '.join(sorted(by_name))}"
+            )
+        selected.append(by_name[name])
+    return selected
+
+
+def _toml_value(val: Any) -> str:
+    """Format a Python value as a TOML scalar or inline table."""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, str):
+        return json.dumps(val)
+    if isinstance(val, (list, tuple)):
+        return "[" + ", ".join(_toml_value(x) for x in val) + "]"
+    if isinstance(val, dict):
+        pairs = [f"{k} = {_toml_value(v)}" for k, v in val.items()]
+        return "{ " + ", ".join(pairs) + " }"
+    return json.dumps(val)
+
+
+def run_scenario(
+    scenario: Scenario,
+    cfg: Config,
+    backend: Backend,
+    variant: str = BASE_VARIANT,
+) -> dict[str, Any]:
+    """Run one scenario end-to-end through capture, digest, dream, and inject."""
+    with tempfile.TemporaryDirectory(prefix=f"aft-current-{scenario.name}-") as tmpdir:
+        tmp = Path(tmpdir)
+        scenario_home = tmp / "home"
+        scenario_vault = tmp / "vault"
+        scenario_repo = tmp / "repo"
+        scenario_home.mkdir(parents=True)
+        scenario_vault.mkdir(parents=True)
+        scenario_repo.mkdir(parents=True)
+
+        _refuse_real(str(scenario_home), "scenario home")
+        _refuse_real(str(scenario_vault), "scenario vault")
+
+        gitutil.git(["init", "-q"], cwd=scenario_repo)
+        (scenario_repo / "README.md").write_text(f"{scenario.slug}\n", encoding="utf-8")
+        gitutil.git(["add", "README.md"], cwd=scenario_repo)
+        gitutil.git(["commit", "-q", "-m", "init"], cwd=scenario_repo)
+
+        pipeline_name = (
+            variant if variant in configmod.DIGEST_PIPELINES else cfg.settings.digest.pipeline
+        )
+        lines = [
+            f'vault = "{scenario_vault}"',
+            'host = "evalhost"',
+            "",
+            "[model]",
+            f'endpoint = "{cfg.settings.model.endpoint}"',
+            f'name = "{cfg.settings.model.name}"',
+            f"extra_body = {_toml_value(cfg.settings.model.extra_body)}",
+            "",
+            "[digest]",
+            f'pipeline = "{pipeline_name}"',
+            "",
+            "[dream]",
+            "quiet_minutes = 0",
+            f"short_term_days = {cfg.settings.dream.short_term_days}",
+        ]
+        if "dream" in scenario.config_overrides:
+            for k, v in scenario.config_overrides["dream"].items():
+                lines.append(f"{k} = {_toml_value(v)}")
+        (scenario_home / configmod.CONFIG_NAME).write_text(
+            "\n".join(lines) + "\n", encoding="utf-8"
+        )
+
+        empty_agents = tmp / "empty_agents"
+        empty_agents.mkdir(parents=True)
+        orig_session_dirs = capture.SESSION_DIRS
+        capture.SESSION_DIRS = {readers.CLAUDE: empty_agents, readers.PI: empty_agents}
+
+        old_home = os.environ.get(configmod.HOME_ENV)
+        git_author = os.environ.get("GIT_AUTHOR_NAME")
+        git_email = os.environ.get("GIT_AUTHOR_EMAIL")
+        git_committer = os.environ.get("GIT_COMMITTER_NAME")
+        git_committer_email = os.environ.get("GIT_COMMITTER_EMAIL")
+        try:
+            os.environ[configmod.HOME_ENV] = str(scenario_home)
+            os.environ["GIT_AUTHOR_NAME"] = "eval"
+            os.environ["GIT_AUTHOR_EMAIL"] = "eval@example.com"
+            os.environ["GIT_COMMITTER_NAME"] = "eval"
+            os.environ["GIT_COMMITTER_EMAIL"] = "eval@example.com"
+
+            scenario_cfg = configmod.load()
+            vault.init(scenario_cfg)
+
+            registry = Registry.load(scenario_cfg.registry_path)
+            proj = registry.add(scenario.slug)
+            registry.add_path(proj, path_key(scenario_cfg.host, scenario_repo))
+            registry.save()
+            vault.commit(scenario_cfg.vault, ["registry.yaml"], f"aft: project add {scenario.slug}")
+
+            original_complete = model.complete_json
+            if backend.command is not None:
+
+                def _dispatch_complete(c, s, u, sc, m):
+                    return backend.complete_json(c, s, u, sc, m)
+
+                model.complete_json = _dispatch_complete
+
+            try:
+                for sess in scenario.sessions:
+                    if sess.dream_only or not sess.transcript.is_file():
+                        schedule.run(scenario_cfg, now=sess.time)
+                        continue
+
+                    event = SessionEvent(
+                        agent=sess.agent,
+                        kind=SESSION_END,
+                        session_id=sess.session_id,
+                        cwd=scenario_repo,
+                        transcript_path=sess.transcript,
+                        time=sess.time,
+                        detail="other",
+                    )
+                    queue.enqueue(scenario_cfg, event)
+
+                    work_time = sess.time + timedelta(minutes=5)
+                    work.run(scenario_cfg, now=work_time)
+
+                    dream_now = sess.dream_time or (sess.time + timedelta(hours=1))
+                    schedule.run(scenario_cfg, now=dream_now)
+
+                block = cli._injection_block(scenario_repo)
+            finally:
+                if backend.command is not None:
+                    model.complete_json = original_complete
+
+            score = score_block(block, scenario.current, scenario.superseded)
+            score["scenario"] = scenario.name
+            score["description"] = scenario.description
+            score["block"] = block
+            return score
+        except Exception as exc:
+            return {
+                "scenario": scenario.name,
+                "description": scenario.description,
+                "current_present": False,
+                "superseded_absent": False,
+                "contradiction": False,
+                "passed": False,
+                "error": str(exc),
+                "current": list(scenario.current),
+                "superseded": list(scenario.superseded),
+                "found_current": [],
+                "missed_current": list(scenario.current),
+                "found_superseded": [],
+                "block": "",
+            }
+        finally:
+            if old_home is not None:
+                os.environ[configmod.HOME_ENV] = old_home
+            else:
+                os.environ.pop(configmod.HOME_ENV, None)
+            if git_author is not None:
+                os.environ["GIT_AUTHOR_NAME"] = git_author
+            else:
+                os.environ.pop("GIT_AUTHOR_NAME", None)
+            if git_email is not None:
+                os.environ["GIT_AUTHOR_EMAIL"] = git_email
+            else:
+                os.environ.pop("GIT_AUTHOR_EMAIL", None)
+            if git_committer is not None:
+                os.environ["GIT_COMMITTER_NAME"] = git_committer
+            else:
+                os.environ.pop("GIT_COMMITTER_NAME", None)
+            if git_committer_email is not None:
+                os.environ["GIT_COMMITTER_EMAIL"] = git_committer_email
+            else:
+                os.environ.pop("GIT_COMMITTER_EMAIL", None)
+            capture.SESSION_DIRS = orig_session_dirs
+
+
+def run_scenarios(
+    scenarios: list[Scenario],
+    cfg: Config,
+    backend: Backend,
+    variant: str = BASE_VARIANT,
+) -> dict[str, Any]:
+    """Run a list of scenarios and summarize totals per model and scenario."""
+    results = []
+    for scenario in scenarios:
+        results.append(run_scenario(scenario, cfg, backend, variant=variant))
+
+    count = len(results)
+    current_present = sum(1 for r in results if r["current_present"])
+    contradictions = sum(1 for r in results if r["contradiction"])
+    passed = sum(1 for r in results if r["passed"])
+
+    totals = {
+        "scenarios": count,
+        "current_present": current_present,
+        "current_rate": round(current_present / count, 3) if count else 0.0,
+        "superseded_absent": count - contradictions,
+        "contradictions": contradictions,
+        "contradiction_rate": round(contradictions / count, 3) if count else 0.0,
+        "passed": passed,
+        "pass_rate": round(passed / count, 3) if count else 0.0,
+    }
+
+    return {
+        "command": "current",
+        "backend": backend.name,
+        "variant": variant,
+        "model": None if backend.command else (cfg.settings.model.name or None),
+        "endpoint": None if backend.command else cfg.settings.model.endpoint,
+        "at": datetime.now(UTC).isoformat(),
+        "totals": totals,
+        "scenarios": results,
+    }
+
+
+def print_current_report(report: dict[str, Any]) -> None:
+    """Print the human-readable summary of current truth scoring."""
+    backend_label = report["backend"]
+    if report.get("model"):
+        backend_label += f" ({report['model']})"
+    t = report["totals"]
+    print(f"\n{backend_label} - Current truth evaluation:")
+    print(f"Scenarios: {t['scenarios']}")
+    for s in report["scenarios"]:
+        cur_str = "yes" if s["current_present"] else "NO"
+        sup_str = "absent" if s["superseded_absent"] else "PRESENT (contradiction)"
+        status = "PASS" if s["passed"] else "FAIL"
+        err = f" [error: {s['error']}]" if "error" in s else ""
+        print(f"  {s['scenario']}: current={cur_str}, superseded={sup_str} -> {status}{err}")
+    print(
+        f"Total: {t['current_present']}/{t['scenarios']} current present "
+        f"({t['current_rate'] * 100:.1f}%), "
+        f"{t['contradictions']}/{t['scenarios']} contradictions "
+        f"({t['contradiction_rate'] * 100:.1f}% contradiction rate). "
+        f"{t['passed']}/{t['scenarios']} passed."
+    )
+
+
+def _cmd_current(args: argparse.Namespace) -> int:
+    cfg = with_model(load_config(), args.endpoint, args.model_name, args.extra_body)
+    cfg = with_pipeline(cfg, args.variant)
+    backend = build_backend(args.backend)
+    scenarios_dir = args.scenarios_dir or DEFAULT_CURRENT_SCENARIOS
+    scenarios = load_scenarios(scenarios_dir, args.scenario)
+    if not scenarios:
+        raise EvalError(f"{scenarios_dir}: no scenarios found")
+    report = run_scenarios(scenarios, cfg, backend, variant=args.variant)
+    print_current_report(report)
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(args.report, report)
+    elif args.data:
+        data = _data_dir(args)
+        out = data / "reports" / f"{time.strftime('%Y%m%dT%H%M%S')}-current-{args.backend}.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(out, report)
     return 0
 
 

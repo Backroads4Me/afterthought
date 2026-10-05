@@ -1,0 +1,20 @@
+{
+  "name": "restated-fact",
+  "description": "a fact restated unchanged",
+  "current": ["The evidence archive retention window is 90 days."],
+  "superseded": [],
+  "sessions": [
+    {
+      "session_id": "fact-1",
+      "agent": "claude",
+      "transcript": "session-1.jsonl",
+      "time": "2026-10-04T10:00:00Z"
+    },
+    {
+      "session_id": "fact-2",
+      "agent": "claude",
+      "transcript": "session-2.jsonl",
+      "time": "2026-10-05T10:00:00Z"
+    }
+  ]
+}
