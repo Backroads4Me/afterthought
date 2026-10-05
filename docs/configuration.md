@@ -50,8 +50,9 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 |---|---|---|
 | `digest.pipeline` | `base` | How a digest asks its questions. `base` asks one model one broad question per chunk of filtered conversation. `turns` asks narrower ones over a compacted input instead: one call per batch of user turns for what the user settled, one for what the session observed, one for what a later item replaced, and one for the summary and handoff. |
 | `digest.verify_items` | `false` | After a turns digest's final state, each kept `[stated]` item is asked back to the model once: did the user assert it rather than ask, propose or paste it, and is it still in effect by the end of the session? An item that fails either question is dropped, and the reason is recorded on the page. |
-| `digest.verifier_endpoint` | `` (the `[model]` endpoint) | The endpoint the item check calls when `digest.verify_items` is on. Empty means the `[model]` endpoint, so the model that wrote the items checks its own answers. |
+| `digest.verifier_endpoint` | `` (the `[model]` endpoint) | The endpoint the item check calls when `digest.verify_items` is on. Empty means the `[model]` endpoint, its key and `extra_body` included. When set, the check sends that endpoint the key `digest.verifier_api_key_env` names and no `extra_body` - the `[model]` table's key and request fields belong to its own endpoint. |
 | `digest.verifier_model` | `` (the `[model]` name) | The model the item check calls when `digest.verify_items` is on. Empty means the `[model]` name. |
+| `digest.verifier_api_key_env` | `` (no key) | The environment variable holding the verifier endpoint's API key, sent as a bearer token; empty means the verifier endpoint takes no key. Read only with `digest.verifier_endpoint` set. |
 
 ## `[dream]`
 

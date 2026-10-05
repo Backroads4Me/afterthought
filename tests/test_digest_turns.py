@@ -641,3 +641,83 @@ def test_a_refused_check_drops_the_item_and_the_job_still_stands(session: Sessio
     assert reasons[0].startswith(
         "the verifier refused: the answer failed its schema: $.asserted should be boolean"
     )
+
+
+def verified_two_endpoint_config(
+    cfg: Config, verifier: FakeEndpoint, key_env: str = ""
+) -> Config:
+    """The turns config with the item check on a second endpoint, re-read from disk.
+
+    The [model] table keeps a key name and an extra_body field of its own, the kind a main
+    endpoint needs and a second one must not inherit.
+    """
+    path = cfg.home / configmod.CONFIG_NAME
+    text = path.read_text(encoding="utf-8")
+    text = text.replace(
+        'name = "fake-model"\n',
+        'name = "fake-model"\napi_key_env = "MAIN_KEY"\nextra_body = { top_p = 0.5 }\n',
+    )
+    text = text.replace(
+        'pipeline = "base"\n',
+        'pipeline = "turns"\nverify_items = true\n'
+        f'verifier_endpoint = "{verifier.endpoint}"\n'
+        + (f'verifier_api_key_env = "{key_env}"\n' if key_env else ""),
+    )
+    path.write_text(text, encoding="utf-8")
+    return configmod.load()
+
+
+def run_on_two_endpoints(
+    session: Session,
+    cfg: Config,
+    verifier: FakeEndpoint,
+    key_env: str = "",
+) -> digest.Digest:
+    """The digest of the shared session with the item check on the verifier's endpoint."""
+    try:
+        cfg = verified_two_endpoint_config(cfg, verifier, key_env)
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        verifier.stop()
+    assert wrote is not None
+    return wrote
+
+
+def test_a_verifier_endpoint_gets_no_main_key_and_no_extra_body(session, monkeypatch):
+    """The check's endpoint is its own service: no [model] key and none of the [model]
+    table's extra_body fields reach it (BUILD-PLAN F56)."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([check()])
+    verifier.start()
+    try:
+        wrote = run_on_two_endpoints(session, cfg, verifier)
+    finally:
+        main.stop()
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    # The three turns calls went to the [model] endpoint, the check to the verifier's.
+    assert len(main.requests) == 3
+    assert len(verifier.requests) == 1
+    sent = verifier.requests[0]
+    assert sent["model"] == "fake-model"
+    assert "top_p" not in sent, "the [model] table's extra_body stays with its own endpoint"
+    assert "Authorization" not in verifier.headers[0], "an empty key name sends no key"
+    assert main.headers[0]["authorization"] == "Bearer main-secret"
+
+
+def test_a_verifier_endpoint_sends_the_key_its_own_setting_names(session, monkeypatch):
+    """digest.verifier_api_key_env names the key the check's endpoint takes, and the
+    [model] key stays with the [model] endpoint (BUILD-PLAN F56)."""
+    monkeypatch.setenv("MAIN_KEY", "main-secret")
+    monkeypatch.setenv("CHECK_KEY", "check-secret")
+    main, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    verifier = FakeEndpoint([check()])
+    verifier.start()
+    try:
+        wrote = run_on_two_endpoints(session, cfg, verifier, key_env="CHECK_KEY")
+    finally:
+        main.stop()
+    assert verifier.headers[0]["authorization"] == "Bearer check-secret"
+    assert main.headers[0]["authorization"] == "Bearer main-secret"

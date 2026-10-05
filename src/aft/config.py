@@ -73,9 +73,15 @@ class DigestConfig:
     # session's end; one that fails either is dropped with the reason on the page.
     verify_items: bool = False
     # Where the item check calls when verify_items is on. Empty means the [model] endpoint
-    # and name, so a small model can check a big one's answers without another table.
+    # and name, so a small model can check a big one's answers without another table. With
+    # a verifier_endpoint set, the check takes its key from verifier_api_key_env and sends
+    # no extra_body: the [model] table's key and request fields belong to its own endpoint.
     verifier_endpoint: str = ""
     verifier_model: str = ""
+    # The environment variable holding the verifier endpoint's API key. Empty means the
+    # endpoint takes no key. Read only with verifier_endpoint set; an empty endpoint uses
+    # the [model] table as it is, its key and extra_body included.
+    verifier_api_key_env: str = ""
 
 
 @dataclass(frozen=True)
@@ -361,6 +367,10 @@ verify_items = false
 # [model] endpoint and name.
 verifier_endpoint = ""
 verifier_model = ""
+# The environment variable holding the verifier endpoint's API key; empty means the
+# endpoint takes no key. Read only with verifier_endpoint set: an empty endpoint uses
+# the [model] table as it is, its key and extra_body included.
+# verifier_api_key_env = ""
 
 [dream]
 interval_minutes = 30

@@ -1203,19 +1203,34 @@ def _verified_items(
     end of them. A fact is kept only on yes to both; anything else is a refusal recorded
     beside the facts. [observed] facts are the session's own sights, not the user's, and
     are never checked. The check calls the verifier's endpoint and model when the config
-    sets them, and the [model] ones otherwise.
+    sets them, and the [model] ones otherwise. A set verifier endpoint takes the key name
+    ``digest.verifier_api_key_env`` names and no ``extra_body``, never the [model] table's
+    key or request fields; an empty endpoint uses the [model] table as it is.
     """
     check = config.settings.digest
-    if check.verifier_endpoint or check.verifier_model:
+    check = config.settings.digest
+    if check.verifier_endpoint:
+        # A second endpoint is its own service: it takes the key name the config gives it
+        # and no extra_body, never the [model] table's key or request fields.
         config = replace(
             config,
             settings=replace(
                 config.settings,
                 model=replace(
                     config.settings.model,
-                    endpoint=check.verifier_endpoint or config.settings.model.endpoint,
+                    endpoint=check.verifier_endpoint,
                     name=check.verifier_model or config.settings.model.name,
+                    api_key_env=check.verifier_api_key_env,
+                    extra_body={},
                 ),
+            ),
+        )
+    elif check.verifier_model:
+        config = replace(
+            config,
+            settings=replace(
+                config.settings,
+                model=replace(config.settings.model, name=check.verifier_model),
             ),
         )
     labels = {entry.id: n for n, entry in enumerate(entries, start=1)}
