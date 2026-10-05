@@ -365,11 +365,37 @@ def run_project(
             )
             return
 
-        quote_to_send = (
-            sources_map.get(verified_evidence[0].source, {}).get("quote", "")
-            if verified_evidence
-            else ""
-        )
+        verified_quotes = [
+            str(sources_map.get(e.source, {}).get("quote", "")) for e in verified_evidence
+        ]
+        if new_fact.source == "stated":
+            if any("?" in q for q in verified_quotes):
+                report.rejected.append(
+                    RejectedFact(
+                        statement=new_fact.statement,
+                        decision_action="add",
+                        rule="R2",
+                        reason="the quote is a question, never a settled item",
+                    )
+                )
+                return
+            said = "\n".join(q for q in verified_quotes if q)
+            missing = digest.ungrounded(new_fact.statement, said)
+            if missing:
+                report.rejected.append(
+                    RejectedFact(
+                        statement=new_fact.statement,
+                        decision_action="add",
+                        rule="R2",
+                        reason=(
+                            "the statement names words neither the user's turn nor a proposal"
+                            f" holds: {', '.join(missing)}"
+                        ),
+                    )
+                )
+                return
+
+        quote_to_send = "\n".join(q for q in verified_quotes if q) if verified_quotes else ""
         proposal = decide.decide(
             config,
             new_fact,

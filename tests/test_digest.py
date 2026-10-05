@@ -3436,3 +3436,14 @@ def test_a_digest_of_an_unregistered_directory_carries_its_path(initialized: Con
 
     unfiled = frontmatter(keys.Resolution(keys.NONE, cfg.vault))
     assert "project" not in unfiled and "path" not in unfiled
+
+
+def test_grounding_known_limit_plain_words_not_caught():
+    """BUILD-PLAN F52: grounding checks names and numbers only, so plain words are not caught."""
+    # Plain words say how, not what, and are not checked (e.g. zebrafish for zebrafjord).
+    assert digest.ungrounded("The aquarium has zebrafish.", "The aquarium has zebrafjord.") == []
+    # Names and numbers are checked.
+    assert digest.ungrounded("The aquarium has PostgreSQL.", "The aquarium has SQLite.") == [
+        "PostgreSQL"
+    ]
+    assert digest.ungrounded("Configure port 8080.", "Configure port 9090.") == ["8080"]

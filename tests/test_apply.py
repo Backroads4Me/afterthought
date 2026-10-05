@@ -3167,3 +3167,210 @@ def test_the_dream_splits_one_slug_by_each_digests_own_record(initialized, home,
     assert groups[0] == [named_digest]
     assert groups[1] == [path_digest]
     assert groups[2] == [orphan]
+
+
+def test_dream_refuses_stated_fact_with_question_quote(initialized, home, fake):
+    """BUILD-PLAN F52: a quote holding a question mark is refused under R2."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question",
+        facts=[
+            {
+                "statement": "Approved sending smaller subsections.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_q#e1",
+                "quote": "Should we send smaller subsections...?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "add decision")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(r.rule == "R2" and "the quote is a question" in r.reason for r in report.rejected)
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert (
+        not overview.exists() or "Approved sending smaller subsections" not in overview.read_text()
+    )
+
+
+def test_dream_refuses_stated_fact_with_ungrounded_statement(initialized, home, fake):
+    """BUILD-PLAN F52: a stated statement naming a name or number not in quote is refused."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-ungrounded",
+        facts=[
+            {
+                "statement": "The database runs on PostgreSQL.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_db#e1",
+                "quote": "The database runs on SQLite.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "add decision")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(r.rule == "R2" and "PostgreSQL" in r.reason for r in report.rejected)
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "PostgreSQL" not in overview.read_text()
+
+
+def test_dream_keeps_grounded_stated_fact(initialized, home, fake):
+    """BUILD-PLAN F52: a stated fact with no question mark and grounded names passes."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-grounded",
+        facts=[
+            {
+                "statement": "Capture runs at session end.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_ok#e1",
+                "quote": "Capture runs at session end.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "capture at session end")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].statement == "Capture runs at session end."
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert "Capture runs at session end." in overview.read_text()
+
+
+def test_dream_supersedes_replaced_rule_fixture(initialized, home, fake):
+    """BUILD-PLAN F52: a rule the user replaced supersedes the old rule."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body=(
+            "## Decisions\n\n"
+            "- Any reply to the notes prompt goes through the notes. [stated] 2026-09-30 [^s1]\n"
+        ),
+        sources=[{"id": "s1", "resource": "aft://session/claude/old#e1", "quote": "any reply"}],
+    )
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-f51",
+        facts=[
+            {
+                "statement": "Reply settle to go through notes; any other reply skips them.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/f51#e1",
+                "quote": "Reply settle to go through notes; any other reply skips them.",
+            }
+        ],
+    )
+
+    fake.script = [reply("supersede", "L1", "rule replaced per F51")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.superseded) == 1
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "~~Any reply to the notes prompt goes through the notes.~~" in overview
+    assert "Reply settle to go through notes; any other reply skips them. [stated]" in overview
+
+
+def test_dream_supersedes_made_false_line_fixture(initialized, home, fake):
+    """BUILD-PLAN F52: a line made false by a later change is superseded."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- Notes are settled with aft settle. [stated] 2026-09-30 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/claude/old#e1", "quote": "aft settle"}],
+    )
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-false",
+        facts=[
+            {
+                "statement": "The aft settle command was removed.",
+                "kind": "state",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/false#e1",
+                "quote": "The aft settle command was removed.",
+            }
+        ],
+    )
+
+    fake.script = [reply("supersede", "L1", "aft settle removed")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.superseded) == 1
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "~~Notes are settled with aft settle.~~" in overview
+    assert "The aft settle command was removed. [stated]" in overview
