@@ -347,7 +347,7 @@ def run_project(
         new_fact: rules.NewFact,
         evidence_list: list[rules.Evidence],
         sources_map: dict[str, dict],
-    ) -> None:
+    ) -> bool:
         """Decide one fact against memory, judge the decision by the rules, and write what
         survives (design 9 steps 2 to 5). ``sources_map`` holds the sources the fact's
         evidence cites: its digest's, or for a short-term line becoming long-term, the
@@ -363,7 +363,7 @@ def run_project(
                     reason="quote not verified",
                 )
             )
-            return
+            return False
 
         verified_quotes = [
             str(sources_map.get(e.source, {}).get("quote", "")) for e in verified_evidence
@@ -383,7 +383,7 @@ def run_project(
                         reason="the quote is a question, never a settled item",
                     )
                 )
-                return
+                return False
             grounding_texts: list[str] = []
             for e in verified_evidence:
                 quote_text = str(sources_map.get(e.source, {}).get("quote", ""))
@@ -406,7 +406,7 @@ def run_project(
                         ),
                     )
                 )
-                return
+                return False
 
         quote_to_send = "\n".join(q for q in verified_quotes if q) if verified_quotes else ""
         proposal = decide.decide(
@@ -459,7 +459,7 @@ def run_project(
                     reason=proposal.decision.reason,
                 )
             )
-            return
+            return False
 
         action = outcome.action if isinstance(outcome, rules.Apply) else outcome.to_action
         if action == "skip":
@@ -733,6 +733,7 @@ def run_project(
 
             record_write(target_file)
             target_file.write_text(doc.render(), encoding="utf-8")
+        return True
 
     try:
         for digest_path in digests:
@@ -1022,11 +1023,7 @@ def _short_term(
                     yours=yours,
                 )
             )
-        doc.remove_short_term(line)
-        record_write(recent)
-        recent.write_text(doc.render(), encoding="utf-8")
-        report.lifted.append(LiftedFact(statement=statement, why=why))
-        settle(
+        survived = settle(
             rules.NewFact(
                 statement=line.statement,
                 kind=line.kind,
@@ -1037,6 +1034,18 @@ def _short_term(
             evidence_list,
             sources,
         )
+        if not survived:
+            continue
+        doc = pagewrite.PageDoc.read(recent, vault=vault_path)
+        cur_line = next(
+            (f for f in doc.page.facts if f.statement == statement and f.state == page.ACTIVE),
+            None,
+        )
+        if cur_line is not None:
+            doc.remove_short_term(cur_line)
+            record_write(recent)
+            recent.write_text(doc.render(), encoding="utf-8")
+        report.lifted.append(LiftedFact(statement=statement, why=why))
 
     doc = pagewrite.PageDoc.read(recent, vault=vault_path)
     changed = False
