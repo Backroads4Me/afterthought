@@ -1,0 +1,78 @@
+{
+  "type": "object",
+  "description": "What the user settled, per turn (BUILD-PLAN F55).",
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "Every turn shown, each with at least one item: what the user settled in it, or one outlet label.",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "properties": {
+          "turn": {
+            "type": "string",
+            "description": "The label of the turn the item comes from, such as #3.",
+            "maxLength": 8
+          },
+          "label": {
+            "type": "string",
+            "description": "What kind of settled thing it is.",
+            "enum": [
+              "decision",
+              "preference",
+              "rule",
+              "fact",
+              "question",
+              "proposal",
+              "request",
+              "none"
+            ]
+          },
+          "statement": {
+            "type": "string",
+            "description": "One plain sentence saying what was settled, with no words the user did not use for names and numbers.",
+            "maxLength": 300
+          },
+          "quote": {
+            "type": "string",
+            "description": "The user's exact words that settle it, copied from the turn's USER text.",
+            "maxLength": 200
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "project",
+              "global"
+            ],
+            "description": "global only for a preference or environment fact that holds for every project"
+          },
+          "term": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ],
+            "description": "long or short; short when unsure"
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "For a decision that approves a proposal in BEFORE: the exact words of BEFORE that state what was proposed; otherwise empty."
+          }
+        },
+        "required": [
+          "turn",
+          "label",
+          "statement",
+          "quote",
+          "scope",
+          "term",
+          "proposal"
+        ]
+      }
+    }
+  },
+  "required": [
+    "items"
+  ]
+}

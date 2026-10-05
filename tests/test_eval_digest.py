@@ -385,6 +385,7 @@ def test_run_records_every_answer_and_what_the_pipeline_kept(ev, tmp_path, cfg):
             "date": "2026-10-04",
             "role": "primary",
             "term": "long",
+            "proposal": None,
         }
     ]
     assert summary["dropped"] == []
@@ -820,3 +821,34 @@ def test_two_quotes_of_one_fact_are_matched_by_what_the_statements_say(ev):
     groups = ev.match_facts({"local": [local, other], "claude": [claude]})
     paired = [group for group in groups if len(group.facts) == 2]
     assert len(paired) == 1 and paired[0].facts == {"local": local, "claude": claude}
+
+
+def test_a_variant_named_after_a_pipeline_runs_that_pipeline(ev, cfg):
+    assert ev.with_pipeline(cfg, "turns").settings.digest.pipeline == "turns"
+    assert ev.with_pipeline(cfg, "base").settings.digest.pipeline == "base"
+    assert ev.with_pipeline(cfg, "trial-3") is cfg
+
+
+def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, tmp_path):
+    data = tmp_path / "data"
+    key = {
+        "sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]},
+        "sess-1#2": {"user": "", "durable": [key_fact("never push to main")]},
+    }
+    data.mkdir(parents=True)
+    (data / "key-turns.json").write_text(json.dumps(key), encoding="utf-8")
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [key_fact("use port 8008"), key_fact("should the report go out at noon?")],
+    )
+    report = ev.score_turns(data, "base", "local")
+    assert report["totals"] == {
+        "sessions": 1,
+        "key_items": 2,
+        "found": 1,
+        "stated": 2,
+        "stated_wrong": 1,
+        "observed": 0,
+    }

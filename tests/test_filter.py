@@ -18,6 +18,7 @@ from aft.filter import (
     FLAG_HEAD_CHARS,
     MAX_CHARS,
     MIN_SESSION_PROMPTS,
+    compact,
     filter_entries,
     prompt_count,
 )
@@ -808,3 +809,58 @@ def test_a_long_prompt_that_begins_with_a_marker_is_dropped_whole(cfg):
     # produced from a prompt this long.
     text = "aft off " + "secret planning note. " * 200
     assert kept([said(text, "e1"), answered("as you wish", "e2")], cfg) == []
+
+
+# The turns pipeline reads a compacted version of the same kept entries (BUILD-PLAN
+# F55): a successful command shows nothing, a failed command's error lines stand, and the
+# assistant's code, diffs and tables are named rather than read. Everything
+# shown is verbatim archived text, so a quote the model takes from it is still found in
+# the evidence archive.
+
+
+def test_compact_keeps_a_prompt_verbatim():
+    assert compact(said("use port 8008, not 8000", "u1")) == "use port 8008, not 8000"
+
+
+def test_compact_of_an_answer_names_a_code_block():
+    entry = answered("before\n```python\nx = 1\ny = 2\n```\nafter", "a1")
+    assert compact(entry) == "before\n[code block]\nafter"
+
+
+def test_compact_of_an_answer_names_a_diff_block():
+    entry = answered("```diff\n- old line\n+ new line\n```", "a1")
+    assert compact(entry) == "[diff]"
+
+
+def test_compact_names_a_raw_diff_run():
+    entry = answered("the change:\n--- a/src/x.py\n+++ b/src/x.py\n@@ -1,2 +1,2 @@\ndone", "a1")
+    assert compact(entry) == "the change:\n[diff]\ndone"
+
+
+def test_compact_of_an_answer_names_a_table():
+    entry = answered("| a | b |\n|---|---|\n| 1 | 2 |\n\nprose after", "a1")
+    assert compact(entry) == "[table]\n\nprose after"
+
+
+def test_compact_of_an_answer_without_blocks_is_verbatim():
+    entry = answered("`use` the small model; a - bullet is not a table", "a1")
+    assert compact(entry) == entry.text
+
+
+def test_compact_collapses_an_unclosed_fence_to_the_end():
+    entry = answered("prose\n```\nleft open at the cap", "a1")
+    assert compact(entry) == "prose\n[code block]"
+
+
+def test_compact_shows_nothing_of_a_successful_commands_output():
+    """A tool entry is a command's output, never the call: a command that did not fail
+    leaves nothing for the turns pipeline to read."""
+    entry = Entry("t1", TIME, "tool", "cargo test\nrunning 3 tests\nok", False)
+    assert compact(entry) == ""
+
+
+def test_compact_keeps_a_failed_commands_error_lines():
+    entry = Entry(
+        "t2", TIME, "tool", "FAILED tests/test_x.py::test_y\n\nE       assert 1 == 2", True
+    )
+    assert compact(entry) == "FAILED tests/test_x.py::test_y\nE       assert 1 == 2"

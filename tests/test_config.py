@@ -33,12 +33,22 @@ def test_values_and_sections(home):
     assert cfg.settings.capture.builtin_redaction is False
 
 
+def test_digest_pipeline_defaults_to_turns(home):
+    assert configmod.load().settings.digest.pipeline == "turns"
+
+
+def test_the_digest_pipeline_is_configurable(home):
+    (home / "config.toml").write_text('[digest]\npipeline = "base"\n')
+    assert configmod.load().settings.digest.pipeline == "base"
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
         ("valut = '/x'\n", "unknown setting valut"),
         ("[dream]\ninterval = 5\n", "unknown setting dream.interval"),
         ("[dream]\ninterval_minutes = '5'\n", "dream.interval_minutes must be an integer"),
+        ("[digest]\npipeline = 'narrow'\n", "digest.pipeline must be one of"),
         ("[dream]\nshort_term_sessions = 0\n", "dream.short_term_sessions must be at least 1"),
         ("[dream]\nshort_term_days = 0\n", "dream.short_term_days must be at least 1"),
         ("[dream]\nshort_term_days = 'week'\n", "dream.short_term_days must be an integer"),

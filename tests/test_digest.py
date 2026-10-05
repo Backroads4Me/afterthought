@@ -184,7 +184,10 @@ def serve(cfg: Config, *answers: object) -> tuple[FakeEndpoint, Config]:
     fake.start()
     (cfg.home / "config.toml").write_text(
         f'vault = "{cfg.vault}"\nhost = "{cfg.host}"\n'
-        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n',
+        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+        # The answers these tests serve are the base pipeline's; the turns pipeline's tests
+        # choose it in test_digest_turns.py.
+        '[digest]\npipeline = "base"\n',
         encoding="utf-8",
     )
     return fake, configmod.load()

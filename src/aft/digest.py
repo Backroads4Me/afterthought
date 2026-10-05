@@ -15,6 +15,13 @@ reads as a session's "last session" layer (DESIGN 10) - and its facts are ordina
 lines whose footnotes name the session and entry each quote came from, so the quote a
 future dream re-checks is the one on the page.
 
+The pipeline the digest runs is a setting (BUILD-PLAN F55). ``base`` asks one model one
+broad question per chunk of filtered conversation. ``turns`` asks narrower ones over a
+compacted input instead: what the user settled, per turn; what the session observed; what
+a later item replaced; and the summary and handoff. Both pipelines verify the same way -
+the words a quote holds must be the words the evidence archive holds - and both file the
+same kind of page.
+
 The watermark moves last and only once the chunk has been dealt with: a page that was not
 written leaves the session's read position where it was, and a chunk the filter emptied
 moves it with no page at all, because those entries are decided and have nothing left to
@@ -32,6 +39,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from importlib.resources import files
 from pathlib import Path
 
@@ -57,7 +65,7 @@ from aft.dream import rules
 from aft.gitutil import GitError, git
 from aft.model import ModelError
 from aft.page import KIND_SECTIONS
-from aft.readers import USER, Entry
+from aft.readers import ASSISTANT, TOOL, USER, Entry
 
 # The page type a digest carries (BUILD-PLAN M2.6).
 PAGE_TYPE = "Session Digest"
@@ -68,6 +76,39 @@ UNFILED = "_unfiled"
 
 PROMPT_FILE = "prompts/digest.md"
 SCHEMA_FILE = "prompts/digest.schema.json"
+
+# The turns pipeline's own prompts and schemas (BUILD-PLAN F55): one question per kind
+# of finding, each with the answer's shape beside it.
+TURNS = "turns"
+TURNS_PROMPT_FILE = "prompts/turns.md"
+TURNS_SCHEMA_FILE = "prompts/turns.schema.json"
+OBSERVED_PROMPT_FILE = "prompts/observed.md"
+OBSERVED_SCHEMA_FILE = "prompts/observed.schema.json"
+FINAL_PROMPT_FILE = "prompts/final.md"
+FINAL_SCHEMA_FILE = "prompts/final.schema.json"
+SUMMARY_PROMPT_FILE = "prompts/summary.md"
+SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
+
+# What a user turn shows the per-turn call besides its own words: the end of the
+# assistant message it answers, within this many characters of the compacted text. The
+# number is the harness's own bound for the same context (BUILD-PLAN F55).
+BEFORE_CHARS = 800
+# How many user turns one turns call reads: the per-turn key was labelled in batches of
+# this size, and a model given many more answers fewer of them (BUILD-PLAN F55).
+TURN_BATCH = 15
+# The BEFORE line of a turn that answers no assistant message: the session's first turn,
+# or a turn the user sent straight after another.
+NO_REPLY = "(no agent message before this turn)"
+# A settled item's kind and scope, set by the script from the label the turns prompt
+# asked for (BUILD-PLAN F55): a rule is the decision the user made about it; a decision
+# is about the project at hand, and a preference, a rule and a stated fact hold for
+# every project.
+_TURN_KINDS = {
+    "decision": "decision",
+    "preference": "preference",
+    "rule": "decision",
+    "fact": "fact",
+}
 
 # The per-chunk input cap of DESIGN 13: 12,000 input tokens. A small model given a long
 # chunk loses track of it and writes about things the chunk never held (finding T17).
@@ -161,6 +202,8 @@ class Fact:
     date: str  # the day of that entry, which is the line's date last evidenced
     role: str = rules.PRIMARY
     term: str = LONG
+    # An approval's second source: the entry and words of the proposal it approves (R2).
+    proposal: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +244,66 @@ def digest_schema() -> dict:
         return json.loads(text)
     except ValueError as exc:
         raise DigestError(f"the shipped digest schema at {SCHEMA_FILE} is not JSON: {exc}") from exc
+
+
+def _shipped_text(name: str) -> str:
+    """A shipped prompt's text, read the way an install carries it (BUILD-PLAN F55)."""
+    try:
+        return (files("aft") / name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DigestError(f"the shipped prompt at {name} cannot be read: {exc}") from exc
+
+
+def _shipped_json(name: str) -> dict:
+    """A shipped schema, as the model's answer is constrained and checked by it."""
+    try:
+        text = (files("aft") / name).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DigestError(f"the shipped schema at {name} cannot be read: {exc}") from exc
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise DigestError(f"the shipped schema at {name} is not JSON: {exc}") from exc
+
+
+def turns_prompt_text() -> str:
+    """The per-turn prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(TURNS_PROMPT_FILE)
+
+
+def turns_schema() -> dict:
+    """The shape of what the user settled, per turn (BUILD-PLAN F55)."""
+    return _shipped_json(TURNS_SCHEMA_FILE)
+
+
+def observed_prompt_text() -> str:
+    """The observed prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(OBSERVED_PROMPT_FILE)
+
+
+def observed_schema() -> dict:
+    """The shape of what one part of a session observed (BUILD-PLAN F55)."""
+    return _shipped_json(OBSERVED_SCHEMA_FILE)
+
+
+def final_prompt_text() -> str:
+    """The final-state prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(FINAL_PROMPT_FILE)
+
+
+def final_schema() -> dict:
+    """The shape of what one item replaced (BUILD-PLAN F55)."""
+    return _shipped_json(FINAL_SCHEMA_FILE)
+
+
+def summary_prompt_text() -> str:
+    """The summary prompt, shipped beside the module (BUILD-PLAN F55)."""
+    return _shipped_text(SUMMARY_PROMPT_FILE)
+
+
+def summary_schema() -> dict:
+    """The shape of a part's summary and handoff (BUILD-PLAN F55)."""
+    return _shipped_json(SUMMARY_SCHEMA_FILE)
 
 
 def tokens(text: str) -> int:
@@ -699,6 +802,16 @@ class Digested:
 def _digest_parts(
     config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
 ) -> Digested:
+    """Each part of one job asked, checked and verified by the pipeline the settings name
+    (BUILD-PLAN F55)."""
+    if config.settings.digest.pipeline == TURNS:
+        return _digest_parts_turns(config, session_id, chunks, role)
+    return _digest_parts_base(config, session_id, chunks, role)
+
+
+def _digest_parts_base(
+    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+) -> Digested:
     """Ask for, check and verify each part of one job (DESIGN 8).
 
     One page per job, whatever the number of parts. Summaries are joined uncut: a page's
@@ -741,11 +854,522 @@ def _digest_parts(
     return result
 
 
+def turn_batches(turns: Sequence[str], budget: int) -> list[list[str]]:
+    """The turn blocks in order, in batches of at most ``TURN_BATCH`` that each fit
+    ``budget`` input tokens; a turn larger than the budget stands alone (DESIGN 13)."""
+    batches: list[list[str]] = []
+    for block in turns:
+        last = batches[-1] if batches else None
+        if (
+            last is not None
+            and len(last) < TURN_BATCH
+            and tokens("\n\n".join([*last, block])) <= budget
+        ):
+            last.append(block)
+        else:
+            batches.append([block])
+    return batches
+
+
+def turn_label(block: str) -> str:
+    """The label a turn block opens with, such as #3, as the model gives it back."""
+    return block[1 : block.index("]")]
+
+
+def turn_blocks(
+    part: Sequence[Entry], before: str = "", before_id: str = ""
+) -> tuple[list[str], str, str, dict[str, str]]:
+    """The user turns of one part as the turns prompt reads them, and the assistant text the
+    next part's first turn answers (BUILD-PLAN F55).
+
+    Each turn is labelled as ``render`` labels its entry, so an item's ``turn`` names the
+    entry its quote must come from. BEFORE is the end of the assistant message the turn
+    answers, carried in from the part before when the turn opens a part, ERRORS the error
+    lines of commands that failed since the user last spoke, USER the user's own words.
+    Returns one block per turn, the assistant text and entry the next part's first turn answers,
+    and which assistant entry each user turn answers, by entry id.
+    """
+    answered: dict[str, str] = {}
+    blocks: list[str] = []
+    errors: list[str] = []
+    for label, entry in labelled(part).items():
+        if entry.role == ASSISTANT:
+            before = filtermod.compact(entry)
+            before_id = entry.id
+        elif entry.role == TOOL:
+            shown = filtermod.compact(entry)
+            if shown:
+                errors.append(shown)
+        elif entry.role == USER:
+            if before:
+                answered[entry.id] = before_id
+            context = before[-BEFORE_CHARS:] if before else NO_REPLY
+            failed = "\n".join(errors) if errors else "(none)"
+            blocks.append(
+                f"[{label}] TURN\nBEFORE: {context}\nERRORS:\n{failed}\nUSER: {entry.text}"
+            )
+            errors = []
+            before, before_id = "", ""
+    return blocks, before, before_id, answered
+
+
+def compacted_blocks(part: Sequence[Entry], users: bool) -> str:
+    """One part compacted and labelled: the user's words (when ``users``), the assistant's
+    prose with its code, diffs and tables named, and failed commands' error lines."""
+    blocks: list[str] = []
+    for label, entry in labelled(part).items():
+        when = entry.time.isoformat()
+        if entry.role == ASSISTANT:
+            blocks.append(f"[{label}] ASSISTANT {when}:\n{filtermod.compact(entry)}")
+        elif entry.role == TOOL:
+            shown = filtermod.compact(entry)
+            if shown:
+                blocks.append(f"[{label}] ERROR {when}:\n{shown}")
+        elif entry.role == USER and users:
+            blocks.append(f"[{label}] USER {when}:\n{entry.text}")
+    return "\n\n".join(blocks)
+
+
+def ungrounded(statement: str, said: str) -> list[str]:
+    """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
+    F55): a word holding a digit or one of ``_/.:-``, or a capital letter anywhere but at the
+    statement's start. Plain words say how, not what, and are not checked. Punctuation around
+    a word is set aside, and a word matches another form of itself on their shared first five
+    letters."""
+    held = {_bare(w) for w in _WORDS.findall(said)}
+    missing: list[str] = []
+    for number, word in enumerate(_WORDS.findall(statement)):
+        low = _bare(word)
+        name = word.strip(".,;:!?\"'()")
+        distinctive = any(c.isdigit() or c in "_/.:-" for c in name) or any(
+            c.isupper() for c in (name[1:] if number == 0 else name)
+        )
+        if not low or not distinctive or low in held:
+            continue
+        if not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
+            missing.append(word.strip(".,;:!?\"'()"))
+    return missing
+
+
+def grounding_sentence(text: str, statement: str, said: str) -> str:
+    """The one sentence of ``text`` that, beside ``said``, grounds every name of
+    ``statement``, verbatim; empty when none does or two do equally well."""
+    grounding = [
+        sentence.strip()
+        for sentence in _SENTENCES.split(text)
+        if sentence.strip()
+        and len(sentence.strip()) <= 300
+        and not ungrounded(statement, f"{said}\n{sentence}")
+    ]
+    if not grounding:
+        return ""
+    return best_sentence("\n".join(grounding), statement) or (
+        grounding[0] if len(grounding) == 1 else ""
+    )
+
+
+def best_sentence(text: str, target: str) -> str:
+    """The sentence of ``text`` that shares most content words with ``target``, verbatim, or
+    empty when none shares at least two or two share the most (BUILD-PLAN F55: an
+    approval's proposal)."""
+    wanted = {_bare(w) for w in _WORDS.findall(target) if len(_bare(w)) >= 4}
+    best, score, tied = "", 1, False
+    for sentence in _SENTENCES.split(text):
+        sentence = sentence.strip()
+        if len(sentence) > 300:
+            continue
+        shared = len(wanted & {_bare(w) for w in _WORDS.findall(sentence)})
+        if shared > score:
+            best, score, tied = sentence, shared, False
+        elif shared == score and best:
+            tied = True
+    # Two sentences matching equally (option A beside option B) leave which was approved
+    # open: none is cited.
+    return "" if tied else best
+
+
+_SENTENCES = re.compile(r"(?<=[.!?:])\s+|\n+")
+
+
+def _bare(word: str) -> str:
+    """A word folded and stripped of the punctuation around it."""
+    return word.casefold().strip(".,;:!?\"'()[]`")
+
+
+_WORDS = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _turn_facts(
+    answer: dict,
+    part: Sequence[Entry],
+    config: Config | None = None,
+    session_id: str = "",
+    answered: dict[str, str] | None = None,
+    entries: dict[str, Entry] | None = None,
+    labelled: set[str] | None = None,
+) -> tuple[list[dict], list[Dropped]]:
+    """What the user settled, as facts the shared checks read, and the items refused here
+    (BUILD-PLAN F55): a statement naming words neither the user's turn nor an approved
+    proposal holds, or an approval whose proposal is not in the message the turn answers.
+
+    An approval carries ``proposal`` - the entry and words of what it approves - for the
+    page to cite beside the user's own words (DESIGN R2). ``labelled`` gathers the entry of
+    every turn the answer gave an item, whatever its label.
+    """
+    facts: list[dict] = []
+    refused: list[Dropped] = []
+    cited = _cited(part)
+    if labelled is not None:
+        labelled.clear()  # the turns of the answer of record, not of an earlier attempt
+    for item in answer["items"]:
+        if labelled is not None and item["turn"] in cited:
+            labelled.add(cited[item["turn"]].id)
+        if item["label"] not in _TURN_KINDS:
+            continue  # a question, proposal, request or nothing: the outlet, never memory
+        fact = {
+            "statement": item["statement"],
+            "kind": _TURN_KINDS[item["label"]],
+            "source": "stated",
+            "term": item["term"],
+            "quote": item["quote"],
+            "entry": item["turn"],
+            "scope": item["scope"],
+        }
+        turn = cited.get(fact["entry"])
+        if turn is not None:
+            fact = {**fact, "entry": turn.id}  # a refusal names the entry, not the prompt's label
+        if any(not fact[key].strip() or placeholder(fact[key]) for key in ("statement", "quote")):
+            refused.append(_refused(fact, "the statement or quote is empty or a placeholder"))
+            continue
+        if "?" in fact["quote"]:
+            # BUILD-PLAN F52: a quote holding a question mark is never [stated].
+            refused.append(_refused(fact, "the quote is a question, never a settled item"))
+            continue
+        said = turn.text if turn is not None else fact["quote"]
+        proposal = item.get("proposal", "").strip()
+        if proposal:
+            before_id = (answered or {}).get(fact["entry"], "")
+            if (
+                before_id
+                and config is not None
+                and not evidence.find_quote(config, session_id, before_id, proposal)
+            ):
+                # The model's copy of the proposal is not verbatim: cite the sentence of the
+                # answered message that best matches what was decided, verbatim from it.
+                answered_entry = (entries or {}).get(before_id)
+                proposal = (
+                    best_sentence(answered_entry.text, f"{fact['statement']} {proposal}")
+                    if answered_entry is not None
+                    else ""
+                )
+            if (
+                not before_id
+                or not proposal
+                or config is None
+                or not evidence.find_quote(config, session_id, before_id, proposal)
+            ):
+                refused.append(
+                    _refused(fact, "the approved proposal is not in the message the turn answers")
+                )
+                continue
+            fact["proposal"] = (before_id, proposal)
+            # DESIGN R2: an approval's statement holds no word that neither the user's words
+            # of approval nor the proposal they approve says.
+            said = f"{said}\n{proposal}"
+        missing = ungrounded(fact["statement"], said)
+        before_id = (answered or {}).get(fact["entry"], "")
+        answered_entry = (entries or {}).get(before_id)
+        if missing and "proposal" not in fact and answered_entry is not None and config:
+            # A name the user's reply takes from the message it answers is the agent's word:
+            # the line cites the one sentence of that message that holds what the statement
+            # needs, as an approval cites its proposal (DESIGN R2).
+            sentence = grounding_sentence(answered_entry.text, fact["statement"], said)
+            if sentence and evidence.find_quote(config, session_id, before_id, sentence):
+                fact["proposal"] = (before_id, sentence)
+                missing = []
+        if missing:
+            refused.append(
+                _refused(
+                    fact,
+                    "the statement names words neither the user's turn nor a proposal holds: "
+                    + ", ".join(missing),
+                )
+            )
+            continue
+        facts.append(fact)
+    return facts, refused
+
+
+def _observed_facts(answer: dict) -> list[dict]:
+    """What the session observed, as facts the shared checks read (BUILD-PLAN F55)."""
+    return [
+        {
+            "statement": item["statement"],
+            "kind": "fact",
+            "source": "observed",
+            "term": item["term"],
+            "quote": item["quote"],
+            "entry": item["entry"],
+            "scope": "project",
+        }
+        for item in answer["items"]
+        if item["statement"].strip()
+        and item["quote"].strip()
+        and not placeholder(item["statement"])
+        and not placeholder(item["quote"])
+    ]
+
+
+def _call_refused(part: Sequence[Entry], call: str, reason: str) -> Dropped:
+    """A call of the turns pipeline that was refused, recorded beside the refused facts: the
+    part was still filed, so it is not a refused part."""
+    return Dropped(
+        statement="", kind="", source="", entry=part[0].id, reason=f"{call} refused: {reason}"
+    )
+
+
+def _final_state(
+    config: Config, facts: list[Fact], order: dict[str, int]
+) -> tuple[list[Fact], list[Dropped]]:
+    """The facts that stand once a later one has replaced an earlier one, by the user's
+    explicit word only (BUILD-PLAN F55), and the replaced ones as refusals naming why.
+
+    The facts are listed in the session's own order, by the entry each quote came from, so
+    "later" in the answer is later in the session, whatever order the calls returned them in.
+    """
+    if len(facts) < 2:
+        return facts, []
+    ordered = sorted(facts, key=lambda fact: order.get(fact.entry, 0))
+    listing = "\n".join(
+        f"[#{n}] [{fact.source}] {fact.kind}: {fact.statement} (words: {fact.quote})"
+        for n, fact in enumerate(ordered, start=1)
+    )
+    try:
+        answer = _model_answer(config, final_prompt_text(), listing, final_schema())
+    except AnswerRefused as exc:
+        return ordered, [
+            Dropped(
+                statement="",
+                kind="",
+                source="",
+                entry=ordered[0].entry,
+                reason=f"final state refused, nothing replaced: {exc}",
+            )
+        ]
+    replaced: dict[int, int] = {}
+    for item in answer["replacements"]:
+        later = _label_number(item["later"])
+        earlier = _label_number(item["earlier"])
+        if later is None or earlier is None or not 1 <= earlier < later <= len(ordered):
+            continue
+        if ordered[later - 1].source != "stated":
+            continue  # only the user's own words replace anything
+        if order.get(ordered[earlier - 1].entry, 0) >= order.get(ordered[later - 1].entry, 0):
+            continue  # a replacement comes later in the session, not only later in a list
+        replaced[earlier] = later
+    kept = [fact for n, fact in enumerate(ordered, start=1) if n not in replaced]
+    dropped = [
+        Dropped(
+            statement=ordered[n - 1].statement,
+            kind=ordered[n - 1].kind,
+            source=ordered[n - 1].source,
+            entry=ordered[n - 1].entry,
+            reason=f"replaced by a later item the user stated: {ordered[later - 1].statement}",
+        )
+        for n, later in sorted(replaced.items())
+    ]
+    return kept, dropped
+
+
+def _label_number(label: str) -> int | None:
+    """``#3`` or ``3`` as 3, or None when it is neither."""
+    text = label.strip().removeprefix(LABEL_PREFIX)
+    return int(text) if text.isdigit() else None
+
+
+def _asked(
+    config: Config,
+    prompt: str,
+    text: str,
+    schema: dict,
+    session_id: str,
+    part: Sequence[Entry],
+    role: str,
+    make,
+) -> tuple[list[Fact], list[Dropped]]:
+    """One call's items, verified, asked again once when two or more items all quote words
+    their entries do not hold (finding T17), as the base pipeline asks."""
+    kept: list[Fact] = []
+    dropped: list[Dropped] = []
+    for _ in range(2):
+        made = make(_model_answer(config, prompt, text, schema))
+        facts, refused = made if isinstance(made, tuple) else (made, [])
+        kept, dropped = verify(config, session_id, part, facts, role=role)
+        proposals = {
+            (fact["statement"], fact["entry"]): fact["proposal"]
+            for fact in facts
+            if "proposal" in fact
+        }
+        kept = [
+            replace(fact, proposal=proposals[(fact.statement, fact.entry)])
+            if (fact.statement, fact.entry) in proposals
+            else fact
+            for fact in kept
+        ]
+        retry = unquoted(facts, kept, dropped)  # only verify's refusals tell T17's case
+        dropped = [*refused, *dropped]
+        if not retry:
+            break
+    return kept, dropped
+
+
+def _digest_parts_turns(
+    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+) -> Digested:
+    """Each part asked the turns pipeline's narrow questions (BUILD-PLAN F55).
+
+    Per part: the summary and handoff, what the user settled turn by turn, and what the
+    session observed, each its own call over the part compacted. Every item goes through
+    ``verify`` as the base pipeline's facts do, so a quote must stand in its entry and
+    ``[stated]`` must cite one of the user's turns; a turn item whose statement names words
+    the session never used is refused first. Across the job, a later item replaces an earlier
+    one only where the user said so. A refused summary, turns or observed call is recorded
+    beside the refused facts and the part's other calls still run; a job that gives neither
+    a summary nor a fact is refused.
+    """
+    result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
+    order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
+    last_refused = False
+    summary_refused = ""
+    before, before_id = "", ""
+    entries = {entry.id: entry for chunk in chunks for entry in chunk}
+    for part in chunks:
+        turns, before, before_id, answered = turn_blocks(part, before, before_id)
+        try:
+            summary = None
+            for _ in range(2):
+                summary = _model_answer(
+                    config,
+                    summary_prompt_text(),
+                    compacted_blocks(part, users=True),
+                    summary_schema(),
+                )
+                if summary["summary"].strip() and not placeholder(summary["summary"]):
+                    break
+                summary = None
+            if summary is None:
+                raise AnswerRefused("the summary is empty or a placeholder")
+        except AnswerRefused as exc:
+            # The turns and observed questions do not read the summary: the part still
+            # gives what its user settled and what it observed.
+            result.dropped.append(_call_refused(part, "summary", str(exc)))
+            summary_refused = str(exc)
+            summary = None
+        turn_facts = partial(
+            _turn_facts,
+            part=part,
+            config=config,
+            session_id=session_id,
+            answered=answered,
+            entries=entries,
+        )
+        cited = _cited(part)
+        for batch in turn_batches(turns, MAX_CHUNK_TOKENS - tokens(turns_prompt_text())):
+            # A turn the answer skipped is asked again once, on its own with the others
+            # skipped: every turn gets a label, as the prompt asks (BUILD-PLAN F55).
+            pending = batch
+            for _ in range(2):
+                labelled: set[str] = set()
+                try:
+                    kept, dropped = _asked(
+                        config,
+                        turns_prompt_text(),
+                        "\n\n".join(pending),
+                        turns_schema(),
+                        session_id,
+                        part,
+                        role,
+                        partial(turn_facts, labelled=labelled),
+                    )
+                    result.facts.extend(kept)
+                    result.dropped.extend(dropped)
+                except AnswerRefused as exc:
+                    result.dropped.append(_call_refused(part, "turns", str(exc)))
+                    break
+                pending = [b for b in pending if cited[turn_label(b)].id not in labelled]
+                if not pending:
+                    break
+        seen = compacted_blocks(part, users=False)
+        if seen:
+            try:
+                kept, dropped = _asked(
+                    config,
+                    observed_prompt_text(),
+                    seen,
+                    observed_schema(),
+                    session_id,
+                    part,
+                    role,
+                    _observed_facts,
+                )
+                result.facts.extend(kept)
+                result.dropped.extend(dropped)
+            except AnswerRefused as exc:
+                result.dropped.append(_call_refused(part, "observed", str(exc)))
+        if summary is None:
+            last_refused = True
+            continue
+        result.summaries.append(summary["summary"])
+        result = replace(result, handoff=grounded_handoff(summary["handoff"], part))
+        last_refused = False
+    if not result.summaries and not result.facts:
+        raise AnswerRefused(summary_refused)
+    if last_refused:
+        result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
+    facts, replaced = _final_state(config, result.facts, order)
+    return replace(result, facts=facts, dropped=[*result.dropped, *replaced])
+
+
 # An answer of at least this many facts, every one of whose quotes is missing from the
 # entry it cites, was written about something other than its chunk (finding T17): a model
 # that read the chunk finds at least one of its own quotes in it.
 MIN_FACTS_ALL_UNQUOTED = 2
 QUOTE_NOT_FOUND = "the quote is not found in entry"
+
+
+# What a turn holds that is not the user's own words (DESIGN 6, R2): a paste, a slash
+# command's text, a shell command run from the prompt and its output. A block with no closing
+# tag runs to the end of the turn.
+_NOT_OWN = re.compile(
+    r"<(pasted_content|command-name|command-message|command-args|bash-input|bash-stdout"
+    r"|bash-stderr|local-command-stdout)\b[^>]*>"
+)
+
+
+def own_words(text: str, quote: str) -> bool:
+    """Whether ``quote`` stands in ``text`` outside every paste and command block: true when
+    one of its places does, or when it is not found here to judge."""
+    spans = []
+    for opening in _NOT_OWN.finditer(text):
+        closing = re.compile(rf"</{opening.group(1)}\b[^>]*>").search(text, opening.end())
+        spans.append((opening.start(), closing.end() if closing else len(text)))
+    words = " ".join(quote.split()).lower()
+    if not words:
+        return True
+    # The text with its whitespace collapsed, as quotes are matched, and where each of its
+    # characters stands in the text itself.
+    flat: list[str] = []
+    origin: list[int] = []
+    for match in re.finditer(r"\S+", text):
+        if flat:
+            flat.append(" ")
+            origin.append(match.start())
+        flat.append(match.group().lower())
+        origin.extend(range(match.start(), match.end()))
+    places = [m.start() for m in re.finditer(re.escape(words), "".join(flat))]
+    if not places:
+        return True
+    return any(not any(start <= origin[p] < end for start, end in spans) for p in places)
 
 
 def unquoted(facts: Sequence[dict], kept: Sequence[Fact], dropped: Sequence[Dropped]) -> bool:
@@ -836,6 +1460,11 @@ def verify(
                 _refused(
                     fact, f"[stated] cites entry {entry.id}, which is not one of the user's turns"
                 )
+            )
+            continue
+        if fact["source"] == "stated" and not own_words(entry.text, fact["quote"]):
+            dropped.append(
+                _refused(fact, "[stated] quotes a paste or a command block, not the user's words")
             )
             continue
         if fact["kind"] not in KIND_SECTIONS.values():
@@ -1071,7 +1700,17 @@ def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) ->
         title=f"{session.agent} session {session.session_id}",
         quote=fact.quote,
     )
-    doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, [source])
+    sources = [source]
+    if fact.proposal is not None:
+        entry, quote = fact.proposal
+        sources.append(
+            doc.add_source(
+                f"aft://session/{session.agent}/{session.session_id}#{entry}",
+                title=f"{session.agent} session {session.session_id} (the proposal approved)",
+                quote=quote,
+            )
+        )
+    doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, sources)
 
 
 def _text(frontmatter: dict) -> str:
