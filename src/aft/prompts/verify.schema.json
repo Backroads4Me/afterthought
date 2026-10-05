@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "description": "The two answers one kept item is checked by (BUILD-PLAN F56).",
+  "properties": {
+    "asserted": {
+      "type": "boolean",
+      "description": "Whether the user's own words settled it, rather than a question, a proposal, a request for the task at hand, or pasted text."
+    },
+    "in_effect": {
+      "type": "boolean",
+      "description": "Whether the item still stands at the end of the entries shown, or a later turn reversed or replaced it."
+    },
+    "reason": {
+      "type": "string",
+      "description": "One short sentence saying what in the entries decides it, either way.",
+      "maxLength": 300
+    }
+  },
+  "required": ["asserted", "in_effect", "reason"]
+}

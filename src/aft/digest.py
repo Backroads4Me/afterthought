@@ -88,6 +88,8 @@ FINAL_PROMPT_FILE = "prompts/final.md"
 FINAL_SCHEMA_FILE = "prompts/final.schema.json"
 SUMMARY_PROMPT_FILE = "prompts/summary.md"
 SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
+VERIFY_PROMPT_FILE = "prompts/verify.md"
+VERIFY_SCHEMA_FILE = "prompts/verify.schema.json"
 
 # What a user turn shows the per-turn call besides its own words: the end of the
 # assistant message it answers, within this many characters of the compacted text. The
@@ -304,6 +306,17 @@ def summary_prompt_text() -> str:
 def summary_schema() -> dict:
     """The shape of a part's summary and handoff (BUILD-PLAN F55)."""
     return _shipped_json(SUMMARY_SCHEMA_FILE)
+
+
+
+def verify_prompt_text() -> str:
+    """The item check's prompt, shipped beside the module (BUILD-PLAN F56)."""
+    return _shipped_text(VERIFY_PROMPT_FILE)
+
+
+def verify_schema() -> dict:
+    """The shape of the two answers one kept item is checked by (BUILD-PLAN F56)."""
+    return _shipped_json(VERIFY_SCHEMA_FILE)
 
 
 def tokens(text: str) -> int:
@@ -1181,6 +1194,93 @@ def _final_state(
     return kept, dropped
 
 
+VERIFY_WINDOW = 2
+"""Entries of context on each side of an item's own, when the item is checked (F56)."""
+
+
+def _verified_items(
+    config: Config, facts: list[Fact], entries: Sequence[Entry]
+) -> tuple[list[Fact], list[Dropped]]:
+    """The [stated] facts that survive the model checking its own answers (BUILD-PLAN F56).
+
+    Each [stated] fact is asked back once, over the two entries on either side of the one
+    its quote came from: whether the user asserted it, and whether it still stands by the
+    end of them. A fact is kept only on yes to both; anything else is a refusal recorded
+    beside the facts. [observed] facts are the session's own sights, not the user's, and
+    are never checked. The check calls the verifier's endpoint and model when the config
+    sets them, and the [model] ones otherwise.
+    """
+    check = config.settings.digest
+    if check.verifier_endpoint or check.verifier_model:
+        config = replace(
+            config,
+            settings=replace(
+                config.settings,
+                model=replace(
+                    config.settings.model,
+                    endpoint=check.verifier_endpoint or config.settings.model.endpoint,
+                    name=check.verifier_model or config.settings.model.name,
+                ),
+            ),
+        )
+    labels = {entry.id: n for n, entry in enumerate(entries, start=1)}
+    kept: list[Fact] = []
+    dropped: list[Dropped] = []
+    for fact in facts:
+        if fact.source != "stated":
+            kept.append(fact)
+            continue
+        own = labels.get(fact.entry)
+        if own is None:
+            # The quote's entry is not among the session's, so there is nothing to read
+            # around; the checks before this one would have refused it already.
+            kept.append(fact)
+            continue
+        around = [
+            entry
+            for entry in entries[max(0, own - 1 - VERIFY_WINDOW) : own + VERIFY_WINDOW]
+            if entry.role in (USER, ASSISTANT)
+        ]
+        listing = "\n".join(
+            f"[#{labels[entry.id]}] {entry.role}{' ITEM' if entry.id == fact.entry else ''}\n"
+            f"{entry.text}"
+            for entry in around
+        )
+        question = f"[{fact.kind}] {fact.statement} (words: {fact.quote})"
+        try:
+            answer = _model_answer(
+                config, verify_prompt_text(), f"{question}\n\n{listing}", verify_schema()
+            )
+        except AnswerRefused as exc:
+            dropped.append(
+                Dropped(
+                    statement=fact.statement,
+                    kind=fact.kind,
+                    source=fact.source,
+                    entry=fact.entry,
+                    reason=f"the verifier refused: {exc}",
+                )
+            )
+            continue
+        if not answer["asserted"] or not answer["in_effect"]:
+            dropped.append(
+                Dropped(
+                    statement=fact.statement,
+                    kind=fact.kind,
+                    source=fact.source,
+                    entry=fact.entry,
+                    reason=(
+                        "the verifier found it not asserted"
+                        if not answer["asserted"]
+                        else "the verifier found it no longer in effect"
+                    ),
+                )
+            )
+        else:
+            kept.append(fact)
+    return kept, dropped
+
+
 def _label_number(label: str) -> int | None:
     """``#3`` or ``3`` as 3, or None when it is neither."""
     text = label.strip().removeprefix(LABEL_PREFIX)
@@ -1235,7 +1335,9 @@ def _digest_parts_turns(
     the session never used is refused first. Across the job, a later item replaces an earlier
     one only where the user said so. A refused summary, turns or observed call is recorded
     beside the refused facts and the part's other calls still run; a job that gives neither
-    a summary nor a fact is refused.
+    a summary nor a fact is refused. With ``digest.verify_items`` on, every ``[stated]``
+    item left is asked back once more over the entries around it, whether the user asserted
+    it and whether it still stands.
     """
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
@@ -1327,7 +1429,13 @@ def _digest_parts_turns(
     if last_refused:
         result = replace(result, handoff={"in_flight": "", "failed": [], "open": []})
     facts, replaced = _final_state(config, result.facts, order)
-    return replace(result, facts=facts, dropped=[*result.dropped, *replaced])
+    dropped = [*result.dropped, *replaced]
+    if config.settings.digest.verify_items:
+        # BUILD-PLAN F56: each [stated] item left is asked back once, whether the user
+        # asserted it and whether it still stands; what the check refuses joins the refusals.
+        facts, checked = _verified_items(config, facts, list(entries.values()))
+        dropped = [*dropped, *checked]
+    return replace(result, facts=facts, dropped=dropped)
 
 
 # An answer of at least this many facts, every one of whose quotes is missing from the
