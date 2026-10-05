@@ -27,6 +27,8 @@ OVERVIEW_SECTIONS = ("State", "Decisions", "Lessons", "Procedures", "Facts", "Re
 INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on the user)"}
 
+# Memory is an earlier record; the session in front of the agent outranks it.
+PRECEDENCE = "What the user says now outranks memory; a memory line it contradicts is out of date."
 HOW_TO = 'Search memory: aft search "<words>". Read a page: aft read <path>.'
 RECORD_MARKERS = (
     'A prompt starting with "aft off", "aft on", "off the record" or "on the record" sets what'
@@ -384,18 +386,19 @@ def _block(
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
-    The fixed costs come first - the block's title and the closing lines on how to
-    search and read and the capture markers - and then every part holds its floor, the
-    heading and first line that name a layer (``_trim``). What the floors leave is the
-    budget of the two producers that grow with the vault, divided evenly between them: the
-    project's own text and its page map, each capped from that remainder rather than from
-    the block, so they cannot over-subscribe it and neither can reach what the other needs.
+    The fixed costs come first - the block's title and the closing lines: that what the
+    user says now comes first, how to search and read, and the capture markers - and then
+    every part holds its floor, the heading and first line that name a layer (``_trim``).
+    What the floors leave is the budget of the two producers that grow with the vault,
+    divided evenly between them: the project's own text and its page map, each capped from
+    that remainder rather than from the block, so they cannot over-subscribe it and neither
+    can reach what the other needs.
     The global preferences layer, which the plan gives no limit of its own, takes whatever
     those two leave. When the budget leaves no room for a layer's first line, the block
     keeps its title and says under ``Cut`` that the rest was cut: a short block is
     acceptable, a layer missing without a word is the defect (design 10).
     """
-    full_closing: list[Part] = [("", [HOW_TO, RECORD_MARKERS])]
+    full_closing: list[Part] = [("", [PRECEDENCE, HOW_TO, RECORD_MARKERS])]
     recent_list = list(recent)
     waiting_list = list(waiting)
     head = _trim(title, max_chars)

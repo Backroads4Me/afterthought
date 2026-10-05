@@ -243,6 +243,7 @@ A widget that turns water into widgets.
 
 {PAGES}
 
+What the user says now outranks memory; a memory line it contradicts is out of date.
 Search memory: aft search "<words>". Read a page: aft read <path>.
 {inject.RECORD_MARKERS}"""
 
@@ -265,7 +266,7 @@ def parts_of(block: str) -> dict[str, list[str]]:
     groups: dict[str, list[str]] = {"": []}
     heading = ""
     for line in block.splitlines():
-        if line.startswith("## ") or line == inject.HOW_TO:
+        if line.startswith("## ") or line == inject.PRECEDENCE:
             heading = line
             groups.setdefault(heading, [])
         if line.strip() and not line.startswith("## "):
@@ -346,7 +347,7 @@ def test_a_collection_shows_only_for_the_projects_it_lists(widget, tmp_path):
 
 def test_the_pages_layer_points_at_every_page_but_the_overview_and_the_listing(widget, tmp_path):
     block = inject.build(widget, resolve(widget, tmp_path / "widget"))
-    assert block.split("## Pages\n\n")[1].split("\n\nSearch memory")[0] == PAGES
+    assert block.split("## Pages\n\n")[1].split("\n\n" + inject.PRECEDENCE)[0] == PAGES
 
 
 def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
@@ -375,7 +376,7 @@ def test_the_cap_holds_and_never_splits_a_line(widget, tmp_path):
         ]
         reported = cut in parts or len(block) + 2 + len(inject.CUT_NOTE) > cap
         assert not hidden or reported, f"cap {cap} dropped {hidden} without saying so"
-        assert inject.HOW_TO in parts or len(block) + 2 + len(inject.HOW_TO) > cap
+        assert inject.PRECEDENCE in parts or len(block) + 2 + len(inject.PRECEDENCE) > cap
 
 
 def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
@@ -399,7 +400,7 @@ def test_a_long_overview_leaves_room_for_the_layers_after_it(widget, tmp_path):
     parts = parts_of(block)
     assert parts["## Preferences"] == ["- Prefer short commits."]
     assert parts["## Pages"] == PAGES.splitlines()
-    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
+    assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
     assert 1 < len(parts["## Facts"]) < 200
 
 
@@ -431,7 +432,7 @@ def test_a_long_preferences_page_cannot_bury_the_page_map(widget, tmp_path):
     assert len(block) <= widget.settings.inject.max_chars
     parts = parts_of(block)
     assert parts["## Pages"] == PAGES.splitlines()
-    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
+    assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
     assert len(parts["## Facts"]) == 20
     assert 1 < len(parts["## Preferences"]) < 150
 
@@ -450,7 +451,7 @@ def test_a_hundred_pages_cannot_starve_the_project_layers(widget, tmp_path):
     assert parts["## State"] == ["- The daemon listens on 8123. (disputed)"]
     assert parts["## Facts"] == ["- The widget is round."]
     assert parts["## Preferences"] == ["- Prefer short commits."]
-    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
+    assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
 
 
 def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path):
@@ -493,7 +494,7 @@ def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path
     assert parts["## Preferences"]
     assert parts["## Preferences"] == uncapped["## Preferences"][: len(parts["## Preferences"])]
     assert len(parts["## Preferences"]) > len(parts["## Pages"])
-    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
+    assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
     for heading in ("## Pages", "## Facts"):
         assert len(parts[heading]) < len(uncapped[heading])
         assert parts[heading] == uncapped[heading][: len(parts[heading])]
@@ -531,7 +532,7 @@ def test_one_over_long_line_costs_only_itself(widget, tmp_path):
     assert parts["## Preferences"] == ["- Prefer short commits."]
     assert parts["## Pages"] == [PAGES.splitlines()[1]]
     assert parts["## Facts"] == [f"- Fact {number} is short enough to show." for number in range(3)]
-    assert parts[inject.HOW_TO] == [inject.HOW_TO, inject.RECORD_MARKERS]
+    assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
 
 
 def test_a_budget_below_the_floors_reports_the_cut(widget, tmp_path):
@@ -662,6 +663,8 @@ def test_an_unregistered_directory_gets_preferences_and_how_to(widget, tmp_path)
     assert resolution.kind == keys.UNREGISTERED
     assert inject.build(widget, resolution) == (
         "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.PRECEDENCE
+        + "\n"
         + inject.HOW_TO
         + "\n"
         + inject.RECORD_MARKERS
@@ -690,6 +693,8 @@ def test_absent_pages_leave_the_block_with_what_exists(widget, tmp_path):
         "# Memory: Widget\n\n## Pages\n\n"
         + PAGES
         + "\n\n"
+        + inject.PRECEDENCE
+        + "\n"
         + inject.HOW_TO
         + "\n"
         + inject.RECORD_MARKERS
@@ -792,6 +797,8 @@ def test_inject_prints_what_it_has_elsewhere(widget, tmp_path, capsys, monkeypat
     assert main(["inject", str(plain)]) == 0
     assert capsys.readouterr().out == (
         "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.PRECEDENCE
+        + "\n"
         + inject.HOW_TO
         + "\n"
         + inject.RECORD_MARKERS
@@ -891,6 +898,8 @@ def test_a_session_start_hook_elsewhere_prints_what_inject_prints_there(
     injected = capsys.readouterr().out
     assert injected == (
         "## Preferences\n\n- Prefer short commits.\n\n"
+        + inject.PRECEDENCE
+        + "\n"
         + inject.HOW_TO
         + "\n"
         + inject.RECORD_MARKERS
@@ -1226,7 +1235,7 @@ def test_a_vault_with_no_short_term_memory_builds_the_block_it_did(widget, tmp_p
 
 def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
     """Design 10: the recent layer takes only what long-term memory leaves."""
-    cap = dataclasses.replace(widget.settings.inject, max_chars=1200)
+    cap = dataclasses.replace(widget.settings.inject, max_chars=1300)
     config = dataclasses.replace(widget, settings=dataclasses.replace(widget.settings, inject=cap))
     without = parts_of(inject.build(config, resolve(config, tmp_path / "widget")))
     many = "\n".join(
@@ -1238,12 +1247,12 @@ def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
         RECENT_PAGE.split("## Decisions")[0] + "## State\n\n" + many + "\n",
     )
     block = inject.build(config, resolve(config, tmp_path / "widget"))
-    assert len(block) <= 1200
+    assert len(block) <= 1300
     assert "- Short-term line 0 about the current work." in block, "the layer took no room"
     assert "- Short-term line 199 about the current work." not in block
     with_recent = parts_of(block)
     for heading, lines in without.items():
-        if heading.startswith("## Pages") or heading == inject.HOW_TO:
+        if heading.startswith("## Pages") or heading == inject.PRECEDENCE:
             continue
         assert with_recent.get(heading) == lines, f"{heading} lost room to short-term memory"
 
@@ -1362,7 +1371,7 @@ def test_off_the_record_filter_not_triggered_by_marker_line():
     assert filtermod.ON_MARKER.match(inject.RECORD_MARKERS) is None
 
 
-def test_block_at_400_with_own_preferences_and_pages_reports_cut():
+def test_block_at_500_with_own_preferences_and_pages_reports_cut():
     title = [("my-project", ["A test project."])]
     own = [
         ("State", ["- Doing something in state section here now."]),
@@ -1370,8 +1379,8 @@ def test_block_at_400_with_own_preferences_and_pages_reports_cut():
     ]
     preferences = [("Preferences", ["- Prefer concise output always and everywhere."])]
     page_map = [("Pages", ["- Other: something else (aft read other.md)."])]
-    block = inject._block(title, own, preferences, page_map, 400)
-    assert len(block) <= 400
+    block = inject._block(title, own, preferences, page_map, 500)
+    assert len(block) <= 500
     assert f"## {inject.CUT_HEADING}" in block
     assert block.endswith(inject.RECORD_MARKERS)
 
@@ -1406,15 +1415,18 @@ def test_block_closing_markers_and_cut_notice_across_budgets(max_chars, with_wai
         for part in [*title, *waiting, *own, *preferences, *recent, *page_map]
         for line in part[1]
     }
-    all_input_lines.update([inject.HOW_TO, inject.RECORD_MARKERS, inject.CUT_NOTE])
+    all_input_lines.update(
+        [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS, inject.CUT_NOTE]
+    )
     for line in block.splitlines():
         if line and not line.startswith("#"):
             assert line in all_input_lines
 
     # The block ends with RECORD_MARKERS whenever max_chars is at least the title plus closing
-    full_closing = [("", [inject.HOW_TO, inject.RECORD_MARKERS])]
+    full_closing = [("", [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS])]
     head = inject._trim(title, max_chars)
-    if max_chars >= inject._width([*head, *full_closing]):
+    cut = [(inject.CUT_HEADING, [inject.CUT_NOTE])]
+    if max_chars >= inject._width([*head, *cut, *full_closing]):
         assert block.endswith(inject.RECORD_MARKERS)
 
     # Every input layer that had a line is either present or ## Cut is present
