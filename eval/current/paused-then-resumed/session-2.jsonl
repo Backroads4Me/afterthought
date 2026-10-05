@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "r1-u1", "timestamp": "2026-10-03T15:00:00Z", "message": {"content": [{"type": "text", "text": "The sqlite schema migration is done: the search indexer background worker is resumed."}]}}
+{"type": "assistant", "uuid": "r1-a1", "timestamp": "2026-10-03T15:00:05Z", "message": {"content": [{"type": "text", "text": "Got it: the search indexer background worker is resumed."}]}}
+{"type": "user", "uuid": "r1-u2", "timestamp": "2026-10-03T15:01:00Z", "message": {"content": [{"type": "text", "text": "Check that queue tasks are resuming normally."}]}}
+{"type": "assistant", "uuid": "r1-a2", "timestamp": "2026-10-03T15:01:10Z", "message": {"content": [{"type": "text", "text": "Queue tasks are running normally."}]}}

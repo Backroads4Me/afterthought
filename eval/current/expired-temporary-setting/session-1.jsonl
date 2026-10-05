@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "e1-u1", "timestamp": "2026-10-01T10:00:00Z", "message": {"content": [{"type": "text", "text": "DEBUG logging is active temporarily for troubleshooting capture queue latency."}]}}
+{"type": "assistant", "uuid": "e1-a1", "timestamp": "2026-10-01T10:00:05Z", "message": {"content": [{"type": "text", "text": "Noted that DEBUG logging is active temporarily."}]}}
+{"type": "user", "uuid": "e1-u2", "timestamp": "2026-10-01T10:01:00Z", "message": {"content": [{"type": "text", "text": "The capture queue writes to jobs.sqlite in WAL mode."}]}}
+{"type": "assistant", "uuid": "e1-a2", "timestamp": "2026-10-01T10:01:10Z", "message": {"content": [{"type": "text", "text": "Confirmed, the capture queue writes in WAL mode."}]}}

@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "rp1-u1", "timestamp": "2026-10-01T10:00:00Z", "message": {"content": [{"type": "text", "text": "For commit messages in this repository, always write them in lowercase imperative style without trailing punctuation."}]}}
+{"type": "assistant", "uuid": "rp1-a1", "timestamp": "2026-10-01T10:00:05Z", "message": {"content": [{"type": "text", "text": "Understood, I will format commit messages in lowercase imperative style without trailing punctuation."}]}}
+{"type": "user", "uuid": "rp1-u2", "timestamp": "2026-10-01T10:01:00Z", "message": {"content": [{"type": "text", "text": "Let's check git status before proceeding."}]}}
+{"type": "assistant", "uuid": "rp1-a2", "timestamp": "2026-10-01T10:01:10Z", "message": {"content": [{"type": "text", "text": "Working tree is clean."}]}}

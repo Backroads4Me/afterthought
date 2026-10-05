@@ -1,0 +1,4 @@
+{"type": "user", "uuid": "p1-u1", "timestamp": "2026-10-03T09:00:00Z", "message": {"content": [{"type": "text", "text": "The search indexer background worker is paused while we run the sqlite schema migration."}]}}
+{"type": "assistant", "uuid": "p1-a1", "timestamp": "2026-10-03T09:00:05Z", "message": {"content": [{"type": "text", "text": "Noted that the search indexer background worker is paused for the migration."}]}}
+{"type": "user", "uuid": "p1-u2", "timestamp": "2026-10-03T09:01:00Z", "message": {"content": [{"type": "text", "text": "Let's monitor the migration script execution."}]}}
+{"type": "assistant", "uuid": "p1-a2", "timestamp": "2026-10-03T09:01:10Z", "message": {"content": [{"type": "text", "text": "The migration script is running."}]}}
