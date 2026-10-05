@@ -1260,6 +1260,19 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   not imply is refused; each relative form above computes its date; the turn block shows the
   date. Scored on the F54 key with the local model at temperature 0 against the turns
   pipeline before it; merged only if it scores no worse. Review checkpoint: yes (prompt).
+- **F60 Current truth stays current** (ruling 2026-10-05; the idea from the longmem.dev
+  benchmark). DESIGN 6, 9, R4. An end-to-end eval of what the memory block says after a
+  sequence of sessions, where F54 scores the digest alone. Scenarios in `eval/current/`, each
+  a short scripted sequence of sessions in afterthought's own setting, written as transcripts
+  in the repo: a preference the user reverses; "X is paused" then "X is resumed" the same day
+  (F58); a temporary setting that expires; a rule the user replaces (F51's case); a fact
+  restated unchanged. `scripts/eval_digest.py current` runs each sequence through capture,
+  digest, dream and inject in a fresh temporary AFT_HOME and vault per scenario, refusing the
+  real home and vault as the F54 harness does; no real session and no hook is involved, so
+  nothing reaches the real archive, vault or memory block. Scoring is mechanical, no model
+  judge: per scenario, the block states the current value, and holds no superseded one
+  (contradiction rate). The report gives both per scenario and in total, per model. Review
+  checkpoint: no.
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
