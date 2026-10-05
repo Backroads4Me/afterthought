@@ -1256,7 +1256,6 @@ def _verified_items(
     key or request fields; an empty endpoint uses the [model] table as it is.
     """
     check = config.settings.digest
-    check = config.settings.digest
     if check.verifier_endpoint:
         # A second endpoint is its own service: it takes the key name the config gives it
         # and no extra_body, never the [model] table's key or request fields.
