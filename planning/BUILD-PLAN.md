@@ -424,7 +424,8 @@ For each fact:
   - observed: seen in a file, a command's output, a log, or an error.
   - inferred: your own conclusion from the session.
   - suggested: an idea, a question, or a tentative remark nobody committed to.
-  These are never stated. A tentative remark from the user ("I think I'll switch to X",
+  These are never stated. A question, a proposal or a request from the user is never a
+  decision or a preference. A tentative remark from the user ("I think I'll switch to X",
   "maybe we should") is suggested. A request for the task at hand ("run the tests") is not
   a fact at all. Text the user pasted, such as a prompt, a document, a log or another
   agent's message, is not the user's own words: what it shows about the machine or the
@@ -618,13 +619,15 @@ A fact earns its place in memory only when a future session would make a mistake
 the user again, without it. Never a fact, long or short term: the status of a pull
 request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
-documents already say.
+documents already say. A question, a proposal or a request from the user is never a
+decision or a preference.
 
 Choose one action:
 - add: the fact is new; no existing line says the same thing or contradicts it.
 - confirm: an existing line already says the same thing. Name it.
 - supersede: the fact replaces an existing line because the thing it describes has
-  changed. Name the line.
+  changed. A new fact that changes how something is done, which an existing line
+  describes, supersedes that line rather than adding beside it. Name the line.
 - conflict: the fact and an existing line say different things about the same thing, so
   both cannot be true, and it is not clear that the thing has changed. Name the line.
 - skip: the fact is not worth keeping: it fails that test, is on the never-a-fact list
@@ -1134,8 +1137,10 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   fact is made: (1) the question check moves into `digest.verify`, which both pipelines
   share; (2) the base pipeline grounds a `[stated]` statement's names and numbers in the
   entry it cites, with the same `digest.ungrounded`; (3) the dream's decide step refuses a
-  new `[stated]` fact whose statement fails either check against its verified quotes, and
-  reports it. Prompts: the base digest and decide prompts say a question, a proposal or a
+  new `[stated]` fact whose statement fails either check, and reports it. The checks read
+  the same text in both steps: the question check reads only the user's own quotes, never an
+  approved proposal; grounding reads the full text of the user's cited turn plus any cited
+  proposal. A short-term line the decide step refuses on being lifted stays in `recent.md`. Prompts: the base digest and decide prompts say a question, a proposal or a
   request from the user is never a decision or a preference; the decide prompt says a new
   fact that changes how something is done, which an existing line describes, supersedes
   that line rather than adding beside it. Tests: the question, the replaced rule and the
