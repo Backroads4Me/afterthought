@@ -42,6 +42,24 @@ def test_the_digest_pipeline_is_configurable(home):
     assert configmod.load().settings.digest.pipeline == "base"
 
 
+def test_digest_verify_items_defaults_off(home):
+    settings = configmod.load().settings.digest
+    assert settings.verify_items is False
+    assert settings.verifier_endpoint == ""
+    assert settings.verifier_model == ""
+
+
+def test_digest_verify_settings_read_from_config(home):
+    (home / "config.toml").write_text(
+        '[digest]\nverify_items = true\n'
+        'verifier_endpoint = "http://localhost:9000/v1"\nverifier_model = "small"\n'
+    )
+    settings = configmod.load().settings.digest
+    assert settings.verify_items is True
+    assert settings.verifier_endpoint == "http://localhost:9000/v1"
+    assert settings.verifier_model == "small"
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [
