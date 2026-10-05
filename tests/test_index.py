@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from aft import db as db_module
 from aft import evidence, forget, index, page, pagewrite
 from aft.cli import main
 from aft.config import Config
@@ -1862,3 +1863,35 @@ def test_a_log_a_reader_will_not_let_finish_is_reported(
 
     assert index.update(initialized) == []
     assert keys_of(initialized, "evidence") == []
+
+
+def test_index_shared_db_wal_mode_and_lock_serialization(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The search index uses shared aft.db plumbing for WAL mode and write lock serialization."""
+    write(initialized, REL, PAGE)
+    assert index.update(initialized) == []
+
+    # 1. Verify WAL mode via shared db plumbing
+    conn = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    try:
+        assert db_module.journal_mode(conn) == db_module.WAL_MODE
+    finally:
+        conn.close()
+
+    # 2. Verify write lock serialization via shared db write_transaction
+    monkeypatch.setattr(index, "BUSY_TIMEOUT_SECONDS", 0.05)
+    write(initialized, "global/preferences.md", PREFERENCES)
+
+    held = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    held.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(index.SearchIndexError, match="cannot write the index"):
+            index.update(initialized)
+    finally:
+        held.rollback()
+        held.close()
+
+    # After write lock is released, update proceeds cleanly
+    assert index.update(initialized) == []
+    assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")

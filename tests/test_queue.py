@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from aft import capture, evidence, queue
+from aft import db as db_module
 from aft.config import Config
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.filter import filter_entries
@@ -1276,3 +1277,31 @@ def test_a_registered_projects_name_is_not_a_free_slug(cfg: Config, tmp_path) ->
     plain.mkdir(parents=True)
     assert queue.record_project(cfg, "claude", "s-1", None, "foo", plain, registry=registry)
     assert queue.recorded_project(cfg, "claude", "s-1").slug == "field-foo"
+
+
+def test_queue_shared_db_wal_mode_and_lock_serialization(cfg: Config) -> None:
+    """The capture queue uses shared aft.db plumbing for WAL mode and write lock serialization."""
+    queue.enqueue(cfg, event(session_id="s1"))
+
+    # 1. Verify WAL mode via shared db plumbing
+    conn = sqlite3.connect(cfg.home / queue.QUEUE_NAME)
+    try:
+        assert db_module.journal_mode(conn) == db_module.WAL_MODE
+    finally:
+        conn.close()
+
+    # 2. Verify write lock serialization via shared db write_transaction
+    held = sqlite3.connect(cfg.home / queue.QUEUE_NAME)
+    held.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            with queue._writing(cfg, busy_timeout_ms=50) as wconn:
+                wconn.execute("INSERT INTO sessions (agent, session_id) VALUES ('claude', 's2')")
+    finally:
+        held.rollback()
+        held.close()
+
+    # After lock is released, writing proceeds cleanly
+    with queue._writing(cfg) as wconn:
+        wconn.execute("INSERT INTO sessions (agent, session_id) VALUES ('claude', 's2')")
+    assert queue.session_state(cfg, "claude", "s2") is not None

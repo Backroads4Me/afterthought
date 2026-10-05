@@ -129,7 +129,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from aft import inject, lint, page, vault
+from aft import db, inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError, path_key
@@ -138,11 +138,11 @@ INDEX_NAME = "index.sqlite"
 
 # The index is per-host derived state, so it lives with the archive and the queue rather
 # than in the vault (DESIGN 6: the home holds "state: evidence archive, search index, ...").
-WAL_MODE = "wal"
+WAL_MODE = db.WAL_MODE
 
 # A reader of the index - `aft search` in front of a person - should not fail because a
 # digest or a dream run is rebuilding it, so a lock is waited out (as in aft.evidence).
-BUSY_TIMEOUT_SECONDS = 5.0
+BUSY_TIMEOUT_SECONDS = db.BUSY_TIMEOUT_SECONDS
 
 PAGES = "pages"
 ARCHIVE = "archive"
@@ -1542,17 +1542,16 @@ def _writing(config: Config, *, rebuild: bool = False) -> Iterator[sqlite3.Conne
     path = _db_path(config)
     conn = _connect(config, rebuild=rebuild)
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        _secure_delete_tokens(conn)
-        yield conn
-        conn.commit()
+        with db.write_transaction(
+            conn,
+            path=path,
+            error_factory=lambda msg, exc: SearchIndexError(
+                f"cannot write the index at {path}: {exc}"
+            ),
+        ):
+            _secure_delete_tokens(conn)
+            yield conn
         _drain_log(conn, path)
-    except sqlite3.Error as exc:
-        conn.rollback()
-        raise SearchIndexError(f"cannot write the index at {path}: {exc}") from exc
-    except BaseException:
-        conn.rollback()
-        raise
     finally:
         conn.close()
 
@@ -1569,7 +1568,7 @@ def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
 
     A log another reader holds open is also why an update that changed nothing takes no write
     lock at all and so never comes here (`update`)."""
-    busy, frames, moved = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    busy, frames, moved = db.wal_checkpoint_truncate(conn)
     if busy:
         raise SearchIndexError(
             f"the write-ahead log of {path} is held open by another reader:"
@@ -1597,7 +1596,7 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
     conn: sqlite3.Connection | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, isolation_level=None, timeout=BUSY_TIMEOUT_SECONDS)
+        conn = db.connect(path, timeout=BUSY_TIMEOUT_SECONDS)
         conn.execute("PRAGMA secure_delete = ON")
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
@@ -1614,7 +1613,7 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
 
 
 def _journal_mode(conn: sqlite3.Connection) -> str:
-    return conn.execute("PRAGMA journal_mode").fetchone()[0]
+    return db.journal_mode(conn)
 
 
 def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
@@ -1623,10 +1622,13 @@ def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
     The mode is re-read rather than trusted from the write, because a pragma that refuses by
     answering with the mode it kept sets no error at all, and WAL is what lets a search read
     while a run rebuilds (as in `aft.evidence`)."""
-    conn.execute("PRAGMA journal_mode = wal")
-    mode = _journal_mode(conn)
-    if mode != WAL_MODE:
-        raise SearchIndexError(f"{path} stays in {mode} mode, not {WAL_MODE}")
+    db.enter_wal(
+        conn,
+        timeout_seconds=BUSY_TIMEOUT_SECONDS,
+        path=path,
+        error_factory=SearchIndexError,
+        get_journal_mode=_journal_mode,
+    )
 
 
 def _db_path(config: Config) -> Path:

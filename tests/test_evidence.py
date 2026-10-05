@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from aft import config as configmod
+from aft import db as db_module
 from aft import evidence
 from aft.readers import Entry
 
@@ -949,3 +950,26 @@ def test_redact_pattern_rewrites_matching_rows_and_drains_log(cfg):
     assert read_back[0].text == "secret key is [redacted]"
     assert read_back[1].text == "clean entry with no secrets"
     assert zlib.compress(b"sk-live-9876543210") not in db(cfg).read_bytes()
+
+
+def test_evidence_shared_db_wal_mode_and_lock_serialization(cfg, monkeypatch):
+    """The evidence archive uses shared aft.db plumbing for WAL mode and write
+    lock serialization."""
+    evidence.store(cfg, "claude", "s1", None, [entry("e1")])
+
+    # 1. Verify WAL mode via shared db plumbing
+    conn = sqlite3.connect(db(cfg))
+    try:
+        assert db_module.journal_mode(conn) == db_module.WAL_MODE
+    finally:
+        conn.close()
+
+    # 2. Verify write lock serialization via shared db write_transaction
+    monkeypatch.setattr(evidence, "BUSY_TIMEOUT_SECONDS", 0.05)
+    with held_write_lock(cfg):
+        with pytest.raises(evidence.EvidenceError, match="cannot write the evidence archive"):
+            evidence.store(cfg, "pi", "s2", None, [entry("e2")])
+
+    # After write lock is released, store proceeds cleanly
+    evidence.store(cfg, "pi", "s2", None, [entry("e2")])
+    assert len(evidence.entries(cfg, "s2")) == 1
