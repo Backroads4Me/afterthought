@@ -62,7 +62,7 @@ DIGEST_PIPELINES = ("base", "turns")
 
 @dataclass(frozen=True)
 class DigestConfig:
-    pipeline: str = "base"
+    pipeline: str = "turns"
 
 
 @dataclass(frozen=True)
@@ -329,7 +329,8 @@ retention_days = 90
 # of filtered conversation. "turns" asks narrower ones over a compacted input instead:
 # one call per batch of user turns for what the user settled, one for what the session
 # observed, one for what a later item replaced, and one for the summary and handoff.
-pipeline = "base"
+# "turns" finds more of what you settled and records fewer wrong lines (BUILD-PLAN F55).
+pipeline = "turns"
 
 [dream]
 interval_minutes = 30

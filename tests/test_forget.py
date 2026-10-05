@@ -56,7 +56,9 @@ def serve(cfg: Config, *answers: object) -> tuple[FakeEndpoint, Config]:
     fake.start()
     (cfg.home / "config.toml").write_text(
         f'vault = "{cfg.vault}"\nhost = "{cfg.host}"\n'
-        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n',
+        f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+        # Base-pipeline answers: the turns pipeline's are served in test_digest_turns.py.
+        '[digest]\npipeline = "base"\n',
         encoding="utf-8",
     )
     return fake, configmod.load()
@@ -1435,6 +1437,8 @@ def point_at(cfg: Config, fake: FakeEndpoint, *, patterns: tuple[str, ...] = ())
     (cfg.home / configmod.CONFIG_NAME).write_text(
         f'vault = "{cfg.vault}"\nhost = "{cfg.host}"\n'
         f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+        # Base-pipeline answers: the turns pipeline's are served in test_digest_turns.py.
+        '[digest]\npipeline = "base"\n'
         f"{capture_block}",
         encoding="utf-8",
     )

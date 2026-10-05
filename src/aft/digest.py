@@ -1337,6 +1337,41 @@ MIN_FACTS_ALL_UNQUOTED = 2
 QUOTE_NOT_FOUND = "the quote is not found in entry"
 
 
+# What a turn holds that is not the user's own words (DESIGN 6, R2): a paste, a slash
+# command's text, a shell command run from the prompt and its output. A block with no closing
+# tag runs to the end of the turn.
+_NOT_OWN = re.compile(
+    r"<(pasted_content|command-name|command-message|command-args|bash-input|bash-stdout"
+    r"|bash-stderr|local-command-stdout)\b[^>]*>"
+)
+
+
+def own_words(text: str, quote: str) -> bool:
+    """Whether ``quote`` stands in ``text`` outside every paste and command block: true when
+    one of its places does, or when it is not found here to judge."""
+    spans = []
+    for opening in _NOT_OWN.finditer(text):
+        closing = re.compile(rf"</{opening.group(1)}\b[^>]*>").search(text, opening.end())
+        spans.append((opening.start(), closing.end() if closing else len(text)))
+    words = " ".join(quote.split()).lower()
+    if not words:
+        return True
+    # The text with its whitespace collapsed, as quotes are matched, and where each of its
+    # characters stands in the text itself.
+    flat: list[str] = []
+    origin: list[int] = []
+    for match in re.finditer(r"\S+", text):
+        if flat:
+            flat.append(" ")
+            origin.append(match.start())
+        flat.append(match.group().lower())
+        origin.extend(range(match.start(), match.end()))
+    places = [m.start() for m in re.finditer(re.escape(words), "".join(flat))]
+    if not places:
+        return True
+    return any(not any(start <= origin[p] < end for start, end in spans) for p in places)
+
+
 def unquoted(facts: Sequence[dict], kept: Sequence[Fact], dropped: Sequence[Dropped]) -> bool:
     """Whether an answer's facts are all ones whose quotes the chunk does not hold."""
     return (
@@ -1425,6 +1460,11 @@ def verify(
                 _refused(
                     fact, f"[stated] cites entry {entry.id}, which is not one of the user's turns"
                 )
+            )
+            continue
+        if fact["source"] == "stated" and not own_words(entry.text, fact["quote"]):
+            dropped.append(
+                _refused(fact, "[stated] quotes a paste or a command block, not the user's words")
             )
             continue
         if fact["kind"] not in KIND_SECTIONS.values():

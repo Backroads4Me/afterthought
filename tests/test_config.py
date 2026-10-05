@@ -33,13 +33,13 @@ def test_values_and_sections(home):
     assert cfg.settings.capture.builtin_redaction is False
 
 
-def test_digest_pipeline_defaults_to_base(home):
-    assert configmod.load().settings.digest.pipeline == "base"
+def test_digest_pipeline_defaults_to_turns(home):
+    assert configmod.load().settings.digest.pipeline == "turns"
 
 
 def test_the_digest_pipeline_is_configurable(home):
-    (home / "config.toml").write_text('[digest]\npipeline = "turns"\n')
-    assert configmod.load().settings.digest.pipeline == "turns"
+    (home / "config.toml").write_text('[digest]\npipeline = "base"\n')
+    assert configmod.load().settings.digest.pipeline == "base"
 
 
 @pytest.mark.parametrize(

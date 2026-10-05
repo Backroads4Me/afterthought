@@ -31,7 +31,8 @@ def turns_config(cfg: Config) -> Config:
     """The served config with the turns pipeline chosen, re-read from disk."""
     path = cfg.home / configmod.CONFIG_NAME
     path.write_text(
-        path.read_text(encoding="utf-8") + '[digest]\npipeline = "turns"\n', encoding="utf-8"
+        path.read_text(encoding="utf-8").replace('pipeline = "base"', 'pipeline = "turns"'),
+        encoding="utf-8",
     )
     return configmod.load()
 
@@ -447,3 +448,21 @@ def test_a_name_from_the_answered_message_cites_its_sentence():
         == "Switch voxtype to the Default theme?"
     )
     assert digest.grounding_sentence(before, "Use the Classic theme.", "ok") == ""
+
+
+def test_a_quote_inside_a_paste_or_command_block_is_not_the_users_words():
+    """DESIGN 6, R2: a paste and a command block are never [stated]; a block with no closing
+    tag runs to the end of the turn."""
+    text = (
+        "Fix it now.\n"
+        '<pasted_content id="d88a">\nYes, fix finding 3 on a new branch.\n'
+        '</pasted_content id="d88a">\nand use port 8008'
+    )
+    assert not digest.own_words(text, "fix finding 3")
+    assert digest.own_words(text, "use   port 8008")
+    assert digest.own_words(text, "Fix it now.")
+    assert not digest.own_words("<bash-input>systemctl stop x</bash-input>", "systemctl stop x")
+    assert not digest.own_words('<pasted_content id="a">\nno close here', "no close")
+    assert not digest.own_words(
+        "<command-name>/goal</command-name>\n<command-args>never push to main", "never push"
+    )

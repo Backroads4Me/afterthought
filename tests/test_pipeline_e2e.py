@@ -207,6 +207,8 @@ class Pipeline:
         (self.cfg.home / configmod.CONFIG_NAME).write_text(
             f'vault = "{self.cfg.vault}"\nhost = "{self.cfg.host}"\n'
             f'[model]\nendpoint = "{self.endpoint.endpoint}"\nname = "fake-model"\n'
+            # Base-pipeline answers: the turns pipeline's are served in test_digest_turns.py.
+            '[digest]\npipeline = "base"\n'
         )
         self.cfg = configmod.load()
 
@@ -337,6 +339,8 @@ def pipeline(initialized, home, tmp_path, monkeypatch) -> Pipeline:
     (home / configmod.CONFIG_NAME).write_text(
         f'vault = "{initialized.vault}"\nhost = "{initialized.host}"\n'
         f'[model]\nendpoint = "{fake.endpoint}"\nname = "fake-model"\n'
+        # Base-pipeline answers: the turns pipeline's are served in test_digest_turns.py.
+        '[digest]\npipeline = "base"\n'
     )
     cfg = pipe.cfg = configmod.load()
 
