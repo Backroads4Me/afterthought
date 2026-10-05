@@ -369,7 +369,12 @@ def run_project(
             str(sources_map.get(e.source, {}).get("quote", "")) for e in verified_evidence
         ]
         if new_fact.source == "stated":
-            if any("?" in q for q in verified_quotes):
+            user_quotes = [
+                str(sources_map.get(e.source, {}).get("quote", ""))
+                for e in verified_evidence
+                if e.yours
+            ]
+            if any("?" in q for q in user_quotes):
                 report.rejected.append(
                     RejectedFact(
                         statement=new_fact.statement,

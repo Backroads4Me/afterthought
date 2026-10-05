@@ -73,6 +73,8 @@ def write_digest(
         for s in sources:
             res = s.get("resource", "")
             q = s.get("quote", "")
+            source_role = s.get("role", USER)
+            source_text = s.get("text", q)
             if res.startswith("aft://session/") and "#" in res:
                 uri = res.removeprefix("aft://session/")
                 parts = uri.split("#", 1)
@@ -83,7 +85,16 @@ def write_digest(
                 if (sess_id, entry_id) in existing_keys:
                     continue
                 by_session.setdefault(sess_id, []).append(
-                    (agent, Entry(id=entry_id, time=NOW, role=USER, text=q, is_error=False))
+                    (
+                        agent,
+                        Entry(
+                            id=entry_id,
+                            time=NOW,
+                            role=source_role,
+                            text=source_text,
+                            is_error=False,
+                        ),
+                    )
                 )
         for sess_id, entries_with_agent in by_session.items():
             agent = entries_with_agent[0][0]
@@ -107,12 +118,13 @@ def write_digest(
         aft_dict["consumed"] = consumed
     aft_dict["facts"] = facts
 
+    cleaned_sources = [{k: v for k, v in s.items() if k not in ("role", "text")} for s in sources]
     fm = {
         "type": "Session Digest",
         "title": f"Digest {filename}",
         "description": "Summary of session.",
         "generated": {"by": "aft", "at": at},
-        "sources": sources,
+        "sources": cleaned_sources,
         "aft": aft_dict,
     }
     fm_str = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).strip()
@@ -130,8 +142,10 @@ def write_digest(
         body_lines.append(f"## {section}")
         body_lines.append("")
         for f in sec_facts:
+            refs = f.get("refs") or [f.get("ref", "s1")]
+            ref_str = " ".join(f"[^{r}]" for r in refs)
             body_lines.append(
-                f"- {f['statement']} [{f['source']}] {f.get('date', TODAY)} [^{f.get('ref', 's1')}]"
+                f"- {f['statement']} [{f['source']}] {f.get('date', TODAY)} {ref_str}"
             )
         body_lines.append("")
 
@@ -3206,6 +3220,51 @@ def test_dream_refuses_stated_fact_with_question_quote(initialized, home, fake):
     assert (
         not overview.exists() or "Approved sending smaller subsections" not in overview.read_text()
     )
+
+
+def test_dream_adds_approval_whose_proposal_ends_in_question(initialized, home, fake):
+    """BUILD-PLAN F52: an approval whose proposal ends in '?' is added."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-approval-q",
+        facts=[
+            {
+                "statement": "The store uses PostgreSQL.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "refs": ["s1", "s2"],
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_app#e1",
+                "quote": "Yes, do that.",
+                "role": "user",
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess_app#e2",
+                "quote": "Shall I switch the store to PostgreSQL?",
+                "role": "assistant",
+            },
+        ],
+    )
+
+    fake.script = [reply("add", None, "store uses postgresql")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].statement == "The store uses PostgreSQL."
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert "The store uses PostgreSQL." in overview
 
 
 def test_dream_refuses_stated_fact_with_ungrounded_statement(initialized, home, fake):
