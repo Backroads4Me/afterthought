@@ -1246,6 +1246,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   withdrawn by "X is resumed" at 15:00 the same day. Supersede of long-term lines still
   compares days. Tests: same-day later entry withdraws; same-day earlier entry does not; an
   entry with no time falls back to the day. Review checkpoint: no.
+- **F59 Statements that read on their own** (ruling 2026-10-05; from a review of Honcho's
+  extraction prompt). DESIGN 8, R2. (1) Dates: each turn block shows the turn's date and
+  weekday, and the turns prompt says a relative date the user gives ("tomorrow", "next
+  Friday", "in two weeks") is written as the absolute date it means, counted from the turn's
+  date. Grounding accepts a date in the statement when the script computes it from a relative
+  date in the turn and the turn's time (today, tomorrow, yesterday, a weekday name with or
+  without "next" or "this", "in N days" or "in N weeks"); any other date stays a name or
+  number the turn must hold. (2) Pronouns: the prompt says a statement leaves no "it",
+  "this", "that", "there" or other pronoun pointing outside itself, naming what it means;
+  a name taken from the answered message is cited as R2 already allows. Tests: "pause it
+  until tomorrow" on a Monday turn becomes Tuesday's date and is kept; a date the turn does
+  not imply is refused; each relative form above computes its date; the turn block shows the
+  date. Scored on the F54 key with the local model at temperature 0 against the turns
+  pipeline before it; merged only if it scores no worse. Review checkpoint: yes (prompt).
 - **F11 Shared sqlite plumbing** (low priority; after M7). One module holds WAL mode, the
   busy timeout and the write lock that `index.py`, `evidence.py` and `queue.py` each
   repeat; the three import it. Behavior does not change. Tests: the existing suites pass,
