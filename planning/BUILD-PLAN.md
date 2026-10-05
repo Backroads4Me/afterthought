@@ -1220,8 +1220,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   effect by the end of the session. Kept only on yes to both; a refusal is reported. A verifier
   from the same family as the writer shares its blind spots, so F56 measures on the F54 key a
   same-model verifier against a small model of a different family (run locally, short inputs
-  only) and keeps whichever scores better; a different family, not a stronger model. The PR
-  carries the scores and the extra tokens. Review checkpoint: yes (prompt, schema).
+  only) and keeps whichever scores better; a different family, not a stronger model. The
+  verifier's endpoint and model are their own settings, defaulting to the digest's model,
+  so a second model is a config change. Build and measure the same-model verifier first,
+  behind `digest.verify_items` (default false until it scores better); the cross-family
+  measurement waits until a second local model is served. The PR carries the scores and
+  the extra tokens. Review checkpoint: yes (prompt, schema).
 - **F57 What the working agent points at** (ruling 2026-10-04; an experiment, after F55).
   DESIGN 8. The working agent sees each decision as it happens. Measured on F54 against F55's
   structural flags alone: (a) a `Memory:` footer the agent writes when a response settles a
