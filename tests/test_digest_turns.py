@@ -1043,3 +1043,120 @@ def test_a_verifier_error_leaves_the_job_as_any_model_error_does(session, monkey
     # The three turns calls went through; the check's call did not survive its endpoint.
     assert len(main.requests) == 3
     assert len(verifier.requests) == ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# F57: what the working agent points at
+
+
+def test_extract_pointer_recognizes_memory_footer_and_look_here_markers():
+    """BUILD-PLAN F57: extract Memory: footers and bare look-here markers."""
+    # Memory footer with bullet lines
+    text1 = 'Updated port.\n\nMemory:\n- "use port 8008"\n- "keep tests fast"'
+    assert digest.extract_pointer(text1) == 'Memory:\n- "use port 8008"\n- "keep tests fast"'
+
+    # Memory footer inline
+    text2 = 'Done.\n\nMemory: "use port 8008"'
+    assert digest.extract_pointer(text2) == 'Memory: "use port 8008"'
+
+    # Bare look-here HTML comment
+    text3 = "Configured settings.\n<!-- look-here -->"
+    assert digest.extract_pointer(text3) == "look-here"
+
+    # Bare look-here bracketed
+    text4 = "Configured settings.\n[look-here]"
+    assert digest.extract_pointer(text4) == "look-here"
+
+    # Bare look-here plain
+    text5 = "Configured settings.\nlook-here"
+    assert digest.extract_pointer(text5) == "look-here"
+
+    # Bare look-here uppercase
+    text6 = "Configured settings.\n<!-- LOOK-HERE -->"
+    assert digest.extract_pointer(text6) == "look-here"
+
+    # Ordinary response with no pointer
+    text7 = "Running tests now."
+    assert digest.extract_pointer(text7) is None
+
+    # Text marked skippable is not a decision pointer
+    text8 = "Verbose logs.\n<!-- skip -->"
+    assert digest.extract_pointer(text8) is None
+
+
+def test_turn_blocks_show_memory_footer_and_look_here_pointers():
+    """BUILD-PLAN F57: turn blocks show POINTER with footer, marker, or (none)."""
+
+    def entry(eid: str, role: str, text: str) -> Entry:
+        return Entry(eid, NOW.astimezone(UTC), role, text, False)
+
+    part = [
+        entry("e1", USER, "use port 8008"),
+        entry("e2", ASSISTANT, 'Configured port 8008.\n\nMemory:\n- "use port 8008"'),
+        entry("e3", USER, "now run tests"),
+        entry("e4", ASSISTANT, "Tests passed.\n<!-- look-here -->"),
+        entry("e5", USER, "wrap up"),
+        entry("e6", ASSISTANT, "All finished."),
+    ]
+    blocks, _, _, _ = digest.turn_blocks(part)
+    assert len(blocks) == 3
+
+    assert 'POINTER: Memory:\n- "use port 8008"' in blocks[0]
+    assert "POINTER: look-here" in blocks[1]
+    assert "POINTER: (none)" in blocks[2]
+
+
+def test_turn_with_memory_footer_extracts_stated_fact_quoting_user(session: Session):
+    """BUILD-PLAN F57: a turn whose response has a Memory: footer is kept as [stated]."""
+    user_turn = "We should use port 8008 for the api."
+    agent_reply = 'Switched to port 8008.\n\nMemory:\n- "use port 8008 for the api"'
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", user_turn),
+        record("e2", "assistant", agent_reply),
+        record("e3", "user", "run tests now"),
+        record("e4", "assistant", "Tests passing."),
+    )
+
+    items = settled(
+        item("e1", "decision", "Use port 8008 for the api.", "use port 8008 for the api")
+    )
+    wrote = run(session, summary(), items, {"items": []})
+    assert len(wrote.facts) == 1
+    assert wrote.facts[0].source == "stated"
+    assert wrote.facts[0].quote == "use port 8008 for the api"
+    assert wrote.facts[0].entry == "e1"
+
+
+def test_pointer_is_pointer_only_fact_quoting_assistant_footer_is_refused(session: Session):
+    """BUILD-PLAN F57: a stated fact quoting the assistant footer rather than the user
+    is refused."""
+    user_turn = "Use port 8008."
+    agent_reply = 'Done.\n\nMemory:\n- "switch to port 8008"'
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", user_turn),
+        record("e2", "assistant", agent_reply),
+        record("e3", "user", "run tests now"),
+        record("e4", "assistant", "Tests passing."),
+    )
+
+    # Model cited e2 (the assistant entry) rather than the user turn e1.
+    items = settled(item("e2", "decision", "Switch to port 8008.", "switch to port 8008"))
+    wrote = run(session, summary(), items, {"items": []})
+    # Stated fact cannot cite assistant entry; dropped by verify.
+    assert len(wrote.facts) == 0
+    assert any("not one of the user's turns" in d.reason for d in wrote.dropped)
+
+
+def test_skip_marker_is_never_removed_from_compacted_blocks():
+    """BUILD-PLAN F57: text the agent marks skippable is never removed."""
+    from aft import filter as filtermod
+
+    entry = Entry("e1", NOW.astimezone(UTC), ASSISTANT, "Step 1\n<!-- skip -->\nStep 2", False)
+    compacted = filtermod.compact(entry)
+    assert "Step 1" in compacted
+    assert "Step 2" in compacted
+    assert "<!-- skip -->" in compacted

@@ -34,6 +34,21 @@ def fake():
     endpoint.stop()
 
 
+@pytest.fixture(autouse=True)
+def _commit_registry_after_save(monkeypatch):
+    """Keep test-registered projects committed, matching aft register behavior."""
+    orig_save = Registry.save
+
+    def save(self):
+        orig_save(self)
+        try:
+            vault.commit(self.path.parent, ["registry.yaml"], "register widget")
+        except Exception:
+            pass
+
+    monkeypatch.setattr(Registry, "save", save)
+
+
 def config_with_fake(home: Path, vault_path: Path, fake: FakeEndpoint) -> configmod.Config:
     (home / "config.toml").write_text(
         f'vault = "{vault_path}"\nhost = "testhost"\n'
@@ -2646,7 +2661,11 @@ def test_real_per_page_lint_catches_invalid_written_page_and_rolls_back(
     monkeypatch.setattr(pagewrite.PageDoc, "render", render_with_an_unlintable_line)
 
     # A hand edit stands uncommitted beside the run, and the checkpoint commits it alone.
-    (cfg.vault / "hand-notes.md").write_text("a hand note\n", encoding="utf-8")
+    hand_notes = cfg.vault / "hand-notes.md"
+    hand_notes.write_text("a hand note\n", encoding="utf-8")
+    import os
+
+    os.utime(hand_notes, (LONG_AGO.timestamp(), LONG_AGO.timestamp()))
 
     before_sha = run_git(["rev-parse", "HEAD"], cfg.vault)
     res = schedule.run(cfg, now=NOW)
