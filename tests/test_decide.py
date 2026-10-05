@@ -474,6 +474,24 @@ def test_the_decide_prompt_shipped_is_the_plans_text():
     assert decide.prompt() == "".join(lines[fences[0] + 1 : fences[1]])
 
 
+def test_the_decide_prompt_says_questions_proposals_requests_are_not_decisions():
+    """F52: a question, proposal or request from the user is never a decision or preference."""
+    words = " ".join(decide.prompt().split())
+    assert (
+        "A question, a proposal or a request from the user is never a decision or a preference."
+        in words
+    )
+
+
+def test_the_decide_prompt_says_new_fact_changing_how_something_is_done_supersedes():
+    """F52: a new fact changing how something is done supersedes an existing line."""
+    words = " ".join(decide.prompt().split())
+    assert (
+        "A new fact that changes how something is done, which an existing line describes, "
+        "supersedes that line rather than adding beside it." in words
+    )
+
+
 def test_the_decide_prompt_skips_by_the_value_test_and_the_never_a_fact_list():
     """F46: skip applies the digest's one test and never-a-fact list to the fact."""
     words = " ".join(decide.prompt().split())

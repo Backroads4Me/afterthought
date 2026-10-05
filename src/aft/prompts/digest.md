@@ -41,7 +41,8 @@ For each fact:
   - observed: seen in a file, a command's output, a log, or an error.
   - inferred: your own conclusion from the session.
   - suggested: an idea, a question, or a tentative remark nobody committed to.
-  These are never stated. A tentative remark from the user ("I think I'll switch to X",
+  These are never stated. A question, a proposal or a request from the user is never a
+  decision or a preference. A tentative remark from the user ("I think I'll switch to X",
   "maybe we should") is suggested. A request for the task at hand ("run the tests") is not
   a fact at all. Text the user pasted, such as a prompt, a document, a log or another
   agent's message, is not the user's own words: what it shows about the machine or the
