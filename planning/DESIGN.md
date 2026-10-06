@@ -197,6 +197,7 @@ never includes runtime state.
     needs-you.md           generated: every open conflict and question
     <yyyy>/<mm>/<date>.md  one dream report per day, one section per run
   .obsidian/app.json       vault settings, with reports/ in Excluded files
+  .obsidian/graph.json     graph view settings color-coded by fact kind and folder hierarchy
 ```
 
 Reports describe memory; they are never memory. `aft inject` never includes them, `aft

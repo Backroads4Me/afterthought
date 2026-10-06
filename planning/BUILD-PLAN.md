@@ -1315,6 +1315,26 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   use no example drawn from one user's projects. Covers `src/aft/prompts/digest.md` and
   `digest.schema.json` (a prompt change, so it gets its review checkpoint), and comments in
   `inject.py`, `digest.py`, `filter.py` and `redact.py`.
+- **F62 Obsidian graph view configuration** (ruling 2026-10-06). DESIGN 3 (vault layout).
+  Generate an opinionated `.obsidian/graph.json` during `aft init` so opening the vault in
+  Obsidian provides a color-coded graph view matching afterthought's fact kinds and folder
+  hierarchy without manual UI setup. `src/aft/vault.py` defines `OBSIDIAN_GRAPH`, adds it to
+  `initial_files()`, and un-ignores `!.obsidian/graph.json` in `gitignore_text()`. Tests:
+  `tests/test_vault.py` verifies `.obsidian/graph.json` is created, valid JSON, contains expected
+  color groups, and is tracked by git. Review checkpoint: no.
+- **F63 Digest handoff captures session goal and files** (ruling 2026-10-06). DESIGN 8 (handoff)
+  and 10 (injection). Enhance session handoff in digests so each session captures (1) the user's
+  primary goal/intent (`goal`: text and entry label) and (2) relevant files touched or left
+  in-flight (`files`: list of relative paths). Update `src/aft/prompts/digest.schema.json`,
+  `src/aft/prompts/digest.md`, `src/aft/digest.py` (`grounded_handoff`, validation, serialization),
+  and `src/aft/inject.py` (`handoff()` rendering under `Last session` with `Goal:` and `Files:`).
+  Tests in `tests/test_digest.py` and `tests/test_inject.py`. Review checkpoint: yes (prompt and schema change).
+- **F64 Invisible character and prompt-injection sanitization in filter** (ruling 2026-10-06).
+  DESIGN 5 (filtering and privacy). Harden `src/aft/filter.py` against indirect prompt injection
+  and memory poisoning. Strip invisible Unicode characters (zero-width spaces, word joiners,
+  byte-order marks, bidirectional overrides) from all incoming transcript entries. Neutralize
+  high-confidence adversarial override patterns in tool outputs and untrusted assistant echoes
+  before entries are archived or digested. Tests in `tests/test_filter.py`. Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 

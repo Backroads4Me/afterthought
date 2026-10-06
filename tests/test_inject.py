@@ -1257,6 +1257,24 @@ def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
         assert with_recent.get(heading) == lines, f"{heading} lost room to short-term memory"
 
 
+def test_short_term_memory_is_capped_at_ten_lines(widget, tmp_path):
+    """The recent layer never carries more than 10 lines even when budget allows."""
+    many = "\n".join(
+        f"- Short-term line {n} about the current work. [observed] 2026-10-04 [^s1]"
+        for n in range(25)
+    )
+    write(
+        widget.vault / "projects/widget/recent.md",
+        RECENT_PAGE.split("## Decisions")[0] + "## State\n\n" + many + "\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    recent_heading = "## Recent (last 5 sessions, newest 2026-10-04)"
+    lines = parts_of(block)[recent_heading]
+    assert len(lines) == 10
+    assert lines[0] == "- Short-term line 0 about the current work."
+    assert lines[9] == "- Short-term line 9 about the current work."
+
+
 @pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
 def test_notes_waiting_on_the_user_reach_the_user_as_well_as_the_agent(
     name, agent, event, widget, tmp_path, capsys, monkeypatch

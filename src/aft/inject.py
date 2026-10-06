@@ -49,6 +49,7 @@ LISTING = "index.md"
 RECENT = pagemod.RECENT_PAGE
 COLLECTION = "collection.md"
 PREFERENCES = Path("global/preferences.md")
+MAX_RECENT_LINES = 10
 
 # One part of the block: the heading its lines sit under, "" when it has none, and
 # the lines under that heading.
@@ -134,6 +135,7 @@ def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
         return ("", [])
     sessions = config.settings.dream.short_term_sessions
     newest = max(fact.date for fact in facts if fact.date)
+    facts = facts[:MAX_RECENT_LINES]
     heading = f"Recent (last {sessions} sessions, newest {newest})"
     return _part(heading, [f"- {_shown(fact)}" for fact in facts])
 
