@@ -1315,3 +1315,81 @@ def test_an_archived_projects_memory_answers_only_the_archive_flag(
     assert [hit.path for hit in search.search(populated_vault, "milling")] == [
         "projects/widget/flange.md"
     ]
+
+
+def test_search_links_and_read_backlinks_section(
+    populated_vault: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """aft search --links finds backlinks and aft read renders backlinks section."""
+    monkeypatch.setenv("AFT_HOME", str(populated_vault.home))
+
+    # Create reference page
+    ref_dir = populated_vault.vault / "references"
+    ref_dir.mkdir(parents=True, exist_ok=True)
+    ref_page = (
+        "---\n"
+        "type: Reference\n"
+        "title: SQLite\n"
+        "sources: []\n"
+        "---\n\n"
+        "## References\n\n"
+        "- SQLite is an embedded database. [stated] 2026-09-28 [^s1]\n"
+    )
+    (ref_dir / "sqlite.md").write_text(ref_page, encoding="utf-8")
+
+    # Create referencing page
+    source_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Widget Notes\n"
+        "sources: []\n"
+        "aft:\n"
+        "  project: p_widget\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- The system uses [[references/sqlite]] for local storage. [stated] 2026-09-28 [^s1]\n"
+    )
+    (populated_vault.vault / "projects/widget/notes.md").write_text(source_page, encoding="utf-8")
+
+    index.update(populated_vault)
+
+    # 1. API test: search(links=...) and search_links(...)
+    hits = search.search(populated_vault, links="references/sqlite")
+    assert len(hits) == 1
+    assert hits[0].path == "projects/widget/notes.md"
+    assert "uses [[references/sqlite]]" in hits[0].snippet
+    assert hits[0].heading == "Facts"
+    assert hits[0].project == "widget"
+
+    hits_helper = search.search_links(populated_vault, "references/sqlite.md")
+    assert len(hits_helper) == 1
+    assert hits_helper[0].path == "projects/widget/notes.md"
+
+    # 2. CLI test: aft search --links
+    capsys.readouterr()
+    assert main(["search", "--links", "references/sqlite"]) == 0
+    out = capsys.readouterr().out
+    assert "projects/widget/notes.md" in out
+    assert "uses [[references/sqlite]]" in out
+
+    # CLI test: aft search --links with --json
+    assert main(["search", "--links", "references/sqlite", "--json"]) == 0
+    json_out = capsys.readouterr().out
+    data = json.loads(json_out)
+    assert len(data) == 1
+    assert data[0]["path"] == "projects/widget/notes.md"
+
+    # 3. Read page with backlinks renders Backlinks section
+    content = search.read_page(populated_vault, "references/sqlite.md")
+    assert "## Backlinks / Referenced In" in content
+    assert "- projects/widget/notes.md" in content
+
+    # CLI test: aft read
+    assert main(["read", "references/sqlite.md"]) == 0
+    read_out = capsys.readouterr().out
+    assert "## Backlinks / Referenced In" in read_out
+    assert "- projects/widget/notes.md" in read_out
+
+    # 4. Page without backlinks does not render Backlinks section
+    no_backlinks_content = search.read_page(populated_vault, "projects/widget/notes.md")
+    assert "## Backlinks / Referenced In" not in no_backlinks_content

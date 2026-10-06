@@ -82,6 +82,14 @@ _COUNTS = re.compile(r"^ \(signals (\d+)/(\d+), sessions (\d+)/(\d+)\)$")
 _CALLOUT_START = re.compile(r"^> \[!(?P<type>[a-z]+)\] (?P<date>\d{4}-\d{2}-\d{2})\s*$")
 
 
+WIKILINK_PATTERN = re.compile(r"\[\[([^\|\]]+)(?:\|([^\]]+))?\]\]")
+
+
+def extract_wikilinks(text: str) -> list[str]:
+    """Extract wikilink targets from text."""
+    return [match.group(1).strip() for match in WIKILINK_PATTERN.finditer(text)]
+
+
 @dataclass
 class Callout:
     type: str
@@ -109,6 +117,11 @@ class Fact:
     signals: tuple[int, int] | None = None
     sessions: tuple[int, int] | None = None
     callouts: list[Callout] = field(default_factory=list)
+
+    @property
+    def links(self) -> list[str]:
+        """Wikilink targets referenced in this fact's statement."""
+        return extract_wikilinks(self.statement)
 
 
 @dataclass
@@ -140,6 +153,22 @@ class Page:
     it. It stays visible here so a script can tell a line the grammar refuses from a page that
     simply has none, and so a hand-typed line is never dropped without a trace (BUILD-PLAN F2).
     """
+
+    @property
+    def links(self) -> list[str]:
+        """All wikilink targets across the page's facts."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for fact in self.facts:
+            for target in fact.links:
+                if target not in seen:
+                    seen.add(target)
+                    result.append(target)
+        return result
+
+    def wikilinks(self) -> list[str]:
+        """Return all wikilink targets across the page."""
+        return self.links
 
 
 def strip_sources(raw: str) -> str:

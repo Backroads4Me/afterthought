@@ -1895,3 +1895,77 @@ def test_index_shared_db_wal_mode_and_lock_serialization(
     # After write lock is released, update proceeds cleanly
     assert index.update(initialized) == []
     assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
+
+
+def test_page_links_population_reindex_and_backlinks(initialized: Config) -> None:
+    """The search index records wikilinks in page_links and resolves targets."""
+    # Write target page
+    ref_page = (
+        "---\n"
+        "type: Reference\n"
+        "title: SQLite\n"
+        "sources: []\n"
+        "---\n\n"
+        "## References\n\n"
+        "- SQLite is an embedded SQL database. [stated] 2026-09-28 [^s1]\n"
+    )
+    write(initialized, "references/sqlite.md", ref_page)
+
+    # Write source page with wikilinks
+    source_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "sources: []\n"
+        "---\n\n"
+        "## Decisions\n\n"
+        "- Uses [[references/sqlite]] for persistence. [stated] 2026-09-28 [^s1]\n"
+        "- Also links to [[global/preferences|Global Preferences]]. [observed] 2026-09-29 [^s2]\n"
+    )
+    source_rel = write(initialized, "projects/widget/overview.md", source_page)
+
+    # Index the files
+    assert index.update(initialized) == []
+
+    # Verify page_links table population
+    conn = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    try:
+        rows = conn.execute(
+            f"SELECT source_path, target, target_path, line_index FROM {index.LINKS_TABLE} "
+            "ORDER BY line_index"
+        ).fetchall()
+        assert len(rows) == 2
+        # First link
+        assert rows[0][0] == source_rel
+        assert rows[0][1] == "references/sqlite"
+        assert rows[0][2] == "references/sqlite.md"
+        assert rows[0][3] == 9
+        # Second link
+        assert rows[1][0] == source_rel
+        assert rows[1][1] == "global/preferences"
+        assert rows[1][3] == 10
+
+        # Test backlinks function with connection
+        bl_conn = index.backlinks(conn, "references/sqlite")
+        assert len(bl_conn) == 1
+        assert bl_conn[0]["source_path"] == source_rel
+        assert bl_conn[0]["target"] == "references/sqlite"
+        assert bl_conn[0]["target_path"] == "references/sqlite.md"
+        assert "Uses [[references/sqlite]] for persistence." in bl_conn[0]["context"]
+    finally:
+        conn.close()
+
+    # Test backlinks function with Config
+    bl_cfg = index.backlinks(initialized, "references/sqlite.md")
+    assert len(bl_cfg) == 1
+    assert bl_cfg[0]["source_path"] == source_rel
+    assert "Uses [[references/sqlite]] for persistence." in bl_cfg[0]["context"]
+
+    # Test get_backlinks alias
+    assert index.get_backlinks(initialized, "references/sqlite") == bl_cfg
+
+    # Clean rebuild on reindex()
+    assert index.reindex(initialized) == []
+    bl_reindex = index.backlinks(initialized, "references/sqlite")
+    assert len(bl_reindex) == 1
+    assert bl_reindex[0]["source_path"] == source_rel

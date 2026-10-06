@@ -209,7 +209,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(handler=cmd_redigest)
     p = sub.add_parser("search", help="search memory with BM25 ranking")
-    p.add_argument("query", help="words to search for")
+    p.add_argument("query", nargs="?", default="", help="words to search for")
+    p.add_argument("--links", help="find backlinks referencing the given target")
     p.add_argument("--project", help="search within a project and global pages")
     p.add_argument(
         "--all",
@@ -1106,13 +1107,14 @@ def cmd_search(args) -> int:
     config = load()
     return search.search_command(
         config,
-        args.query,
+        getattr(args, "query", "") or "",
         project=args.project,
         all_projects=args.all,
         archive=args.archive,
         reports=args.reports,
         as_json=args.json,
         limit=args.limit,
+        links=getattr(args, "links", None),
     )
 
 
