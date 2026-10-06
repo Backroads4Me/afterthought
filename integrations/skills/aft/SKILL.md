@@ -44,8 +44,9 @@ command has `--dry-run`, show its output first.
 | To see why the model refuses calls, or to end that | `aft model cooldown`, with `--clear` to let calls through again |
 | To rebuild a session's digest | `aft redigest <session>`; it counts against the budget, and the vault's git history keeps the old digest |
 | To backfill the sessions of no project | `aft redigest --unfiled`, with `--dry-run` first; it rebuilds every still-archived unfiled session to file under the project its recorded directory now resolves to, and counts against the budget |
-| To register a directory | `aft project add <path>`; any directory is a project now, git or not |
+| To register a directory | `aft project add <path>`; any directory is a project now, git or not; `aft project add <path> --to <project>` attaches it to a project that exists instead |
 | To rename a project | `aft project rename <old> <new>` |
+| To fold one project into another | `aft project merge <from> <into>`; the destination takes the source's paths, digests, archive and pages, and the source leaves the registry |
 | To archive a project | `aft project archive <slug>`; its memory block is not injected and its pages and digests answer only `aft search <words> --archive`, until `aft project unarchive <slug>` |
 | To bring an archived project back | `aft project unarchive <slug>`; its pages and digests answer ordinary searches again, from the date the archive began |
 | To settle a note waiting on them | `aft settle <where> --keep`, `aft settle <where> --withdraw`, or `aft settle <where> --replace <statement>`, where is the note's page and line as `aft notes` prints them; follow "Notes waiting on the user" below |
