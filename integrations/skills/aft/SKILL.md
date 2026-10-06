@@ -41,6 +41,7 @@ command has `--dry-run`, show its output first.
 | To start it again | `aft resume` |
 | To run background work now | `aft run`, or `aft dream` for the dream alone |
 | To start the day's token count again | `aft budget reset` |
+| To see why the model refuses calls, or to end that | `aft model cooldown`, with `--clear` to let calls through again |
 | To rebuild a session's digest | `aft redigest <session>`; it counts against the budget, and the vault's git history keeps the old digest |
 | To backfill the sessions of no project | `aft redigest --unfiled`, with `--dry-run` first; it rebuilds every still-archived unfiled session to file under the project its recorded directory now resolves to, and counts against the budget |
 | To register a directory | `aft project add <path>`; any directory is a project now, git or not |

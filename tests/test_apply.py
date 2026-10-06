@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from aft import config as configmod
-from aft import evidence, inject, keys, lint, page, pagewrite, queue, vault
+from aft import evidence, inject, keys, lint, model, page, pagewrite, queue, vault
 from aft.dream import apply, rules, schedule
 from aft.events import SESSION_END, SessionEvent
 from aft.registry import Registry, path_key
@@ -1986,6 +1986,9 @@ def test_model_failure_mid_run_rolls_back_every_write(initialized, home, fake, t
 
     # Both digests still wait, and their bytes carry no trace of the failed run, so the
     # next run has no human edit to checkpoint and dreams each fact exactly once.
+    # The 500s left a cooldown stamped with the wall clock, which a test cannot wait out;
+    # the endpoint answers again, so the record is cleared the way its deadline would be.
+    model.clear_cooldown(cfg)
     fake.script = [reply("add", None, "first again"), reply("add", None, "second again")]
     res = schedule.run(cfg, now=NOW + timedelta(minutes=45))
     assert res.checkpoint is None
@@ -2790,18 +2793,17 @@ def test_a_failing_project_leaves_the_next_project_alone(initialized, home, fake
         sources=[{"id": "s1", "resource": "aft://session/c/b1#e1", "quote": "beta only words"}],
     )
 
-    # alpha writes its first fact, then the endpoint is down for its second digest (aft tries a
-    # 5xx twice); beta's call is answered after the failure.
+    # alpha writes its first fact, then the endpoint refuses its second digest with a 400,
+    # which aft neither retries nor cools down; beta's call is answered after the failure.
     fake.script = [
         reply("add", None, "alpha first"),
-        Reply(status=500),
-        Reply(status=500),
+        Reply(status=400),
         reply("add", None, "beta only"),
     ]
 
     res = schedule.run(cfg, now=NOW)
 
-    assert "500" in res.failures["alpha"]
+    assert "400" in res.failures["alpha"]
     assert "alpha" not in res.ran
     assert "beta" in res.ran
     # alpha gave back what it wrote: no page, and its first digest is waiting again.

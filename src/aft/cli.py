@@ -165,6 +165,12 @@ def _parser() -> argparse.ArgumentParser:
     q = bsub.add_parser("reset", help="start today's token count again from now")
     q.set_defaults(handler=cmd_budget_reset)
 
+    p = sub.add_parser("model", help="show and manage the model endpoint's state")
+    msub = p.add_subparsers(metavar="action")
+    q = msub.add_parser("cooldown", help="show the endpoint's cooldown, or clear it")
+    q.add_argument("--clear", action="store_true", help="end any active cooldown")
+    q.set_defaults(handler=cmd_model_cooldown)
+
     p = sub.add_parser("pause", help="pause background work; sessions are still queued")
     p.add_argument("reason", nargs="*", help="why, shown while the pause stands")
     p.set_defaults(handler=cmd_pause)
@@ -838,7 +844,35 @@ def cmd_budget_reset(args) -> int:
 
     config = load()
     moment = model.reset_budget(config)
-    print(f"aft budget: reset at {moment:%H:%M}Z; today's count starts again from 0")
+    # A person resetting the budget by hand is saying the situation has changed, so the
+    # endpoint's cooldown goes with it: the next call is allowed to try again (F66).
+    cleared = model.clear_cooldown(config)
+    note = "; the model cooldown was cleared too" if cleared else ""
+    print(f"aft budget: reset at {moment:%H:%M}Z; today's count starts again from 0{note}")
+    return 0
+
+
+def cmd_model_cooldown(args) -> int:
+    """Show the model endpoint's cooldown, or clear it (BUILD-PLAN F66)."""
+    from aft import model
+
+    config = load()
+    if args.clear:
+        if model.clear_cooldown(config):
+            print("aft model: cooldown cleared")
+        else:
+            print("No active model cooldown.")
+        return 0
+    record = model.get_cooldown(config)
+    until = model.cooldown_until(config)
+    if record is None or until is None:
+        print("No active model cooldown.")
+        return 0
+    left = max(0, int((until - datetime.now(UTC)).total_seconds()))
+    print(
+        f"aft model: the endpoint is in cooldown for another {left // 60}m{left % 60:02d}s"
+        f" (until {until:%H:%M}Z): {record.get('reason')}"
+    )
     return 0
 
 

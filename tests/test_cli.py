@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 from datetime import UTC, date, datetime
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from aft import vault
+from aft import model, vault
 from aft.cli import main
 from aft.config import load
 from aft.events import SESSION_END, SessionEvent
@@ -474,3 +475,29 @@ def test_redigest_without_a_session_id_prints_usage(initialized, capsys):
         main(["redigest"])
     assert excinfo.value.code == 2
     assert "usage: aft redigest" in capsys.readouterr().err
+
+
+def test_model_cooldown_shows_status_and_clears(cfg, capsys):
+    assert main(["model", "cooldown"]) == 0
+    assert "No active model cooldown." in capsys.readouterr().out
+    model.set_cooldown(cfg, "cannot reach http://endpoint: connection refused")
+    capsys.readouterr()
+    assert main(["model", "cooldown"]) == 0
+    out = capsys.readouterr().out
+    assert "connection refused" in out
+    assert re.search(r"another \d+m\d\ds", out)
+    assert main(["model", "cooldown", "--clear"]) == 0
+    assert "aft model: cooldown cleared" in capsys.readouterr().out
+    assert model.get_cooldown(cfg) is None
+    assert main(["model", "cooldown", "--clear"]) == 0
+    assert "No active model cooldown." in capsys.readouterr().out
+
+
+def test_budget_reset_clears_the_model_cooldown(cfg, capsys):
+    model.set_cooldown(cfg, "the endpoint answered 500")
+    assert main(["budget", "reset"]) == 0
+    out = capsys.readouterr().out
+    assert "reset at" in out and "cooldown was cleared" in out
+    assert model.get_cooldown(cfg) is None
+    assert main(["budget", "reset"]) == 0
+    assert "cooldown" not in capsys.readouterr().out
