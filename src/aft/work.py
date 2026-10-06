@@ -146,6 +146,13 @@ def run(config: Config, now: datetime | None = None) -> Report:
     ``now`` is the moment the run measures itself at: the sweep's window and the day the
     budget counts are both taken from it, so a run and a test can name the same instant.
     """
+    # An endpoint left cooling down by an earlier run's failures gets no calls from this
+    # one either: the record answers for the whole queue in the timer's one line, and
+    # every job stays queued for the run after the deadline passes (F66).
+    cooling, reason = model.is_in_cooldown(config)
+    if cooling:
+        until = model.cooldown_until(config)
+        return Report(stopped=f"the model endpoint is in cooldown until {until:%H:%M}Z: {reason}")
     vault.require(config)
     moment = now or datetime.now(UTC)
     swept = digested = empty = purged = 0

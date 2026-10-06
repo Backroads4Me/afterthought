@@ -23,7 +23,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,12 @@ MIN_KEY_CHARS = 16
 WITHHELD = "[details withheld]"
 # OpenAI requires the name of a json_schema response format to match [a-zA-Z0-9_-]{1,64}.
 SCHEMA_NAME = "aft"
+
+# An endpoint that answered with a server error, a rate limit, or nothing at all is left
+# to cool down in this file: no call is made until the deadline passes, so a down
+# endpoint costs one line per run instead of the same error job after job (F66).
+COOLDOWN_FILE = "model-cooldown.json"
+COOLDOWN_SECONDS = 900.0
 
 
 class ModelError(Exception):
@@ -75,9 +81,17 @@ def complete_json(
     """Ask the model for one JSON object that satisfies ``schema``.
 
     Raises ``ModelError`` when ``model.name`` is empty or ``schema`` misuses a keyword,
-    when the endpoint cannot be reached, answers with a non-2xx, an unusable body or no
-    usable token count, or returns output that fails ``schema`` twice.
+    when the endpoint is cooling down from an earlier failure, when the endpoint cannot
+    be reached, answers with a non-2xx, an unusable body or no usable token count, or
+    returns output that fails ``schema`` twice.
     """
+
+    # A cooldown an earlier failure left is answered before anything is sent: the point
+    # of the record is that a down endpoint costs no calls at all while it lasts (F66).
+    cooling, reason = is_in_cooldown(config)
+    if cooling:
+        record = get_cooldown(config) or {}
+        raise ModelError(f"Model endpoint is in cooldown until {record.get('until')}: {reason}")
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
     try:
@@ -115,6 +129,95 @@ def complete_json(
         return answer
 
     raise ModelError("; ".join(problems))
+
+
+def cooldown_path(config: Config) -> Path:
+    """Where the endpoint's cooldown state lives."""
+    return config.home / COOLDOWN_FILE
+
+
+def get_cooldown(config: Config) -> dict[str, Any] | None:
+    """The endpoint's cooldown record, or None when it is not cooling down.
+
+    A record left with ``active`` false, or one that cannot be read, is as good as
+    absent.
+    """
+    try:
+        record = json.loads(cooldown_path(config).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not record.get("active"):
+        return None
+    return record
+
+
+def is_in_cooldown(config: Config) -> tuple[bool, str]:
+    """Whether the endpoint is cooling down, and the reason when it is.
+
+    A record whose deadline has passed cools down no longer, whether or not a later
+    call got far enough to clear it.
+    """
+    record = get_cooldown(config)
+    if record is None:
+        return False, ""
+    until = _time(record.get("until"))
+    if until is None or until <= datetime.now(UTC):
+        return False, ""
+    return True, str(record.get("reason") or "")
+
+
+def cooldown_until(config: Config) -> datetime | None:
+    """When the endpoint's cooldown ends, or None while it is not cooling down."""
+    cooling, _ = is_in_cooldown(config)
+    if not cooling:
+        return None
+    record = get_cooldown(config) or {}
+    return _time(record.get("until"))
+
+
+def set_cooldown(config: Config, reason: str, duration_seconds: float = COOLDOWN_SECONDS) -> None:
+    """Cool the endpoint down for ``duration_seconds`` from now (15 minutes by default).
+
+    ``consecutive_errors`` counts the errors in a row across calls, so a report can
+    tell one bad moment from an endpoint that keeps failing. Writing the record is
+    best-effort: the caller already holds the error worth reporting, and a home that
+    cannot be written only means the next call meets the endpoint again.
+    """
+    previous = get_cooldown(config) or {}
+    record = {
+        "active": True,
+        "reason": reason,
+        "until": (datetime.now(UTC) + timedelta(seconds=duration_seconds)).isoformat(),
+        "consecutive_errors": int(previous.get("consecutive_errors") or 0) + 1,
+    }
+    try:
+        config.home.mkdir(parents=True, exist_ok=True)
+        cooldown_path(config).write_text(json.dumps(record) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def clear_cooldown(config: Config) -> bool:
+    """End any cooldown, True when there was a record to end.
+
+    A file that cannot be removed is marked inactive instead, so a home that cannot
+    let go of it still stops cooling down.
+    """
+    path = cooldown_path(config)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        record = get_cooldown(config)
+        if record is None:
+            return False
+        record["active"] = False
+        try:
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        except OSError:
+            return False
+    return True
 
 
 def tokens_used(config: Config, since: datetime | None = None) -> int:
@@ -207,6 +310,9 @@ def _chat(config: Config, body: dict) -> str:
         opener = urllib.request.build_opener(_RefuseRedirect())
         with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
             raw = response.read().decode(errors="replace")
+        # The endpoint answered, so it is up: no cooldown stands any longer, whatever
+        # it went on to say.
+        clear_cooldown(config)
     except urllib.error.HTTPError as exc:
         target = exc.headers.get("location")
         if 300 <= exc.code < 400 and target:
@@ -225,14 +331,22 @@ def _chat(config: Config, body: dict) -> str:
             detail = b""
         excerpt = _quoted(config, detail.decode(errors="replace"))[:REPORT_CHARS]
         message = f"{url} returned {exc.code}: {excerpt}"
+        # A server error or a rate limit is the endpoint's own state, not a session's:
+        # it goes down as a cooldown, so the calls after this one fail fast (F66).
+        if exc.code >= 500 or exc.code == 429:
+            set_cooldown(config, message)
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
     except (OSError, http.client.HTTPException, ValueError) as exc:
         # Covers a refused connection, a DNS failure, a timeout, a reply that is not
         # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
-        # endpoint is treated as down and the work stays queued (DESIGN 14).
-        raise ModelError(f"cannot reach {url}: {_quoted(config, str(exc))}") from exc
+        # endpoint is treated as down and the work stays queued (DESIGN 14). It also
+        # goes down as a cooldown, so the next call reads the record instead of meeting
+        # the same refusal itself (F66).
+        message = f"cannot reach {url}: {_quoted(config, str(exc))}"
+        set_cooldown(config, message)
+        raise ModelError(message) from exc
 
     try:
         reply = json.loads(raw)

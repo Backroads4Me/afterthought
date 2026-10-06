@@ -545,3 +545,98 @@ def test_a_malformed_schema_costs_no_call_and_blames_the_right_side(serve, broke
     assert "the schema aft was given is faulty" in str(refusal.value)
     assert fake.requests == []
     assert not model.usage_path(cfg).exists()
+
+
+# The cooldown: an endpoint that answered with a server error, a rate limit, or nothing
+# at all is written down, and the calls after it fail without touching the network
+# (BUILD-PLAN F66).
+
+
+def test_a_500_sets_a_cooldown(serve):
+    fake, cfg = serve(Reply(status=500))
+    with pytest.raises(model.ModelError, match="500"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert record["active"] is True
+    assert "500" in record["reason"]
+    assert record["consecutive_errors"] >= 1
+    assert datetime.fromisoformat(record["until"]) > datetime.now(UTC)
+    # Both attempts of the one call met the endpoint before the record was written.
+    assert len(fake.requests) == 2
+
+
+def test_a_429_sets_a_cooldown(serve):
+    fake, cfg = serve(Reply(status=429))
+    with pytest.raises(model.ModelError, match="429"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert "429" in record["reason"]
+    # A rate limit is not worth the retry a 5xx gets: one request, then the record.
+    assert len(fake.requests) == 1
+
+
+def test_an_endpoint_that_cannot_be_reached_sets_a_cooldown(home):
+    # Started and stopped, so the port is one nothing is listening on any more.
+    fake = FakeEndpoint()
+    fake.start()
+    endpoint = fake.endpoint
+    fake.stop()
+    cfg = point_at(home, endpoint)
+    with pytest.raises(model.ModelError, match="cannot reach"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert "cannot reach" in record["reason"]
+
+
+def test_a_call_in_cooldown_fails_fast_without_touching_the_endpoint(serve):
+    fake, cfg = serve({"answer": "yes"})
+    model.set_cooldown(cfg, "cannot reach http://endpoint: connection refused")
+    with pytest.raises(model.ModelError) as refused:
+        call(cfg)
+    assert "Model endpoint is in cooldown until" in str(refused.value)
+    assert "connection refused" in str(refused.value)
+    assert fake.requests == []
+
+
+def test_a_successful_call_clears_the_cooldown(serve):
+    # A first attempt that hits a 500 and a retry that succeeds leave nothing behind:
+    # the endpoint answered, so no record stands against the calls after it.
+    fake, cfg = serve(Reply(status=500), {"answer": "yes"})
+    assert call(cfg) == {"answer": "yes"}
+    assert model.get_cooldown(cfg) is None
+    assert len(fake.requests) == 2
+
+
+def test_an_expired_cooldown_stands_down(serve):
+    fake, cfg = serve({"answer": "yes"})
+    model.set_cooldown(cfg, "cannot reach the endpoint", duration_seconds=-1.0)
+    assert model.is_in_cooldown(cfg) == (False, "")
+    assert call(cfg) == {"answer": "yes"}
+    assert len(fake.requests) == 1
+
+
+def test_clear_cooldown_ends_the_record(cfg):
+    model.set_cooldown(cfg, "the endpoint answered 500")
+    assert model.is_in_cooldown(cfg) == (True, "the endpoint answered 500")
+    assert model.clear_cooldown(cfg) is True
+    assert model.get_cooldown(cfg) is None
+    assert model.is_in_cooldown(cfg) == (False, "")
+    assert model.clear_cooldown(cfg) is False
+
+
+def test_a_cooldown_record_that_cannot_be_read_is_no_cooldown(cfg):
+    model.cooldown_path(cfg).write_text("{not json", encoding="utf-8")
+    assert model.get_cooldown(cfg) is None
+    assert model.is_in_cooldown(cfg) == (False, "")
+
+
+def test_set_cooldown_counts_the_errors_in_a_row(cfg):
+    model.set_cooldown(cfg, "first failure")
+    model.set_cooldown(cfg, "second failure", duration_seconds=-1.0)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert record["reason"] == "second failure"
+    assert record["consecutive_errors"] == 2
