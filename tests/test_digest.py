@@ -1371,13 +1371,27 @@ def test_the_injection_reads_the_handoff_off_the_digest(session: Session):
 
 def test_the_injection_reads_the_goal_and_files_off_the_digest(session: Session):
     """The goal opens Last session and the files the work touched close it."""
+    # The files the work touched have to be the session's own words for M3 to keep
+    # them: the turn names them, and the digest's fact line carries them onto the page.
+    append_records(
+        session.transcript,
+        record(
+            "e9",
+            "user",
+            "The work touched src/aft/digest.py and tests/test_digest.py.",
+        ),
+    )
     digest_once(
         session,
         answer(
-            said(),
+            said(
+                statement="The work touched src/aft/digest.py and tests/test_digest.py.",
+                quote="The work touched src/aft/digest.py and tests/test_digest.py.",
+                entry="e9",
+            ),
             in_flight="the sweep, still to write",
             goal="capture the session's work in memory",
-            files=["src/aft/digest.py", "tests/test_digest.py"],
+            files=("src/aft/digest.py", "tests/test_digest.py"),
         ),
     )
     resolution = keys.resolve(

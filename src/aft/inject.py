@@ -21,11 +21,24 @@ from aft.keys import Resolution
 from aft.registry import Project
 
 # The overview's sections, in the order the block shows them.
-OVERVIEW_SECTIONS = ("State", "Decisions", "Lessons", "Procedures", "Facts", "References")
+OVERVIEW_SECTIONS = (
+    "Preferences",
+    "State",
+    "Decisions",
+    "Lessons",
+    "Procedures",
+    "Facts",
+    "References",
+)
 
 # A line's state decides whether the block carries it and how it is marked (design 6).
 INJECTED = (pagemod.ACTIVE, pagemod.CONFLICT, pagemod.NEEDS_YOU)
 MARKS = {pagemod.CONFLICT: "(disputed)", pagemod.NEEDS_YOU: "(waiting on the user)"}
+
+
+# The handoff line that names the files the session touched, and the prefix the block's
+# own filter matches it by.
+FILES_LINE = "- Files: "
 
 # Memory is an earlier record; the session in front of the agent outranks it.
 PRECEDENCE = "What the user says now outranks memory; a memory line it contradicts is out of date."
@@ -156,16 +169,59 @@ def _heading(project: Project, overview: pagemod.Page | None) -> Part:
 
 
 def _handoff_part(config: Config, slug: str) -> Part:
-    """The "Last session" part: the handoff of the project's newest digest, and nothing
-    when the project has no digest."""
+    """The "Last session" part: the newest digest's handoff, dated by the day the session
+    ran down, and nothing when the project has no digest (H4).
+
+    The newest primary digest is the last session's word even when it left nothing in
+    flight: the part then says so instead of borrowing an older session's handoff. A
+    summary the digest records rides along, and file paths the chunk does not name are
+    dropped (M3).
+    """
     digest = _newest_digest(config.vault / "digests" / slug)
-    return _part("Last session", [] if digest is None else handoff(_frontmatter(digest)))
+    if digest is None:
+        return _part("Last session", [])
+    frontmatter = _frontmatter(digest)
+    lines = handoff(frontmatter)
+    if lines:
+        lines = _checked_files(lines, digest)
+    if not lines:
+        lines = ["- Nothing left in flight."]
+        summary = _text(frontmatter, "summary")
+        if summary:
+            lines.append(f"- Summary: {summary}")
+    day = _day_of(digest.stem)
+    heading = f"Last session ({day})" if day != date.min else "Last session"
+    return _part(heading, lines)
+
+
+def _checked_files(lines: list[str], digest: Path) -> list[str]:
+    """The handoff lines with the file paths the digest's chunk does not name dropped (M3).
+
+    The digest page's body is the chunk the handoff was written over, so a path its text
+    never carries did not reach the session's words. When the page cannot be read, the
+    check cannot run and every path stands.
+    """
+    text = _read(digest)
+    if text is None:
+        return lines
+    chunk = pagemod.split_frontmatter(text)[1]
+    kept = []
+    for line in lines:
+        if not line.startswith(FILES_LINE):
+            kept.append(line)
+            continue
+        names = [name for name in line[len(FILES_LINE) :].split(", ") if name in chunk]
+        if names:
+            kept.append(FILES_LINE + ", ".join(names))
+    return kept
 
 
 def _newest_digest(directory: Path) -> Path | None:
-    """The newest digest of a primary session that carries a handoff under ``directory``.
+    """The newest digest of a primary session under ``directory``, whatever its handoff
+    holds: an empty handoff is still the last session's word, not a reason to walk back
+    to an older session's (H4).
 
-    Worker, library and memory-import digests never supply or remove it.
+    Worker, library and memory-import digests never supply it.
     """
     digests = list(directory.rglob("*.md"))
     if not digests:
@@ -181,8 +237,7 @@ def _newest_digest(directory: Path) -> Path | None:
             aft = fm.get("aft") if isinstance(fm, dict) else None
             if isinstance(aft, dict) and aft.get("role") == "worker":
                 continue
-            if handoff(fm):
-                return digest
+            return digest
     return None
 
 
@@ -286,7 +341,7 @@ def handoff(frontmatter: dict | None) -> list[str]:
     if isinstance(files, list):
         names = [one_line(path) for path in files if isinstance(path, str)]
         if names:
-            lines.append(f"- Files: {', '.join(names)}")
+            lines.append(FILES_LINE + ", ".join(names))
     return lines
 
 
