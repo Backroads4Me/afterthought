@@ -658,10 +658,10 @@ def run_project(
                 # Confirmed by a long-term fact: the line is cited and, once this run's
                 # digests are in, leaves recent.md as a long-term fact (design 6, R10).
                 assert proposal.target is not None
-                target_fact = doc.fact(proposal.target.fact.statement)
                 for sid in refs_to_use:
+                    target_fact = doc.fact(proposal.target.fact.statement)
                     doc.confirm(target_fact, source=sid, date=new_fact.date)
-                to_lift.append((target_fact.statement, LIFT_CONFIRMED))
+                to_lift.append((proposal.target.fact.statement, LIFT_CONFIRMED))
             elif action == "confirm":
                 assert proposal.target is not None
                 for sid in refs_to_use:
@@ -684,7 +684,8 @@ def run_project(
                 promoted = doc.promote(target_fact, kind=new_fact.kind)
                 confirmed_refs = list(promoted.refs)
                 for sid in refs_to_use:
-                    doc.confirm(promoted, source=sid, date=new_fact.date)
+                    target_fact = doc.fact(promoted.statement)
+                    doc.confirm(target_fact, source=sid, date=new_fact.date)
                     confirmed_refs.append(sid)
                 report.promoted.append(
                     PromotedFact(
@@ -1148,10 +1149,16 @@ def _stored_long_term(
         entry = sources.get(ref, {})
         quoted.add((str(entry.get("resource", "")), str(entry.get("quote", ""))))
     quoted.discard(("", ""))
-    pages = [vault_path / "projects" / page_slug / "overview.md"]
-    global_dir = vault_path / "global"
-    if global_dir.is_dir():
-        pages.extend(sorted(global_dir.glob("*.md")))
+    project_dir = vault_path / "projects" / page_slug
+    pages = (
+        [
+            path
+            for path in sorted(project_dir.rglob("*.md"))
+            if not page.is_recent(path.relative_to(vault_path))
+        ]
+        if project_dir.is_dir()
+        else []
+    )
     for path in pages:
         if not path.is_file():
             continue
