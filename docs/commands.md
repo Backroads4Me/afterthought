@@ -16,9 +16,10 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 
 | Command | What it does |
 |---|---|
-| `aft project add [path] [--slug S] [--title T]` | Registers the directory at `path` (default: the current one) as a project, git repository or not. A repository's `origin` remote is recorded too, so a re-clone finds the same memory. A path under the system temporary directory is refused unless `--allow-temp` is given. |
+| `aft project add [path] [--slug S] [--to SLUG] [--title T]` | Registers the directory at `path` (default: the current one) as a project, git repository or not. A repository's `origin` remote is recorded too, so a re-clone finds the same memory. With `--to SLUG` the directory joins the registered project SLUG instead of making a new one, and is refused when another project already holds it. A path under the system temporary directory is refused unless `--allow-temp` is given. |
 | `aft project list [--json]` | Lists registered projects, their ids, paths and remotes. |
 | `aft project rename OLD NEW` | Changes a project's slug. Its id, and every page that names it, stay the same. |
+| `aft project merge FROM INTO` | Merges the project FROM into INTO: INTO takes FROM's paths and remotes, its digests, its archive, and its pages, with a page both hold combined line by line under its matching sections, and FROM leaves the registry. |
 | `aft project forget SLUG` | Removes a project from the registry. Its pages stay in `projects/<slug>/`, and the command says so; delete them yourself if you want them gone. |
 | `aft project archive SLUG` | Retires a project from everyday memory with the user's say-so: its block is not injected, and its pages and digests answer only `aft search --archive`. Sessions still capture and dream, and the daily report names projects idle for 90 days. Nothing is deleted; `aft project unarchive` brings it back. |
 | `aft project unarchive SLUG` | Ends a project's archive: its block is injected again and its pages and digests answer ordinary searches, from the date the archive began. |

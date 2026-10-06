@@ -501,3 +501,294 @@ def test_budget_reset_clears_the_model_cooldown(cfg, capsys):
     assert model.get_cooldown(cfg) is None
     assert main(["budget", "reset"]) == 0
     assert "cooldown" not in capsys.readouterr().out
+
+
+# Attaching a directory to an existing project (F70)
+
+
+def test_project_add_to_attaches_a_path_and_its_remote(initialized, tmp_path, capsys):
+    """`aft project add <path> --to <slug>` gives the project the directory, and its
+    origin remote, without making a new project (F70)."""
+    repo = make_repo(tmp_path / "widget", origin="git@github.com:ex/widget.git")
+    assert main(["project", "add", str(repo)]) == 0
+    capsys.readouterr()
+    extra = make_repo(tmp_path / "extra", origin="git@github.com:ex/extra.git")
+
+    assert main(["project", "add", str(extra), "--to", "widget"]) == 0
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.by_slug("widget")
+    assert project.paths == [f"testhost:{repo.resolve()}", f"testhost:{extra.resolve()}"]
+    assert project.remotes == ["github.com/ex/widget", "github.com/ex/extra"]
+    assert capsys.readouterr().out == (
+        f"attached testhost:{extra.resolve()} to widget ({project.id})\n"
+    )
+    assert run_git(["log", "-1", "--format=%s"], initialized.vault) == "aft: attach extra to widget"
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_add_to_is_idempotent_for_its_own_directory(initialized, tmp_path, capsys):
+    """A directory the project already holds attaches again as a success, and changes
+    nothing (F70)."""
+    repo = make_repo(tmp_path / "widget")
+    assert main(["project", "add", str(repo)]) == 0
+    capsys.readouterr()
+    log_before = run_git(["log", "--format=%H"], initialized.vault)
+
+    assert main(["project", "add", str(repo), "--to", "widget"]) == 0
+
+    registry = Registry.load(initialized.registry_path)
+    project = registry.by_slug("widget")
+    assert project.paths == [f"testhost:{repo.resolve()}"]
+    assert capsys.readouterr().out == (
+        f"attached testhost:{repo.resolve()} to widget ({project.id})\n"
+    )
+    assert run_git(["log", "--format=%H"], initialized.vault) == log_before
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_add_to_refuses_a_path_another_project_holds(initialized, tmp_path, capsys):
+    """A directory another project holds is a merge's business, not a second claim (F70)."""
+    first = make_repo(tmp_path / "first")
+    second = make_repo(tmp_path / "second")
+    assert main(["project", "add", str(first)]) == 0
+    assert main(["project", "add", str(second)]) == 0
+    capsys.readouterr()
+
+    assert main(["project", "add", str(second), "--to", "first"]) == 2
+
+    captured = capsys.readouterr()
+    assert f"a project 'second' already exists for {second.resolve()}" in captured.err
+    assert "`aft project merge` merges projects" in captured.err
+    registry = Registry.load(initialized.registry_path)
+    assert registry.by_slug("first").paths == [f"testhost:{first.resolve()}"]
+    assert registry.by_slug("second").paths == [f"testhost:{second.resolve()}"]
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_add_to_refuses_an_unknown_project(initialized, tmp_path, capsys):
+    """`--to` names a project that has to exist already (F70)."""
+    repo = make_repo(tmp_path / "widget")
+
+    assert main(["project", "add", str(repo), "--to", "nowhere"]) == 2
+
+    assert "no project 'nowhere'" in capsys.readouterr().err
+    assert Registry.load(initialized.registry_path).projects == []
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_add_refuses_slug_and_to_together(initialized, tmp_path):
+    """A call either names a new project or joins an existing one, not both (F70)."""
+    repo = make_repo(tmp_path / "widget")
+    with pytest.raises(SystemExit) as excinfo:
+        main(["project", "add", str(repo), "--slug", "widget", "--to", "widget"])
+    assert excinfo.value.code == 2
+
+
+def test_the_default_home_refuses_attaching_a_temporary_project(default_home, tmp_path, capsys):
+    """With AFT_HOME unset the vault is the user's real one, so attaching a directory
+    under the system temporary directory waits for --allow-temp, like registering one
+    does (BUILD-PLAN F25, F70)."""
+    home_repo = make_repo(tmp_path / "widget")
+    assert main(["project", "add", str(home_repo)]) == 0
+    capsys.readouterr()
+    scratch = temp_repo("scratch")
+    try:
+        assert main(["project", "add", str(scratch), "--to", "widget"]) == 2
+        captured = capsys.readouterr()
+        assert "temporary directory" in captured.err
+        assert "--allow-temp" in captured.err
+        registry = Registry.load(load().registry_path)
+        assert registry.by_slug("widget").paths == [f"testhost:{home_repo.resolve()}"]
+
+        assert main(["project", "add", str(scratch), "--allow-temp", "--to", "widget"]) == 0
+        registry = Registry.load(load().registry_path)
+        assert f"testhost:{scratch.resolve()}" in registry.by_slug("widget").paths
+    finally:
+        shutil.rmtree(scratch)
+
+
+# Merging one project into another (F70)
+
+
+def _write_page(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def test_project_merge_moves_everything_into_the_destination(initialized, tmp_path, capsys):
+    """A merge gives the destination the source's paths and remotes, digests, archive and
+    pages, and the source leaves the registry (F70)."""
+    alpha_repo = make_repo(tmp_path / "alpha", origin="git@github.com:ex/alpha.git")
+    beta_repo = make_repo(tmp_path / "beta")
+    assert main(["project", "add", str(alpha_repo)]) == 0
+    assert main(["project", "add", str(beta_repo)]) == 0
+    capsys.readouterr()
+    vault_root = initialized.vault
+    _write_page(
+        vault_root / "projects" / "alpha" / "overview.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: The alpha project.\nsources: []\n"
+        "---\n\n## Facts\n\n- alpha keeps its own fact [stated] 2026-10-01\n\n"
+        "## Lessons\n\n- alpha learned alone [observed] 2026-10-02\n",
+    )
+    _write_page(
+        vault_root / "projects" / "alpha" / "recent.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: The alpha project.\nsources: []\n"
+        "---\n\n## State\n\n- alpha is mid-migration [observed] 2026-10-04\n",
+    )
+    _write_page(vault_root / "projects" / "alpha" / "notes.md", "alpha notes\n")
+    _write_page(
+        vault_root / "projects" / "beta" / "overview.md",
+        "---\ntype: Project\ntitle: beta\ndescription: The beta project.\nsources: []\n"
+        "---\n\n## Facts\n\n- beta keeps its own fact [stated] 2026-10-03\n",
+    )
+    _write_page(
+        vault_root / "projects" / "beta" / "recent.md",
+        "---\ntype: Project\ntitle: beta\ndescription: The beta project.\nsources: []\n"
+        "---\n\n## State\n\n- beta is mid-migration [observed] 2026-10-05\n",
+    )
+    _write_page(vault_root / "projects" / "beta" / "notes.md", "beta notes\n")
+    _write_page(vault_root / "digests" / "alpha" / "2026" / "10" / "digest.md", "alpha digest\n")
+    _write_page(vault_root / "digests" / "beta" / "2026" / "09" / "digest.md", "beta digest\n")
+    _write_page(vault_root / "archive" / "projects" / "alpha" / "overview.md", "alpha archive\n")
+    _write_page(
+        vault_root / "archive" / "alpha.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: The alpha project.\nsources: []\n"
+        "---\n\n## Facts\n\n- old alpha fact [stated] 2026-09-01\n",
+    )
+    _write_page(
+        vault_root / "archive" / "beta.md",
+        "---\ntype: Project\ntitle: beta\ndescription: The beta project.\nsources: []\n"
+        "---\n\n## Facts\n\n- old beta fact [stated] 2026-09-02\n",
+    )
+    vault.commit(vault_root, ["projects", "digests", "archive"], "seed the two projects")
+
+    assert main(["project", "merge", "alpha", "beta"]) == 0
+
+    assert capsys.readouterr().out == "merged alpha into beta\n"
+    registry = Registry.load(initialized.registry_path)
+    beta = registry.by_slug("beta")
+    assert registry.by_slug("alpha") is None
+    assert beta.paths == [f"testhost:{beta_repo.resolve()}", f"testhost:{alpha_repo.resolve()}"]
+    assert beta.remotes == ["github.com/ex/alpha"]
+
+    overview = (vault_root / "projects" / "beta" / "overview.md").read_text()
+    assert overview.index("beta keeps its own fact") < overview.index("alpha keeps its own fact")
+    assert overview.index("## Lessons") < overview.index("alpha learned alone")
+    assert overview.index("## Facts") < overview.index("## Lessons")
+    recent = (vault_root / "projects" / "beta" / "recent.md").read_text()
+    assert recent.index("beta is mid-migration") < recent.index("alpha is mid-migration")
+    assert (vault_root / "projects" / "beta" / "notes.md").read_text() == "beta notes\n"
+    assert (vault_root / "projects" / "beta" / "notes-2.md").read_text() == "alpha notes\n"
+    assert not (vault_root / "projects" / "alpha").exists()
+    assert (
+        vault_root / "digests" / "beta" / "2026" / "10" / "digest.md"
+    ).read_text() == "alpha digest\n"
+    assert (
+        vault_root / "digests" / "beta" / "2026" / "09" / "digest.md"
+    ).read_text() == "beta digest\n"
+    assert not (vault_root / "digests" / "alpha").exists()
+    assert (
+        vault_root / "archive" / "projects" / "beta" / "overview.md"
+    ).read_text() == "alpha archive\n"
+    assert not (vault_root / "archive" / "projects" / "alpha").exists()
+    legacy = (vault_root / "archive" / "beta.md").read_text()
+    assert legacy.index("old beta fact") < legacy.index("old alpha fact")
+    assert not (vault_root / "archive" / "alpha.md").exists()
+    assert run_git(["log", "-1", "--format=%s"], vault_root) == "aft: merge alpha into beta"
+    assert run_git(["status", "--porcelain"], vault_root) == ""
+
+
+def test_project_merge_moves_pages_the_destination_lacks(initialized, tmp_path, capsys):
+    """Pages, a legacy archive page and digests the destination has none of move over
+    whole (F70)."""
+    alpha_repo = make_repo(tmp_path / "alpha")
+    beta_repo = make_repo(tmp_path / "beta")
+    assert main(["project", "add", str(alpha_repo)]) == 0
+    assert main(["project", "add", str(beta_repo)]) == 0
+    capsys.readouterr()
+    vault_root = initialized.vault
+    alpha_overview = (
+        "---\ntype: Project\ntitle: alpha\ndescription: The alpha project.\nsources: []\n"
+        "---\n\n## Facts\n\n- alpha keeps its own fact [stated] 2026-10-01\n"
+    )
+    _write_page(vault_root / "projects" / "alpha" / "overview.md", alpha_overview)
+    _write_page(
+        vault_root / "archive" / "alpha.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: The alpha project.\nsources: []\n"
+        "---\n\n## Facts\n\n- old alpha fact [stated] 2026-09-01\n",
+    )
+    _write_page(vault_root / "digests" / "alpha" / "2026" / "10" / "digest.md", "alpha digest\n")
+    vault.commit(vault_root, ["projects", "digests", "archive"], "seed alpha alone")
+
+    assert main(["project", "merge", "alpha", "beta"]) == 0
+
+    assert (vault_root / "projects" / "beta" / "overview.md").read_text() == alpha_overview
+    assert not (vault_root / "projects" / "alpha").exists()
+    assert not (vault_root / "projects" / "beta" / "recent.md").exists()
+    assert (
+        (vault_root / "archive" / "beta.md")
+        .read_text()
+        .endswith("- old alpha fact [stated] 2026-09-01\n")
+    )
+    assert not (vault_root / "archive" / "alpha.md").exists()
+    assert (
+        vault_root / "digests" / "beta" / "2026" / "10" / "digest.md"
+    ).read_text() == "alpha digest\n"
+    assert not (vault_root / "digests" / "alpha").exists()
+    assert run_git(["log", "-1", "--format=%s"], vault_root) == "aft: merge alpha into beta"
+    assert run_git(["status", "--porcelain"], vault_root) == ""
+
+
+def test_project_merge_with_no_vault_directories_keeps_the_registry_tidy(
+    initialized, tmp_path, capsys
+):
+    """Two projects with no pages, digests or archive merge as a registry change alone:
+    the destination's paths and remotes are duplicate-free, and no directories appear
+    (F70)."""
+    alpha_repo = make_repo(tmp_path / "alpha", origin="git@github.com:ex/shared.git")
+    beta_repo = make_repo(tmp_path / "beta", origin="git@github.com:ex/shared.git")
+    assert main(["project", "add", str(alpha_repo)]) == 0
+    assert main(["project", "add", str(beta_repo)]) == 0
+    capsys.readouterr()
+
+    assert main(["project", "merge", "alpha", "beta"]) == 0
+
+    assert capsys.readouterr().out == "merged alpha into beta\n"
+    registry = Registry.load(initialized.registry_path)
+    beta = registry.by_slug("beta")
+    assert registry.by_slug("alpha") is None
+    assert beta.paths == [f"testhost:{beta_repo.resolve()}", f"testhost:{alpha_repo.resolve()}"]
+    assert beta.remotes == ["github.com/ex/shared"]
+    assert not (initialized.vault / "projects" / "alpha").exists()
+    assert not (initialized.vault / "projects" / "beta").exists()
+    assert not (initialized.vault / "digests" / "beta").exists()
+    assert run_git(["log", "-1", "--format=%s"], initialized.vault) == "aft: merge alpha into beta"
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_merge_refuses_the_same_project(initialized, tmp_path, capsys):
+    make_repo(tmp_path / "alpha")
+    assert main(["project", "add", str(tmp_path / "alpha")]) == 0
+    capsys.readouterr()
+
+    assert main(["project", "merge", "alpha", "alpha"]) == 2
+
+    assert "cannot merge a project into itself" in capsys.readouterr().err
+    assert Registry.load(initialized.registry_path).by_slug("alpha") is not None
+
+
+def test_project_merge_refuses_unknown_projects(initialized, tmp_path, capsys):
+    """Both names have to be registered, whichever side of the merge they sit on (F70)."""
+    make_repo(tmp_path / "alpha")
+    assert main(["project", "add", str(tmp_path / "alpha")]) == 0
+    capsys.readouterr()
+
+    assert main(["project", "merge", "delta", "alpha"]) == 2
+    assert "no project 'delta'" in capsys.readouterr().err
+    assert main(["project", "merge", "alpha", "delta"]) == 2
+    assert "no project 'delta'" in capsys.readouterr().err
+    registry = Registry.load(initialized.registry_path)
+    assert registry.by_slug("alpha") is not None
+    assert registry.by_slug("delta") is None
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""

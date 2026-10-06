@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import sys
@@ -99,7 +100,11 @@ def _parser() -> argparse.ArgumentParser:
     q.set_defaults(handler=cmd_project_list)
     q = psub.add_parser("add", help="register the project at a path")
     q.add_argument("path", nargs="?", default=".")
-    q.add_argument("--slug", help="defaults to the directory name")
+    names = q.add_mutually_exclusive_group()
+    names.add_argument("--slug", help="the new project's name; defaults to the directory name")
+    names.add_argument(
+        "--to", metavar="SLUG", help="attach the path to this registered project instead"
+    )
     q.add_argument("--title")
     q.add_argument(
         "--allow-temp",
@@ -111,6 +116,10 @@ def _parser() -> argparse.ArgumentParser:
     q.add_argument("old")
     q.add_argument("new")
     q.set_defaults(handler=cmd_project_rename)
+    q = psub.add_parser("merge", help="merge one project into another")
+    q.add_argument("from_slug", metavar="from")
+    q.add_argument("into_slug", metavar="into")
+    q.set_defaults(handler=cmd_project_merge)
     q = psub.add_parser("archive", help="take a project out of memory without deleting anything")
     q.add_argument("slug")
     q.set_defaults(handler=cmd_project_archive)
@@ -493,37 +502,61 @@ def cmd_project_add(args) -> int:
     with vault.locked(config):
         registry = Registry.load(config.registry_path)
         held = registry.by_path_key(path_key(config.host, root))
-        if held is not None:
-            # The directory is already someone's project, so this is a rename's business,
-            # not a second project under a name its own walk would step aside from.
-            raise UsageError(
-                f"a project {held.slug!r} already exists for {root};"
-                " `aft project rename` changes its name"
-            )
-        if args.slug:
-            # The name a person chose is theirs to choose again: one another directory's
-            # session records claim is refused, not quietly prefixed. The directory's own
-            # claim does not count against it, so the name its sessions file it under
-            # stays takeable (DESIGN 7, F49).
-            if args.slug in queue.claimed_slugs(config, registry, keep={str(root)}):
+        if args.to is not None:
+            # The directory joins a project that already exists. A directory another
+            # project holds is a merge's business, not a second claim (F70).
+            project = registry.by_slug(args.to)
+            if project is None:
+                raise UsageError(f"no project {args.to!r} in the registry")
+            if held is not None and held is not project:
                 raise UsageError(
-                    f"the name {args.slug!r} is claimed by the session records of another"
-                    " directory; pick another name, or leave it off to have one settled"
-                    " (DESIGN 7, F49)"
+                    f"a project {held.slug!r} already exists for {root};"
+                    " `aft project merge` merges projects"
                 )
-            slug = args.slug
+            if held is None:
+                registry.add_path(project, path_key(config.host, root))
+                if info and info.origin:
+                    registry.add_remote(project, gitutil.normalize_remote(info.origin))
+                registry.save()
+                vault.commit(
+                    config.vault, ["registry.yaml"], f"aft: attach {root.name} to {args.to}"
+                )
+            slug = args.to
         else:
-            # The default name settles the way a session-start record settles it, against
-            # the registry and every claim, and a pathless record of the name this
-            # directory resolves to is given the directory (DESIGN 7, F49).
-            slug = queue.adopt_claim(config, registry, root, slugify(root.name))
-        project = registry.add(slug, args.title)
-        registry.add_path(project, path_key(config.host, root))
-        if info and info.origin:
-            registry.add_remote(project, gitutil.normalize_remote(info.origin))
-        registry.save()
-        vault.commit(config.vault, ["registry.yaml"], f"aft: register {slug}")
-    print(f"registered {slug} ({project.id}) at {config.host}:{root}")
+            if held is not None:
+                # The directory is already someone's project, so this is a rename's business,
+                # not a second project under a name its own walk would step aside from.
+                raise UsageError(
+                    f"a project {held.slug!r} already exists for {root};"
+                    " `aft project rename` changes its name"
+                )
+            if args.slug:
+                # The name a person chose is theirs to choose again: one another directory's
+                # session records claim is refused, not quietly prefixed. The directory's own
+                # claim does not count against it, so the name its sessions file it under
+                # stays takeable (DESIGN 7, F49).
+                if args.slug in queue.claimed_slugs(config, registry, keep={str(root)}):
+                    raise UsageError(
+                        f"the name {args.slug!r} is claimed by the session records of another"
+                        " directory; pick another name, or leave it off to have one settled"
+                        " (DESIGN 7, F49)"
+                    )
+                slug = args.slug
+            else:
+                # The default name settles the way a session-start record settles it, against
+                # the registry and every claim, and a pathless record of the name this
+                # directory resolves to is given the directory (DESIGN 7, F49).
+                slug = queue.adopt_claim(config, registry, root, slugify(root.name))
+            project = registry.add(slug, args.title)
+            registry.add_path(project, path_key(config.host, root))
+            if info and info.origin:
+                registry.add_remote(project, gitutil.normalize_remote(info.origin))
+            registry.save()
+            vault.commit(config.vault, ["registry.yaml"], f"aft: register {slug}")
+    if args.to is not None:
+        print(f"attached {config.host}:{root} to {slug} ({project.id})")
+    else:
+        print(f"registered {slug} ({project.id}) at {config.host}:{root}")
     return 0
 
 
@@ -591,6 +624,213 @@ def cmd_project_rename(args) -> int:
         vault.commit(config.vault, changed, f"aft: rename {args.old} to {args.new}")
     print(f"renamed {args.old} to {args.new}")
     return 0
+
+
+def cmd_project_merge(args) -> int:
+    """Merge one project into another (F70).
+
+    The destination takes the source's paths and remotes, its digests, its archive, and
+    its pages, and the source leaves the registry. A page both projects hold is combined
+    line by line under its matching sections, so nothing either page said is lost.
+    """
+    from aft import vault
+
+    config = load()
+    vault.require(config)
+    if args.from_slug == args.into_slug:
+        raise UsageError("cannot merge a project into itself")
+    with vault.locked(config):
+        registry = Registry.load(config.registry_path)
+        source = registry.by_slug(args.from_slug)
+        if source is None:
+            raise UsageError(f"no project {args.from_slug!r}")
+        target = registry.by_slug(args.into_slug)
+        if target is None:
+            raise UsageError(f"no project {args.into_slug!r}")
+        # The source's path keys were already unique to it, and remotes repeat only when
+        # both projects named the same origin, so the transfer cannot collide (F70).
+        target.paths.extend(source.paths)
+        source.paths = []
+        for remote in source.remotes:
+            if remote not in target.remotes:
+                target.remotes.append(remote)
+        changed = ["registry.yaml"]
+        _merge_project_directories(config, source.slug, target.slug, changed)
+        registry.projects.remove(source)
+        registry.save()
+        vault.commit(config.vault, changed, f"aft: merge {source.slug} into {target.slug}")
+    print(f"merged {args.from_slug} into {args.into_slug}")
+    return 0
+
+
+def _merge_project_directories(
+    config: Config, from_slug: str, into_slug: str, changed: list[str]
+) -> None:
+    """Move the source project's vault directories into the destination's (F70).
+
+    Appends every path that gained or lost files to ``changed``, so one commit covers the
+    moves; a directory that held nothing adds nothing, since git has no path to stage.
+    """
+    from aft import vault
+
+    try:
+        source = config.vault / "digests" / from_slug
+        if source.exists():
+            if _move_all(source, config.vault / "digests" / into_slug):
+                changed += [f"digests/{from_slug}", f"digests/{into_slug}"]
+            source.rmdir()
+        source = config.vault / "archive" / "projects" / from_slug
+        if source.exists():
+            if _move_all(source, config.vault / "archive" / "projects" / into_slug):
+                changed += [f"archive/projects/{from_slug}", f"archive/projects/{into_slug}"]
+            source.rmdir()
+        source = config.vault / "archive" / f"{from_slug}.md"
+        target = config.vault / "archive" / f"{into_slug}.md"
+        if source.exists():
+            if target.exists():
+                _merge_fact_pages(source, target)
+                source.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+            changed += [f"archive/{from_slug}.md", f"archive/{into_slug}.md"]
+        source = config.vault / "projects" / from_slug
+        if source.exists():
+            target = config.vault / "projects" / into_slug
+            moved = False
+            for name in ("overview.md", "recent.md"):
+                page = source / name
+                if not page.exists():
+                    continue
+                if (target / name).exists():
+                    _merge_fact_pages(page, target / name)
+                    page.unlink()
+                else:
+                    target.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(page), str(target / name))
+                moved = True
+            moved = _move_all(source, target) or moved
+            if moved:
+                changed += [f"projects/{from_slug}", f"projects/{into_slug}"]
+            source.rmdir()
+    except OSError as exc:
+        raise vault.VaultError(f"cannot merge project directories: {exc}") from exc
+
+
+def _move_into(source: Path, target: Path) -> bool:
+    """Move the file or directory ``source`` onto the name ``target``, and say whether
+    anything moved (F70).
+
+    A directory whose name the destination holds has its children moved in one by one; a
+    file whose name is taken keeps its name with a number appended, so nothing the vault
+    holds is overwritten.
+    """
+    from aft import vault
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.move(str(source), str(target))
+            return True
+        if not source.is_dir():
+            destination = target
+            number = 2
+            while destination.exists():
+                destination = target.with_name(f"{target.stem}-{number}{target.suffix}")
+                number += 1
+            shutil.move(str(source), str(destination))
+            return True
+        moved = False
+        for child in list(source.iterdir()):
+            moved = _move_into(child, target / child.name) or moved
+        source.rmdir()
+        return moved
+    except OSError as exc:
+        raise vault.VaultError(f"cannot merge project directories: {exc}") from exc
+
+
+def _move_all(source: Path, target: Path) -> bool:
+    """Move every entry of the directory ``source`` to the same name under ``target``,
+    and say whether anything moved (F70)."""
+    moved = False
+    for item in list(source.iterdir()):
+        moved = _move_into(item, target / item.name) or moved
+    return moved
+
+
+def _split_page_text(text: str) -> tuple[str, str]:
+    """A page's frontmatter text, its closing line included, and its body (F70).
+
+    Text with no frontmatter comes back with an empty first part.
+    """
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return "", text
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[: index + 1]) + "\n", "\n".join(lines[index + 1 :])
+    return "", text
+
+
+def _body_runs(body: str) -> list[tuple[str | None, list[str]]]:
+    """A page body as one run of lines per ``## `` section, in order (F70).
+
+    The first run's heading is None and holds whatever comes before the first section,
+    usually the blank line after the frontmatter.
+    """
+    runs: list[tuple[str | None, list[str]]] = [(None, [])]
+    for line in body.split("\n"):
+        if line.rstrip().startswith("## "):
+            runs.append((line.rstrip()[3:].strip(), []))
+        else:
+            runs[-1][1].append(line)
+    return runs
+
+
+def _render_runs(runs: list[tuple[str | None, list[str]]]) -> str:
+    """The body text of page runs, with a blank line kept before each heading (F70)."""
+    lines: list[str] = []
+    for heading, run in runs:
+        if heading is not None:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(f"## {heading}")
+        lines.extend(run)
+    return "\n".join(lines)
+
+
+def _merge_fact_pages(source: Path, target: Path) -> None:
+    """Merge the source fact page into the target page under matching sections (F70).
+
+    The target's frontmatter stands. A section the target holds takes the source's lines
+    after its own; one it lacks is added whole at the end. Whatever the source had before
+    its first section goes after the target's own, if it has any.
+    """
+    _, source_body = _split_page_text(source.read_text())
+    frontmatter, target_body = _split_page_text(target.read_text())
+    source_runs = _body_runs(source_body)
+    target_runs = _body_runs(target_body)
+    lead = [line for line in source_runs[0][1] if line.strip()]
+    if lead:
+        target_runs[0][1].extend(lead)
+    for heading, lines in source_runs[1:]:
+        core = list(lines)
+        while core and not core[0].strip():
+            core.pop(0)
+        while core and not core[-1].strip():
+            core.pop()
+        if not core:
+            continue
+        for other_heading, other_lines in target_runs[1:]:
+            if other_heading == heading:
+                if other_lines and other_lines[-1].strip():
+                    other_lines.append("")
+                other_lines.extend(core)
+                other_lines.append("")
+                break
+        else:
+            target_runs.append((heading, core))
+    target.write_text(frontmatter + _render_runs(target_runs))
 
 
 def cmd_project_forget(args) -> int:
