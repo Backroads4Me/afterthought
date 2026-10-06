@@ -227,14 +227,22 @@ def said(
     }
 
 
-def answer(*facts: dict, summary: str = "Built the capture hook.", in_flight: str = "") -> dict:
+def answer(
+    *facts: dict,
+    summary: str = "Built the capture hook.",
+    in_flight: str = "",
+    goal: str = "",
+    files: tuple[str, ...] = (),
+) -> dict:
     """One digest answer of the shape the schema describes."""
     return {
         "summary": summary,
         "handoff": {
+            "goal": {"text": goal, "entry": "#1" if goal else ""},
             "in_flight": {"text": in_flight, "entry": "#1" if in_flight else ""},
             "failed": [],
             "open": [],
+            "files": list(files),
         },
         "facts": list(facts),
     }
@@ -761,6 +769,7 @@ def with_handoff(key: str, text: str) -> dict:
         answer(said(), summary="..."),
         answer(said(), summary=""),
         answer(said(), in_flight="…"),
+        answer(said(), goal="…"),
         with_handoff("failed", "--"),
         with_handoff("open", "..."),
     ],
@@ -888,15 +897,38 @@ def test_a_handoff_item_naming_no_entry_of_the_chunk_is_left_out(session: Sessio
     chunk's entries is not grounded in it."""
     grounded = answer(said())
     grounded["handoff"] = {
+        "goal": {"text": "the sweep, still to write", "entry": "#9999"},
         "in_flight": {"text": "the sweep, still to write", "entry": "#9999"},
         "failed": [{"text": "a retry loop", "entry": "#1"}],
         "open": [{"text": "where the cursor lives", "entry": "nowhere"}],
+        "files": [],
     }
     wrote = digest_once(session, grounded)
     assert frontmatter(session.cfg, wrote.path)["aft"]["handoff"] == {
         "in_flight": "",
         "failed": ["a retry loop"],
         "open": [],
+    }
+
+
+def test_the_handoff_carries_a_grounded_goal_and_its_files(session: Session):
+    """The session's goal rides the handoff when it names an entry of the chunk, and the
+    files the work touched travel beside it."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(),
+            in_flight="the sweep, still to write",
+            goal="capture the session's work in memory",
+            files=["src/aft/digest.py", "tests/test_digest.py"],
+        ),
+    )
+    assert frontmatter(session.cfg, wrote.path)["aft"]["handoff"] == {
+        "goal": "capture the session's work in memory",
+        "in_flight": "the sweep, still to write",
+        "failed": [],
+        "open": [],
+        "files": ["src/aft/digest.py", "tests/test_digest.py"],
     }
 
 
@@ -1014,6 +1046,26 @@ def test_the_injection_reads_the_handoff_off_the_digest(session: Session):
     block = inject.build(session.cfg, resolution)
     assert "## Last session" in block
     assert "- In flight: the sweep, still to write" in block
+
+
+def test_the_injection_reads_the_goal_and_files_off_the_digest(session: Session):
+    """The goal opens Last session and the files the work touched close it."""
+    digest_once(
+        session,
+        answer(
+            said(),
+            in_flight="the sweep, still to write",
+            goal="capture the session's work in memory",
+            files=["src/aft/digest.py", "tests/test_digest.py"],
+        ),
+    )
+    resolution = keys.resolve(
+        session.cwd, registry.Registry.load(session.cfg.registry_path), session.cfg.host
+    )
+    block = inject.build(session.cfg, resolution)
+    assert "## Last session" in block
+    assert "- Goal: capture the session's work in memory" in block
+    assert "- Files: src/aft/digest.py, tests/test_digest.py" in block
 
 
 def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Session):
@@ -2134,11 +2186,17 @@ def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
     assert fact["properties"]["scope"]["enum"] == ["project", "global"]
     handoff = schema["properties"]["handoff"]
     assert handoff["required"] == ["in_flight", "failed", "open"]
+    assert "goal" in handoff["properties"]
+    assert "files" in handoff["properties"]
     assert handoff["properties"]["in_flight"]["properties"]["text"]["maxLength"] == 400
     assert handoff["properties"]["in_flight"]["required"] == ["text", "entry"]
     assert handoff["properties"]["open"]["items"]["required"] == ["text", "entry"]
     assert handoff["properties"]["failed"]["maxItems"] == 5
     assert handoff["properties"]["open"]["maxItems"] == 5
+    assert handoff["properties"]["goal"]["required"] == ["text", "entry"]
+    assert handoff["properties"]["goal"]["properties"]["text"]["maxLength"] == 400
+    assert handoff["properties"]["files"]["maxItems"] == 10
+    assert handoff["properties"]["files"]["items"]["maxLength"] == 200
 
 
 def test_the_schema_is_one_the_validator_reads():
@@ -2150,11 +2208,31 @@ def test_the_schema_is_one_the_validator_reads():
         schema.validate(
             {
                 "summary": "x" * 801,
-                "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+                "handoff": {
+                    "goal": {"text": "", "entry": ""},
+                    "in_flight": {"text": "", "entry": ""},
+                    "failed": [],
+                    "open": [],
+                    "files": [],
+                },
                 "facts": [],
             },
             digest.digest_schema(),
         )
+    schema.validate(
+        {
+            "summary": "The session shipped the hook.",
+            "handoff": {
+                "goal": {"text": "capture the session's work in memory", "entry": "#1"},
+                "in_flight": {"text": "", "entry": ""},
+                "failed": [],
+                "open": [],
+                "files": ["src/aft/digest.py"],
+            },
+            "facts": [],
+        },
+        digest.digest_schema(),
+    )
 
 
 def with_capture(

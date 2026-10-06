@@ -773,7 +773,11 @@ def mismatch(answer: dict, part: Sequence[Entry]) -> str | None:
             return "a fact is empty or a placeholder"
     handoff = answer["handoff"]
     # An empty handoff item is how the prompt says nothing is left to hand off.
-    texts = [handoff["in_flight"]["text"]]
+    goal = handoff.get("goal")
+    texts = [
+        handoff["in_flight"]["text"],
+        goal.get("text", "") if isinstance(goal, dict) else "",
+    ]
     texts += [item["text"] for item in [*handoff["failed"], *handoff["open"]]]
     if any(placeholder(text) for text in texts):
         return "the handoff is a placeholder"
@@ -793,11 +797,20 @@ def grounded_handoff(handoff: dict, part: Sequence[Entry]) -> dict:
         return bool(item["text"].strip()) and item["entry"] in cited
 
     in_flight = handoff["in_flight"]
-    return {
+    note = {
         "in_flight": in_flight["text"] if grounded(in_flight) else "",
         "failed": [item["text"] for item in handoff["failed"] if grounded(item)],
         "open": [item["text"] for item in handoff["open"] if grounded(item)],
     }
+    goal = handoff.get("goal")
+    if isinstance(goal, dict) and grounded(goal):
+        note["goal"] = goal["text"]
+    files = handoff.get("files")
+    if isinstance(files, list):
+        kept = [path for path in files if isinstance(path, str) and path.strip()]
+        if kept:
+            note["files"] = kept
+    return note
 
 
 @dataclass(frozen=True)
@@ -2042,11 +2055,16 @@ def _frontmatter(
         # the index files its facts into that directory's own scope and not into whatever
         # directory once claimed the name the digest is filed under (DESIGN 7, F49).
         aft["path"] = str(resolution.root)
-    aft["handoff"] = {
+    note: dict[str, object] = {
         "in_flight": handoff["in_flight"],
         "failed": list(handoff["failed"]),
         "open": list(handoff["open"]),
     }
+    if handoff.get("goal"):
+        note["goal"] = handoff["goal"]
+    if handoff.get("files"):
+        note["files"] = list(handoff["files"])
+    aft["handoff"] = note
     if kept:
         aft["facts"] = [_verified(fact) for fact in kept]
     if dropped:
