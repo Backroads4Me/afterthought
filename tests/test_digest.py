@@ -2185,7 +2185,9 @@ def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
     ]
     assert fact["properties"]["scope"]["enum"] == ["project", "global"]
     handoff = schema["properties"]["handoff"]
-    assert handoff["required"] == ["goal", "in_flight", "failed", "open", "files"]
+    assert handoff["required"] == ["in_flight", "failed", "open"]
+    assert "goal" in handoff["properties"]
+    assert "files" in handoff["properties"]
     assert handoff["properties"]["in_flight"]["properties"]["text"]["maxLength"] == 400
     assert handoff["properties"]["in_flight"]["required"] == ["text", "entry"]
     assert handoff["properties"]["open"]["items"]["required"] == ["text", "entry"]

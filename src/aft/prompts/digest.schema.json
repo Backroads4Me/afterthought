@@ -93,11 +93,9 @@
         }
       },
       "required": [
-        "goal",
         "in_flight",
         "failed",
-        "open",
-        "files"
+        "open"
       ]
     },
     "facts": {
