@@ -1132,12 +1132,13 @@ def relative_dates(text: str, when: datetime) -> set[date]:
 
 def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[str]:
     """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
-    F55): a word holding a digit or one of ``_/.:-``, or a capital letter anywhere but at the
-    statement's start. Plain words say how, not what, and are not checked. Punctuation around
-    a word is set aside. An all-letter word matches another form of itself on their shared
-    first five letters; a token holding a digit or a symbol must be held exactly, because
-    near misses share its opening (2026-10-05 and 2026-10-15). A date computed from a
-    relative expression in ``said`` and the turn's ``when`` is grounded when written in ISO
+    F55): a word holding a digit or a symbol beyond a hyphen, or a capital letter anywhere
+    but at the statement's start. Plain words say how, not what, and are not checked.
+    Punctuation around a word is set aside. A word whose only symbol is a hyphen matches
+    another form of itself on their shared first five letters, as an all-letter word does;
+    a token holding a digit or another symbol must be held exactly, because near misses
+    share its opening (2026-10-05 and 2026-10-15). A date computed from a relative
+    expression in ``said`` and the turn's ``when`` is grounded when written in ISO
     (2026-10-06), 'October 6', or day-first (6 October) style (F59)."""
     if when is not None:
         allowed = relative_dates(said, when)
@@ -1192,9 +1193,10 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
         )
         if not low or not distinctive or low in held:
             continue
-        if any(c.isdigit() or c in "_/.:-" for c in low):
-            # A token holding a digit or symbol is held exactly: its first five characters
-            # are shared by the near misses it must not ground (2026-10-05, 2026-10-15).
+        if any(c.isdigit() or c in "_/.:" for c in low):
+            # A token holding a digit or a symbol beyond a hyphen is held exactly: its first
+            # five characters are shared by the near misses it must not ground (2026-10-05,
+            # 2026-10-15).
             missing.append(word.strip(".,;:!?\"'()"))
         elif not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
             missing.append(word.strip(".,;:!?\"'()"))
@@ -1220,14 +1222,42 @@ def grounding_sentence(text: str, statement: str, said: str, when: datetime | No
 
 def enclosing_sentence(text: str, quote: str) -> str:
     """The sentence of ``text`` that holds ``quote``, whitespace folded, or empty when no
-    sentence does: a quote is judged by the words it was cut out of, not its own."""
-    flat = " ".join(quote.split())
-    if not flat:
+    sentence does: a quote is judged by the words it was cut out of, not its own. A quote
+    spanning lines is matched against the text with its whitespace folded, and the slice
+    from the boundary before it to the boundary after it is what comes back, so a turn
+    written across lines still yields the sentence the quote was cut from."""
+    flat_quote = " ".join(quote.split())
+    if not flat_quote:
         return ""
-    for sentence in _SENTENCES.split(text):
-        if flat in " ".join(sentence.split()):
-            return sentence
-    return ""
+    # The text with its whitespace collapsed, as the quote is matched, and where each of
+    # its characters stands in the text itself.
+    flat: list[str] = []
+    origin: list[int] = []
+    for match in re.finditer(r"\S+", text):
+        if flat:
+            flat.append(" ")
+            origin.append(match.start())
+        flat.append(match.group())
+        origin.extend(range(match.start(), match.end()))
+    place = re.search(re.escape(flat_quote), "".join(flat))
+    if place is None:
+        return ""
+    start = origin[place.start()]
+    end = origin[place.end() - 1] + 1
+    # The sentence runs from the boundary before the quote - the previous ., ? or !, or
+    # the start of the text - to the boundary after it, so every sentence the quote
+    # overlaps lies inside the slice and a question mark in any of them is seen.
+    sentence_start = 0
+    for i in range(start - 1, -1, -1):
+        if text[i] in ".!?":
+            sentence_start = i + 1
+            break
+    sentence_end = len(text)
+    for i in range(end, len(text)):
+        if text[i] in ".!?":
+            sentence_end = i + 1
+            break
+    return text[sentence_start:sentence_end].strip()
 
 
 def best_sentence(text: str, target: str) -> str:
@@ -1882,9 +1912,16 @@ def verify(
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
         words = fact["quote"].split()
-        if len(words) < 4 and not fact["quote"].rstrip().endswith((".", "!")):
+        if (
+            fact["source"] == "stated"
+            and not fact.get("proposal")
+            and len(words) < 4
+            and not fact["quote"].rstrip().endswith((".", "!"))
+        ):
             # A quote of fewer than four words that is not a whole sentence is a fragment,
-            # too little to stand behind a statement.
+            # too little to stand behind a statement. A plain [stated] quote only: an
+            # approval's yes is short by nature (R2), and an observed quote reports what
+            # the session saw, such as an exit code or an error line.
             dropped.append(_refused(fact, QUOTE_TOO_SHORT))
             continue
         if fact["source"] == "stated" and entry.role != USER:
@@ -1914,7 +1951,7 @@ def verify(
                 )
                 continue
         if fact["source"] == "observed":
-            missing = ungrounded(fact["statement"], entry.text)
+            missing = ungrounded(fact["statement"], entry.text, when=entry.time)
             if missing:
                 dropped.append(
                     _refused(

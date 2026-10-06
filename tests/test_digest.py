@@ -508,6 +508,32 @@ def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
     assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
 
 
+def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session: Session):
+    """BUILD-PLAN F52: a question written across lines is still a question: the quote is
+    judged by the sentence it was cut from, whatever lines the turn broke it across."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store digest\nat session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store digest at session end.",
+                quote="store digest at session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
 def test_base_digest_refuses_a_trivial_quote(session: Session):
     """A quote of fewer than four words that is not a whole sentence is too little to cite."""
     wrote = digest_once(
@@ -523,6 +549,59 @@ def test_base_digest_refuses_a_trivial_quote(session: Session):
     assert not wrote.facts
     dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
     assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_keeps_a_short_approval_quote(session: Session):
+    """R2: an approval's yes is short by nature and is never refused as a fragment."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "do it"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            {
+                **said(
+                    statement="Capture runs at session end.",
+                    quote="do it",
+                    entry="e1",
+                ),
+                "proposal": ("e2", "Option B: capture runs at session end."),
+            }
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["do it"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_short_observed_quote(session: Session):
+    """An observed quote reports what the session saw, and is never refused as a fragment:
+    an exit code or an error line is three words and still evidence."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", "The first run failed with exit code 1."),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The first run failed with exit code 1.",
+                quote="exit code 1",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["exit code 1"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
 
 
 def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Session):
@@ -542,6 +621,33 @@ def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Ses
     assert not wrote.facts
     dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
     assert any("PostgreSQL" in d["reason"] for d in dropped)
+
+
+def test_base_digest_keeps_observed_fact_with_computed_relative_date(session: Session):
+    """BUILD-PLAN F59: an observed statement's date is grounded by a relative expression in
+    the entry it cites, dated by that entry's own time."""
+    when = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT, when=when),
+        record("e2", "assistant", "The backup stays paused until tomorrow.", when=when),
+        record("e3", "user", SECOND_PROMPT, when=when),
+        record("e4", "assistant", SECOND_ANSWER, when=when),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The backup is paused until 2026-10-06.",
+                quote="The backup stays paused until tomorrow.",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert [fact.statement for fact in wrote.facts] == ["The backup is paused until 2026-10-06."]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
 
 
 def test_base_digest_refuses_ungrounded_statement_for_stated_fact(session: Session):
@@ -3606,3 +3712,16 @@ def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
     # shared first five letters.
     assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-05.") == []
     assert digest.ungrounded("We use Postgres.", "We use PostgreSQL.") == []
+
+
+def test_ungrounded_prefix_matches_a_purely_alphabetic_hyphenated_word():
+    """A word whose only symbol is a hyphen matches another form of itself on their shared
+    first five letters, as an all-letter word does; a hyphenated token holding a digit is
+    still held exactly."""
+    assert digest.ungrounded("We re-digest the session.", "We are re-digesting it now.") == []
+    assert digest.ungrounded("Add a follow-up.", "Follow-ups are welcome.") == []
+    assert digest.ungrounded("The stack is self-hosted.", "It stays self-hosting.") == []
+    # A hyphenated word is still checked: a word it is not another form of is missing.
+    assert digest.ungrounded("Add a follow-up.", "Add a wrap-up.") == ["follow-up"]
+    # A hyphenated token holding a digit is held exactly.
+    assert digest.ungrounded("Pinned to v2-1-0.", "Pinned to v2-1-9.") == ["v2-1-0"]

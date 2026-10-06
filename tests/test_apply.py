@@ -3367,6 +3367,48 @@ def test_dream_refuses_stated_fact_quoted_from_a_question(initialized, home, fak
     assert not overview.exists() or "store digest at session end" not in overview.read_text()
 
 
+def test_dream_refuses_stated_fact_quoted_from_a_question_across_lines(initialized, home, fake):
+    """R2: a question written across lines is still a question; the quote is judged by the
+    sentence it was cut from, whatever lines the turn broke it across."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question-lines",
+        facts=[
+            {
+                "statement": "Store digest at session end.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_ql#e1",
+                "quote": "store digest at session end",
+                "text": "Should we store digest\nat session end?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "store digest at session end")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(
+        r.rule == "R2" and r.reason == "the quote is a question, never a settled item"
+        for r in report.rejected
+    )
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "store digest at session end" not in overview.read_text()
+
+
 def test_dream_keeps_grounded_stated_fact(initialized, home, fake):
     """BUILD-PLAN F52: a stated fact with no question mark and grounded names passes."""
     cfg = config_with_fake(home, initialized.vault, fake)
