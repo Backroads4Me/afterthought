@@ -195,7 +195,8 @@ def test_forget_session_removes_every_trace_and_byte_level_erasure(initialized: 
     # Check curated lines
     curated_doc = pagewrite.PageDoc.read(initialized.vault / curated_rel)
     facts_by_statement = {f.statement: f for f in curated_doc.page.facts}
-    assert facts_by_statement["Solely on forgotten session."].state == "withdrawn"
+    assert facts_by_statement[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Solely on forgotten session." not in facts_by_statement
     assert facts_by_statement["On both sessions."].state == "active"
     assert facts_by_statement["Solely on kept session."].state == "active"
     assert curated_doc.sources["sf"]["quote"] == "[forgotten]"
@@ -314,9 +315,11 @@ def test_forget_session_unknown_leaves_state_intact(initialized: Config, capsys)
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
 
 
-def test_forget_session_with_open_note_does_not_abort_and_reports(initialized: Config, capsys):
-    """When a line with an open note cannot be withdrawn, forget_session withdraws other lines,
-    scrubs source quotes, and lists the un-withdrawable line in the report and CLI output."""
+def test_forget_session_with_open_note_withdraws_line_and_archives_note(
+    initialized: Config, capsys
+):
+    """When a line with an open note rests only on the forgotten session, forget_session
+    resolves/archives a scrubbed copy of the note and withdraws the line."""
     reg = registry.Registry.load(initialized.registry_path)
     prj = reg.add("beta", "Beta")
     reg.save()
@@ -351,41 +354,30 @@ def test_forget_session_with_open_note_does_not_abort_and_reports(initialized: C
     )
     index.update(initialized)
 
-    # First run: open note stops line 1 from being withdrawn, but line 2 is withdrawn
+    # Open note is resolved and archived; both lines are withdrawn
     code = cli.main(["forget", "session", FORGOTTEN_SESSION])
     assert code == 0
     out = capsys.readouterr().out
-    assert "1 line(s) with open notes could not be withdrawn; close the note and rerun:" in out
-    assert "Line with open note." in out
-    assert page_rel in out
-    assert "withdrew 1 curated line(s)" in out
+    assert "could not be withdrawn" not in out
+    assert "withdrew 2 curated line(s)" in out
 
     doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
     facts = {f.statement: f for f in doc.page.facts}
-    assert facts["Line with open note."].state == "needs-you"
-    assert facts["Line without note."].state == "withdrawn"
+    assert facts[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Line with open note." not in facts
+    assert "Line without note." not in facts
     assert doc.sources["sf"]["quote"] == "[forgotten]"
     assert doc.sources["sf"]["title"] == "[forgotten]"
     assert lint.lint_vault(initialized.vault) == []
 
-    # Close note and rerun forget: now the line is withdrawn
-    cur_text = (initialized.vault / page_rel).read_text(encoding="utf-8")
-    closed_lines = [line for line in cur_text.splitlines() if not line.startswith(">")]
-    (initialized.vault / page_rel).write_text("\n".join(closed_lines) + "\n", encoding="utf-8")
-    run_git(["add", page_rel], initialized.vault)
-    run_git(["commit", "-q", "-m", "close note on line"], initialized.vault)
-
-    code2 = cli.main(["forget", "session", FORGOTTEN_SESSION])
-    assert code2 == 0
-    out2 = capsys.readouterr().out
-    assert "could not be withdrawn" not in out2
-    assert "withdrew 1 curated line(s)" in out2
-
-    doc2 = pagewrite.PageDoc.read(initialized.vault / page_rel)
-    facts2 = {f.statement: f for f in doc2.page.facts}
-    assert facts2["Line with open note."].state == "withdrawn"
-    assert facts2["Line without note."].state == "withdrawn"
-    assert lint.lint_vault(initialized.vault) == []
+    # Check that the archived note exists under archive/ and is scrubbed
+    archive_path = initialized.vault / "archive" / page_rel
+    assert archive_path.exists()
+    archive_text = archive_path.read_text(encoding="utf-8")
+    assert FORGOTTEN_PHRASE not in archive_text
+    assert "[!question]" in archive_text
+    assert "Line with open note." not in archive_text
+    assert FORGOTTEN_MARKER in archive_text
 
 
 def test_forget_session_mixed_session_line_scrubs_source_quote_and_keeps_line_active(
@@ -438,7 +430,8 @@ def test_forget_session_mixed_session_line_scrubs_source_quote_and_keeps_line_ac
     doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
     facts = {f.statement: f for f in doc.page.facts}
     assert facts["Mixed evidence decision."].state == "active"
-    assert facts["Forgotten evidence decision."].state == "withdrawn"
+    assert facts[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Forgotten evidence decision." not in facts
     assert facts["Kept evidence decision."].state == "active"
 
     # Source sf is scrubbed with the fixed marker; sk is unchanged
@@ -851,7 +844,8 @@ def test_forget_and_redigest_with_session_and_session_2_prefix_collision(
     # Curated lines
     doc = pagewrite.PageDoc.read(initialized.vault / overview_rel)
     facts_by_statement = {f.statement: f for f in doc.page.facts}
-    assert facts_by_statement["Decision from sess1."].state == "withdrawn"
+    assert facts_by_statement[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Decision from sess1." not in facts_by_statement
     assert facts_by_statement["Decision from sess2."].state == "active"
     assert "Candidate resting only on sess1." not in facts_by_statement
 
@@ -883,7 +877,8 @@ def test_forget_and_redigest_with_session_and_session_2_prefix_collision(
     assert not (cfg.vault / new_digest_sess2).exists()
     doc = pagewrite.PageDoc.read(initialized.vault / overview_rel)
     facts_by_statement = {f.statement: f for f in doc.page.facts}
-    assert facts_by_statement["Decision from sess2."].state == "withdrawn"
+    assert facts_by_statement[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Decision from sess2." not in facts_by_statement
 
 
 def test_redigest_prunes_empty_date_directories(initialized: Config, capsys):
@@ -1328,7 +1323,8 @@ def test_forgetting_a_session_withdraws_a_superseded_line_so_the_archive_lets_it
     assert archive_hits(cfg, "molybdenum") == []
     assert search_hits(cfg, "molybdenum") == []
     page_text = (cfg.vault / "archive/projects/widget/overview.md").read_text(encoding="utf-8")
-    assert "~~Ship in molybdenum.~~" in page_text, "the line stays on the page, struck"
+    assert f"~~{FORGOTTEN_MARKER}~~" in page_text, "the line stays on the page, struck and scrubbed"
+    assert "Ship in molybdenum." not in page_text
     assert "withdrawn" in page_text and "superseded" not in page_text
     assert f'quote: "{FORGOTTEN_MARKER}"' in page_text
 
@@ -1822,3 +1818,177 @@ def test_redigest_keeps_a_factless_page_of_a_session_with_the_longer_id(initiali
     finally:
         fake.stop()
     assert (cfg.vault / other).exists()
+
+
+def test_forget_session_scrubs_callout_and_does_not_reappear_in_needs_you(
+    initialized: Config,
+):
+    """A callout citing a forgotten session is scrubbed/replaced with [forgotten] on the page
+    and does not re-appear when needs-you.md is regenerated."""
+    from aft.dream import report as reportmod
+
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register widget"], initialized.vault)
+
+    entry_f = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    entry_k = Entry("k1", NOW, "user", KEPT_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry_f])
+    evidence.store(initialized, "claude", KEPT_SESSION, prj.id, [entry_k])
+
+    page_rel = "projects/widget/overview.md"
+    create_curated_page(
+        initialized.vault,
+        page_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Widget\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            f"  - id: sk\n"
+            f"    resource: aft://session/claude/{KEPT_SESSION}#k1\n"
+            f'    quote: "{KEPT_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Kept approach stands. [stated] 2026-10-01 [^sk]\n\n"
+            "> [!conflict] 2026-10-01\n"
+            f'> For: "{FORGOTTEN_PHRASE}" [^sf]\n'
+            f'> Against: "{KEPT_PHRASE}" [^sk]\n'
+        ),
+    )
+    index.update(initialized)
+
+    # Initial generation puts forgotten phrase into needs-you.md
+    reportmod.regenerate_needs_you(initialized.vault)
+    needs_path = initialized.vault / "reports" / "needs-you.md"
+    assert FORGOTTEN_PHRASE in needs_path.read_text(encoding="utf-8")
+
+    # Forgetting the session scrubs the callout on the page and in reports
+    forget.forget_session(initialized, FORGOTTEN_SESSION)
+
+    page_text = (initialized.vault / page_rel).read_text(encoding="utf-8")
+    assert FORGOTTEN_PHRASE not in page_text
+    assert f"> {FORGOTTEN_MARKER}" in page_text
+    assert f'> Against: "{KEPT_PHRASE}" [^sk]' in page_text
+
+    # Regenerating needs-you from the page does NOT reintroduce forgotten words
+    reportmod.regenerate_needs_you(initialized.vault)
+    needs_text = needs_path.read_text(encoding="utf-8")
+    assert FORGOTTEN_PHRASE not in needs_text
+    assert FORGOTTEN_MARKER in needs_text
+    assert KEPT_PHRASE in needs_text
+
+
+def test_forget_session_scrubs_archived_notes_in_archive_directory(initialized: Config):
+    """Archived notes under archive/ citing the forgotten session or its sources are scrubbed."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register widget"], initialized.vault)
+
+    entry = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry])
+
+    archive_rel = "archive/projects/widget/overview.md"
+    create_curated_page(
+        initialized.vault,
+        archive_rel,
+        (
+            "---\n"
+            "type: Archive\n"
+            "title: widget archive\n"
+            "description: Notes and lines resolved out of widget.\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Resolved notes\n\n"
+            "> - Fact resolved out. [stated] 2026-09-01 [^sf]\n"
+            "> [!question] 2026-09-02\n"
+            f"> Why was {FORGOTTEN_PHRASE} chosen?\n"
+            f"> Because {FORGOTTEN_PHRASE} was required.\n"
+        ),
+    )
+    index.update(initialized)
+
+    # Search in archive matches before forget
+    hits_before = archive_hits(initialized, "whispering cedar ledger")
+    assert any("archive" in h for h in hits_before)
+
+    # Forget session
+    forget.forget_session(initialized, FORGOTTEN_SESSION)
+
+    # Archive file is scrubbed
+    archive_text = (initialized.vault / archive_rel).read_text(encoding="utf-8")
+    assert FORGOTTEN_PHRASE not in archive_text
+    assert FORGOTTEN_MARKER in archive_text
+
+    # Search in archive finds nothing
+    assert search_hits(initialized, "whispering cedar ledger") == []
+    assert archive_hits(initialized, "whispering cedar ledger") == []
+
+
+def test_forget_session_line_resting_only_on_forgotten_session_with_open_note_withdrawn(
+    initialized: Config, capsys
+):
+    """A line resting only on the forgotten session with an open note is successfully
+    withdrawn (with its note resolved and scrubbed) rather than skipped."""
+    reg = registry.Registry.load(initialized.registry_path)
+    prj = reg.add("widget", "Widget")
+    reg.save()
+    run_git(["add", "registry.yaml"], initialized.vault)
+    run_git(["commit", "-q", "-m", "register widget"], initialized.vault)
+
+    entry = Entry("e1", NOW, "user", FORGOTTEN_PHRASE, False)
+    evidence.store(initialized, "claude", FORGOTTEN_SESSION, prj.id, [entry])
+
+    page_rel = "projects/widget/overview.md"
+    create_curated_page(
+        initialized.vault,
+        page_rel,
+        (
+            "---\n"
+            "type: Project\n"
+            "title: Widget\n"
+            "sources:\n"
+            f"  - id: sf\n"
+            f"    resource: aft://session/claude/{FORGOTTEN_SESSION}#e1\n"
+            f'    quote: "{FORGOTTEN_PHRASE}"\n'
+            "aft:\n"
+            f"  project: {prj.id}\n"
+            "---\n\n"
+            "## Decisions\n\n"
+            "- Line with conflict note. [stated] 2026-10-01 [^sf]\n"
+            "> [!conflict] 2026-10-01\n"
+            f'> For: "{FORGOTTEN_PHRASE}" [^sf]\n'
+        ),
+    )
+    index.update(initialized)
+
+    report = forget.forget_session(initialized, FORGOTTEN_SESSION)
+    assert report.lines_withdrawn == ("Line with conflict note.",)
+    assert report.lines_unwithdrawn == ()
+
+    doc = pagewrite.PageDoc.read(initialized.vault / page_rel)
+    facts = {f.statement: f for f in doc.page.facts}
+    assert facts[FORGOTTEN_MARKER].state == "withdrawn"
+    assert "Line with conflict note." not in facts
+    assert lint.lint_vault(initialized.vault) == []
+
+    # Note was archived and scrubbed
+    archive_path = initialized.vault / "archive" / page_rel
+    assert archive_path.exists()
+    archive_text = archive_path.read_text(encoding="utf-8")
+    assert FORGOTTEN_PHRASE not in archive_text
+    assert FORGOTTEN_MARKER in archive_text

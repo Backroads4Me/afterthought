@@ -31,6 +31,7 @@ from aft.digest import _is_session_digest, _is_session_resource
 from aft.library import propose
 
 FORGOTTEN_MARKER = "[forgotten]"
+_FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
 
 #: The line states `aft forget session` withdraws when nothing but the forgotten session
 #: supports them. Active, stale, disputed and waiting lines are memory standing on that evidence.
@@ -38,7 +39,14 @@ FORGOTTEN_MARKER = "[forgotten]"
 #: holds: DESIGN 10's ``archive`` collection is built of superseded lines, and DESIGN 12 says a
 #: forgotten session leaves everything afterthought controls, so a struck line resting on no
 #: evidence but the forgotten one goes out of memory the same way, as withdrawn.
-_WITHDRAWABLE = (page.ACTIVE, page.SUPERSEDED, page.STALE, page.CONFLICT, page.NEEDS_YOU)
+_WITHDRAWABLE = (
+    page.ACTIVE,
+    page.SUPERSEDED,
+    page.STALE,
+    page.CONFLICT,
+    page.NEEDS_YOU,
+    page.WITHDRAWN,
+)
 
 
 @dataclass(frozen=True)
@@ -124,6 +132,7 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
 
         today = datetime.now(UTC).date().isoformat()
         fact_dirs = (*lint.FACT_DIRS, "archive")
+        all_session_sources: set[str] = set()
         for fact_dir_name in fact_dirs:
             fact_dir = config.vault / fact_dir_name
             if not fact_dir.exists():
@@ -133,7 +142,29 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                 if lint.SKIP_DIRS.intersection(rel_parts[:-1]):
                     continue
                 try:
-                    doc = pagewrite.PageDoc.read(p)
+                    doc = pagewrite.PageDoc.read(p, vault=config.vault)
+                except (OSError, pagewrite.WriteError):
+                    continue
+                for sid, s in doc.sources.items():
+                    if _is_session_resource(str(s.get("resource", "")), session_id):
+                        all_session_sources.add(sid)
+                        quote = str(s.get("quote", ""))
+                        if quote.strip():
+                            words.append(quote)
+                        title = str(s.get("title", ""))
+                        if title.strip():
+                            words.append(title)
+
+        for fact_dir_name in fact_dirs:
+            fact_dir = config.vault / fact_dir_name
+            if not fact_dir.exists():
+                continue
+            for p in sorted(fact_dir.rglob("*.md")):
+                rel_parts = p.relative_to(config.vault).parts
+                if lint.SKIP_DIRS.intersection(rel_parts[:-1]):
+                    continue
+                try:
+                    doc = pagewrite.PageDoc.read(p, vault=config.vault)
                 except (OSError, pagewrite.WriteError):
                     continue
 
@@ -144,10 +175,6 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                 }
                 if not session_sources:
                     continue
-                for sid in session_sources:
-                    quote = str(doc.sources[sid].get("quote", ""))
-                    if quote.strip():
-                        words.append(quote)
 
                 rel = p.relative_to(config.vault).as_posix()
                 original_text = doc.render()
@@ -162,6 +189,9 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                         if (
                             fact.section in page.KIND_SECTIONS
                             and fact.state in _WITHDRAWABLE
+                            and not (
+                                fact.state == page.WITHDRAWN and fact.statement == FORGOTTEN_MARKER
+                            )
                             and fact.refs
                             and all(ref in session_sources for ref in fact.refs)
                             and pagewrite.line_identity(fact) not in skipped_facts
@@ -171,8 +201,20 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                     if target is None:
                         break
                     try:
-                        doc.withdraw(target, today)
-                        withdrawn_on_page.append(target.statement)
+                        if target.callouts:
+                            doc.resolve_callout(target)
+                            archive_rel = doc._archive_file().relative_to(config.vault).as_posix()
+                            if archive_rel not in pages_modified:
+                                pages_modified.append(archive_rel)
+                            target = next(
+                                f
+                                for f in doc.page.facts
+                                if f.line == target.line or f.statement == target.statement
+                            )
+                        original_statement = target.statement
+                        doc.withdraw(target, today, statement=FORGOTTEN_MARKER)
+                        if original_statement != FORGOTTEN_MARKER:
+                            withdrawn_on_page.append(original_statement)
                     except pagewrite.WriteError:
                         skipped_facts.add(pagewrite.line_identity(target))
                         unwithdrawn_on_page.append(f"{rel}:{target.line}: {target.statement}")
@@ -197,20 +239,30 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                         skipped_facts.add(pagewrite.line_identity(target))
                         unwithdrawn_on_page.append(f"{rel}:{target.line}: {target.statement}")
 
+                doc.scrub_callouts(session_sources, words=words, marker=FORGOTTEN_MARKER)
+
                 for sid in sorted(session_sources):
                     doc.scrub_source(sid, marker=FORGOTTEN_MARKER)
 
                 if doc.render() != original_text:
                     p.write_text(doc.render(), encoding="utf-8")
-                    pages_modified.append(rel)
+                    if rel not in pages_modified:
+                        pages_modified.append(rel)
                     lines_withdrawn.extend(withdrawn_on_page)
                     candidates_removed.extend(candidates_on_page)
 
                 lines_unwithdrawn.extend(unwithdrawn_on_page)
 
+        archive_scrubbed = _scrub_archive_pages(
+            config, session_id, words, today, all_session_sources
+        )
+        for rel in archive_scrubbed:
+            if rel not in pages_modified:
+                pages_modified.append(rel)
+
         reports_scrubbed = _scrub_report_pages(config, words)
 
-        to_commit = [*digests_removed, *pages_modified, *reports_scrubbed]
+        to_commit = sorted(dict.fromkeys([*digests_removed, *pages_modified, *reports_scrubbed]))
         committed = False
         if to_commit:
             committed = vault.commit(config.vault, to_commit, f"aft: forget session {session_id}")
@@ -228,6 +280,89 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         jobs_removed=jobs_removed,
         reports_scrubbed=tuple(reports_scrubbed),
     )
+
+
+def _scrub_archive_pages(
+    config: Config,
+    session_id: str,
+    words: list[str],
+    today: str,
+    all_session_sources: set[str],
+) -> list[str]:
+    """Scrub resolved notes, fact statements, frontmatter sources, and words in archive/."""
+    archive_dir = config.vault / "archive"
+    if not archive_dir.is_dir():
+        return []
+    phrases = sorted({w for w in words if w.strip()}, key=len, reverse=True)
+    changed: list[str] = []
+    for path in sorted(archive_dir.rglob("*.md")):
+        if ".git" in path.parts:
+            continue
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        original_text = raw_text
+
+        # 1. If parseable as PageDoc, handle structured fact lines and sources
+        try:
+            doc = pagewrite.PageDoc.read(path, vault=config.vault)
+            session_sources = {
+                sid
+                for sid, s in doc.sources.items()
+                if _is_session_resource(str(s.get("resource", "")), session_id)
+            }
+            combined_sources = session_sources | all_session_sources
+            for fact in list(doc.page.facts):
+                if (
+                    fact.section in page.KIND_SECTIONS
+                    and fact.refs
+                    and all(r in combined_sources for r in fact.refs)
+                    and not (fact.state == page.WITHDRAWN and fact.statement == FORGOTTEN_MARKER)
+                ):
+                    try:
+                        if fact.callouts:
+                            doc.resolve_callout(fact)
+                            fact = next(f for f in doc.page.facts if f.line == fact.line)
+                        doc.withdraw(fact, today, statement=FORGOTTEN_MARKER)
+                    except pagewrite.WriteError:
+                        pass
+            doc.scrub_callouts(combined_sources, words=words, marker=FORGOTTEN_MARKER)
+            for sid in sorted(session_sources):
+                doc.scrub_source(sid, marker=FORGOTTEN_MARKER)
+            text = doc.render()
+        except (OSError, pagewrite.WriteError):
+            text = raw_text
+            combined_sources = all_session_sources
+
+        # 2. Scrub resolved note blocks and remaining words in text
+        lines = text.split("\n")
+        scrubbed_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("> - "):
+                footnotes = set(_FOOTNOTE.findall(stripped))
+                if any(fn in combined_sources for fn in footnotes):
+                    m = re.match(
+                        r"^(>\s*-\s*)(?:~~)?(.+?)(?:~~)?(\s+\[[a-z]+\]\s+\d{4}-\d{2}-\d{2}.*)$",
+                        line,
+                    )
+                    if m:
+                        prefix, _, rest = m.groups()
+                        line = f"{prefix}{FORGOTTEN_MARKER}{rest}"
+            elif stripped.startswith("> ") and not stripped.startswith("> [!"):
+                footnotes = set(_FOOTNOTE.findall(stripped))
+                if any(fn in combined_sources for fn in footnotes):
+                    line = f"> {FORGOTTEN_MARKER}"
+            for phrase in phrases:
+                line = line.replace(phrase, FORGOTTEN_MARKER)
+            scrubbed_lines.append(line)
+
+        scrubbed_text = "\n".join(scrubbed_lines)
+        if scrubbed_text != original_text:
+            path.write_text(scrubbed_text, encoding="utf-8")
+            changed.append(path.relative_to(config.vault).as_posix())
+    return changed
 
 
 def _digest_words(path: Path) -> list[str]:

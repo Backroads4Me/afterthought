@@ -32,6 +32,7 @@ from aft import config as configmod
 from aft import index as indexmod
 from aft.config import Config
 from aft.dream import schedule
+from aft.forget import FORGOTTEN_MARKER
 from aft.readers import CLAUDE, PI
 from aft.redact import REDACTED
 from conftest import make_repo, run_git
@@ -543,8 +544,9 @@ def test_the_pipeline_end_to_end(pipeline: Pipeline, capsys, monkeypatch) -> Non
     # The line that rested only on it is withdrawn: struck, out of memory, and not searchable
     # even once the archive and the reports are opened up.
     _, memory_after = pipeline.memory()
-    struck = [fact for fact in memory_after.facts if CLAUDE_STATEMENT in fact.statement]
-    assert [fact.state for fact in struck] == [page.WITHDRAWN], memory_after.facts
+    struck = [fact for fact in memory_after.facts if fact.state == page.WITHDRAWN]
+    assert [fact.statement for fact in struck] == [FORGOTTEN_MARKER], memory_after.facts
+    assert CLAUDE_STATEMENT not in [fact.statement for fact in memory_after.facts]
     assert cli.main(["inject", str(pipeline.repo)]) == 0
     assert CLAUDE_STATEMENT not in capsys.readouterr().out
 
