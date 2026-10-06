@@ -15,6 +15,9 @@ Where the lines come from:
   reports (design 6). Reference pages are outside M4.3's list: one carries
   ``aft.projects`` rather than one project, so no run owns it under R6 as the rules read
   a page's project.
+  A fact being lifted out of short-term memory decides with ``recent.md`` left out
+  (``exclude_recent``): the line being lifted holds the fact itself, and the decision must
+  land on long-term memory, not re-cite the line where it sits (R10).
 * **The pages as they are now, not the search index.** A run applies earlier facts before
   it decides later ones (design 9), so a line added a moment ago has to be found, and the
   index is only brought up to date after the run commits. An index row is also a whole
@@ -137,24 +140,36 @@ class Proposal:
         return rules.check(self.decision, self.new_fact, target, context)
 
 
-def decide(config: Config, new_fact: rules.NewFact, quote: str, slug: str | None) -> Proposal:
+def decide(
+    config: Config,
+    new_fact: rules.NewFact,
+    quote: str,
+    slug: str | None,
+    exclude_recent: bool = False,
+) -> Proposal:
     """Retrieve the lines related to one fact, ask the model, and resolve its answer.
 
     ``slug`` names the run's project directory, or None for a project with no pages yet.
     ``quote`` is the fact's verified quote from its digest. Raises ``model.ModelError``
-    when the endpoint fails, which leaves the digest waiting (design 14)."""
-    lines = related(config.vault, new_fact, slug)
+    when the endpoint fails, which leaves the digest waiting (design 14). ``exclude_recent``
+    leaves the project's ``recent.md`` out of the retrieval (R10): a line being lifted out
+    of short-term memory decides against long-term memory alone."""
+    lines = related(config.vault, new_fact, slug, exclude_recent=exclude_recent)
     decision = ask(config, new_fact, quote, lines)
     return Proposal(new_fact, lines, decision, _target(decision, lines))
 
 
-def related(vault: Path, new_fact: rules.NewFact, slug: str | None) -> tuple[Line, ...]:
+def related(
+    vault: Path, new_fact: rules.NewFact, slug: str | None, exclude_recent: bool = False
+) -> tuple[Line, ...]:
     """The existing lines most related to the fact, at most ``LIMIT``, best first.
 
     A line shares at least one word with the fact or it is not related. Ties keep page
-    and line order, so the same vault always gives the same list."""
+    and line order, so the same vault always gives the same list. ``exclude_recent``
+    leaves the project's ``recent.md`` out of the candidates (R10): a lift decision is
+    never shown the line it is lifting."""
     candidates: list[tuple[str, str | None, page.Fact, dict[str, dict]]] = []
-    for path in _pages(vault, new_fact.scope, slug):
+    for path in _pages(vault, new_fact.scope, slug, exclude_recent):
         candidates.extend(_lines(vault, path))
     words = sorted({word.lower() for word in _WORD.findall(new_fact.statement)})
     if not candidates or not words:
@@ -226,13 +241,17 @@ def _target(decision: rules.Decision, lines: Sequence[Line]) -> Line | None:
     return next((line for line in lines if line.label == decision.line), None)
 
 
-def _pages(vault: Path, scope: str, slug: str | None) -> list[Path]:
-    """The pages a fact's decision may edit, in path order."""
+def _pages(vault: Path, scope: str, slug: str | None, exclude_recent: bool = False) -> list[Path]:
+    """The pages a fact's decision may edit, in path order. ``exclude_recent`` drops the
+    project's short-term page, whose lines a lift decision is never shown (R10)."""
     if scope == "global":
         roots = [vault / GLOBAL_PAGES]
     else:
         roots = [vault / PROJECT_PAGES / slug] if slug else []
-    return [path for root in roots if root.is_dir() for path in sorted(root.rglob("*.md"))]
+    paths = [path for root in roots if root.is_dir() for path in sorted(root.rglob("*.md"))]
+    if exclude_recent:
+        paths = [path for path in paths if not page.is_recent(path.relative_to(vault))]
+    return paths
 
 
 def _lines(vault: Path, path: Path) -> list[tuple[str, str | None, page.Fact, dict[str, dict]]]:

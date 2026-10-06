@@ -347,11 +347,15 @@ def run_project(
         new_fact: rules.NewFact,
         evidence_list: list[rules.Evidence],
         sources_map: dict[str, dict],
+        lifting: bool = False,
     ) -> bool:
         """Decide one fact against memory, judge the decision by the rules, and write what
         survives (design 9 steps 2 to 5). ``sources_map`` holds the sources the fact's
         evidence cites: its digest's, or for a short-term line becoming long-term, the
-        sources of ``recent.md``."""
+        sources of ``recent.md``. ``lifting`` decides a line that is leaving short-term
+        memory: the retrieval leaves ``recent.md`` out (R10), and a decision that names one
+        of its lines anyway is judged as a new long-term line, which lands on the
+        overview."""
         nonlocal project, run_project_id, page_slug, run_id
         verified_evidence = [e for e in evidence_list if e.verified]
         if not verified_evidence:
@@ -432,6 +436,7 @@ def run_project(
             new_fact,
             quote_to_send,
             page_slug if project else None,
+            **({"exclude_recent": True} if lifting else {}),
         )
 
         # Target line evidence from archive
@@ -467,6 +472,14 @@ def run_project(
             line_evidence=tuple(line_evidence),
         )
         outcome = proposal.check(context)
+
+        # A lift is decided against long-term memory alone (the retrieval left recent.md
+        # out), so a decision that names one of its lines is not the confirm of the line
+        # being lifted: judged as the new long-term line it takes itself for, it is
+        # written to the overview. Left as the decision asked, it would re-cite the line
+        # on recent.md and the lift would then delete it.
+        if lifting and proposal.target is not None and proposal.target.recent:
+            outcome = rules.check(rules.Decision("add"), new_fact, None, context)
 
         if isinstance(outcome, rules.Reject):
             report.rejected.append(
@@ -651,8 +664,10 @@ def run_project(
                 to_lift.append((target_fact.statement, LIFT_CONFIRMED))
             elif action == "confirm":
                 assert proposal.target is not None
-                target_fact = doc.fact(proposal.target.fact.statement)
                 for sid in refs_to_use:
+                    # Each confirm rewrites the line, so the handle is taken again per
+                    # source: one taken before the first confirm is stale by the second.
+                    target_fact = doc.fact(proposal.target.fact.statement)
                     doc.confirm(target_fact, source=sid, date=new_fact.date)
                     report.confirmed.append(
                         ConfirmedFact(
@@ -977,9 +992,12 @@ def _short_term(
 
     A line is lifted when a later session's long-term fact confirmed it (``to_lift``), or
     when its sources are at least ``dream.short_term_sessions`` sessions apart. Lifting
-    takes the line off ``recent.md`` and puts it, with every source it gathered, to the
-    decision as a long-term fact through ``settle``; whatever that decides, the line has
-    left short-term memory. A line rolls off once its newest source has left the project's
+    puts the line, with every source it gathered, to the decision as a long-term fact
+    through ``settle``, which decides it against long-term memory alone (R10): the
+    retrieval leaves ``recent.md`` out, so the line is never its own target. The line
+    leaves ``recent.md`` once its fact stands on a long-term page, or the decision
+    skipped the fact, which is the decision itself dropping it. A line rolls off once its
+    newest source has left the project's
     last ``short_term_sessions`` sessions, whatever its state; a note under it moves to the
     archive first, so nothing a person typed there is lost. A project that stops having
     sessions never rolls a line off by count, so a line whose newest source is older than
@@ -1051,8 +1069,18 @@ def _short_term(
             ),
             evidence_list,
             sources,
+            lifting=True,
         )
         if not survived:
+            continue
+        # The line leaves short-term memory only once its fact stands on a long-term page:
+        # the decision wrote it there, or the decision skipped the fact, which is the
+        # decision itself dropping it (the report says so). A lift that stored nothing
+        # would otherwise take the line off recent.md and lose it.
+        dropped = any(entry.statement == statement for entry in report.skips)
+        if not dropped and not _stored_long_term(
+            vault_path, page_slug, statement, sources, line.refs
+        ):
             continue
         doc = pagewrite.PageDoc.read(recent, vault=vault_path)
         cur_line = next(
@@ -1099,6 +1127,49 @@ def _short_term(
     if changed:
         record_write(recent)
         recent.write_text(doc.render(), encoding="utf-8")
+
+
+def _stored_long_term(
+    vault_path: Path,
+    page_slug: str,
+    statement: str,
+    sources: dict[str, dict],
+    refs: tuple[str, ...],
+) -> bool:
+    """Whether the fact a lift is settling now stands on a long-term page.
+
+    Its statement written on one, as an added, superseded, candidate or noted line, or one
+    of the lifted line's own sources cited from one: a confirm judges the fact to be a
+    long-term line already standing and moves the evidence onto it. A page that cannot be
+    read holds nothing.
+    """
+    quoted = set()
+    for ref in refs:
+        entry = sources.get(ref, {})
+        quoted.add((str(entry.get("resource", "")), str(entry.get("quote", ""))))
+    quoted.discard(("", ""))
+    pages = [vault_path / "projects" / page_slug / "overview.md"]
+    global_dir = vault_path / "global"
+    if global_dir.is_dir():
+        pages.extend(sorted(global_dir.glob("*.md")))
+    for path in pages:
+        if not path.is_file():
+            continue
+        try:
+            doc = pagewrite.PageDoc.read(path, vault=vault_path)
+        except (OSError, UnicodeDecodeError, pagewrite.WriteError):
+            continue
+        page_sources = doc.sources
+        for fact in doc.page.facts:
+            if fact.statement == statement:
+                return True
+            if any(statement in "\n".join(callout.text) for callout in fact.callouts):
+                return True
+            for ref in fact.refs:
+                entry = page_sources.get(ref, {})
+                if (str(entry.get("resource", "")), str(entry.get("quote", ""))) in quoted:
+                    return True
+    return False
 
 
 def expire_short_term(
