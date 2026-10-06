@@ -223,6 +223,8 @@ class Pipeline:
                     "reason": "the later session dropped the daemon",
                 },
             )
+            with queue._writing(self.cfg) as conn:
+                conn.execute("UPDATE jobs SET event_time = ?", (PI_AT.isoformat(),))
             self._dream = schedule.run(self.cfg, now=DREAMED_AT)
         return self._dream
 
