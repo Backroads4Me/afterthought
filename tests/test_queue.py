@@ -1305,3 +1305,46 @@ def test_queue_shared_db_wal_mode_and_lock_serialization(cfg: Config) -> None:
     with queue._writing(cfg) as wconn:
         wconn.execute("INSERT INTO sessions (agent, session_id) VALUES ('claude', 's2')")
     assert queue.session_state(cfg, "claude", "s2") is not None
+
+
+def test_attempts_increment_on_claim(cfg: Config) -> None:
+    """Each claim increments the job's attempts counter."""
+    queue.enqueue(cfg, event(session_id="retry-job"))
+    job1 = queue.next_job(cfg)
+    assert job1 is not None
+    assert job1.attempts == 1
+    rows = query(cfg, "SELECT attempts FROM jobs WHERE id = ?", (job1.id,))
+    assert rows == [(1,)]
+
+
+def test_stale_reclaim_marks_failed_when_max_attempts_exceeded(cfg: Config) -> None:
+    """A stale claim that has met MAX_ATTEMPTS is marked failed on reclaim."""
+    queue.enqueue(cfg, event(session_id="poison-crash"))
+    job = queue.next_job(cfg)
+    assert job is not None
+    holder = 999999
+    now = datetime.now(UTC)
+    with queue._writing(cfg) as conn:
+        conn.execute(
+            "UPDATE jobs SET claimed_pid = ?, attempts = ?, updated_time = ? WHERE id = ?",
+            (holder, queue.MAX_ATTEMPTS, (now - timedelta(hours=1)).isoformat(), job.id),
+        )
+    assert queue.next_job(cfg) is None
+    rows = query(cfg, "SELECT status, error FROM jobs WHERE id = ?", (job.id,))
+    assert len(rows) == 1
+    assert rows[0][0] == queue.FAILED
+    assert "exceeded maximum attempts" in rows[0][1]
+
+
+def test_failed_jobs_do_not_block_subsequent_jobs(cfg: Config) -> None:
+    """A failed job does not block subsequent jobs in the queue."""
+    queue.enqueue(cfg, event(session_id="job-1"))
+    queue.enqueue(cfg, event(session_id="job-2"))
+    job1 = queue.next_job(cfg)
+    assert job1 is not None
+    assert job1.session_id == "job-1"
+    queue.fail(cfg, job1, "poison job failure")
+
+    job2 = queue.next_job(cfg)
+    assert job2 is not None
+    assert job2.session_id == "job-2"

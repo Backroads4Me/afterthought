@@ -2423,15 +2423,11 @@ def test_an_endpoint_that_is_down_stops_the_run_and_keeps_the_work_queued(sessio
     assert rows(cfg, queue.FAILED) == []
 
 
-def test_an_index_written_by_another_build_stops_the_run_naming_the_index(
+def test_an_index_written_by_another_build_auto_reindexes_and_digests(
     session: Session, monkeypatch
 ):
-    """DESIGN 14, lead's ruling on #39: an index that refuses is not an endpoint that is down.
-
-    The digest step indexes before it spends a token, so the index's refusal arrives as one of
-    the failures that end a run. Told as the endpoint's word it sends whoever reads the timer's
-    line to a model that is fine, when the repair is `aft reindex` and no model at all.
-    """
+    """When the build stamp changes, work automatically rebuilds the index and completes
+    digestion."""
     fake, cfg = serve(session.cfg, answer(said()))
     queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="stale-1"))
     assert indexmod.update(cfg) == []
@@ -2440,11 +2436,10 @@ def test_an_index_written_by_another_build_stops_the_run_naming_the_index(
         report = work.run(cfg)
     finally:
         fake.stop()
-    assert report.stopped == work.STOP_INDEX
-    assert any("written by build rows" in line for line in report.failures), report.failures
-    assert report.digested == 0
-    assert pages(cfg) == [], "the refusal came after the page stood"
-    assert watermark(cfg, "stale-1") is None
+    assert report.stopped == ""
+    assert report.digested == 1
+    assert len(pages(cfg)) > 0
+    assert watermark(cfg, "stale-1") is not None
     assert rows(cfg, queue.FAILED) == []
 
 

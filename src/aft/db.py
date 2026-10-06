@@ -37,14 +37,22 @@ def enter_wal(
     default one, retrying until timeout_seconds elapses so concurrent initializers do not fail.
     """
     deadline = time.monotonic() + timeout_seconds
-    while get_journal_mode(conn) != WAL_MODE and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
         try:
+            if get_journal_mode(conn) == WAL_MODE:
+                return
             conn.execute(f"PRAGMA journal_mode = {WAL_MODE}")
+            if get_journal_mode(conn) == WAL_MODE:
+                return
         except sqlite3.OperationalError:
             if time.monotonic() >= deadline:
-                raise
+                break
             time.sleep(0.002)
-    mode = get_journal_mode(conn)
+    mode = "unknown"
+    try:
+        mode = get_journal_mode(conn)
+    except sqlite3.OperationalError:
+        pass
     if mode != WAL_MODE:
         target = f"{path} " if path else ""
         msg = f"{target}stays in {mode} mode, not {WAL_MODE}"

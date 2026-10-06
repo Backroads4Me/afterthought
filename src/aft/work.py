@@ -22,6 +22,7 @@ to retry once a person has fixed the endpoint.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,6 +36,17 @@ from aft.model import ModelError
 from aft.readers import ReaderError
 from aft.registry import RegistryError
 from aft.vault import VaultError
+
+MAX_ATTEMPTS = queue.MAX_ATTEMPTS
+
+
+def _is_fatal_chunk_error(exc: BaseException) -> bool:
+    """Whether a ModelError is a fatal chunk error (400, 413, 422) that fails only this job."""
+    if not isinstance(exc, ModelError):
+        return False
+    msg = str(exc)
+    return bool(re.search(r"\b(400|413|422)\b", msg))
+
 
 # What a run reports as the reason it stopped early.
 STOP_BUDGET = "the day's token budget is spent"
@@ -186,6 +198,25 @@ def run(config: Config, now: datetime | None = None) -> Report:
                 else:
                     digested += 1
             except STOPS_RUN as exc:
+                if _is_fatal_chunk_error(exc):
+                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    try:
+                        queue.fail(config, job, str(exc))
+                    except QUEUE_LOST as lost:
+                        failures.append(f"the queue: {lost}")
+                        stopped = STOP_QUEUE
+                        break
+                    continue
+                if job.attempts >= MAX_ATTEMPTS:
+                    failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                    try:
+                        queue.fail(config, job, str(exc))
+                    except QUEUE_LOST as lost:
+                        failures.append(f"the queue: {lost}")
+                        stopped = STOP_QUEUE
+                        break
+                    stopped = _stop_for(exc)
+                    break
                 # The job stays claimed only by a lease: its session's watermark has not moved,
                 # so the next run reads the same chunk again once the host works again.
                 failures.append(f"job {job.id} ({job.session_id}): {exc}")
@@ -230,6 +261,28 @@ def run(config: Config, now: datetime | None = None) -> Report:
                         else:
                             digested += 1
                     except STOPS_RUN as exc:
+                        if _is_fatal_chunk_error(exc):
+                            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                            try:
+                                queue.fail(config, job, str(exc))
+                            except QUEUE_LOST as lost:
+                                failures.append(f"the queue: {lost}")
+                                stopped = STOP_QUEUE
+                                break
+                            continue
+                        if job.attempts >= MAX_ATTEMPTS:
+                            failures.append(f"job {job.id} ({job.session_id}): {exc}")
+                            try:
+                                queue.fail(config, job, str(exc))
+                            except QUEUE_LOST as lost:
+                                failures.append(f"the queue: {lost}")
+                                stopped = STOP_QUEUE
+                                break
+                            stopped = _stop_for(exc)
+                            if stopped != STOP_QUEUE:
+                                _archive_worker(config, job, failures)
+                                _archive_workers(config, failures)
+                            break
                         failures.append(f"job {job.id} ({job.session_id}): {exc}")
                         stopped = _stop_for(exc)
                         if stopped != STOP_QUEUE:
