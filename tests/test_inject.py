@@ -205,11 +205,15 @@ A widget that turns water into widgets.
 
 {inject.notes_line(2)}
 
-## Last session
+## Last session (2026-10-05)
 
 - In flight: the block
 - Failed: the parserless draft
 - Open: the pi extension
+
+## Preferences
+
+- Prefer plain hyphens in prose.
 
 ## State
 
@@ -323,11 +327,11 @@ def test_excluded_states_stay_out(widget, tmp_path, excluded):
     assert excluded not in block
 
 
-def test_preferences_come_from_the_global_page_only(widget, tmp_path):
-    """The plan's layer 3 names the overview's injected sections and Preferences is not
-    one of them; layer 4 reads ``global/preferences.md``."""
+def test_project_preferences_reach_the_block(widget, tmp_path):
+    """H3: a project-scoped preference on the overview reaches the block with the
+    project's other sections, and the global page keeps its own layer."""
     block = inject.build(widget, resolve(widget, tmp_path / "widget"))
-    assert "Prefer plain hyphens in prose." not in block
+    assert "## Preferences\n\n- Prefer plain hyphens in prose." in block
     assert "- Prefer short commits." in block
 
 
@@ -474,7 +478,10 @@ def test_a_hundred_pages_cannot_starve_the_project_layers(widget, tmp_path):
     ]
     assert parts["## State"] == ["- The daemon listens on 8123. (disputed)"]
     assert parts["## Facts"] == ["- The widget is round."]
-    assert parts["## Preferences"] == ["- Prefer short commits."]
+    assert parts["## Preferences"] == [
+        "- Prefer plain hyphens in prose.",
+        "- Prefer short commits.",
+    ]
     assert parts[inject.PRECEDENCE] == [inject.PRECEDENCE, inject.HOW_TO, inject.RECORD_MARKERS]
 
 
@@ -514,7 +521,7 @@ def test_a_full_map_and_a_full_overview_still_carry_every_layer(widget, tmp_path
     assert len(block) <= widget.settings.inject.max_chars
     parts = parts_of(block)
     assert parts[""] == ["# Memory: Widget", "A widget that turns water into widgets."]
-    assert parts["## Last session"] == uncapped["## Last session"]
+    assert parts["## Last session (2026-10-05)"] == uncapped["## Last session (2026-10-05)"]
     assert parts["## Preferences"]
     assert parts["## Preferences"] == uncapped["## Preferences"][: len(parts["## Preferences"])]
     assert len(parts["## Preferences"]) > len(parts["## Pages"])
@@ -1143,7 +1150,10 @@ def test_stripped_frontmatter_fallback_when_strip_fails(widget):
     assert page.facts[0].statement == "Fact 1"
 
 
-def test_last_session_takes_newest_primary_session_with_handoff(widget, tmp_path):
+def test_the_newest_primary_digest_supplies_the_last_session_even_when_empty(widget, tmp_path):
+    """H4: the newest primary digest is the last session's word even when it left
+    nothing in flight; an older digest's handoff never stands in for it, and a worker,
+    library or import digest never takes the slot."""
     repo = (tmp_path / "widget").resolve()
     # Primary digest on 2026-10-06 with a handoff
     write(
@@ -1184,13 +1194,39 @@ def test_last_session_takes_newest_primary_session_with_handoff(widget, tmp_path
         "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:20:00Z\n"
         "sources: []\n---\n\n## Summary\n\nSession 3\n",
     )
-    resolution = resolve(widget, repo)
-    block = inject.build(widget, resolution)
+    block = inject.build(widget, resolve(widget, repo))
     parts = parts_of(block)
-    assert parts["## Last session"] == ["- In flight: Primary task 2"]
+    assert parts["## Last session (2026-10-07)"] == ["- Nothing left in flight."]
+    for earlier in ("Primary task 1", "Primary task 2", "Worker task"):
+        assert f"- In flight: {earlier}" not in block
+
+
+def test_the_last_session_heading_carries_the_day_the_session_ran_down(widget, tmp_path):
+    """H4: the heading dates the handoff, so a stale one can be judged at a glance."""
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "## Last session (2026-10-05)" in block
+
+
+def test_an_empty_handoff_carries_the_digests_summary(widget, tmp_path):
+    """A digest that left nothing in flight but recorded a summary says so and gives
+    the summary along."""
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-06-pi-one.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-06T10:00:00Z\n"
+        "summary: The session closed every thread it opened.\n"
+        "sources: []\n---\n\n## Facts\n\n- Nothing survives. [observed] 2026-10-06 [^s1]\n",
+    )
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    parts = parts_of(block)
+    assert parts["## Last session (2026-10-06)"] == [
+        "- Nothing left in flight.",
+        "- Summary: The session closed every thread it opened.",
+    ]
 
 
 def test_last_session_opens_with_the_goal_and_names_the_files(widget, tmp_path):
+    """The goal opens Last session and the files the work touched close it: M3 keeps
+    only the paths the digest's chunk itself names."""
     repo = (tmp_path / "widget").resolve()
     write(
         widget.vault / "digests/widget/2026/10/2026-10-07-claude-s09.md",
@@ -1201,15 +1237,37 @@ def test_last_session_opens_with_the_goal_and_names_the_files(widget, tmp_path):
         "    failed: []\n"
         "    open: []\n"
         "    files: [src/aft/digest.py, tests/test_inject.py]\n"
-        "sources: []\n---\n\n## Summary\n\nSession\n",
+        "sources: []\n---\n\n## Summary\n\nSession\n\n"
+        "The work touched src/aft/digest.py and tests/test_inject.py.\n",
     )
     block = inject.build(widget, resolve(widget, repo))
     parts = parts_of(block)
-    assert parts["## Last session"] == [
+    assert parts["## Last session (2026-10-07)"] == [
         "- Goal: capture the session's work in memory",
         "- In flight: Primary task 1",
         "- Files: src/aft/digest.py, tests/test_inject.py",
     ]
+
+
+def test_a_file_the_chunk_does_not_name_stays_out_of_the_handoff(widget, tmp_path):
+    """M3: a handoff file path the digest's chunk never carries is dropped, so the
+    block does not send the session after a file the work did not touch."""
+    repo = (tmp_path / "widget").resolve()
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-claude-s10.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:00:00Z\n"
+        "aft:\n  handoff:\n    in_flight: the block\n"
+        "    files: [src/aft/inject.py, src/aft/nowhere.py]\n"
+        "sources: []\n---\n\n## Summary\n\nSession\n\n"
+        "The work touched src/aft/inject.py alone.\n",
+    )
+    block = inject.build(widget, resolve(widget, repo))
+    parts = parts_of(block)
+    assert parts["## Last session (2026-10-07)"] == [
+        "- In flight: the block",
+        "- Files: src/aft/inject.py",
+    ]
+    assert "src/aft/nowhere.py" not in block
 
 
 def test_missing_cwd_gets_global_preferences_and_how_to(widget, capsys):
@@ -1281,7 +1339,9 @@ def test_a_vault_with_no_short_term_memory_builds_the_block_it_did(widget, tmp_p
 
 def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
     """Design 10: the recent layer takes only what long-term memory leaves."""
-    cap = dataclasses.replace(widget.settings.inject, max_chars=1300)
+    # H3 adds the overview's Preferences section to the long-term layers, so the cap
+    # leaves room for them and the recent layer's floor besides.
+    cap = dataclasses.replace(widget.settings.inject, max_chars=1600)
     config = dataclasses.replace(widget, settings=dataclasses.replace(widget.settings, inject=cap))
     without = parts_of(inject.build(config, resolve(config, tmp_path / "widget")))
     many = "\n".join(
@@ -1293,7 +1353,7 @@ def test_short_term_memory_cannot_crowd_out_long_term_memory(widget, tmp_path):
         RECENT_PAGE.split("## Decisions")[0] + "## State\n\n" + many + "\n",
     )
     block = inject.build(config, resolve(config, tmp_path / "widget"))
-    assert len(block) <= 1300
+    assert len(block) <= 1600
     assert "- Short-term line 0 about the current work." in block, "the layer took no room"
     assert "- Short-term line 199 about the current work." not in block
     with_recent = parts_of(block)
