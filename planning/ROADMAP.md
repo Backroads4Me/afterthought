@@ -68,3 +68,75 @@ Leverage `pi.registerCommand()` in `integrations/pi/afterthought.ts`:
 2. **`/aft-notes`**: Prints all open questions and conflicts for the current project with their supporting quotes directly to the user's terminal.
 3. **`/aft-settle [index] [keep|withdraw]`**: Allows the user to settle a conflict note directly from the Pi command line without consuming agent turns.
 4. **`/aft-search <query>`**: Runs `aft search "<query>"` via subprocess and renders the top results in Pi's UI.
+
+---
+
+## 4. Combating Reasoning Entrenchment and Circular Loops
+
+### Overview
+Derived from `matthewfl/pi-contemplator`. Prevent agents from falling into repeated debugging loops across turns and sessions.
+
+### Problem Statement
+In complex multi-turn sessions, LLM coding agents often formulate flawed hypotheses and repeatedly attempt variations of the same broken approach across 10-20 turns. Naive handoffs record what was tried without explicitly marking what was disproven.
+
+### Proposed Design
+1. **Digest Dead-End Extraction**:
+   Enhance `src/aft/prompts/digest.md` to extract an explicit list of `disproven_hypotheses` alongside raw failed commands (for example: "Disproven: Issue was NOT caused by database locks; deadlocks were ruled out by transaction logs").
+2. **Handoff Negative Guidance**:
+   Inject these disproven hypotheses into the next session's `Last session` handoff so a fresh cold session does not repeat the same circular loop.
+
+---
+
+## 5. Context Hygiene and In-Flight Output Pruning
+
+### Overview
+Derived from `alpertarhan/pi-smart-compact` (Pi Continuity) and `elpapi42/pi-observational-memory`. Protect live context from oversized tool outputs.
+
+### Problem Statement
+Afterthought filters tool outputs post-session during transcript ingestion in `src/aft/filter.py`. However, during a live session in Pi or Claude Code, massive tool outputs (such as 5,000-line test runs or huge diffs) clog the live context window and trigger early, lossy compactions.
+
+### Proposed Design
+1. **Pre-Compaction Transcript Trimming**:
+   In `integrations/pi/afterthought.ts`, hook into `session_before_compact` to run a local sanitization pass on tool outputs, replacing large blocks with compact summary anchors and file/line references before Pi runs its native compaction pass.
+2. **Preserve "The Way Back"**:
+   Ensure references to archived evidence remain retrievable via `aft trace <source>` so the agent can inspect full details on demand without keeping raw bytes in working memory.
+
+---
+
+## 6. Memory Store Diagnostics and Health Audits (`aft doctor`)
+
+### Overview
+Derived from `Mont3ll/pi-persistent-intelligence`. Implement a comprehensive diagnostic command `aft doctor` (extending `src/aft/lint.py`).
+
+### Problem Statement
+As an afterthought vault grows over months across dozens of repositories, silent data drift can accumulate:
+- Candidates that never reached the recurrence gate and sat untouched for months.
+- Superseded lines that were archived, leaving unresolved footnote citations.
+- Code anchors (R8) tied to git branches that were deleted or rebased.
+- Fact pages approaching the maximum token budget.
+
+### Proposed Design
+1. **Audit Health Metrics**:
+   - Count and age distribution of active vs candidate facts.
+   - Anchor validity check across default git branches using ripgrep.
+   - Footnote citation integrity: assert every `[^id]` in markdown matches a valid entry in the page's YAML `sources` list.
+   - Orphaned candidates: report candidate facts older than 60 days that have received zero fresh signals.
+2. **Interactive Remediation**:
+   - Provide flags such as `aft doctor --prune-candidates` to purge abandoned candidate facts with one clean git commit and report.
+
+---
+
+## 7. Attention Dynamics and Injection Placement
+
+### Overview
+Derived from `samfoy/pi-memory`. Optimize token recency and attention for smaller local models.
+
+### Problem Statement
+Afterthought injects the entire memory block into Pi's system prompt options. While effective for frontier reasoning models, smaller local models (such as 7B-14B parameters on vLLM or Ollama) suffer from lost-in-the-middle attention degradation when reading long system prompts.
+
+### Proposed Design
+1. **Configurable Injection Placement**:
+   Add a configuration setting `inject.placement = "system" | "pre-prompt"` in `~/.afterthought/config.toml`.
+2. **Behavior**:
+   - `"system"` (default): Current behavior, placing memory in the system prompt.
+   - `"pre-prompt"`: Attaches the short-term `Last session` handoff and active project state as a user-turn context prefix immediately preceding the user's first prompt, maximizing token recency and model attention on the most urgent working state.

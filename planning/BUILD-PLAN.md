@@ -1335,6 +1335,22 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   byte-order marks, bidirectional overrides) from all incoming transcript entries. Neutralize
   high-confidence adversarial override patterns in tool outputs and untrusted assistant echoes
   before entries are archived or digested. Tests in `tests/test_filter.py`. Review checkpoint: no.
+- **F65 OKF v0.2 interlinked wiki compounding** (ruling 2026-10-06). DESIGN 11 (library and
+  references). Enable automatic bidirectional wikilink (`[[target]]`, `[[target|alias]]`)
+  resolution and backlink tracking between projects, library references (`references/`), and
+  global preferences. `src/aft/page.py` extracts wikilinks into `Fact` and `Page` objects;
+  `src/aft/index.py` stores links in a `page_links` SQLite table and maintains incoming/outgoing
+  edges across reindexes; `src/aft/search.py` adds backlink queries (`aft search --links <target>`)
+  and displays `## Backlinks / Referenced In` on `aft read references/<name>`. Prompt and
+  synthesis instructions encourage linking canonical concepts without inventing references.
+  Tests in `tests/test_page.py` and `tests/test_index.py`. Review checkpoint: no.
+- **F66 Persisted cooldown on model errors** (ruling 2026-10-06). DESIGN 9 (model calls) and
+  13 (background work). Protect against repeated blocking timeouts and log flooding when the
+  model endpoint is unreachable or returns 5xx/429 errors. `src/aft/model.py` persists cooldown
+  state to `~/.afterthought/model-cooldown.json` (15-minute default) on network/server errors;
+  `complete_json()` and `work.run()` fail-fast while active without network calls; `aft model cooldown`
+  and `--clear` inspect and reset status; `aft budget reset` also clears cooldown. Tests in
+  `tests/test_model.py` and `tests/test_work.py`. Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
