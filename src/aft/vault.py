@@ -71,6 +71,32 @@ Nothing is waiting on you.
 
 OBSIDIAN_APP = {"userIgnoreFilters": ["reports/"]}
 
+OBSIDIAN_GRAPH = {
+    "collapse-filter": False,
+    "search": "",
+    "local-search": "",
+    "local-backend": "current",
+    "showTags": True,
+    "showAttachments": False,
+    "hideUnresolved": False,
+    "showOrphans": True,
+    "showFilter": True,
+    "linkStrength": 0.73,
+    "linkDistance": 200,
+    "repelStrength": 12.5,
+    "centerStrength": 0.52,
+    "colorGroups": [
+        {"query": 'tag:"#preference" or line:"[stated]"', "color": {"a": 1, "rgb": 16753920}},
+        {"query": 'tag:"#decision" or section:"Decisions"', "color": {"a": 1, "rgb": 65330}},
+        {"query": 'tag:"#state" or section:"State"', "color": {"a": 1, "rgb": 3394815}},
+        {"query": 'tag:"#lesson" or section:"Lessons"', "color": {"a": 1, "rgb": 16724787}},
+        {"query": 'tag:"#procedure" or section:"Procedures"', "color": {"a": 1, "rgb": 10040319}},
+        {"query": 'tag:"#fact" or section:"Facts"', "color": {"a": 1, "rgb": 4474111}},
+        {"query": 'path:"projects/"', "color": {"a": 1, "rgb": 16777215}},
+        {"query": 'path:"digests/"', "color": {"a": 1, "rgb": 8947848}},
+    ],
+}
+
 
 # The block `aft` owns inside the vault's `.gitignore`: its own marker, then the rule it
 # wrote. A line the owner added themselves is never touched.
@@ -83,6 +109,7 @@ def gitignore_text(commit_library: bool) -> str:
         "# Obsidian keeps per-device state here; only the shared settings are committed.",
         ".obsidian/*",
         "!.obsidian/app.json",
+        "!.obsidian/graph.json",
     ]
     if not commit_library:
         lines += ["", LIBRARY_IGNORE_MARKER, LIBRARY_IGNORE_RULE]
@@ -135,6 +162,7 @@ def initial_files(config: Config) -> dict[str, str]:
         "global/environment.md": ENVIRONMENT,
         "reports/needs-you.md": NEEDS_YOU,
         ".obsidian/app.json": json.dumps(OBSIDIAN_APP, indent=2) + "\n",
+        ".obsidian/graph.json": json.dumps(OBSIDIAN_GRAPH, indent=2) + "\n",
         ".gitignore": gitignore_text(config.settings.library.commit),
     }
 
