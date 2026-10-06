@@ -66,6 +66,9 @@ RUNNING = "running"
 DONE = "done"
 FAILED = "failed"
 
+# Maximum claim attempts for a job before marking it permanently failed.
+MAX_ATTEMPTS = 3
+
 # The floor of a claim's lease. The work cadence is a scheduling period anyone may set
 # in config.toml, while the lease is what keeps one session digesting one chunk at a
 # time, so the lease never drops below the quiet period the design commits a session to
@@ -89,6 +92,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     claimed_pid     INTEGER,
     claimed_time    TEXT,
     error           TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
     created_time    TEXT NOT NULL,
     updated_time    TEXT NOT NULL
 );
@@ -139,6 +143,7 @@ class Job:
     event_time: datetime
     watermark: str | None
     off_record: bool
+    attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -583,7 +588,7 @@ def next_job(config: Config, *, role: str | None = None) -> Job | None:
     with _writing(config) as conn:
         _reclaim_stale_claims(conn, now, lease)
         rows = conn.execute(
-            "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time"
+            "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time, attempts"
             " FROM jobs j"
             " WHERE status = ?"
             "   AND NOT EXISTS ("
@@ -610,12 +615,14 @@ def next_job(config: Config, *, role: str | None = None) -> Job | None:
                 )
                 if has_pending_primary:
                     continue
+            current_attempts = (int(row[7]) if row[7] is not None else 0) + 1
             conn.execute(
-                "UPDATE jobs SET status = ?, claimed_pid = ?, claimed_time = ?, updated_time = ?"
+                "UPDATE jobs SET status = ?, claimed_pid = ?, claimed_time = ?, updated_time = ?,"
+                " attempts = ?"
                 " WHERE id = ?",
-                (RUNNING, os.getpid(), _text(now), _text(now), row[0]),
+                (RUNNING, os.getpid(), _text(now), _text(now), current_attempts, row[0]),
             )
-            return _job(conn, row)
+            return _job(conn, row, attempts=current_attempts)
         return None
 
 
@@ -623,7 +630,7 @@ def pending_jobs(config: Config, *, role: str | None = None) -> list[Job]:
     """Waiting jobs, oldest first, optionally filtered by role."""
     with _reading(config) as conn:
         rows = conn.execute(
-            "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time"
+            "SELECT id, agent, session_id, cwd, transcript_path, kind, event_time, attempts"
             " FROM jobs j"
             " WHERE status = ?"
             "   AND NOT EXISTS ("
@@ -953,20 +960,27 @@ def _reclaim_stale_claims(conn: sqlite3.Connection, now: datetime, lease: timede
     that could still finish it.
     """
     stale = [
-        job_id
-        for job_id, pid, updated in conn.execute(
-            "SELECT id, claimed_pid, updated_time FROM jobs"
+        (job_id, attempts)
+        for job_id, pid, updated, attempts in conn.execute(
+            "SELECT id, claimed_pid, updated_time, attempts FROM jobs"
             " WHERE status = ? AND claimed_pid IS NOT NULL",
             (RUNNING,),
         )
         # A claim that only looks alive would strand the session, not lose one job.
         if not _alive(pid) or now - datetime.fromisoformat(updated) >= lease
     ]
-    for job_id in stale:
-        conn.execute(
-            "UPDATE jobs SET status = ?, claimed_pid = NULL, updated_time = ? WHERE id = ?",
-            (PENDING, _text(now), job_id),
-        )
+    for job_id, attempts in stale:
+        if attempts >= MAX_ATTEMPTS:
+            conn.execute(
+                "UPDATE jobs SET status = ?, claimed_pid = NULL, error = ?, updated_time = ?"
+                " WHERE id = ?",
+                (FAILED, f"exceeded maximum attempts ({MAX_ATTEMPTS})", _text(now), job_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET status = ?, claimed_pid = NULL, updated_time = ? WHERE id = ?",
+                (PENDING, _text(now), job_id),
+            )
 
 
 def _alive(pid: int) -> bool:
@@ -1047,6 +1061,12 @@ def _connect(config: Config, *, busy_timeout_ms: int | None = None) -> sqlite3.C
                 raise
     sessions = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
     jobs = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    if "attempts" not in jobs:
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            if "attempts" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+                raise
     if "off_record" not in sessions or "digest_due" not in sessions or "claimed_time" not in jobs:
         conn.close()
         raise QueueError(
@@ -1081,7 +1101,7 @@ def _enter_wal(conn: sqlite3.Connection, *, timeout_ms: int = BUSY_TIMEOUT_MS) -
     )
 
 
-def _job(conn: sqlite3.Connection, row: tuple) -> Job:
+def _job(conn: sqlite3.Connection, row: tuple, *, attempts: int | None = None) -> Job:
     """The claimed row, plus where its session's digest has read to: the watermark it
     reached and whether an off-the-record span is open there.
 
@@ -1092,6 +1112,11 @@ def _job(conn: sqlite3.Connection, row: tuple) -> Job:
         "SELECT watermark, off_record FROM sessions WHERE agent = ? AND session_id = ?",
         (row[1], row[2]),
     ).fetchone()
+    attempt_count = (
+        attempts
+        if attempts is not None
+        else (int(row[7]) if len(row) > 7 and row[7] is not None else 0)
+    )
     return Job(
         id=row[0],
         agent=row[1],
@@ -1102,6 +1127,7 @@ def _job(conn: sqlite3.Connection, row: tuple) -> Job:
         event_time=datetime.fromisoformat(row[6]),
         watermark=state[0] if state else None,
         off_record=bool(state[1]) if state else False,
+        attempts=attempt_count,
     )
 
 
