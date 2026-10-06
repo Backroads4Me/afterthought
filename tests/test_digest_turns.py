@@ -790,7 +790,12 @@ def test_the_check_never_asks_about_an_observed_item(session: Session):
 
 
 def test_each_stated_item_gets_its_own_call_after_the_final_state(session: Session):
-    again = item("e4", "fact", "A slow endpoint is not retried forever.", "not retried forever")
+    again = item(
+        "e4",
+        "fact",
+        "A slow endpoint is not retried forever.",
+        "a slow endpoint is not retried forever",
+    )
     wrote, fake = run_checked(
         session,
         summary(),

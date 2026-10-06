@@ -1132,11 +1132,15 @@ def relative_dates(text: str, when: datetime) -> set[date]:
 
 def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[str]:
     """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
-    F55): a word holding a digit or one of ``_/.:-``, or a capital letter anywhere but at the
-    statement's start. Plain words say how, not what, and are not checked. Punctuation around
-    a word is set aside, and a word matches another form of itself on their shared first five
-    letters. A date computed from a relative expression in ``said`` and the turn's ``when`` is
-    grounded when written in ISO (2026-10-06), 'October 6', or day-first (6 October) style (F59)."""
+    F55): a word holding a digit or a symbol, or a capital letter anywhere but at the
+    statement's start. Plain words say how, not what, and are not checked. Punctuation
+    around a word is set aside. Only a purely alphabetic word may match another form of
+    itself on their shared first five letters, as Postgres matches PostgreSQL; a token
+    holding a digit, a hyphen or any other symbol must be held exactly, because near
+    misses share its opening (2026-10-05 and 2026-10-15, self-hosted and self-managed).
+    A date computed from a relative expression in ``said`` and the turn's ``when`` is
+    grounded when written in ISO (2026-10-06), 'October 6', or day-first (6 October)
+    style (F59)."""
     if when is not None:
         allowed = relative_dates(said, when)
         if allowed:
@@ -1190,7 +1194,13 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
         )
         if not low or not distinctive or low in held:
             continue
-        if not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
+        if not low.isalpha():
+            # A token holding a digit, a hyphen or any other symbol is held exactly: only
+            # a purely alphabetic word may match another form of itself on their shared
+            # first five letters, and near misses share a hyphenated opening as readily
+            # as a dated one (2026-10-05 and 2026-10-15, self-hosted and self-managed).
+            missing.append(word.strip(".,;:!?\"'()"))
+        elif not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
             missing.append(word.strip(".,;:!?\"'()"))
     return missing
 
@@ -1210,6 +1220,52 @@ def grounding_sentence(text: str, statement: str, said: str, when: datetime | No
     return best_sentence("\n".join(grounding), statement) or (
         grounding[0] if len(grounding) == 1 else ""
     )
+
+
+def enclosing_sentence(text: str, quote: str) -> str:
+    """The sentence of ``text`` that holds ``quote``, whitespace folded, or empty when no
+    sentence does: a quote is judged by the words it was cut out of, not its own. A quote
+    spanning lines is matched against the text with its whitespace folded, and the slice
+    from the boundary before it to the boundary after it is what comes back, so a turn
+    written across lines still yields the sentence the quote was cut from."""
+    flat_quote = " ".join(quote.split())
+    if not flat_quote:
+        return ""
+    # The text with its whitespace collapsed, as the quote is matched, and where each of
+    # its characters stands in the text itself.
+    flat: list[str] = []
+    origin: list[int] = []
+    for match in re.finditer(r"\S+", text):
+        if flat:
+            flat.append(" ")
+            origin.append(match.start())
+        flat.append(match.group())
+        origin.extend(range(match.start(), match.end()))
+    place = re.search(re.escape(flat_quote), "".join(flat))
+    if place is None:
+        return ""
+    start = origin[place.start()]
+    end = origin[place.end() - 1] + 1
+    # The sentence runs from the boundary before the quote - the previous ., ? or !
+    # followed by whitespace, a line break, or the start of the text - to the boundary
+    # after it, so every sentence the quote overlaps lies inside the slice and a question
+    # mark in any of them is seen. A line break is a boundary the same way: a turn written
+    # across lines without punctuation holds one sentence per line. A dot inside a word, a
+    # version or a filename is no boundary.
+    sentence_start = 0
+    for i in range(start - 1, -1, -1):
+        if text[i] == "\n" or (text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace())):
+            sentence_start = i + 1
+            break
+    sentence_end = len(text)
+    for i in range(end, len(text)):
+        if text[i] == "\n":
+            sentence_end = i
+            break
+        elif text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+            sentence_end = i + 1
+            break
+    return text[sentence_start:sentence_end].strip()
 
 
 def best_sentence(text: str, target: str) -> str:
@@ -1734,6 +1790,7 @@ def _digest_parts_turns(
 # that read the chunk finds at least one of its own quotes in it.
 MIN_FACTS_ALL_UNQUOTED = 2
 QUOTE_NOT_FOUND = "the quote is not found in entry"
+QUOTE_TOO_SHORT = "the quote is too short to cite: fewer than four words, not a sentence"
 
 
 # What a turn holds that is not the user's own words (DESIGN 6, R2): a paste, a slash
@@ -1851,12 +1908,37 @@ def verify(
             continue
         # A label is the prompt's name for the entry; what is recorded is the entry's own id.
         fact = {**fact, "entry": entry.id}
-        if fact["source"] == "stated" and "?" in fact["quote"]:
-            # BUILD-PLAN F52: a quote holding a question mark is never [stated].
+        if fact["source"] == "stated" and (
+            "?" in fact["quote"] or "?" in enclosing_sentence(entry.text, fact["quote"])
+        ):
+            # BUILD-PLAN F52: a quote holding a question mark is never [stated], and a
+            # quote cropped from an asking sentence is that question's tail, never a
+            # settled item.
             dropped.append(_refused(fact, "the quote is a question, never a settled item"))
             continue
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
+            continue
+        words = fact["quote"].split()
+        flat_quote = " ".join(fact["quote"].split()).strip(".,;:!?\"'()")
+        flat_turn = " ".join(entry.text.split()).strip(".,;:!?\"'()")
+        enclosing = enclosing_sentence(entry.text, fact["quote"])
+        flat_enclosing = " ".join(enclosing.split()).strip(".,;:!?\"'()")
+        if (
+            fact["source"] == "stated"
+            and not fact.get("proposal")
+            and len(words) < 4
+            and flat_quote != flat_turn
+            and flat_quote != flat_enclosing
+        ):
+            # A quote of fewer than four words that is not a whole sentence is a fragment,
+            # too little to stand behind a statement. A short quote that is the whole turn
+            # or the whole sentence it was cut from - the words compared without outer
+            # punctuation, so a sentence quoted without its full stop still matches - is
+            # no fragment: nothing of what was said is missing from it. A plain [stated]
+            # quote only: an approval's yes is short by nature (R2), and an observed quote
+            # reports what the session saw, such as an exit code or an error line.
+            dropped.append(_refused(fact, QUOTE_TOO_SHORT))
             continue
         if fact["source"] == "stated" and entry.role != USER:
             dropped.append(
@@ -1880,6 +1962,17 @@ def verify(
                     _refused(
                         fact,
                         "the statement names words neither the user's turn nor a proposal holds: "
+                        + ", ".join(missing),
+                    )
+                )
+                continue
+        if fact["source"] == "observed":
+            missing = ungrounded(fact["statement"], entry.text, when=entry.time)
+            if missing:
+                dropped.append(
+                    _refused(
+                        fact,
+                        "the statement names words the entry it cites does not hold: "
                         + ", ".join(missing),
                     )
                 )

@@ -482,6 +482,327 @@ def test_base_digest_refuses_quoted_question_for_stated_fact(session: Session):
     assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
 
 
+def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
+    """BUILD-PLAN F52: a quote cut out of an asking sentence is a question, even though
+    the crop itself holds no question mark."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store digest at session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store digest at session end.",
+                quote="store digest at session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session: Session):
+    """BUILD-PLAN F52: a question written across lines is still a question: the quote is
+    judged by the sentence it was cut from, whatever lines the turn broke it across."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store digest\nat session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store digest at session end.",
+                quote="store digest at session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_quote_cropped_from_a_question_with_dots(session: Session):
+    """A dot inside a version is not a sentence boundary: the question a quote was cut
+    from is seen whole, and its question mark still refuses the fact (BUILD-PLAN F52)."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we pin requests to 2.31 or later?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Pin requests to 2.31 or later.",
+                quote="pin requests to",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_a_trivial_quote(session: Session):
+    """A quote of fewer than four words that is not a whole sentence is too little to cite."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs at session end, not per turn.",
+                quote="session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_keeps_a_short_quote_that_is_the_whole_turn(session: Session):
+    """A short [stated] quote that is the user's whole turn is no fragment: it is
+    everything the turn said."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "always use uv"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Always use uv.",
+                quote="always use uv",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["always use uv"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_refuses_a_short_quote_cropped_from_a_longer_sentence(session: Session):
+    """A quote of fewer than four words cut out of a longer sentence is a fragment, even
+    when the turn it sits in is short."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "We should use uv for every install."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Use uv for every install.",
+                quote="should use uv",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_refuses_a_short_quote_that_ends_in_a_full_stop(session: Session):
+    """A short quote ending in a period is no sentence of its own when it was cropped out
+    of a longer one: the period the quote carries is not proof it was whole."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "We should never use Docker."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Never use Docker.",
+                quote="use Docker.",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_keeps_a_short_quote_that_is_the_whole_sentence(session: Session):
+    """A short quote that is the whole sentence the user said, written without its
+    terminal period, is no fragment."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Always use uv."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Always use uv.",
+                quote="Always use uv",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["Always use uv"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_statement_on_line_one_of_an_unpunctuated_turn(session: Session):
+    """A line break is a sentence boundary: a statement on the first line of a turn
+    without punctuation is not read with the question on the line below it."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "always use uv for installs\nwhat about poetry?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Use uv for installs.",
+                quote="always use uv for installs",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["always use uv for installs"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_short_approval_quote(session: Session):
+    """R2: an approval's yes is short by nature and is never refused as a fragment."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "do it"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            {
+                **said(
+                    statement="Capture runs at session end.",
+                    quote="do it",
+                    entry="e1",
+                ),
+                "proposal": ("e2", "Option B: capture runs at session end."),
+            }
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["do it"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_short_observed_quote(session: Session):
+    """An observed quote reports what the session saw, and is never refused as a fragment:
+    an exit code or an error line is three words and still evidence."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", "The first run failed with exit code 1."),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The first run failed with exit code 1.",
+                quote="exit code 1",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["exit code 1"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Session):
+    """An observed statement's names are grounded in the entry it cites, as a stated one
+    is in the user's turn."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The hook writes rows into PostgreSQL.",
+                quote="Done: the hook writes one row and returns without calling a model.",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any("PostgreSQL" in d["reason"] for d in dropped)
+
+
+def test_base_digest_keeps_observed_fact_with_computed_relative_date(session: Session):
+    """BUILD-PLAN F59: an observed statement's date is grounded by a relative expression in
+    the entry it cites, dated by that entry's own time."""
+    when = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT, when=when),
+        record("e2", "assistant", "The backup stays paused until tomorrow.", when=when),
+        record("e3", "user", SECOND_PROMPT, when=when),
+        record("e4", "assistant", SECOND_ANSWER, when=when),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The backup is paused until 2026-10-06.",
+                quote="The backup stays paused until tomorrow.",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert [fact.statement for fact in wrote.facts] == ["The backup is paused until 2026-10-06."]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
 def test_base_digest_refuses_ungrounded_statement_for_stated_fact(session: Session):
     """BUILD-PLAN F52: the base pipeline grounds stated names and numbers in the entry."""
     wrote = digest_once(
@@ -1081,7 +1402,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
         answer(
             said(
                 statement="Ted prefers a plain hyphen.",
-                quote="session end",
+                quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
             ),
@@ -1126,7 +1447,7 @@ def test_a_global_fact_that_is_not_stated_carries_the_rule_it_will_be_skipped_fo
             ),
             said(
                 statement="Ted prefers a plain hyphen.",
-                quote="session end",
+                quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
             ),
@@ -2449,7 +2770,9 @@ def test_worker_session_digested_with_budget_left_after_primary(session: Session
                 entry="e1",
             )
         ),
-        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+        answer(
+            said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
+        ),
     )
     try:
         cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=500_000)
@@ -2501,7 +2824,13 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
                 entry="e1",
             )
         ),
-        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+        answer(
+            said(
+                statement="Worker test passed.",
+                quote="Worker ran tests: failed with error.",
+                entry="w1",
+            )
+        ),
     )
     try:
         cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=250)
@@ -2726,7 +3055,7 @@ def test_redigesting_a_worker_session_keeps_its_role(session: Session, tmp_path)
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     worker_answer = answer(
-        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+        said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
     )
     fake, cfg = serve(session.cfg, worker_answer, worker_answer)
     try:
@@ -2891,7 +3220,7 @@ def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Ses
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     worker_answer = answer(
-        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+        said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
     )
     fake, cfg = serve(session.cfg, worker_answer, worker_answer)
     try:
@@ -3519,3 +3848,74 @@ def test_grounding_known_limit_plain_words_not_caught():
         "PostgreSQL"
     ]
     assert digest.ungrounded("Configure port 8080.", "Configure port 9090.") == ["8080"]
+
+
+def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
+    """A token holding a digit or symbol must be held exactly: near misses share its first
+    five characters and are not another form of it."""
+    assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-15.") == [
+        "2026-10-05"
+    ]
+    assert digest.ungrounded("Host is 192.168.100.200.", "Host is 192.168.100.133.") == [
+        "192.168.100.200"
+    ]
+    assert digest.ungrounded("Now on version 1.26.9.", "Now on version 1.26.4.") == ["1.26.9"]
+    assert digest.ungrounded("The limit is 300000.", "The limit is 30000.") == ["300000"]
+    # An exact hold still grounds a token, and an all-letter word still matches on its
+    # shared first five letters.
+    assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-05.") == []
+    assert digest.ungrounded("We use Postgres.", "We use PostgreSQL.") == []
+
+
+def test_ungrounded_holds_a_hyphenated_word_exactly():
+    """A token with a symbol or hyphen in it is held exactly; only a purely alphabetic
+    word matches another form of itself on their shared first five letters."""
+    assert digest.ungrounded("We re-digest the session.", "We are re-digesting it now.") == [
+        "re-digest"
+    ]
+    assert digest.ungrounded("Add a follow-up.", "Follow-ups are welcome.") == ["follow-up"]
+    assert digest.ungrounded("The stack is self-hosted.", "It stays self-hosting.") == [
+        "self-hosted"
+    ]
+    # A hyphenated word is still checked: a word it is not another form of is missing.
+    assert digest.ungrounded("Add a follow-up.", "Add a wrap-up.") == ["follow-up"]
+    # A hyphenated token holding a digit is held exactly.
+    assert digest.ungrounded("Pinned to v2-1-0.", "Pinned to v2-1-9.") == ["v2-1-0"]
+
+
+def test_ungrounded_demands_an_exact_hold_on_hyphenated_names():
+    """Hyphenated names that share an opening are different names: self-hosted does not
+    ground on self-managed, auto-merge on auto-rebase, x-api-key on x-api-token."""
+    assert digest.ungrounded("The stack is self-hosted.", "The stack is self-managed.") == [
+        "self-hosted"
+    ]
+    assert digest.ungrounded("Enable auto-merge.", "Enable auto-rebase.") == ["auto-merge"]
+    assert digest.ungrounded("Set x-api-key.", "Set x-api-token.") == ["x-api-key"]
+    # An exact hold still grounds a hyphenated word.
+    assert digest.ungrounded("The stack is self-hosted.", "The stack is self-hosted.") == []
+
+
+def test_enclosing_sentence_skips_a_dot_inside_a_word():
+    """A dot inside a version or a filename is not a sentence boundary: the sentence a
+    quote was cut from is taken whole, so a question mark after the dot is seen."""
+    question = "Should we pin requests to 2.31 or later?"
+    assert digest.enclosing_sentence(question, "pin requests to") == question
+    assert digest.enclosing_sentence(question, "2.31") == question
+    assert digest.enclosing_sentence(question, "31 or later") == question
+    asked = "Do we keep the setting in config.toml or drop it?"
+    assert digest.enclosing_sentence(asked, "keep the setting") == asked
+    assert digest.enclosing_sentence(asked, "config.toml") == asked
+    # A dot a sentence really ends on still closes it.
+    assert (
+        digest.enclosing_sentence("Pin requests to 2.31. Should we pin harder?", "pin harder")
+        == "Should we pin harder?"
+    )
+
+
+def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
+    """A line break closes a sentence the way a full stop does: the statement on one line
+    of an unpunctuated turn is not read with the question on the line below it."""
+    turn = "always use uv for installs\nwhat about poetry?"
+    assert digest.enclosing_sentence(turn, "use uv for installs") == "always use uv for installs"
+    assert digest.enclosing_sentence(turn, "installs") == "always use uv for installs"
+    assert digest.enclosing_sentence(turn, "what about poetry") == "what about poetry?"

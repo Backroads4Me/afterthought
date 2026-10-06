@@ -3325,6 +3325,178 @@ def test_dream_refuses_stated_fact_with_ungrounded_statement(initialized, home, 
     assert not overview.exists() or "PostgreSQL" not in overview.read_text()
 
 
+def test_dream_refuses_stated_fact_quoted_from_a_question(initialized, home, fake):
+    """R2: a quote cropped out of an asking sentence is a question, even though the crop
+    itself holds no question mark."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question",
+        facts=[
+            {
+                "statement": "Store digest at session end.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_q#e1",
+                "quote": "store digest at session end",
+                "text": "Should we store digest at session end?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "store digest at session end")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(
+        r.rule == "R2" and r.reason == "the quote is a question, never a settled item"
+        for r in report.rejected
+    )
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "store digest at session end" not in overview.read_text()
+
+
+def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_version_dot(
+    initialized, home, fake
+):
+    """R2: a dot inside a version is not a sentence boundary, so the question mark after
+    it is still seen and the fact is refused."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question-version",
+        facts=[
+            {
+                "statement": "Pin requests to 2.31 or later.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_qv#e1",
+                "quote": "pin requests to",
+                "text": "Should we pin requests to 2.31 or later?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "pin requests to")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(
+        r.rule == "R2" and r.reason == "the quote is a question, never a settled item"
+        for r in report.rejected
+    )
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "pin requests to" not in overview.read_text()
+
+
+def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_filename_dot(
+    initialized, home, fake
+):
+    """R2: a dot inside a filename is not a sentence boundary, so the question mark after
+    it is still seen and the fact is refused."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question-filename",
+        facts=[
+            {
+                "statement": "Keep the setting in config.toml.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_qf#e1",
+                "quote": "keep the setting",
+                "text": "Do we keep the setting in config.toml or drop it?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "keep the setting")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(
+        r.rule == "R2" and r.reason == "the quote is a question, never a settled item"
+        for r in report.rejected
+    )
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "config.toml" not in overview.read_text()
+
+
+def test_dream_refuses_stated_fact_quoted_from_a_question_across_lines(initialized, home, fake):
+    """R2: a question written across lines is still a question; the quote is judged by the
+    sentence it was cut from, whatever lines the turn broke it across."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-question-lines",
+        facts=[
+            {
+                "statement": "Store digest at session end.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_ql#e1",
+                "quote": "store digest at session end",
+                "text": "Should we store digest\nat session end?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "store digest at session end")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert any(
+        r.rule == "R2" and r.reason == "the quote is a question, never a settled item"
+        for r in report.rejected
+    )
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert not overview.exists() or "store digest at session end" not in overview.read_text()
+
+
 def test_dream_keeps_grounded_stated_fact(initialized, home, fake):
     """BUILD-PLAN F52: a stated fact with no question mark and grounded names passes."""
     cfg = config_with_fake(home, initialized.vault, fake)
