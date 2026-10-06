@@ -78,68 +78,31 @@ class Hit:
 _TIER_SHARED = "CASE WHEN project_id IS ? THEN 0 WHEN project_id IS NULL THEN 1 ELSE 2 END"
 _TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 2 END"
 
-#: The collections whose rows are one per document: an evidence row is one archived entry and
-#: its path names that entry, so a document there has no second row, and the fold that narrows
-#: a sectioned document to its best row has nothing to fold. Asking those collections without
-#: the fold reads their matches once instead of sorting them twice.
-SINGLE_ROW_COLLECTIONS: tuple[str, ...] = (index.EVIDENCE,)
-
-
 #: The collections whose rows carry an explicit timestamp in the identity time column.
 COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
 
 
-def _ask(
+def _is_raw_evidence(collection: str, path: str) -> bool:
+    """Check whether a row is raw evidence rather than curated memory."""
+    return collection == index.EVIDENCE or path.startswith(index.SESSION_RESOURCE)
+
+
+def _curated_priority(collection: str, path: str) -> int:
+    """Priority within a tier: curated memory (pages, digests) ranks ahead of raw evidence."""
+    return 1 if _is_raw_evidence(collection, path) else 0
+
+
+def _query_collections(
     conn: sqlite3.Connection,
     collections: list[str],
-    query: str,
+    fts5_query: str | None,
+    time_clauses: list[str],
+    time_params: list[str],
     narrow_id: str | None,
     tier0_id: str | None,
     limit: int,
-    *,
-    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Ask each collection for its ``limit`` best-ranked documents, best tier and row first.
-
-    A collection `_scope` rules out entirely is not asked at all, so a narrowed search never
-    sends a statement against memory it does not admit.
-
-    The limit belongs in SQL. Without it a search builds every match - the snippet, the row, the
-    Python object - to keep eight of them, which is what a vault whose every line carries the
-    queried word pays for every search.
-
-    It cannot be a bare limit of rows, because a hit is a document while a row is a section: a
-    page with twelve matching sections is twelve rows and one hit, and a limit asked for at the
-    door would hand back one document's twelve sections and call the search over. So each
-    collection is asked to narrow itself to one row per document - the best-ranked one, which is
-    the only row of it any search could have kept - and the limit goes after that. That is what
-    makes the limit mean what it says, and it is done in SQL over the whole collection rather
-    than after the rows arrive, because a search that reads every row to discover the eight it
-    wanted has already paid for the ones it threw away. A collection whose rows are one per
-    document (``SINGLE_ROW_COLLECTIONS``) skips the fold: there is nothing to narrow, and the
-    statement reads its matches once instead of sorting them twice.
-
-    Which rows survived comes back before what they say, because a snippet is cut by the match
-    scan it is written into: a statement that joins back to its table by rowid snippets whatever
-    the join happened to read, which is the row's first words rather than the matched ones, and
-    a statement that scans the matches to snippet them correctly pays for every match rather
-    than for the kept few. So the kept rowids are asked for by name in their own collection,
-    which is a seek measured at 0.1 ms where snippet-izing all 11 000 matches costs 50 ms.
-    """
-    tc = parse_temporal(query, now=now)
-    fts5_query = _to_fts5_query(tc.stripped_query) if tc.stripped_query else None
-    if fts5_query is None and not (tc.start or tc.end):
-        return []
-
-    time_clauses: list[str] = []
-    time_params: list[str] = []
-    if tc.start is not None:
-        time_clauses.append("time >= ?")
-        time_params.append(tc.start.isoformat())
-    if tc.end is not None:
-        time_clauses.append("time <= ?")
-        time_params.append(tc.end.isoformat())
-
+    """Query each collection for its limit best-ranked rows."""
     rows: list[dict[str, Any]] = []
     for col in collections:
         if fts5_query is None and col not in COLLECTIONS_WITH_TIMESTAMPS:
@@ -176,27 +139,19 @@ def _ask(
         where_cond = f"{match_cond}{clause}{time_filter}"
         where_args = [*match_args, *extra, *time_args]
 
-        if col in SINGLE_ROW_COLLECTIONS:
-            # One row per document: the fold below has nothing to fold, and skipping it is
-            # the difference between reading the matches once and sorting them twice.
-            keep = conn.execute(
-                f"SELECT rowid AS rid, path, description, heading, project_id,"
-                f" {index.rank_expression(col)} AS score, {tier} AS tier"
-                f" FROM {col} WHERE {where_cond}"
-                " ORDER BY tier ASC, score ASC LIMIT ?",
-                (*tier_args, *where_args, limit),
-            ).fetchall()
-        else:
-            keep = conn.execute(
-                f"SELECT rid, path, description, heading, score, tier, project_id FROM"
-                f" (SELECT rid, path, description, heading, score, tier, project_id,"
-                f" row_number() OVER (PARTITION BY path ORDER BY tier, score) AS best"
-                f" FROM (SELECT rowid AS rid, path, description, heading, project_id,"
-                f" {index.rank_expression(col)} AS score, {tier} AS tier"
-                f" FROM {col} WHERE {where_cond})) WHERE best = 1"
-                " ORDER BY tier ASC, score ASC LIMIT ?",
-                (*tier_args, *where_args, limit),
-            ).fetchall()
+        partition_expr = (
+            "CASE WHEN session_id IS NOT NULL AND session_id != '' THEN session_id ELSE path END"
+        )
+        keep = conn.execute(
+            f"SELECT rid, path, description, heading, score, tier, project_id, session_id FROM"
+            f" (SELECT rid, path, description, heading, score, tier, project_id, session_id,"
+            f" row_number() OVER (PARTITION BY {partition_expr} ORDER BY tier, score) AS best"
+            f" FROM (SELECT rowid AS rid, path, description, heading, project_id, session_id,"
+            f" {index.rank_expression(col)} AS score, {tier} AS tier"
+            f" FROM {col} WHERE {where_cond})) WHERE best = 1"
+            " ORDER BY tier ASC, score ASC LIMIT ?",
+            (*tier_args, *where_args, limit),
+        ).fetchall()
         if not keep:
             continue
 
@@ -218,12 +173,71 @@ def _ask(
                 "rank": row["score"],
                 "tier": row["tier"],
                 "project_id": row["project_id"],
+                "session_id": row["session_id"],
             }
             for row in keep
         )
 
-    rows.sort(key=lambda row: (row["tier"], row["rank"]))
+    rows.sort(
+        key=lambda row: (
+            row["tier"],
+            _curated_priority(row["collection"], row["path"]),
+            row["rank"],
+        )
+    )
     return rows
+
+
+def _ask(
+    conn: sqlite3.Connection,
+    collections: list[str],
+    query: str,
+    narrow_id: str | None,
+    tier0_id: str | None,
+    limit: int,
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Ask each collection for its limit best-ranked documents, best tier and row first.
+
+    Curated memory (pages, digests) ranks ahead of raw evidence within each tier.
+    Evidence entries are collapsed per session so a session returns at most its best-ranked hit.
+    Conjunction (AND) of query terms is tried first, falling back to disjunction (OR) if
+    conjunction yields no matches.
+    """
+    tc = parse_temporal(query, now=now)
+    terms = _to_fts5_terms(tc.stripped_query) if tc.stripped_query else []
+    if not terms and not (tc.start or tc.end):
+        return []
+
+    time_clauses: list[str] = []
+    time_params: list[str] = []
+    if tc.start is not None:
+        time_clauses.append("time >= ?")
+        time_params.append(tc.start.isoformat())
+    if tc.end is not None:
+        time_clauses.append("time <= ?")
+        time_params.append(tc.end.isoformat())
+
+    if len(terms) > 1:
+        fts5_and = " AND ".join(terms)
+        rows = _query_collections(
+            conn, collections, fts5_and, time_clauses, time_params, narrow_id, tier0_id, limit
+        )
+        if rows:
+            return rows
+        fts5_or = " OR ".join(terms)
+        return _query_collections(
+            conn, collections, fts5_or, time_clauses, time_params, narrow_id, tier0_id, limit
+        )
+    elif len(terms) == 1:
+        return _query_collections(
+            conn, collections, terms[0], time_clauses, time_params, narrow_id, tier0_id, limit
+        )
+    else:
+        return _query_collections(
+            conn, collections, None, time_clauses, time_params, narrow_id, tier0_id, limit
+        )
 
 
 def search(
@@ -338,12 +352,26 @@ def search(
 
         slugs = {proj.id: proj.slug for proj in registry.projects}
         seen_paths: set[str] = set()
+        seen_evidence_sessions: set[str] = set()
         hits: list[Hit] = []
 
         for row in rows:
             path_val = row["path"]
-            if path_val in seen_paths:
-                continue
+            if _is_raw_evidence(row["collection"], path_val):
+                session_val = row.get("session_id")
+                if not session_val:
+                    parsed = _parse_session_resource(path_val)
+                    if parsed:
+                        session_val = parsed[0]
+                if session_val:
+                    if session_val in seen_evidence_sessions:
+                        continue
+                    seen_evidence_sessions.add(session_val)
+                elif path_val in seen_paths:
+                    continue
+            else:
+                if path_val in seen_paths:
+                    continue
             seen_paths.add(path_val)
 
             desc = " ".join((row["description"] or "").split())
@@ -593,7 +621,7 @@ def trace_command(config: Config, page: str, source_id: str | None = None) -> in
     return 0
 
 
-def _to_fts5_query(query: str) -> str | None:
+def _to_fts5_terms(query: str) -> list[str]:
     """Extract and quote search terms for an FTS5 MATCH expression."""
     terms: list[str] = []
     for match in re.finditer(r'"([^"]*)"|(\S+)', query):
@@ -608,9 +636,15 @@ def _to_fts5_query(query: str) -> str | None:
             if s:
                 escaped = s.replace('"', '""')
                 terms.append(f'"{escaped}"')
+    return terms
+
+
+def _to_fts5_query(query: str, op: str = "AND") -> str | None:
+    """Extract and quote search terms for an FTS5 MATCH expression."""
+    terms = _to_fts5_terms(query)
     if not terms:
         return None
-    return " OR ".join(terms)
+    return f" {op} ".join(terms)
 
 
 def _resolve_page_path(config: Config, path_str: str) -> Path:

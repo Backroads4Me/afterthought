@@ -1095,7 +1095,9 @@ def test_a_known_answer_pass_at_the_default_scope_reaches_every_collection(
     paths = {hit.path for hit in search.search(cfg, "plain SQLite storage", project="widget")}
 
     assert "projects/widget/overview.md" in paths, "the curated line"
-    assert "aft://session/claude/s-widget-1#e-1" in paths, "the archived entry itself"
+    assert any(path.startswith("aft://session/claude/s-widget-1#") for path in paths), (
+        "the archived entry itself"
+    )
     assert not any(path.startswith(("projects/gadget", "digests/gadget")) for path in paths)
 
     digest_paths = {hit.path for hit in search.search(cfg, "prototype", project="widget")}
@@ -1413,7 +1415,7 @@ def test_search_temporal_filtering_evidence(populated_vault: Config) -> None:
         populated_vault, "plain SQLite storage 2026-09-28", all_projects=True
     )
     evidence_paths = [h.path for h in hits_matching_date if h.collection == "evidence"]
-    assert any("s-widget-1#e-1" in p for p in evidence_paths)
+    assert any("s-widget-1" in p for p in evidence_paths)
 
     # Different date excludes the evidence entry from matching
     hits_wrong_date = search.search(
@@ -1431,7 +1433,7 @@ def test_search_relative_temporal_filtering_evidence(populated_vault: Config) ->
         populated_vault, "plain SQLite storage today", all_projects=True, now=now_same_day
     )
     today_evidence = [h.path for h in hits_today if h.collection == "evidence"]
-    assert any("s-widget-1#e-1" in p for p in today_evidence)
+    assert any("s-widget-1" in p for p in today_evidence)
 
     # Yesterday relative to 2026-09-28 is 2026-09-27, so 2026-09-28 entry is excluded
     hits_yesterday = search.search(
@@ -1448,7 +1450,7 @@ def test_search_since_temporal_filtering(populated_vault: Config) -> None:
         populated_vault, "plain SQLite storage since 2026-09-25", all_projects=True
     )
     matching = [h.path for h in hits_since_before if h.collection == "evidence"]
-    assert any("s-widget-1#e-1" in p for p in matching)
+    assert any("s-widget-1" in p for p in matching)
 
     hits_since_after = search.search(
         populated_vault, "plain SQLite storage since 2026-09-29", all_projects=True
@@ -1464,3 +1466,115 @@ def test_search_command_temporal_cli(populated_vault: Config, capsys) -> None:
     assert ret == 0
     out = capsys.readouterr().out
     assert "projects/widget/assembly.md" in out
+
+
+def test_multi_term_query_matches_all_terms_before_or_fallback(populated_vault: Config) -> None:
+    """A multi-term query tries AND first across collections, falling back to OR only if no matches.
+
+    When matching documents contain all query terms, partial matches matching only some terms
+    are not returned. When no document contains all terms, the query falls back to OR so partial
+    matches answer.
+    """
+    cfg = populated_vault
+    # Document 'projects/widget/assembly.md' has both 'titanium' and 'bolt'.
+    # Add a page that only contains 'titanium' (without 'bolt').
+    (cfg.vault / "projects/widget/fasteners.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Fasteners\n"
+        "description: Fastener overview.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Fasteners\n\n"
+        "## Facts\n\n"
+        "- Titanium rivets provide lightweight structural joints. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    # 1. Multi-term query where conjunction matches:
+    # "titanium bolt" matches assembly.md (which has both words).
+    # fasteners.md only has "titanium", so it is excluded because AND succeeded.
+    hits = search.search(cfg, "titanium bolt", project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/assembly.md" in hit_paths
+    assert "projects/widget/fasteners.md" not in hit_paths
+
+    # 2. Multi-term query where conjunction fails:
+    # "rivets bolt" has no document matching both words.
+    # Conjunction returns nothing, so it falls back to OR, finding both pages.
+    fallback_hits = search.search(cfg, "rivets bolt", project="widget")
+    fallback_paths = [h.path for h in fallback_hits]
+    assert "projects/widget/assembly.md" in fallback_paths
+    assert "projects/widget/fasteners.md" in fallback_paths
+
+
+def test_curated_memory_ranks_before_raw_evidence(populated_vault: Config) -> None:
+    """Within a tier, curated memory collections (pages, digests) rank ahead of raw evidence."""
+    cfg = populated_vault
+    # Query "plain SQLite storage" matches:
+    # - Curated page: projects/widget/overview.md (tier 0, curated)
+    # - Raw evidence: aft://session/claude/s-widget-1#... (tier 0, raw evidence)
+    hits = search.search(cfg, "plain SQLite storage", project="widget", limit=10)
+    page_indices = [i for i, h in enumerate(hits) if h.collection == index.PAGES]
+    evidence_indices = [i for i, h in enumerate(hits) if h.collection == index.EVIDENCE]
+
+    assert page_indices, "must find matching pages"
+    assert evidence_indices, "must find matching evidence"
+    assert min(page_indices) < min(evidence_indices), (
+        "curated page must rank before raw evidence within the same tier"
+    )
+
+    # Also test digest ranks ahead of raw evidence
+    (cfg.vault / "digests/widget/2026/09/2026-09-29-claude-s-widget-2.md").write_text(
+        "---\n"
+        "type: Session Digest\n"
+        "title: Widget SQLite digest\n"
+        "description: SQLite storage notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Storage review\n\n"
+        "## Summary\n\n"
+        "Decided on plain SQLite storage for local memory.\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+    hits2 = search.search(cfg, "plain SQLite storage", project="widget", limit=10)
+    digest_indices = [i for i, h in enumerate(hits2) if h.collection == index.DIGESTS]
+    evidence_indices2 = [i for i, h in enumerate(hits2) if h.collection == index.EVIDENCE]
+    assert digest_indices, "must find matching digest"
+    assert min(digest_indices) < min(evidence_indices2), (
+        "curated digest must rank before raw evidence within the same tier"
+    )
+
+
+def test_raw_evidence_results_collapsed_per_session(populated_vault: Config) -> None:
+    """Raw evidence results are collapsed per session so multiple hits from one session
+    do not flood results.
+    """
+    cfg = populated_vault
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    # Store multiple entries in a single session all matching the same query terms
+    entries = [
+        Entry("e-0", now, "user", "telemetry probe calibration step 1", False),
+        Entry("e-1", now, "assistant", "telemetry probe calibration step 2", False),
+        Entry("e-2", now, "user", "telemetry probe calibration step 3", False),
+        Entry("e-3", now, "assistant", "telemetry probe calibration verified", False),
+    ]
+    evidence.store(cfg, "claude", "s-telemetry-1", "p_widget", entries)
+
+    # Store another session with matching entries
+    entries2 = [
+        Entry("e-0", now, "user", "telemetry probe calibration alternate method", False),
+        Entry("e-1", now, "assistant", "telemetry probe calibration confirmed", False),
+    ]
+    evidence.store(cfg, "claude", "s-telemetry-2", "p_widget", entries2)
+    index.update(cfg)
+
+    hits = search.search(cfg, "telemetry probe calibration", project="widget", limit=10)
+    evidence_hits = [h for h in hits if h.collection == index.EVIDENCE]
+
+    # Exactly 2 evidence hits: one for s-telemetry-1 and one for s-telemetry-2
+    assert len(evidence_hits) == 2, f"expected 2 collapsed hits, got {len(evidence_hits)}"
+    sessions_found = {h.path.split("#")[0] for h in evidence_hits}
+    assert len(sessions_found) == 2, f"each hit must come from a distinct session: {sessions_found}"
