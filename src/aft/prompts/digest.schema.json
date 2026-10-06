@@ -11,6 +11,21 @@
       "type": "object",
       "description": "What a session that resumes this one needs to know to start.",
       "properties": {
+        "goal": {
+          "type": "object",
+          "description": "The user's overarching goal or primary task for this session, and the entry it came from.",
+          "properties": {
+            "text": { "type": "string", "maxLength": 400 },
+            "entry": { "type": "string", "description": "The label of the entry, e.g. #1." }
+          },
+          "required": ["text", "entry"]
+        },
+        "files": {
+          "type": "array",
+          "description": "Key files modified, inspected, or left in-flight during this session.",
+          "items": { "type": "string", "maxLength": 200 },
+          "maxItems": 10
+        },
         "in_flight": {
           "type": "object",
           "description": "What was being worked on when this part ended, and the entry it comes from; empty text and entry when nothing was.",
@@ -78,9 +93,11 @@
         }
       },
       "required": [
+        "goal",
         "in_flight",
         "failed",
-        "open"
+        "open",
+        "files"
       ]
     },
     "facts": {

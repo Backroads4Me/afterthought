@@ -337,6 +337,30 @@ def test_the_newest_digest_supplies_the_handoff(widget, tmp_path):
     assert "the older draft" not in block
 
 
+def test_the_handoff_note_opens_with_the_goal_and_names_the_files():
+    """The goal leads the note and the files the work touched close it."""
+    note = {
+        "goal": "capture the session's work in memory",
+        "in_flight": "the block",
+        "failed": ["the parserless draft"],
+        "open": ["the pi extension"],
+        "files": ["src/aft/digest.py", "tests/test_inject.py"],
+    }
+    assert inject.handoff({"aft": {"handoff": note}}) == [
+        "- Goal: capture the session's work in memory",
+        "- In flight: the block",
+        "- Failed: the parserless draft",
+        "- Open: the pi extension",
+        "- Files: src/aft/digest.py, tests/test_inject.py",
+    ]
+
+
+def test_a_handoff_without_a_goal_or_files_leaves_their_lines_out():
+    """A digest that recorded neither a goal nor files carries neither line."""
+    note = {"in_flight": "the block", "failed": [], "open": []}
+    assert inject.handoff({"aft": {"handoff": note}}) == ["- In flight: the block"]
+
+
 def test_a_collection_shows_only_for_the_projects_it_lists(widget, tmp_path):
     collection = widget.vault / "references/widget-spec/collection.md"
     collection.write_text(COLLECTION.format(project_id="p_somewhere_else"))
@@ -1164,6 +1188,28 @@ def test_last_session_takes_newest_primary_session_with_handoff(widget, tmp_path
     block = inject.build(widget, resolution)
     parts = parts_of(block)
     assert parts["## Last session"] == ["- In flight: Primary task 2"]
+
+
+def test_last_session_opens_with_the_goal_and_names_the_files(widget, tmp_path):
+    repo = (tmp_path / "widget").resolve()
+    write(
+        widget.vault / "digests/widget/2026/10/2026-10-07-claude-s09.md",
+        "---\ntype: Digest\ngenerated:\n  at: 2026-10-07T10:00:00Z\n"
+        "aft:\n  handoff:\n"
+        "    goal: capture the session's work in memory\n"
+        "    in_flight: Primary task 1\n"
+        "    failed: []\n"
+        "    open: []\n"
+        "    files: [src/aft/digest.py, tests/test_inject.py]\n"
+        "sources: []\n---\n\n## Summary\n\nSession\n",
+    )
+    block = inject.build(widget, resolve(widget, repo))
+    parts = parts_of(block)
+    assert parts["## Last session"] == [
+        "- Goal: capture the session's work in memory",
+        "- In flight: Primary task 1",
+        "- Files: src/aft/digest.py, tests/test_inject.py",
+    ]
 
 
 def test_missing_cwd_gets_global_preferences_and_how_to(widget, capsys):

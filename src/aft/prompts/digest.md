@@ -62,9 +62,14 @@ For each fact:
 
 Also write:
 - summary: one to four sentences on what happened.
-- handoff: what was in flight when this part ended, approaches that failed, and what is
-  still open, each item with the label of the entry it comes from. Use empty values when
-  there is nothing to hand off.
+- handoff:
+  - goal: one sentence stating the user's primary goal or request for this session, with
+    its entry label.
+  - in_flight: what was being worked on when this part ended, with its entry label.
+  - failed: approaches that failed, with entry labels.
+  - open: questions and next steps left open, with entry labels.
+  - files: list of relative file paths touched or relevant to the in-flight work.
+  Use empty values when there is nothing to hand off.
 
 Write only about what the entries say. When a part holds little worth keeping, say so in
 a one-sentence summary and leave the facts and the handoff empty: an answer with nothing

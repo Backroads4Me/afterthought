@@ -263,19 +263,28 @@ def _as_int(part: str) -> int:
 
 
 def handoff(frontmatter: dict | None) -> list[str]:
-    """The handoff note of a digest: what was in flight, what failed, and what is open, as
-    M2.6 writes it into the digest's frontmatter under ``aft.handoff`` (design 8). The block
-    shows these lines and `aft.index` indexes them, so this is the one reading of the field."""
+    """The handoff note of a digest: the session's goal, what was in flight, what failed,
+    what is open, and the files it touched, as M2.6 writes it into the digest's frontmatter
+    under ``aft.handoff`` (design 8). The block shows these lines and `aft.index` indexes
+    them, so this is the one reading of the field."""
     aft = (frontmatter or {}).get("aft")
     note = aft.get("handoff") if isinstance(aft, dict) else None
     if not isinstance(note, dict):
         return []
+    goal = note.get("goal")
+    goal_text = one_line(goal) if isinstance(goal, str) else ""
+    lines = [f"- Goal: {goal_text}"] if goal_text else []
     in_flight = _text(note, "in_flight")
-    lines = [f"- In flight: {in_flight}"] if in_flight else []
+    lines += [f"- In flight: {in_flight}"] if in_flight else []
     for key in ("failed", "open"):
         items = note.get(key)
         if isinstance(items, list):
             lines += [f"- {key.capitalize()}: {text}" for text in map(one_line, items) if text]
+    files = note.get("files")
+    if isinstance(files, list):
+        names = [one_line(path) for path in files if isinstance(path, str)]
+        if names:
+            lines.append(f"- Files: {', '.join(names)}")
     return lines
 
 
