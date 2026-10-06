@@ -338,6 +338,23 @@ def test_extract_wikilinks():
     assert page.extract_wikilinks("Multiple [[one]] and [[two|alias]] links.") == ["one", "two"]
 
 
+def test_extract_wikilinks_ignores_fenced_code_blocks():
+    assert page.extract_wikilinks("```python\n# Link: [[fake-link]]\n```") == []
+    assert page.extract_wikilinks("~~~\n[[fake-link]]\n~~~") == []
+    mixed = "See [[real-link]].\n```python\n# [[fake-link]]\n```\n"
+    assert page.extract_wikilinks(mixed) == ["real-link"]
+
+
+def test_extract_wikilinks_ignores_inline_code_spans():
+    assert page.extract_wikilinks("see `[[not-a-link]]`") == []
+
+
+def test_extract_wikilinks_ignores_code_but_not_prose():
+    text = "For specs see [[real-link]] and `code`"
+    assert len(page.mask_markdown_code(text)) == len(text)
+    assert page.extract_wikilinks(text) == ["real-link"]
+
+
 def test_fact_and_page_wikilinks():
     body = (
         "## Facts\n"

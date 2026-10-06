@@ -84,10 +84,30 @@ _CALLOUT_START = re.compile(r"^> \[!(?P<type>[a-z]+)\] (?P<date>\d{4}-\d{2}-\d{2
 
 WIKILINK_PATTERN = re.compile(r"\[\[([^\|\]]+)(?:\|([^\]]+))?\]\]")
 
+# Code a page quotes rather than prose: a fenced block opens with a line of three or more
+# backticks or tildes and closes with a line of the same marker, running to the end of the
+# text when no closing line comes, and an inline span opens with a run of backticks and
+# closes with a run of the same length on the same line.
+_FENCED_CODE = re.compile(
+    r"^[ \t]*(```+|~~~+)[^\n]*\n(?:.*?\n)?[ \t]*\1[^\n]*$"
+    r"|^[ \t]*(```+|~~~+)[^\n]*\n.*\Z",
+    re.MULTILINE | re.DOTALL,
+)
+_INLINE_CODE = re.compile(r"(`+)(?:(?!\1).)*?\1")
+
+
+def mask_markdown_code(text: str) -> str:
+    """Replace fenced code blocks and inline code spans with spaces of the same length,
+    so character offsets in the masked text line up with the original."""
+    masked = text
+    for pattern in (_FENCED_CODE, _INLINE_CODE):
+        masked = pattern.sub(lambda match: " " * len(match.group(0)), masked)
+    return masked
+
 
 def extract_wikilinks(text: str) -> list[str]:
-    """Extract wikilink targets from text."""
-    return [match.group(1).strip() for match in WIKILINK_PATTERN.finditer(text)]
+    """Extract wikilink targets from text, ignoring links inside code blocks and spans."""
+    return [match.group(1).strip() for match in WIKILINK_PATTERN.finditer(mask_markdown_code(text))]
 
 
 @dataclass
