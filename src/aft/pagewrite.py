@@ -380,6 +380,50 @@ class PageDoc:
 
         raise WriteError(f"could not find source {source_id} entry lines in frontmatter")
 
+    def scrub_callouts(
+        self,
+        session_sources: set[str],
+        words: Sequence[str] = (),
+        marker: str = "[forgotten]",
+    ) -> bool:
+        """Replace callout text citing forgotten sources or words with a marker.
+
+        Callout rows citing a source from a forgotten session or carrying the session's
+        words are scrubbed, so regenerating needs-you or reading the page does not repeat
+        the forgotten words.
+        """
+        changed = False
+        phrases = sorted({w for w in words if w.strip()}, key=len, reverse=True)
+        for fact in reversed(self.page.facts):
+            for callout in reversed(fact.callouts):
+                start = callout.line
+                stop = callout.line + len(callout.text)
+                old_rows = self.lines[start:stop]
+                new_rows = []
+                for row_line in old_rows:
+                    if not row_line.lstrip().startswith(">"):
+                        new_rows.append(row_line)
+                        continue
+                    row_content = row_line.lstrip()[1:].strip()
+                    cites_forgotten = any(
+                        ref in session_sources for ref in _FOOTNOTE.findall(row_content)
+                    )
+                    if cites_forgotten:
+                        new_rows.append(f"> {marker}")
+                    else:
+                        scrubbed_row = row_content
+                        for phrase in phrases:
+                            scrubbed_row = scrubbed_row.replace(phrase, marker)
+                        if scrubbed_row != row_content:
+                            new_rows.append(f"> {scrubbed_row}")
+                        else:
+                            new_rows.append(row_line)
+                if new_rows != old_rows:
+                    with self._atomic():
+                        self._apply(start, stop, new_rows)
+                    changed = True
+        return changed
+
     def add_fact(
         self,
         kind: str,
@@ -506,12 +550,13 @@ class PageDoc:
             self._line_reads(at + 2, found.statement, page.SUPERSEDED)
             return self._fact_written(at + 1, statement)
 
-    def withdraw(self, fact: page.Fact, date: str) -> bool:
+    def withdraw(self, fact: page.Fact, date: str, *, statement: str | None = None) -> bool:
         """Strike a line out of memory after ``aft forget`` (design 6, withdrawn).
 
         A stale line can be withdrawn too, and its stale mark gives way to the strike, since
         a withdrawn line is out of memory whatever its anchor says. A line already withdrawn
-        is left as it is, keeping the date it was first withdrawn on.
+        is left as it is, keeping the date it was first withdrawn on, unless a replacement
+        statement is provided to scrub it.
 
         So is a superseded line whose evidence is being forgotten. Its strike already says a
         newer line replaced it, and that is the truth the page keeps above it; what `aft forget`
@@ -522,22 +567,36 @@ class PageDoc:
         `superseded <date> by [^id]` was, still struck, still in the same section.
         """
         found = self._resolve(fact)
-        date = _check_date(date)
+        target_statement = (
+            self._check_statement(statement) if statement is not None else found.statement
+        )
         if found.section == page.CANDIDATES:
             raise WriteError("a candidate line cannot be struck through")
         if found.state == page.WITHDRAWN:
+            if statement is not None and found.statement != target_statement:
+                withdraw_date = found.state_date or _check_date(date)
+                line = _fact_line(
+                    target_statement,
+                    found.source,
+                    found.date,
+                    found.refs,
+                    struck=True,
+                    suffix=f" withdrawn {withdraw_date}",
+                )
+                return self._rewrite(found, line, page.WITHDRAWN, statement=target_statement)
             return False
         if found.callouts:
             raise WriteError("a line with an open note cannot be struck; close the note first")
+        date = _check_date(date)
         line = _fact_line(
-            found.statement,
+            target_statement,
             found.source,
             found.date,
             found.refs,
             struck=True,
             suffix=f" withdrawn {date}",
         )
-        return self._rewrite(found, line, page.WITHDRAWN)
+        return self._rewrite(found, line, page.WITHDRAWN, statement=target_statement)
 
     def mark_stale(self, fact: page.Fact, reason: str, date: str) -> bool:
         """Mark an active line stale, ending it ``(stale <date>: <reason>)`` (design 6, R8).
@@ -867,7 +926,13 @@ class PageDoc:
             )
         return found
 
-    def _rewrite(self, found: page.Fact, line: str, state: str | None = None) -> bool:
+    def _rewrite(
+        self,
+        found: page.Fact,
+        line: str,
+        state: str | None = None,
+        statement: str | None = None,
+    ) -> bool:
         """Replace one fact line in place; whether its text changed.
 
         The new line has to read back as the same statement, in ``state`` when one is
@@ -876,9 +941,10 @@ class PageDoc:
         index = found.line - 1
         if line == self.lines[index]:
             return False
+        target_statement = statement if statement is not None else found.statement
         with self._atomic():
             self._apply(index, index + 1, [line])
-            self._line_reads(found.line, found.statement, state or found.state)
+            self._line_reads(found.line, target_statement, state or found.state)
         return True
 
     def _line_reads(self, line: int, statement: str, state: str) -> None:
