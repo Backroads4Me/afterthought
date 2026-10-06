@@ -186,13 +186,14 @@ def _ask(
 
 def search(
     config: Config,
-    query: str,
+    query: str = "",
     *,
     project: str | None = None,
     all_projects: bool = False,
     archive: bool = False,
     reports: bool = False,
     limit: int = 8,
+    links: str | None = None,
 ) -> list[Hit]:
     """Query the search index with BM25 ranking across active collections.
 
@@ -204,6 +205,45 @@ def search(
     """
     vault.require(config)
     index.update(config)
+
+    if links is not None:
+        blinks = index.backlinks(config, links)
+        hits: list[Hit] = []
+        for b in blinks:
+            src = b["source_path"]
+            context = b.get("context") or b.get("line_context") or ""
+            line_idx = b["line_index"]
+            heading = ""
+            project_slug = ""
+            parts = Path(src).parts
+            if len(parts) >= 2 and parts[0] == "projects":
+                project_slug = parts[1]
+            try:
+                src_path = config.vault / src
+                if src_path.is_file():
+                    parsed = page.parse(src_path.read_text(encoding="utf-8"), Path(src))
+                    for f in parsed.facts:
+                        if f.line == line_idx:
+                            heading = f.section
+                            break
+            except Exception:
+                pass
+            if not heading:
+                heading = f"line {line_idx}"
+            hit = Hit(
+                path=src,
+                description=f"links to [[{b['target']}]]",
+                snippet=context,
+                collection=index.PAGES,
+                heading=heading,
+                project=project_slug,
+                rank=0.0,
+            )
+            hits.append(hit)
+        if query:
+            q_lower = query.lower()
+            hits = [h for h in hits if q_lower in h.snippet.lower() or q_lower in h.path.lower()]
+        return hits[:limit]
 
     fts5_query = _to_fts5_query(query)
     if not fts5_query:
@@ -336,9 +376,17 @@ def _scope(collection: str, narrow_id: str | None) -> tuple[str, list[Any]]:
     return "", []
 
 
+def search_links(config: Config, target: str, *, limit: int = 8) -> list[Hit]:
+    """Query backlinks to a target as search hits."""
+    return search(config, links=target, limit=limit)
+
+
+backlinks = index.backlinks
+
+
 def search_command(
     config: Config,
-    query: str,
+    query: str = "",
     *,
     project: str | None = None,
     all_projects: bool = False,
@@ -346,6 +394,7 @@ def search_command(
     reports: bool = False,
     as_json: bool = False,
     limit: int = 8,
+    links: str | None = None,
 ) -> int:
     """Run search and print one tab-separated line per hit.
 
@@ -364,6 +413,7 @@ def search_command(
         archive=archive,
         reports=reports,
         limit=limit,
+        links=links,
     )
     if as_json:
         print(json.dumps([h.to_dict() for h in hits], indent=2))
@@ -395,13 +445,26 @@ def read_page(config: Config, path_str: str, level: str = "full") -> str:
         raise SearchError(f"{path_str} is not UTF-8 text: {exc}") from exc
 
     if level == "full":
-        return text
+        content = text
     elif level == "outline":
-        return _extract_outline(text)
+        content = _extract_outline(text)
     elif level == "abstract":
-        return _extract_abstract(text, path)
+        content = _extract_abstract(text, path)
     else:
         raise SearchError(f"unknown level {level!r}; expected outline, abstract, or full")
+
+    try:
+        rel_path = path.relative_to(config.vault.resolve()).as_posix()
+        blinks = index.backlinks(config, rel_path)
+        if blinks:
+            referencing = sorted({b["source_path"] for b in blinks})
+            backlink_lines = [f"- {src}" for src in referencing]
+            section = "\n\n## Backlinks / Referenced In\n\n" + "\n".join(backlink_lines) + "\n"
+            content = content.rstrip("\n") + section
+    except Exception:
+        pass
+
+    return content
 
 
 def read_command(config: Config, path: str, level: str = "full") -> int:

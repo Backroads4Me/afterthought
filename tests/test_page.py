@@ -329,3 +329,23 @@ def test_frontmatter_errors():
     assert page.split_frontmatter("---\n- a\n---\n")[3] == "frontmatter must be a mapping"
     assert page.split_frontmatter("---\ntype: x\n")[3] == "frontmatter has no closing ---"
     assert page.split_frontmatter("# no frontmatter\n")[0] is None
+
+
+def test_extract_wikilinks():
+    assert page.extract_wikilinks("No links here.") == []
+    assert page.extract_wikilinks("Simple [[target]] link.") == ["target"]
+    assert page.extract_wikilinks("Aliased [[target|My Alias]] link.") == ["target"]
+    assert page.extract_wikilinks("Multiple [[one]] and [[two|alias]] links.") == ["one", "two"]
+
+
+def test_fact_and_page_wikilinks():
+    body = (
+        "## Facts\n"
+        "- Uses [[references/sqlite]] for storage. [stated] 2026-09-28 [^a]\n"
+        "- Connects to [[projects/api|API]] and [[references/sqlite]]. [observed] 2026-09-29 [^b]\n"
+    )
+    result = parse(fact_page(body))
+    assert result.facts[0].links == ["references/sqlite"]
+    assert result.facts[1].links == ["projects/api", "references/sqlite"]
+    assert result.links == ["references/sqlite", "projects/api"]
+    assert result.wikilinks() == ["references/sqlite", "projects/api"]

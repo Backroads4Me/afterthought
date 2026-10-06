@@ -128,6 +128,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from aft import db, inject, lint, page, vault
 from aft.config import Config
@@ -281,8 +282,11 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: a struck line there stays unreachable under ``--archive`` until the file is rebuilt.
 #: ``rows-5`` is the build whose collections stem their words (``TOKENIZER``): an index from
 #: ``rows-4`` holds whole words only, so a query for "pause" would miss "paused" there.
-BUILD_STAMP = "rows-5"
+#: ``rows-6`` introduces ``page_links`` for wikilink resolution and backlink tracking.
+BUILD_STAMP = "rows-6"
 BUILD_TABLE = "build"
+LINKS_TABLE = "page_links"
+
 
 #: One row, keyed so a build replaces its own stamp instead of leaving a second behind: a file
 #: is written by one build at a time.
@@ -332,6 +336,9 @@ _DELETE_KEYS_BY_PATH = {
     name: f"DELETE FROM {name} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
     for name in COLLECTIONS
 }
+_DELETE_LINKS_BY_PATH = (
+    f"DELETE FROM {LINKS_TABLE} WHERE source_path IN (SELECT first FROM {_TEMP_KEYS})"
+)
 _DELETE_KEYS_BY_ENTRY = {
     name: f"DELETE FROM {name}"
     f" WHERE (session_id, entry_id) IN (SELECT first, second FROM {_TEMP_KEYS})"
@@ -339,6 +346,7 @@ _DELETE_KEYS_BY_ENTRY = {
 }
 _DROP_HASH = f"DELETE FROM {FILES_TABLE} WHERE path = ?"
 _DROP_HASHES = f"DELETE FROM {FILES_TABLE} WHERE path IN (SELECT first FROM {_TEMP_KEYS})"
+
 # What the index recorded about each evidence row: the key it was stored under, the digest of
 # its stored payload, the fields the row copied out of the archive beside it, and the
 # collection the row answers from. A row is read again when any of it moved. The state is read
@@ -371,6 +379,7 @@ _RESET_FILE_ROWS: tuple[str, ...] = (
     *(f"DELETE FROM {name}" for name in FILE_COLLECTIONS),
     f"DELETE FROM {LIBRARY}",
     f"DELETE FROM {FILES_TABLE}",
+    f"DELETE FROM {LINKS_TABLE}",
 )
 
 # The schema: a table of what each file hashed out as and when it was read, a table of the
@@ -382,6 +391,11 @@ _CREATE_FILES = (
 )
 _CREATE_ORIGINS = (
     f"CREATE TABLE IF NOT EXISTS {ORIGINS_TABLE} (input TEXT PRIMARY KEY, digest TEXT NOT NULL)"
+)
+_CREATE_PAGE_LINKS = (
+    f"CREATE TABLE IF NOT EXISTS {LINKS_TABLE} ("
+    "source_path TEXT, target TEXT, target_path TEXT, line_index INT, "
+    "PRIMARY KEY(source_path, target, line_index))"
 )
 #: Words are stemmed with SQLite's own Porter stemmer over its unicode61 tokenizer, so a
 #: search for "pause" finds "paused" and "configure" finds "configured" (BUILD-PLAN F61).
@@ -398,13 +412,14 @@ _SCHEMA_TABLES: tuple[tuple[str, str], ...] = (
     (FILES_TABLE, _CREATE_FILES),
     (ORIGINS_TABLE, _CREATE_ORIGINS),
     (BUILD_TABLE, _CREATE_BUILD),
+    (LINKS_TABLE, _CREATE_PAGE_LINKS),
     *((name, _CREATE_COLLECTION.format(collection=name)) for name in COLLECTIONS),
 )
 # A rebuild drops every table before it recreates them, so nothing an earlier update got wrong
 # survives into it (DESIGN 14); an ordinary update only creates what is missing.
 _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
     (name, f"DROP TABLE IF EXISTS {name}")
-    for name in (*COLLECTIONS, FILES_TABLE, ORIGINS_TABLE, BUILD_TABLE)
+    for name in (*COLLECTIONS, FILES_TABLE, ORIGINS_TABLE, BUILD_TABLE, LINKS_TABLE)
 )
 
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
@@ -607,6 +622,7 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         for collection, file_rows in rows.items():
             for row in file_rows:
                 _insert(conn, collection, row)
+        _sync_page_links(conn, config, rel, current.text)
         conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
     conn.execute(_RECORD_ORIGIN, (PROJECTS_ORIGIN, projects.digest))
     return report
@@ -796,6 +812,7 @@ def _drop_paths(conn: sqlite3.Connection, rels: list[str]) -> None:
     _fill_keys(conn, ((rel, "") for rel in rels))
     for collection in by_collection:
         conn.execute(_DELETE_KEYS_BY_PATH[collection])
+    conn.execute(_DELETE_LINKS_BY_PATH)
     conn.execute(_DROP_HASHES)
 
 
@@ -1633,3 +1650,174 @@ def _enter_wal(conn: sqlite3.Connection, path: Path) -> None:
 
 def _db_path(config: Config) -> Path:
     return config.home / INDEX_NAME
+
+
+def resolve_target_path(vault_root: Path, target: str) -> str | None:
+    """Resolve a wikilink target to a vault-relative path if a matching page exists."""
+    t = target.split("#", 1)[0].strip()
+    if not t:
+        return None
+    p = Path(t)
+    candidates = [
+        t,
+        f"{t}.md",
+        f"{t}/overview.md",
+    ]
+    if len(p.parts) == 1:
+        candidates.extend(
+            [
+                f"references/{t}.md",
+                f"references/{t}",
+                f"global/{t}.md",
+                f"projects/{t}/overview.md",
+                f"projects/{t}",
+            ]
+        )
+    elif len(p.parts) == 2 and p.parts[0] == "projects":
+        candidates.append(f"{t}/overview.md")
+
+    for cand in candidates:
+        cand_path = vault_root / cand
+        if cand_path.is_file():
+            try:
+                return cand_path.relative_to(vault_root).as_posix()
+            except ValueError:
+                return cand
+
+    target_clean = t.removesuffix(".md")
+    for md_file in vault_root.rglob("*.md"):
+        try:
+            rel = md_file.relative_to(vault_root).as_posix()
+        except ValueError:
+            continue
+        if rel == t or rel == f"{t}.md" or rel.removesuffix(".md") == target_clean:
+            return rel
+        if md_file.stem == target_clean:
+            return rel
+
+    return None
+
+
+def _sync_page_links(conn: sqlite3.Connection, config: Config, rel: str, text: str) -> None:
+    """Parse wikilinks from page rows/facts and insert into page_links."""
+    for line_idx, line in enumerate(text.splitlines(), start=1):
+        targets = page.extract_wikilinks(line)
+        if not targets:
+            continue
+        seen: set[str] = set()
+        for target in targets:
+            if target in seen:
+                continue
+            seen.add(target)
+            target_path = resolve_target_path(config.vault, target)
+            conn.execute(
+                f"INSERT OR REPLACE INTO {LINKS_TABLE} "
+                "(source_path, target, target_path, line_index) VALUES (?, ?, ?, ?)",
+                (rel, target, target_path, line_idx),
+            )
+
+
+def _find_vault(db_target: sqlite3.Connection | Config) -> Path | None:
+    if isinstance(db_target, Config):
+        return db_target.vault
+    try:
+        cur = db_target.execute("PRAGMA database_list")
+        row = cur.fetchone()
+        if row and row[2]:
+            home = Path(row[2]).parent
+            from aft import config as config_mod
+
+            return config_mod.load(environ={config_mod.HOME_ENV: str(home)}).vault
+    except Exception:
+        pass
+    try:
+        from aft import config as config_mod
+
+        return config_mod.load().vault
+    except Exception:
+        pass
+    return None
+
+
+def backlinks(db_target: sqlite3.Connection | Config, target: str) -> list[dict[str, Any]]:
+    """Return source paths and line contexts referencing the given target."""
+    if isinstance(db_target, Config):
+        with _reading(db_target) as conn:
+            return _backlinks_conn(conn, target, config=db_target)
+    return _backlinks_conn(db_target, target, config=None)
+
+
+get_backlinks = backlinks
+
+
+def _backlinks_conn(
+    conn: sqlite3.Connection, target: str, config: Config | None = None
+) -> list[dict[str, Any]]:
+    vault_root = config.vault if config is not None else _find_vault(conn)
+    t = target.split("#", 1)[0].strip()
+    candidates: set[str] = {t}
+    if t.endswith(".md"):
+        candidates.add(t[:-3])
+    else:
+        candidates.add(f"{t}.md")
+
+    p = Path(t)
+    candidates.add(p.stem)
+    if len(p.parts) == 1:
+        candidates.add(f"references/{t}")
+        candidates.add(f"references/{t}.md")
+        candidates.add(f"global/{t}")
+        candidates.add(f"global/{t}.md")
+        candidates.add(f"projects/{t}/overview.md")
+    elif len(p.parts) == 2 and p.parts[0] == "projects":
+        candidates.append(f"{t}/overview.md")
+
+    if vault_root is not None:
+        resolved = resolve_target_path(vault_root, t)
+        if resolved:
+            candidates.add(resolved)
+            candidates.add(resolved.removesuffix(".md"))
+            candidates.add(Path(resolved).stem)
+
+    cand_list = list(candidates)
+    placeholders = ", ".join("?" for _ in cand_list)
+    sql = (
+        f"SELECT source_path, target, target_path, line_index FROM {LINKS_TABLE} "
+        f"WHERE target IN ({placeholders}) OR target_path IN ({placeholders}) "
+        "ORDER BY source_path, line_index"
+    )
+    rows = conn.execute(sql, (*cand_list, *cand_list)).fetchall()
+
+    results: list[dict[str, Any]] = []
+    file_cache: dict[str, list[str]] = {}
+    for row in rows:
+        source_path = row[0]
+        tgt = row[1]
+        tgt_path = row[2]
+        line_index = row[3]
+        context = ""
+        if vault_root is not None:
+            if source_path not in file_cache:
+                src_file = vault_root / source_path
+                if src_file.is_file():
+                    try:
+                        file_cache[source_path] = src_file.read_text(encoding="utf-8").splitlines()
+                    except Exception:
+                        file_cache[source_path] = []
+                else:
+                    file_cache[source_path] = []
+            lines = file_cache[source_path]
+            if 1 <= line_index <= len(lines):
+                context = lines[line_index - 1].strip()
+
+        results.append(
+            {
+                "source_path": source_path,
+                "target": tgt,
+                "target_path": tgt_path,
+                "line_index": line_index,
+                "context": context,
+                "line_context": context,
+            }
+        )
+    return results
