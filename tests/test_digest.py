@@ -628,6 +628,82 @@ def test_base_digest_refuses_a_short_quote_cropped_from_a_longer_sentence(sessio
     assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
 
 
+def test_base_digest_refuses_a_short_quote_that_ends_in_a_full_stop(session: Session):
+    """A short quote ending in a period is no sentence of its own when it was cropped out
+    of a longer one: the period the quote carries is not proof it was whole."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "We should never use Docker."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Never use Docker.",
+                quote="use Docker.",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_keeps_a_short_quote_that_is_the_whole_sentence(session: Session):
+    """A short quote that is the whole sentence the user said, written without its
+    terminal period, is no fragment."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Always use uv."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Always use uv.",
+                quote="Always use uv",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["Always use uv"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_statement_on_line_one_of_an_unpunctuated_turn(session: Session):
+    """A line break is a sentence boundary: a statement on the first line of a turn
+    without punctuation is not read with the question on the line below it."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "always use uv for installs\nwhat about poetry?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Use uv for installs.",
+                quote="always use uv for installs",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["always use uv for installs"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
 def test_base_digest_keeps_a_short_approval_quote(session: Session):
     """R2: an approval's yes is short by nature and is never refused as a fragment."""
     write_records(
@@ -3834,3 +3910,12 @@ def test_enclosing_sentence_skips_a_dot_inside_a_word():
         digest.enclosing_sentence("Pin requests to 2.31. Should we pin harder?", "pin harder")
         == "Should we pin harder?"
     )
+
+
+def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
+    """A line break closes a sentence the way a full stop does: the statement on one line
+    of an unpunctuated turn is not read with the question on the line below it."""
+    turn = "always use uv for installs\nwhat about poetry?"
+    assert digest.enclosing_sentence(turn, "use uv for installs") == "always use uv for installs"
+    assert digest.enclosing_sentence(turn, "installs") == "always use uv for installs"
+    assert digest.enclosing_sentence(turn, "what about poetry") == "what about poetry?"

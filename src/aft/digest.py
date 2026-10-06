@@ -1247,17 +1247,22 @@ def enclosing_sentence(text: str, quote: str) -> str:
     start = origin[place.start()]
     end = origin[place.end() - 1] + 1
     # The sentence runs from the boundary before the quote - the previous ., ? or !
-    # followed by whitespace, or the start of the text - to the boundary after it, so
-    # every sentence the quote overlaps lies inside the slice and a question mark in any
-    # of them is seen. A dot inside a word, a version or a filename is no boundary.
+    # followed by whitespace, a line break, or the start of the text - to the boundary
+    # after it, so every sentence the quote overlaps lies inside the slice and a question
+    # mark in any of them is seen. A line break is a boundary the same way: a turn written
+    # across lines without punctuation holds one sentence per line. A dot inside a word, a
+    # version or a filename is no boundary.
     sentence_start = 0
     for i in range(start - 1, -1, -1):
-        if text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+        if text[i] == "\n" or (text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace())):
             sentence_start = i + 1
             break
     sentence_end = len(text)
     for i in range(end, len(text)):
-        if text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+        if text[i] == "\n":
+            sentence_end = i
+            break
+        elif text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
             sentence_end = i + 1
             break
     return text[sentence_start:sentence_end].strip()
@@ -1915,21 +1920,24 @@ def verify(
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
         words = fact["quote"].split()
-        flat_quote = " ".join(fact["quote"].split())
+        flat_quote = " ".join(fact["quote"].split()).strip(".,;:!?\"'()")
+        flat_turn = " ".join(entry.text.split()).strip(".,;:!?\"'()")
+        enclosing = enclosing_sentence(entry.text, fact["quote"])
+        flat_enclosing = " ".join(enclosing.split()).strip(".,;:!?\"'()")
         if (
             fact["source"] == "stated"
             and not fact.get("proposal")
             and len(words) < 4
-            and not fact["quote"].rstrip().endswith((".", "!"))
-            and flat_quote != " ".join(entry.text.split())
-            and flat_quote != " ".join(enclosing_sentence(entry.text, fact["quote"]).split())
+            and flat_quote != flat_turn
+            and flat_quote != flat_enclosing
         ):
             # A quote of fewer than four words that is not a whole sentence is a fragment,
             # too little to stand behind a statement. A short quote that is the whole turn
-            # or the whole sentence it was cut from is no fragment: nothing of what was
-            # said is missing from it. A plain [stated] quote only: an approval's yes is
-            # short by nature (R2), and an observed quote reports what the session saw,
-            # such as an exit code or an error line.
+            # or the whole sentence it was cut from - the words compared without outer
+            # punctuation, so a sentence quoted without its full stop still matches - is
+            # no fragment: nothing of what was said is missing from it. A plain [stated]
+            # quote only: an approval's yes is short by nature (R2), and an observed quote
+            # reports what the session saw, such as an exit code or an error line.
             dropped.append(_refused(fact, QUOTE_TOO_SHORT))
             continue
         if fact["source"] == "stated" and entry.role != USER:
