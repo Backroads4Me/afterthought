@@ -482,6 +482,68 @@ def test_base_digest_refuses_quoted_question_for_stated_fact(session: Session):
     assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
 
 
+def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
+    """BUILD-PLAN F52: a quote cut out of an asking sentence is a question, even though
+    the crop itself holds no question mark."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we store digest at session end?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Store digest at session end.",
+                quote="store digest at session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
+def test_base_digest_refuses_a_trivial_quote(session: Session):
+    """A quote of fewer than four words that is not a whole sentence is too little to cite."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Capture runs at session end, not per turn.",
+                quote="session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Session):
+    """An observed statement's names are grounded in the entry it cites, as a stated one
+    is in the user's turn."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The hook writes rows into PostgreSQL.",
+                quote="Done: the hook writes one row and returns without calling a model.",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any("PostgreSQL" in d["reason"] for d in dropped)
+
+
 def test_base_digest_refuses_ungrounded_statement_for_stated_fact(session: Session):
     """BUILD-PLAN F52: the base pipeline grounds stated names and numbers in the entry."""
     wrote = digest_once(
@@ -1081,7 +1143,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
         answer(
             said(
                 statement="Ted prefers a plain hyphen.",
-                quote="session end",
+                quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
             ),
@@ -1126,7 +1188,7 @@ def test_a_global_fact_that_is_not_stated_carries_the_rule_it_will_be_skipped_fo
             ),
             said(
                 statement="Ted prefers a plain hyphen.",
-                quote="session end",
+                quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
             ),
@@ -2449,7 +2511,9 @@ def test_worker_session_digested_with_budget_left_after_primary(session: Session
                 entry="e1",
             )
         ),
-        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+        answer(
+            said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
+        ),
     )
     try:
         cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=500_000)
@@ -2501,7 +2565,13 @@ def test_worker_session_not_digested_when_primary_exhausts_budget(session: Sessi
                 entry="e1",
             )
         ),
-        answer(said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")),
+        answer(
+            said(
+                statement="Worker test passed.",
+                quote="Worker ran tests: failed with error.",
+                entry="w1",
+            )
+        ),
     )
     try:
         cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=250)
@@ -2726,7 +2796,7 @@ def test_redigesting_a_worker_session_keeps_its_role(session: Session, tmp_path)
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     worker_answer = answer(
-        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+        said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
     )
     fake, cfg = serve(session.cfg, worker_answer, worker_answer)
     try:
@@ -2891,7 +2961,7 @@ def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Ses
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     worker_answer = answer(
-        said(statement="Worker test passed.", quote="Worker ran tests", entry="w1")
+        said(statement="Worker test passed.", quote="Worker ran tests: all green.", entry="w1")
     )
     fake, cfg = serve(session.cfg, worker_answer, worker_answer)
     try:
@@ -3519,3 +3589,20 @@ def test_grounding_known_limit_plain_words_not_caught():
         "PostgreSQL"
     ]
     assert digest.ungrounded("Configure port 8080.", "Configure port 9090.") == ["8080"]
+
+
+def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
+    """A token holding a digit or symbol must be held exactly: near misses share its first
+    five characters and are not another form of it."""
+    assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-15.") == [
+        "2026-10-05"
+    ]
+    assert digest.ungrounded("Host is 192.168.100.200.", "Host is 192.168.100.133.") == [
+        "192.168.100.200"
+    ]
+    assert digest.ungrounded("Now on version 1.26.9.", "Now on version 1.26.4.") == ["1.26.9"]
+    assert digest.ungrounded("The limit is 300000.", "The limit is 30000.") == ["300000"]
+    # An exact hold still grounds a token, and an all-letter word still matches on its
+    # shared first five letters.
+    assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-05.") == []
+    assert digest.ungrounded("We use Postgres.", "We use PostgreSQL.") == []
