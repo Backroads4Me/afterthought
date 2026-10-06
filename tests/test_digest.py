@@ -534,6 +534,32 @@ def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session:
     assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
 
 
+def test_base_digest_refuses_quote_cropped_from_a_question_with_dots(session: Session):
+    """A dot inside a version is not a sentence boundary: the question a quote was cut
+    from is seen whole, and its question mark still refuses the fact (BUILD-PLAN F52)."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "Should we pin requests to 2.31 or later?"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Pin requests to 2.31 or later.",
+                quote="pin requests to",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
 def test_base_digest_refuses_a_trivial_quote(session: Session):
     """A quote of fewer than four words that is not a whole sentence is too little to cite."""
     wrote = digest_once(
@@ -542,6 +568,57 @@ def test_base_digest_refuses_a_trivial_quote(session: Session):
             said(
                 statement="Capture runs at session end, not per turn.",
                 quote="session end",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"].startswith("the quote is too short to cite") for d in dropped)
+
+
+def test_base_digest_keeps_a_short_quote_that_is_the_whole_turn(session: Session):
+    """A short [stated] quote that is the user's whole turn is no fragment: it is
+    everything the turn said."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "always use uv"),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Always use uv.",
+                quote="always use uv",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["always use uv"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_refuses_a_short_quote_cropped_from_a_longer_sentence(session: Session):
+    """A quote of fewer than four words cut out of a longer sentence is a fragment, even
+    when the turn it sits in is short."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", "We should use uv for every install."),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Use uv for every install.",
+                quote="should use uv",
                 entry="e1",
             )
         ),
@@ -3714,14 +3791,46 @@ def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
     assert digest.ungrounded("We use Postgres.", "We use PostgreSQL.") == []
 
 
-def test_ungrounded_prefix_matches_a_purely_alphabetic_hyphenated_word():
-    """A word whose only symbol is a hyphen matches another form of itself on their shared
-    first five letters, as an all-letter word does; a hyphenated token holding a digit is
-    still held exactly."""
-    assert digest.ungrounded("We re-digest the session.", "We are re-digesting it now.") == []
-    assert digest.ungrounded("Add a follow-up.", "Follow-ups are welcome.") == []
-    assert digest.ungrounded("The stack is self-hosted.", "It stays self-hosting.") == []
+def test_ungrounded_holds_a_hyphenated_word_exactly():
+    """A token with a symbol or hyphen in it is held exactly; only a purely alphabetic
+    word matches another form of itself on their shared first five letters."""
+    assert digest.ungrounded("We re-digest the session.", "We are re-digesting it now.") == [
+        "re-digest"
+    ]
+    assert digest.ungrounded("Add a follow-up.", "Follow-ups are welcome.") == ["follow-up"]
+    assert digest.ungrounded("The stack is self-hosted.", "It stays self-hosting.") == [
+        "self-hosted"
+    ]
     # A hyphenated word is still checked: a word it is not another form of is missing.
     assert digest.ungrounded("Add a follow-up.", "Add a wrap-up.") == ["follow-up"]
     # A hyphenated token holding a digit is held exactly.
     assert digest.ungrounded("Pinned to v2-1-0.", "Pinned to v2-1-9.") == ["v2-1-0"]
+
+
+def test_ungrounded_demands_an_exact_hold_on_hyphenated_names():
+    """Hyphenated names that share an opening are different names: self-hosted does not
+    ground on self-managed, auto-merge on auto-rebase, x-api-key on x-api-token."""
+    assert digest.ungrounded("The stack is self-hosted.", "The stack is self-managed.") == [
+        "self-hosted"
+    ]
+    assert digest.ungrounded("Enable auto-merge.", "Enable auto-rebase.") == ["auto-merge"]
+    assert digest.ungrounded("Set x-api-key.", "Set x-api-token.") == ["x-api-key"]
+    # An exact hold still grounds a hyphenated word.
+    assert digest.ungrounded("The stack is self-hosted.", "The stack is self-hosted.") == []
+
+
+def test_enclosing_sentence_skips_a_dot_inside_a_word():
+    """A dot inside a version or a filename is not a sentence boundary: the sentence a
+    quote was cut from is taken whole, so a question mark after the dot is seen."""
+    question = "Should we pin requests to 2.31 or later?"
+    assert digest.enclosing_sentence(question, "pin requests to") == question
+    assert digest.enclosing_sentence(question, "2.31") == question
+    assert digest.enclosing_sentence(question, "31 or later") == question
+    asked = "Do we keep the setting in config.toml or drop it?"
+    assert digest.enclosing_sentence(asked, "keep the setting") == asked
+    assert digest.enclosing_sentence(asked, "config.toml") == asked
+    # A dot a sentence really ends on still closes it.
+    assert (
+        digest.enclosing_sentence("Pin requests to 2.31. Should we pin harder?", "pin harder")
+        == "Should we pin harder?"
+    )

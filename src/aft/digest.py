@@ -1132,14 +1132,15 @@ def relative_dates(text: str, when: datetime) -> set[date]:
 
 def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[str]:
     """The names and numbers of ``statement`` that ``said`` does not hold (BUILD-PLAN F52,
-    F55): a word holding a digit or a symbol beyond a hyphen, or a capital letter anywhere
-    but at the statement's start. Plain words say how, not what, and are not checked.
-    Punctuation around a word is set aside. A word whose only symbol is a hyphen matches
-    another form of itself on their shared first five letters, as an all-letter word does;
-    a token holding a digit or another symbol must be held exactly, because near misses
-    share its opening (2026-10-05 and 2026-10-15). A date computed from a relative
-    expression in ``said`` and the turn's ``when`` is grounded when written in ISO
-    (2026-10-06), 'October 6', or day-first (6 October) style (F59)."""
+    F55): a word holding a digit or a symbol, or a capital letter anywhere but at the
+    statement's start. Plain words say how, not what, and are not checked. Punctuation
+    around a word is set aside. Only a purely alphabetic word may match another form of
+    itself on their shared first five letters, as Postgres matches PostgreSQL; a token
+    holding a digit, a hyphen or any other symbol must be held exactly, because near
+    misses share its opening (2026-10-05 and 2026-10-15, self-hosted and self-managed).
+    A date computed from a relative expression in ``said`` and the turn's ``when`` is
+    grounded when written in ISO (2026-10-06), 'October 6', or day-first (6 October)
+    style (F59)."""
     if when is not None:
         allowed = relative_dates(said, when)
         if allowed:
@@ -1193,10 +1194,11 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
         )
         if not low or not distinctive or low in held:
             continue
-        if any(c.isdigit() or c in "_/.:" for c in low):
-            # A token holding a digit or a symbol beyond a hyphen is held exactly: its first
-            # five characters are shared by the near misses it must not ground (2026-10-05,
-            # 2026-10-15).
+        if not low.isalpha():
+            # A token holding a digit, a hyphen or any other symbol is held exactly: only
+            # a purely alphabetic word may match another form of itself on their shared
+            # first five letters, and near misses share a hyphenated opening as readily
+            # as a dated one (2026-10-05 and 2026-10-15, self-hosted and self-managed).
             missing.append(word.strip(".,;:!?\"'()"))
         elif not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
             missing.append(word.strip(".,;:!?\"'()"))
@@ -1244,17 +1246,18 @@ def enclosing_sentence(text: str, quote: str) -> str:
         return ""
     start = origin[place.start()]
     end = origin[place.end() - 1] + 1
-    # The sentence runs from the boundary before the quote - the previous ., ? or !, or
-    # the start of the text - to the boundary after it, so every sentence the quote
-    # overlaps lies inside the slice and a question mark in any of them is seen.
+    # The sentence runs from the boundary before the quote - the previous ., ? or !
+    # followed by whitespace, or the start of the text - to the boundary after it, so
+    # every sentence the quote overlaps lies inside the slice and a question mark in any
+    # of them is seen. A dot inside a word, a version or a filename is no boundary.
     sentence_start = 0
     for i in range(start - 1, -1, -1):
-        if text[i] in ".!?":
+        if text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
             sentence_start = i + 1
             break
     sentence_end = len(text)
     for i in range(end, len(text)):
-        if text[i] in ".!?":
+        if text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
             sentence_end = i + 1
             break
     return text[sentence_start:sentence_end].strip()
@@ -1912,16 +1915,21 @@ def verify(
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
         words = fact["quote"].split()
+        flat_quote = " ".join(fact["quote"].split())
         if (
             fact["source"] == "stated"
             and not fact.get("proposal")
             and len(words) < 4
             and not fact["quote"].rstrip().endswith((".", "!"))
+            and flat_quote != " ".join(entry.text.split())
+            and flat_quote != " ".join(enclosing_sentence(entry.text, fact["quote"]).split())
         ):
             # A quote of fewer than four words that is not a whole sentence is a fragment,
-            # too little to stand behind a statement. A plain [stated] quote only: an
-            # approval's yes is short by nature (R2), and an observed quote reports what
-            # the session saw, such as an exit code or an error line.
+            # too little to stand behind a statement. A short quote that is the whole turn
+            # or the whole sentence it was cut from is no fragment: nothing of what was
+            # said is missing from it. A plain [stated] quote only: an approval's yes is
+            # short by nature (R2), and an observed quote reports what the session saw,
+            # such as an exit code or an error line.
             dropped.append(_refused(fact, QUOTE_TOO_SHORT))
             continue
         if fact["source"] == "stated" and entry.role != USER:
