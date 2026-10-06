@@ -374,11 +374,17 @@ def run_project(
         ]
         if new_fact.source == "stated":
             user_quotes = [
-                str(sources_map.get(e.source, {}).get("quote", ""))
+                (
+                    str(sources_map.get(e.source, {}).get("quote", "")),
+                    _turn_text(config, e.resource),
+                )
                 for e in verified_evidence
                 if e.yours
             ]
-            if any("?" in q for q in user_quotes):
+            if any(
+                "?" in q or (turn is not None and "?" in digest.enclosing_sentence(turn, q))
+                for q, turn in user_quotes
+            ):
                 report.rejected.append(
                     RejectedFact(
                         statement=new_fact.statement,
