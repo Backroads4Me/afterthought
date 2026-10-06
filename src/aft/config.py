@@ -98,7 +98,7 @@ class DreamConfig:
 
 @dataclass(frozen=True)
 class WorkConfig:
-    """The cap on one day of ``aft work``. DESIGN 13 expects about 55,000 input tokens a
+    """The cap on one day of ``aft run``. DESIGN 13 expects about 55,000 input tokens a
     day of digests plus a smaller amount of dreaming; four times that bounds a loop that
     has gone wrong without ever parking an ordinary day's work."""
 
@@ -387,7 +387,7 @@ short_term_sessions = 5
 short_term_days = 7
 
 [work]
-# Tokens one day of "aft work" may spend before the rest of the queue waits for
+# Tokens one day of "aft run" may spend before the rest of the queue waits for
 # tomorrow. An ordinary day of digests is about 55,000, so this is about four times
 # that: enough for a heavy day, short enough to bound a run that has gone wrong.
 daily_token_budget = 200000

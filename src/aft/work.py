@@ -1,4 +1,4 @@
-"""``aft work``: the run that digests the queue, inside the day's budget (BUILD-PLAN M2.6).
+"""``aft run``: the run that digests the queue, inside the day's budget (BUILD-PLAN M2.6).
 
 Two steps, and the order is the point. The sweep goes first, so a session whose hook never
 fired is in this run's queue rather than the next one's (DESIGN 8); then the queue itself,

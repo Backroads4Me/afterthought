@@ -1,13 +1,13 @@
 """Install and uninstall afterthought's systemd user service and timer units (BUILD-PLAN M2.9).
 
-A systemd user timer triggers `aft work` periodically (every `dream.interval_minutes`,
+A systemd user timer triggers `aft run` periodically (every `dream.interval_minutes`,
 defaulting to 30 minutes) to process pending capture queues, generate digests, and dream.
 Because a systemd user service does not inherit the user's interactive shell environment,
 the service file loads an optional `EnvironmentFile=-%h/.afterthought/env`, where the
 model API key variable named in `model.api_key_env` can be configured.
 
-Capture hooks may also trigger `aft-work.service` early via:
-`systemctl --user start --no-block aft-work.service`, rate-limited to at most once
+Capture hooks may also trigger `aft-run.service` early via:
+`systemctl --user start --no-block aft-run.service`, rate-limited to at most once
 every 5 minutes.
 """
 
@@ -25,12 +25,14 @@ from typing import Any
 
 from aft.config import DEFAULT_HOME, Config, load
 
-SERVICE_NAME = "aft-work.service"
-TIMER_NAME = "aft-work.timer"
+SERVICE_NAME = "aft-run.service"
+TIMER_NAME = "aft-run.timer"
 UNIT_NAMES = (SERVICE_NAME, TIMER_NAME)
+LEGACY_SERVICE_NAME = "aft-work.service"
+LEGACY_TIMER_NAME = "aft-work.timer"
 DEFAULT_UNIT_DIR = Path(".config/systemd/user")
 EARLY_START_MINUTES = 5
-RATE_LIMIT_FILE = "last-work-trigger"
+RATE_LIMIT_FILE = "last-run-trigger"
 
 
 class InstallError(Exception):
@@ -96,25 +98,25 @@ def format_interval(interval_minutes: int) -> str:
 
 
 def service_content(aft_path: Path | str | None = None) -> str:
-    """The content of aft-work.service."""
+    """The content of aft-run.service."""
     executable = resolve_aft_path(aft_path)
     return f"""\
 [Unit]
-Description=Afterthought background work
+Description=Afterthought background run
 
 [Service]
 Type=oneshot
 EnvironmentFile=-%h/.afterthought/env
-ExecStart={executable} work
+ExecStart={executable} run
 """
 
 
 def timer_content(interval_minutes: int = 30) -> str:
-    """The content of aft-work.timer for the given interval in minutes."""
+    """The content of aft-run.timer for the given interval in minutes."""
     interval_spec = format_interval(interval_minutes)
     return f"""\
 [Unit]
-Description=Afterthought background work timer
+Description=Afterthought background run timer
 
 [Timer]
 OnBootSec=5min
@@ -177,10 +179,10 @@ def install(
     aft_path: Path | str | None = None,
     runner: Runner | None = None,
 ) -> Change:
-    """Write aft-work.service and aft-work.timer into target_dir, and enable the timer.
+    """Write aft-run.service and aft-run.timer into target_dir, and enable the timer.
 
     Writing the units is half an install: a timer that is not enabled never fires, so the
-    install reloads systemd and enables and starts ``aft-work.timer`` every time it runs,
+    install reloads systemd and enables and starts ``aft-run.timer`` every time it runs,
     whether or not the unit files changed. Both commands are safe to repeat.
     """
     directory = unit_dir(target_dir)
@@ -192,12 +194,15 @@ def install(
 
     service_path = directory / SERVICE_NAME
     timer_path = directory / TIMER_NAME
+    legacy_service = directory / LEGACY_SERVICE_NAME
+    legacy_timer = directory / LEGACY_TIMER_NAME
+    has_legacy = legacy_service.is_file() or legacy_service.is_symlink() or legacy_timer.is_file() or legacy_timer.is_symlink()
 
     existing_service = service_path.read_text(encoding="utf-8") if service_path.is_file() else None
     existing_timer = timer_path.read_text(encoding="utf-8") if timer_path.is_file() else None
 
     commands = _said(ENABLE_COMMANDS)
-    if existing_service == desired_service and existing_timer == desired_timer:
+    if existing_service == desired_service and existing_timer == desired_timer and not has_legacy:
         if dry_run:
             return Change(changed=False, units=(service_path, timer_path), commands=commands)
         active, problem = _apply(ENABLE_COMMANDS, directory, runner)
@@ -241,6 +246,12 @@ def install(
 
     try:
         directory.mkdir(parents=True, exist_ok=True)
+        if has_legacy:
+            if legacy_timer.is_file() or legacy_timer.is_symlink():
+                _apply((("systemctl", "--user", "disable", "--now", LEGACY_TIMER_NAME),), directory, runner)
+                legacy_timer.unlink(missing_ok=True)
+            if legacy_service.is_file() or legacy_service.is_symlink():
+                legacy_service.unlink(missing_ok=True)
         service_path.write_text(desired_service, encoding="utf-8")
         timer_path.write_text(desired_timer, encoding="utf-8")
     except OSError as exc:
@@ -272,26 +283,30 @@ def uninstall(
     directory = unit_dir(target_dir)
     service_path = directory / SERVICE_NAME
     timer_path = directory / TIMER_NAME
+    legacy = tuple(p for p in (directory / LEGACY_SERVICE_NAME, directory / LEGACY_TIMER_NAME) if p.is_file() or p.is_symlink())
 
     existing = tuple(p for p in (service_path, timer_path) if p.is_file() or p.is_symlink())
-    if not existing:
+    all_existing = existing + legacy
+    if not all_existing:
         return Change(changed=False, units=())
 
-    preview_text = f"would remove {', '.join(str(p) for p in existing)}"
+    preview_text = f"would remove {', '.join(str(p) for p in all_existing)}"
     commands = _said((*DISABLE_COMMANDS, RELOAD_COMMAND))
 
     if dry_run:
         return Change(
             changed=True,
-            units=existing,
+            units=all_existing,
             preview=preview_text,
             commands=commands,
         )
 
     active, problem = _apply(DISABLE_COMMANDS, directory, runner)
+    if any(p.name == LEGACY_TIMER_NAME for p in legacy):
+        _apply((("systemctl", "--user", "disable", "--now", LEGACY_TIMER_NAME),), directory, runner)
     removed: list[Path] = []
     try:
-        for p in existing:
+        for p in all_existing:
             p.unlink()
             removed.append(p)
     except OSError as exc:
@@ -332,7 +347,7 @@ def trigger_early(
     runner: Callable[[list[str]], Any] | None = None,
     force: bool = False,
 ) -> bool:
-    """Start aft-work.service early if at least 5 minutes have elapsed since the last trigger.
+    """Start aft-run.service early if at least 5 minutes have elapsed since the last trigger.
 
     ``force`` starts it whatever the last trigger was, as `aft resume` does. Paused
     background work is never started (BUILD-PLAN F38). A run with AFT_HOME set to a

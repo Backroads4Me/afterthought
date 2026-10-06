@@ -1,7 +1,7 @@
 """Pausing background work (BUILD-PLAN F38).
 
 A pause is state, not configuration: one marker file in the home directory saying since
-when and why. While it stands, `aft work` and `aft dream` exit at once, whatever started
+when and why. While it stands, `aft run` and `aft dream` exit at once, whatever started
 them (the timer, a session's end, or a person), and a session's end does not start the
 work service. Capture is untouched: hooks still queue each session and still print the
 memory block, so nothing is lost and `aft resume` picks the backlog up.

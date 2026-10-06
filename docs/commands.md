@@ -10,7 +10,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | `aft init` | Writes `~/.afterthought/config.toml` with the defaults if there is none, and creates the vault as a git repository. Safe to run again. |
 | `aft install claude [--dry-run] [--uninstall]` | Adds afterthought's `SessionStart`, `PreCompact` and `SessionEnd` hooks to `~/.claude/settings.json`, and installs the `aft` skill, which tells an agent how to use afterthought's commands. A copy of the skill under an earlier name (`library-import`, `aft-library-import`) is removed when it is one afterthought shipped. Leaves every other hook alone. `--dry-run` shows the change; `--uninstall` removes only afterthought's entries. |
 | `aft install pi [--dry-run] [--uninstall]` | Copies afterthought's extension into pi's extensions directory and installs the `aft` skill in pi's skills directory. |
-| `aft install timer [--dry-run] [--uninstall]` | Writes the systemd user units that run `aft work` every `dream.interval_minutes`, then enables and starts the timer. `--uninstall` stops and removes them. |
+| `aft install timer [--dry-run] [--uninstall]` | Writes the systemd user units that run `aft run` every `dream.interval_minutes`, then enables and starts the timer. `--uninstall` stops and removes them. |
 
 ## Projects
 
@@ -41,15 +41,15 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 
 ## Background work
 
-The timer runs `aft work`, which ends with a dream. Both can be run by hand.
+The timer runs `aft run`, which ends with a dream. Both can be run by hand.
 
 | Command | What it does |
 |---|---|
-| `aft work [--force]` | Sweeps for sessions no hook reported, then digests the queue until the day's token budget is spent, then dreams. Exits 1 when a job could not be digested, and 0 when the budget simply ran out. While paused it says so and does nothing, unless `--force` is given. |
+| `aft run [--force]` | Sweeps for sessions no hook reported, then digests the queue until the day's token budget is spent, then dreams. Exits 1 when a job could not be digested, and 0 when the budget simply ran out. While paused it says so and does nothing, unless `--force` is given. |
 | `aft dream [--force]` | Turns waiting digests into memory, one quiet project at a time, with one commit and one report section per project. Exits at once when no digest is waiting, or while paused unless `--force` is given. |
 | `aft budget` | Shows today's token use against `work.daily_token_budget`, what is left, and when the count starts again. |
 | `aft budget reset` | Starts today's count again from now, for when something spent the budget and has been fixed. The usage log is never changed; midnight UTC still starts the next day. |
-| `aft pause [REASON]` | Pauses background work: `aft work` and `aft dream` do nothing, whatever starts them, and a session's end no longer starts a run. Sessions are still captured and queued, and the memory block is still shown, so nothing is lost. Use it while the model server is down, while something in the pipeline looks wrong, or during a large edit of the vault. |
+| `aft pause [REASON]` | Pauses background work: `aft run` and `aft dream` do nothing, whatever starts them, and a session's end no longer starts a run. Sessions are still captured and queued, and the memory block is still shown, so nothing is lost. Use it while the model server is down, while something in the pipeline looks wrong, or during a large edit of the vault. |
 | `aft resume` | Ends the pause and starts a run for the backlog. |
 | `aft redigest SESSION` | Rebuilds a session's digest from the evidence archive, with the current prompt, checks and redaction patterns. The rebuilt digest is dreamed again. Counts against the daily budget. `aft redigest --unfiled [--dry-run]` is the backfill: every still-archived session whose digests sit under `_unfiled` is rebuilt to file under the project its recorded directory now resolves to; `--dry-run` lists the sessions and the tokens it would charge and writes nothing. |
 

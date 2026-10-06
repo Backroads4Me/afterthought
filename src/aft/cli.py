@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aft", description="Shared memory for coding agents.")
     parser.add_argument("--version", action="version", version=f"aft {__version__}")
-    sub = parser.add_subparsers(metavar="command")
+    sub = parser.add_subparsers(metavar="command", dest="subcommand")
 
     p = sub.add_parser("init", help="create the config file and the vault")
     p.set_defaults(handler=cmd_init)
@@ -125,11 +125,11 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_lint)
 
     p = sub.add_parser(
-        "work",
+        "run",
         help="sweep for missed sessions and digest queued work within the day's budget",
     )
     p.add_argument("--force", action="store_true", help="run once even while paused")
-    p.set_defaults(handler=cmd_work)
+    p.set_defaults(handler=cmd_run)
 
     p = sub.add_parser("notes", help="list the notes in memory waiting on the user's decision")
     p.add_argument("path", nargs="?", default=".", help="a directory of the project to ask about")
@@ -672,7 +672,7 @@ def cmd_import_claude_memory(args) -> int:
     return claude_memory.run(config, args.source, project=args.project, dry_run=args.dry_run)
 
 
-def cmd_work(args) -> int:
+def cmd_run(args) -> int:
     """Digest the queue within the day's budget, say how far the run got, then dream.
 
     A job that could not be digested is an exit status a timer can see, not a line only
@@ -683,13 +683,13 @@ def cmd_work(args) -> int:
 
     stopped = None if args.force else pause.paused(config)
     if stopped is not None:
-        print(f"aft work: {stopped.line()}")
+        print(f"aft run: {stopped.line()}")
         return 0
-    _budget_note(config, "work")
+    _budget_note(config, "run")
     report = work.run(config)
-    print(f"aft work: {report.line()}")
+    print(f"aft run: {report.line()}")
     for failure in report.failures:
-        print(f"aft work: {failure}", file=sys.stderr)
+        print(f"aft run: {failure}", file=sys.stderr)
     _dream(config)
     return 1 if report.failures else 0
 

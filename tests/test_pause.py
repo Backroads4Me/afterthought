@@ -29,16 +29,16 @@ def test_an_unreadable_marker_still_pauses(cfg):
     assert pause.paused(cfg) is not None
 
 
-def test_work_and_dream_do_nothing_while_paused(initialized, capsys, monkeypatch):
+def test_run_and_dream_do_nothing_while_paused(initialized, capsys, monkeypatch):
     ran = []
-    monkeypatch.setattr("aft.work.run", lambda config: ran.append("work"))
+    monkeypatch.setattr("aft.work.run", lambda config: ran.append("run"))
     monkeypatch.setattr("aft.cli._dream", lambda config: ran.append("dream"))
     pause.pause(initialized, "maintenance")
-    assert cli.main(["work"]) == 0
+    assert cli.main(["run"]) == 0
     assert cli.main(["dream"]) == 0
     assert ran == []
     out = capsys.readouterr().out
-    assert "aft work: paused since" in out and "maintenance" in out
+    assert "aft run: paused since" in out and "maintenance" in out
     assert "aft dream: paused since" in out
 
 

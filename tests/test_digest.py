@@ -1969,7 +1969,7 @@ def test_a_claim_lost_while_failing_a_job_reaches_the_command_too(
     queue.enqueue(cfg, event(gone, session.cwd, session_id="lost-1"))
     monkeypatch.setattr(digest, "digest_job", digest_after_it_is_taken)
     try:
-        code = cli.main(["work"])
+        code = cli.main(["run"])
         printed = capsys.readouterr()
     finally:
         fake.stop()
@@ -2062,11 +2062,11 @@ def test_an_index_written_by_another_build_stops_the_run_naming_the_index(
 
 
 def test_the_command_runs_the_work_and_says_what_it_did(session: Session, capsys):
-    """`aft work` is a command a person and a timer can run, not only a library call."""
+    """`aft run` is a command a person and a timer can run, not only a library call."""
     fake, cfg = serve(session.cfg, answer(said()))
     try:
         queue.enqueue(cfg, event(session.transcript, session.cwd))
-        code = cli.main(["work"])
+        code = cli.main(["run"])
     finally:
         fake.stop()
     assert code == 0
@@ -2080,7 +2080,7 @@ def test_the_work_reports_a_failure_as_a_nonzero_exit(session: Session, capsys):
     fake, cfg = serve(session.cfg, answer(said()))
     try:
         queue.enqueue(cfg, event(broken, session.cwd))
-        code = cli.main(["work"])
+        code = cli.main(["run"])
     finally:
         fake.stop()
     assert code == 1

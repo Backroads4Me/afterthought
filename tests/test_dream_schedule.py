@@ -448,13 +448,13 @@ def test_cli_dream(widget, initialized, capsys):
     assert capsys.readouterr().out == "aft dream: widget: 1 digest(s) taken up\n"
 
 
-def test_work_dreams_at_its_end(widget, initialized, capsys, monkeypatch):
+def test_run_dreams_at_its_end(widget, initialized, capsys, monkeypatch):
     digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
     monkeypatch.setattr(work.capture, "sweep", lambda config, moment: [])
     capsys.readouterr()
-    assert main(["work"]) == 0
+    assert main(["run"]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "aft work: 0 swept, 0 digested, 0 with nothing to digest",
+        "aft run: 0 swept, 0 digested, 0 with nothing to digest",
         "aft dream: widget: 1 digest(s) taken up",
     ]
 

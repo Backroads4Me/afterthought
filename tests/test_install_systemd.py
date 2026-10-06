@@ -46,7 +46,7 @@ def test_unit_file_contents(tmp_path: Path, cfg: Config) -> None:
 
     service_text = service_file.read_text(encoding="utf-8")
     assert "[Unit]" in service_text
-    assert "Description=Afterthought background work" in service_text
+    assert "Description=Afterthought background run" in service_text
     # The unit lands in the home of whoever runs aft, so it names no account or repository.
     assert "Documentation=" not in service_text
     assert "[Service]" in service_text
@@ -54,11 +54,11 @@ def test_unit_file_contents(tmp_path: Path, cfg: Config) -> None:
     assert "EnvironmentFile=-%h/.afterthought/env" in service_text
     real_aft = shutil.which("aft")
     assert real_aft is not None
-    assert f"ExecStart={Path(real_aft).resolve()} work" in service_text
+    assert f"ExecStart={Path(real_aft).resolve()} run" in service_text
 
     timer_text = timer_file.read_text(encoding="utf-8")
     assert "[Unit]" in timer_text
-    assert "Description=Afterthought background work timer" in timer_text
+    assert "Description=Afterthought background run timer" in timer_text
     assert "Documentation=" not in timer_text
     assert "[Timer]" in timer_text
     assert "OnBootSec=5min" in timer_text
@@ -230,7 +230,7 @@ def test_systemd_analyze_verify_timer(tmp_path: Path, cfg: Config) -> None:
     service_text = service_path.read_text(encoding="utf-8")
     real_aft = shutil.which("aft")
     assert real_aft is not None
-    assert f"ExecStart={Path(real_aft).resolve()} work" in service_text
+    assert f"ExecStart={Path(real_aft).resolve()} run" in service_text
 
     result = subprocess.run(
         ["systemd-analyze", "verify", str(timer_path)],

@@ -49,7 +49,7 @@ def test_work_runs_again_after_a_reset(cfg, monkeypatch, capsys):
     ran = []
     monkeypatch.setattr("aft.work.run", lambda config: ran.append(True) or _Report())
     monkeypatch.setattr("aft.cli._dream", lambda config: None)
-    assert cli.main(["work"]) == 0
+    assert cli.main(["run"]) == 0
     assert ran == [True]
     assert "the day's budget was reset at" in capsys.readouterr().out
 
