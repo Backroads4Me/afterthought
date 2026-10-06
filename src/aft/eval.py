@@ -18,9 +18,12 @@ holds itself to by default.
 
 from __future__ import annotations
 
+import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -241,3 +244,122 @@ def _shape(value: object) -> str:
     if isinstance(value, str):
         return f"the text {value[:30]!r}"
     return type(value).__name__
+
+
+def _hit_matches(hit: str, ground_truth: str) -> bool:
+    """Whether a retrieved hit matches the ground-truth target."""
+    if not hit or not ground_truth:
+        return False
+    if hit == ground_truth:
+        return True
+    if hit.casefold() == ground_truth.casefold():
+        return True
+    pattern = rf"(?:^|[\s/\\#._:-]){re.escape(ground_truth.casefold())}(?:$|[\s/\\#._:-])"
+    return bool(re.search(pattern, hit.casefold()))
+
+
+def compute_recall_at_k(ranked_hits: list[str], ground_truth: str, k: int) -> float:
+    """Compute retrieval Recall@K for a single ground-truth target."""
+    if k <= 0:
+        return 0.0
+    for hit in ranked_hits[:k]:
+        if _hit_matches(hit, ground_truth):
+            return 1.0
+    return 0.0
+
+
+def compute_ndcg_at_k(ranked_hits: list[str], ground_truth: str, k: int = 10) -> float:
+    """Compute ranking quality NDCG@K using 1.0 / math.log2(rank_idx + 2)."""
+    if k <= 0:
+        return 0.0
+    for rank_idx, hit in enumerate(ranked_hits[:k]):
+        if _hit_matches(hit, ground_truth):
+            return 1.0 / math.log2(rank_idx + 2)
+    return 0.0
+
+
+@dataclass
+class BenchmarkReport:
+    """Summary of multi-session retrieval recall and ranking metrics."""
+
+    recall_at_1: float = 0.0
+    recall_at_3: float = 0.0
+    recall_at_5: float = 0.0
+    recall_at_10: float = 0.0
+    ndcg_at_10: float = 0.0
+    avg_latency_ms: float = 0.0
+    peak_rss_mb: float = 0.0
+    total_queries: int = 0
+
+    def __init__(
+        self,
+        recall_at_1: float = 0.0,
+        recall_at_3: float = 0.0,
+        recall_at_5: float = 0.0,
+        recall_at_10: float = 0.0,
+        ndcg_at_10: float = 0.0,
+        avg_latency_ms: float = 0.0,
+        peak_rss_mb: float = 0.0,
+        total_queries: int = 0,
+        **kwargs: Any,
+    ) -> None:
+        self.recall_at_1 = float(kwargs.get("recall_1", recall_at_1))
+        self.recall_at_3 = float(kwargs.get("recall_3", recall_at_3))
+        self.recall_at_5 = float(kwargs.get("recall_5", recall_at_5))
+        self.recall_at_10 = float(kwargs.get("recall_10", recall_at_10))
+        self.ndcg_at_10 = float(kwargs.get("ndcg_10", ndcg_at_10))
+        self.avg_latency_ms = float(avg_latency_ms)
+        self.peak_rss_mb = float(peak_rss_mb)
+        self.total_queries = int(total_queries)
+
+    @property
+    def recall_1(self) -> float:
+        return self.recall_at_1
+
+    @property
+    def recall_3(self) -> float:
+        return self.recall_at_3
+
+    @property
+    def recall_5(self) -> float:
+        return self.recall_at_5
+
+    @property
+    def recall_10(self) -> float:
+        return self.recall_at_10
+
+    @property
+    def ndcg_10(self) -> float:
+        return self.ndcg_at_10
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "recall@1": self.recall_at_1,
+            "recall@3": self.recall_at_3,
+            "recall@5": self.recall_at_5,
+            "recall@10": self.recall_at_10,
+            "ndcg@10": self.ndcg_at_10,
+            "avg_latency_ms": self.avg_latency_ms,
+            "peak_rss_mb": self.peak_rss_mb,
+            "total_queries": self.total_queries,
+        }
+
+    def format_table(self) -> str:
+        lines = [
+            "=" * 44,
+            "LongMemEval-S Retrieval Benchmark Summary",
+            "=" * 44,
+            f"Queries evaluated : {self.total_queries}",
+            f"Recall@1          : {self.recall_at_1:.4f}",
+            f"Recall@3          : {self.recall_at_3:.4f}",
+            f"Recall@5          : {self.recall_at_5:.4f}",
+            f"Recall@10         : {self.recall_at_10:.4f}",
+            f"Session NDCG@10   : {self.ndcg_at_10:.4f}",
+            f"Avg Latency       : {self.avg_latency_ms:.2f} ms",
+            f"Peak RSS          : {self.peak_rss_mb:.2f} MB",
+            "=" * 44,
+        ]
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.format_table()

@@ -8,6 +8,9 @@ than merely find nothing.
 
 from __future__ import annotations
 
+import importlib.util
+import json
+import math
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,12 @@ from aft.cli import main
 from aft.config import Config
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
+
+_EVAL_SCRIPT = Path(__file__).resolve().parent.parent / "eval" / "longmemeval.py"
+_spec = importlib.util.spec_from_file_location("longmemeval", _EVAL_SCRIPT)
+assert _spec is not None and _spec.loader is not None
+longmemeval = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(longmemeval)
 
 HOST = "testhost"
 
@@ -425,3 +434,201 @@ def test_the_command_reads_the_vault_golden_set_and_exits_one_when_an_entry_fail
 def test_the_command_exits_two_when_the_set_cannot_be_read(memory: Config, tmp_path: Path, capsys):
     assert main(["eval", str(tmp_path / "nowhere.yaml")]) == 2
     assert "no golden set at" in capsys.readouterr().err
+
+
+def test_compute_recall_at_k():
+    hits = [
+        "session-1",
+        "session-2",
+        "session-3",
+        "session-4",
+        "session-5",
+        "session-6",
+        "session-7",
+        "session-8",
+        "session-9",
+        "session-10",
+        "session-11",
+    ]
+    # Rank 0 (first position)
+    assert evalmod.compute_recall_at_k(hits, "session-1", 1) == 1.0
+    assert evalmod.compute_recall_at_k(hits, "session-1", 3) == 1.0
+    assert evalmod.compute_recall_at_k(hits, "session-1", 5) == 1.0
+    assert evalmod.compute_recall_at_k(hits, "session-1", 10) == 1.0
+
+    # Rank 1 (second position)
+    assert evalmod.compute_recall_at_k(hits, "session-2", 1) == 0.0
+    assert evalmod.compute_recall_at_k(hits, "session-2", 3) == 1.0
+    assert evalmod.compute_recall_at_k(hits, "session-2", 5) == 1.0
+
+    # Rank 4 (fifth position)
+    assert evalmod.compute_recall_at_k(hits, "session-5", 3) == 0.0
+    assert evalmod.compute_recall_at_k(hits, "session-5", 5) == 1.0
+
+    # Rank 9 (tenth position)
+    assert evalmod.compute_recall_at_k(hits, "session-10", 5) == 0.0
+    assert evalmod.compute_recall_at_k(hits, "session-10", 10) == 1.0
+
+    # Rank 10 (eleventh position)
+    assert evalmod.compute_recall_at_k(hits, "session-11", 10) == 0.0
+
+    # Missing item
+    assert evalmod.compute_recall_at_k(hits, "session-missing", 10) == 0.0
+
+    # Edge cases
+    assert evalmod.compute_recall_at_k(hits, "session-1", 0) == 0.0
+    assert evalmod.compute_recall_at_k(hits, "session-1", -1) == 0.0
+    assert evalmod.compute_recall_at_k([], "session-1", 5) == 0.0
+    assert evalmod.compute_recall_at_k(hits, "", 5) == 0.0
+
+    # Compound paths and word boundary checks
+    hit_1 = ["evidence/claude/session-1.jsonl#e-1"]
+    assert evalmod.compute_recall_at_k(hit_1, "session-1", 1) == 1.0
+    hit_10 = ["evidence/claude/session-10.jsonl#e-1"]
+    assert evalmod.compute_recall_at_k(hit_10, "session-1", 1) == 0.0
+
+
+def test_compute_ndcg_at_k():
+    hits = [
+        "session-1",
+        "session-2",
+        "session-3",
+        "session-4",
+        "session-5",
+        "session-6",
+        "session-7",
+        "session-8",
+        "session-9",
+        "session-10",
+        "session-11",
+    ]
+    # Rank 0: 1 / log2(0 + 2) = 1.0
+    assert evalmod.compute_ndcg_at_k(hits, "session-1", 10) == pytest.approx(1.0)
+
+    # Rank 1: 1 / log2(1 + 2) = 1 / log2(3)
+    assert evalmod.compute_ndcg_at_k(hits, "session-2", 10) == pytest.approx(1.0 / math.log2(3))
+
+    # Rank 2: 1 / log2(2 + 2) = 1 / 2 = 0.5
+    assert evalmod.compute_ndcg_at_k(hits, "session-3", 10) == pytest.approx(0.5)
+
+    # Rank 9: 1 / log2(9 + 2) = 1 / log2(11)
+    assert evalmod.compute_ndcg_at_k(hits, "session-10", 10) == pytest.approx(1.0 / math.log2(11))
+
+    # Rank 10 (eleventh hit) is beyond k=10
+    assert evalmod.compute_ndcg_at_k(hits, "session-11", 10) == 0.0
+
+    # Cutoff at smaller k
+    assert evalmod.compute_ndcg_at_k(hits, "session-3", 2) == 0.0
+
+    # Missing hit
+    assert evalmod.compute_ndcg_at_k(hits, "session-missing", 10) == 0.0
+
+    # Edge cases
+    assert evalmod.compute_ndcg_at_k(hits, "session-1", 0) == 0.0
+    assert evalmod.compute_ndcg_at_k([], "session-1", 10) == 0.0
+    assert evalmod.compute_ndcg_at_k(hits, "", 10) == 0.0
+
+
+def test_benchmark_report_dataclass():
+    report = evalmod.BenchmarkReport(
+        recall_at_1=0.8,
+        recall_at_3=0.9,
+        recall_at_5=0.95,
+        recall_at_10=1.0,
+        ndcg_at_10=0.85,
+        avg_latency_ms=12.5,
+        peak_rss_mb=45.2,
+        total_queries=10,
+    )
+    assert report.recall_1 == 0.8
+    assert report.recall_3 == 0.9
+    assert report.recall_5 == 0.95
+    assert report.recall_10 == 1.0
+    assert report.ndcg_10 == 0.85
+    assert report.avg_latency_ms == 12.5
+    assert report.peak_rss_mb == 45.2
+    assert report.total_queries == 10
+
+    d = report.to_dict()
+    assert d["recall@1"] == 0.8
+    assert d["recall@3"] == 0.9
+    assert d["recall@5"] == 0.95
+    assert d["recall@10"] == 1.0
+    assert d["ndcg@10"] == 0.85
+    assert d["avg_latency_ms"] == 12.5
+    assert d["peak_rss_mb"] == 45.2
+    assert d["total_queries"] == 10
+
+    table = report.format_table()
+    assert "LongMemEval-S Retrieval Benchmark Summary" in table
+    assert "Queries evaluated : 10" in table
+    assert "Recall@1          : 0.8000" in table
+    assert str(report) == table
+
+
+def test_longmemeval_runner_synthetic(tmp_path: Path):
+    fixture_data = {
+        "sessions": [
+            {
+                "session_id": "session-crypto",
+                "agent": "claude",
+                "project": "security",
+                "messages": [
+                    {"role": "user", "content": "How do we hash passwords?"},
+                    {
+                        "role": "assistant",
+                        "content": "We use Argon2id with 64MB memory cost for password hashing.",
+                    },
+                ],
+            },
+            {
+                "session_id": "session-cache",
+                "agent": "claude",
+                "project": "infra",
+                "messages": [
+                    {"role": "user", "content": "What is our caching strategy?"},
+                    {
+                        "role": "assistant",
+                        "content": "Redis 7 with LRU eviction and 2GB memory limit.",
+                    },
+                ],
+            },
+        ],
+        "queries": [
+            {
+                "question": "Argon2id password hashing memory cost",
+                "ground_truth": "session-crypto",
+            },
+            {
+                "question": "Redis caching strategy LRU eviction",
+                "ground_truth": "session-cache",
+            },
+        ],
+    }
+    dataset_file = tmp_path / "longmemeval_fixture.json"
+    dataset_file.write_text(json.dumps(fixture_data), encoding="utf-8")
+    output_file = tmp_path / "results.json"
+
+    report = longmemeval.run_benchmark(dataset_file, output_path=output_file)
+    assert report.total_queries == 2
+    assert report.recall_at_1 == 1.0
+    assert report.recall_at_3 == 1.0
+    assert report.recall_at_5 == 1.0
+    assert report.recall_at_10 == 1.0
+    assert report.ndcg_at_10 == pytest.approx(1.0)
+    assert report.avg_latency_ms >= 0.0
+    assert report.peak_rss_mb > 0.0
+
+    assert output_file.is_file()
+    saved = json.loads(output_file.read_text(encoding="utf-8"))
+    assert saved["recall@1"] == 1.0
+    assert "queries" in saved
+    assert len(saved["queries"]) == 2
+
+    # Test runner with limit=1
+    limited_report = longmemeval.run_benchmark(dataset_file, limit=1)
+    assert limited_report.total_queries == 1
+
+    # Test CLI invocation
+    rc = longmemeval.main(["--dataset", str(dataset_file), "--limit", "1"])
+    assert rc == 0
