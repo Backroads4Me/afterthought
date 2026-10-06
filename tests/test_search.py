@@ -1393,3 +1393,74 @@ def test_search_links_and_read_backlinks_section(
     # 4. Page without backlinks does not render Backlinks section
     no_backlinks_content = search.read_page(populated_vault, "projects/widget/notes.md")
     assert "## Backlinks / Referenced In" not in no_backlinks_content
+
+
+def test_search_query_stripping_preserves_page_results(populated_vault: Config) -> None:
+    """Temporal phrases are stripped from FTS5 lexical queries so pages still match."""
+    now = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+    # The file contains "titanium bolt" but not "past week" or "last 3 days"
+    hits = search.search(populated_vault, "titanium bolt past week", now=now)
+    assert any(h.path == "projects/widget/assembly.md" for h in hits)
+
+    hits_days = search.search(populated_vault, "titanium bolt last 3 days", now=now)
+    assert any(h.path == "projects/widget/assembly.md" for h in hits_days)
+
+
+def test_search_temporal_filtering_evidence(populated_vault: Config) -> None:
+    """Evidence queries filter by matching ISO date range boundaries."""
+    # Evidence entry was stored at 2026-09-28T12:00:00+00:00
+    hits_matching_date = search.search(
+        populated_vault, "plain SQLite storage 2026-09-28", all_projects=True
+    )
+    evidence_paths = [h.path for h in hits_matching_date if h.collection == "evidence"]
+    assert any("s-widget-1#e-1" in p for p in evidence_paths)
+
+    # Different date excludes the evidence entry from matching
+    hits_wrong_date = search.search(
+        populated_vault, "plain SQLite storage 2026-09-10", all_projects=True
+    )
+    wrong_evidence = [h.path for h in hits_wrong_date if h.collection == "evidence"]
+    assert not wrong_evidence
+
+
+def test_search_relative_temporal_filtering_evidence(populated_vault: Config) -> None:
+    """Relative temporal queries filter evidence by calculated start/end dates."""
+    # Entry timestamp is 2026-09-28
+    now_same_day = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+    hits_today = search.search(
+        populated_vault, "plain SQLite storage today", all_projects=True, now=now_same_day
+    )
+    today_evidence = [h.path for h in hits_today if h.collection == "evidence"]
+    assert any("s-widget-1#e-1" in p for p in today_evidence)
+
+    # Yesterday relative to 2026-09-28 is 2026-09-27, so 2026-09-28 entry is excluded
+    hits_yesterday = search.search(
+        populated_vault, "plain SQLite storage yesterday", all_projects=True, now=now_same_day
+    )
+    yesterday_evidence = [h.path for h in hits_yesterday if h.collection == "evidence"]
+    assert not yesterday_evidence
+
+
+def test_search_since_temporal_filtering(populated_vault: Config) -> None:
+    """Since expressions filter evidence with time >= start without an upper bound."""
+    # Entry timestamp is 2026-09-28
+    hits_since_before = search.search(
+        populated_vault, "plain SQLite storage since 2026-09-25", all_projects=True
+    )
+    matching = [h.path for h in hits_since_before if h.collection == "evidence"]
+    assert any("s-widget-1#e-1" in p for p in matching)
+
+    hits_since_after = search.search(
+        populated_vault, "plain SQLite storage since 2026-09-29", all_projects=True
+    )
+    non_matching = [h.path for h in hits_since_after if h.collection == "evidence"]
+    assert not non_matching
+
+
+def test_search_command_temporal_cli(populated_vault: Config, capsys) -> None:
+    """search_command strips temporal expressions and formats results properly."""
+    now = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
+    ret = search.search_command(populated_vault, "titanium bolt past week", now=now)
+    assert ret == 0
+    out = capsys.readouterr().out
+    assert "projects/widget/assembly.md" in out

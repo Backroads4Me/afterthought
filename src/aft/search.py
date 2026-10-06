@@ -25,12 +25,14 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aft import evidence, index, inject, keys, page, vault
 from aft.config import Config
 from aft.registry import Registry
+from aft.temporal import TemporalConstraint, parse_temporal
 
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
 _HEADING = re.compile(r"^#{1,6}\s")
@@ -83,13 +85,19 @@ _TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 2 END"
 SINGLE_ROW_COLLECTIONS: tuple[str, ...] = (index.EVIDENCE,)
 
 
+#: The collections whose rows carry an explicit timestamp in the identity time column.
+COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
+
+
 def _ask(
     conn: sqlite3.Connection,
     collections: list[str],
-    fts5_query: str,
+    query: str,
     narrow_id: str | None,
     tier0_id: str | None,
     limit: int,
+    *,
+    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Ask each collection for its ``limit`` best-ranked documents, best tier and row first.
 
@@ -118,8 +126,25 @@ def _ask(
     than for the kept few. So the kept rowids are asked for by name in their own collection,
     which is a seek measured at 0.1 ms where snippet-izing all 11 000 matches costs 50 ms.
     """
+    tc = parse_temporal(query, now=now)
+    fts5_query = _to_fts5_query(tc.stripped_query) if tc.stripped_query else None
+    if fts5_query is None and not (tc.start or tc.end):
+        return []
+
+    time_clauses: list[str] = []
+    time_params: list[str] = []
+    if tc.start is not None:
+        time_clauses.append("time >= ?")
+        time_params.append(tc.start.isoformat())
+    if tc.end is not None:
+        time_clauses.append("time <= ?")
+        time_params.append(tc.end.isoformat())
+
     rows: list[dict[str, Any]] = []
     for col in collections:
+        if fts5_query is None and col not in COLLECTIONS_WITH_TIMESTAMPS:
+            continue
+
         clause, extra = _scope(col, narrow_id)
         shared = col in index.GLOBAL_COLLECTIONS
         if narrow_id is not None and not shared:
@@ -134,15 +159,32 @@ def _ask(
             # and tier 2.
             tier_args = [tier0_id if tier0_id is not None else ""]
 
+        if col in COLLECTIONS_WITH_TIMESTAMPS and time_clauses:
+            time_filter = " AND " + " AND ".join(time_clauses)
+            time_args = list(time_params)
+        else:
+            time_filter = ""
+            time_args = []
+
+        if fts5_query is not None:
+            match_cond = f"{col} MATCH ?"
+            match_args = [fts5_query]
+        else:
+            match_cond = "1=1"
+            match_args = []
+
+        where_cond = f"{match_cond}{clause}{time_filter}"
+        where_args = [*match_args, *extra, *time_args]
+
         if col in SINGLE_ROW_COLLECTIONS:
             # One row per document: the fold below has nothing to fold, and skipping it is
             # the difference between reading the matches once and sorting them twice.
             keep = conn.execute(
                 f"SELECT rowid AS rid, path, description, heading, project_id,"
                 f" {index.rank_expression(col)} AS score, {tier} AS tier"
-                f" FROM {col} WHERE {col} MATCH ?{clause}"
+                f" FROM {col} WHERE {where_cond}"
                 " ORDER BY tier ASC, score ASC LIMIT ?",
-                (*tier_args, fts5_query, *extra, limit),
+                (*tier_args, *where_args, limit),
             ).fetchall()
         else:
             keep = conn.execute(
@@ -151,9 +193,9 @@ def _ask(
                 f" row_number() OVER (PARTITION BY path ORDER BY tier, score) AS best"
                 f" FROM (SELECT rowid AS rid, path, description, heading, project_id,"
                 f" {index.rank_expression(col)} AS score, {tier} AS tier"
-                f" FROM {col} WHERE {col} MATCH ?{clause})) WHERE best = 1"
+                f" FROM {col} WHERE {where_cond})) WHERE best = 1"
                 " ORDER BY tier ASC, score ASC LIMIT ?",
-                (*tier_args, fts5_query, *extra, limit),
+                (*tier_args, *where_args, limit),
             ).fetchall()
         if not keep:
             continue
@@ -162,8 +204,8 @@ def _ask(
         snippets = dict(
             conn.execute(
                 f"SELECT rowid, snippet({col}, -1, '', '', '...', 16) FROM {col}"
-                f" WHERE {col} MATCH ?{clause} AND rowid IN ({rowids})",
-                (fts5_query, *extra, *(row["rid"] for row in keep)),
+                f" WHERE {where_cond} AND rowid IN ({rowids})",
+                (*where_args, *(row["rid"] for row in keep)),
             ).fetchall()
         )
         rows.extend(
@@ -194,6 +236,8 @@ def search(
     reports: bool = False,
     limit: int = 8,
     links: str | None = None,
+    now: datetime | None = None,
+    tc: TemporalConstraint | None = None,
 ) -> list[Hit]:
     """Query the search index with BM25 ranking across active collections.
 
@@ -245,8 +289,10 @@ def search(
             hits = [h for h in hits if q_lower in h.snippet.lower() or q_lower in h.path.lower()]
         return hits[:limit]
 
-    fts5_query = _to_fts5_query(query)
-    if not fts5_query:
+    if tc is None:
+        tc = parse_temporal(query, now=now)
+    fts5_query = _to_fts5_query(tc.stripped_query) if tc.stripped_query else None
+    if not fts5_query and not (tc.start or tc.end):
         return []
 
     registry = Registry.load(config.registry_path)
@@ -288,7 +334,7 @@ def search(
         if not active_collections:
             return []
 
-        rows = _ask(conn, active_collections, fts5_query, narrow_id, tier0_id, limit)
+        rows = _ask(conn, active_collections, query, narrow_id, tier0_id, limit, now=now)
 
         slugs = {proj.id: proj.slug for proj in registry.projects}
         seen_paths: set[str] = set()
@@ -395,6 +441,7 @@ def search_command(
     as_json: bool = False,
     limit: int = 8,
     links: str | None = None,
+    now: datetime | None = None,
 ) -> int:
     """Run search and print one tab-separated line per hit.
 
@@ -405,6 +452,7 @@ def search_command(
     evidence hit's path carries the entry id, which is what makes `aft trace <path>` open
     it.
     """
+    tc = parse_temporal(query, now=now)
     hits = search(
         config,
         query,
@@ -414,6 +462,8 @@ def search_command(
         reports=reports,
         limit=limit,
         links=links,
+        now=now,
+        tc=tc,
     )
     if as_json:
         print(json.dumps([h.to_dict() for h in hits], indent=2))
