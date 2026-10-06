@@ -25,8 +25,9 @@ item labelled question, proposal, request or none.
   it hints at what they want. A question is never a decision.
 - proposal: the user floats an idea or thinks aloud without settling it ("maybe we could",
   "I'm considering").
-- request: an instruction for the task at hand only ("run the tests", "investigate why X",
-  "squash-merge it", "fix it"), with nothing that lasts beyond the task.
+- request: an instruction for the task at hand or momentary session pacing ("run the tests",
+  "investigate why X", "squash-merge it", "fix it", "don't start new agents right now",
+  "go ahead", "pause for now", "park this for now"), with nothing that stands as a permanent rule.
 - none: anything else: thanks, pasted material (a document, a log, another agent's message),
   a reply with no content.
 
@@ -50,8 +51,10 @@ other labels:
 - scope: global only for a preference or a fact about the user's environment that holds for
   every project; otherwise project.
 - term: long when it will still be true and useful the next time someone opens this
-  project; short when it is true now but will change as the work moves on (something paused,
-  a temporary setting). When unsure, use short.
+  project; short when it is an explicit project-level condition that changes how future
+  sessions act (a temporary setting, a feature freeze, a disabled service), not progress
+  on the work or immediate task pacing. When unsure whether an item lasts beyond this session,
+  do not extract it as a fact.
 - quote: the user's exact words that settle it, copied character for character from USER,
   at most 200 characters.
 

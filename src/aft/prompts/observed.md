@@ -11,7 +11,8 @@ placeholder. An ERROR entry holds the error lines a failed command left.
 Keep only what a future session could not learn by reading the code or the git history: what
 the session saw about the machine, its setup, its tools, or the project's environment that
 no file in the repository records. Skip what the session did, what the user decided, routine
-steps, file listings, and code.
+steps, file listings, and code. Never extract agent harness mechanics, internal agent
+coordination rules, worker timeouts, worker worktrees, or session monitoring crons.
 
 The words to quote are the assistant's own words, or the error lines a failed command left.
 
@@ -22,7 +23,8 @@ For each item:
   300 characters. Do not paraphrase or join words from different entries.
 - entry: the label of the entry the quote comes from, such as #3.
 - term: long when it will still be true the next time someone opens this project; short
-  when it is true now but will change as the work moves on. When unsure, use short.
+  when it is an explicit project-level condition that changes how future sessions act. When
+  unsure whether an item lasts beyond this session, do not extract it.
 
 Write only about what the entries say. Never invent an item, a quote, or an entry label.
 Never write placeholder text such as "..."; leave the items empty when there is nothing.
