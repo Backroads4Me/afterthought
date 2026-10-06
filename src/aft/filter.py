@@ -49,6 +49,34 @@ from aft.redact import compile_patterns, redact
 MAX_CHARS = 1500
 CAP_MARKER = " [...]"
 
+FILTERED_INJECTION = "[filtered injection attempt]"
+
+_INVISIBLE_CHARS = re.compile(r"[\u200B-\u200D\u2060\uFEFF\u202A-\u202E]")
+
+_INJECTION_PATTERNS = (
+    r"(?i)\bignore\s+(?:previous|all|above|prior)\s+instructions\b",
+    r"(?i)\bsystem\s+prompt\s+override\b",
+    r"(?i)\byou\s+are\s+now\s+(?:an?\s+unrestricted|in\s+developer\s+mode)\b",
+    r"(?i)\bdisregard\s+(?:all|any|your)\s+(?:rules|instructions|guidelines)\b",
+)
+_INJECTION_COMPILED: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern) for pattern in _INJECTION_PATTERNS
+)
+
+
+def sanitize_text(text: str) -> str:
+    """Strip invisible and bidirectional override characters from text."""
+    return _INVISIBLE_CHARS.sub("", text)
+
+
+def strip_injections(text: str) -> str:
+    """Neutralize high-confidence injection override patterns in text."""
+    text = sanitize_text(text)
+    for pattern in _INJECTION_COMPILED:
+        text = pattern.sub(FILTERED_INJECTION, text)
+    return text
+
+
 # A tool entry the agent flagged as an error keeps this many leading characters whatever
 # is in them, so the head of a failure a run reported survives even when its lines match
 # none of the patterns below (M2.3). The rest of the entry keeps only those lines.
@@ -134,6 +162,10 @@ def filter_entries(
     outside, off_record = _outside_spans(entries, off_record)
     kept: list[Entry] = []
     for entry in outside:
+        text = sanitize_text(entry.text)
+        if entry.role != USER:
+            text = strip_injections(text)
+        entry = replace(entry, text=text)
         text = _kept_text(entry, patterns, builtin=builtin)
         if text is None:
             continue
@@ -160,11 +192,12 @@ def _outside_spans(entries: Iterable[Entry], off_record: bool) -> tuple[list[Ent
     """
     outside: list[Entry] = []
     for entry in entries:
+        text = sanitize_text(entry.text)
         if entry.role == USER:
-            if OFF_MARKER.match(entry.text):
+            if OFF_MARKER.match(text):
                 off_record = True
                 continue
-            if ON_MARKER.match(entry.text):
+            if ON_MARKER.match(text):
                 off_record = False
                 continue
         if not off_record:
