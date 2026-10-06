@@ -281,8 +281,8 @@ def watch(monkeypatch: pytest.MonkeyPatch, prefix: str) -> list[str]:
     seen: list[str] = []
     real = index._connect
 
-    def traced(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
-        conn = real(config, rebuild=rebuild)
+    def traced(config: Config, *args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = real(config, *args, **kwargs)
         conn.set_trace_callback(lambda sql: seen.append(sql) if sql.startswith(prefix) else None)
         return conn
 
@@ -1000,44 +1000,49 @@ def test_reindex_drops_what_no_file_or_row_justifies(initialized: Config) -> Non
     assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
 
 
-def test_an_index_written_by_another_build_names_the_repair_rather_than_answering(
-    initialized: Config, monkeypatch: pytest.MonkeyPatch
+def test_an_index_written_by_another_build_is_automatically_rebuilt(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """What a row *is* is decided by the code that wrote it, not by the file holding it, so an
-    carried across an upgrade answers rows nothing vouches for as though they were current. The
-    file states which build wrote it, and a build that is not that one refuses with the repair in
-    the sentence, naming the build it did find, rather than adding rows of its own to rows it
-    cannot vouch for."""
+    """When a build stamp mismatch occurs, the index is automatically rebuilt from scratch
+    under the write lock rather than raising SearchIndexError."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
 
-    written = index.BUILD_STAMP
     monkeypatch.setattr(index, "BUILD_STAMP", "the-next-build")
-    with pytest.raises(index.SearchIndexError, match=f"written by build {written}.*aft reindex"):
-        index.update(initialized)
+    with caplog.at_level("INFO"):
+        assert index.update(initialized) == []
+    assert "rebuilding search index" in caplog.text
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
 
-    # the rebuild is the repair, and it leaves the rows it rebuilt
-    assert index.reindex(initialized) == []
-    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+
+def test_search_automatically_rebuilds_on_build_stamp_bump(
+    initialized: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Search queries trigger auto-reindex when the build stamp is bumped."""
+    from aft.search import search
+
+    rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
 
+    monkeypatch.setattr(index, "BUILD_STAMP", "the-next-build")
+    hits = search(initialized, "SQLite")
+    assert len(hits) > 0
+    assert hits[0].path == rel
 
-def test_an_index_holding_rows_that_never_said_who_wrote_them_names_the_repair(
-    initialized: Config,
+
+def test_an_index_holding_rows_that_never_said_who_wrote_them_is_automatically_rebuilt(
+    initialized: Config, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An index written before the file said anything about its build holds rows and answers
-    nothing about them, which is the case the stamp exists to catch: the refusal says what is
-    unknown about the file, in other words than the one naming another build, and the rebuild is
-    what answers it."""
+    """An index written before the file said anything about its build is automatically rebuilt
+    on update rather than raising an error."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
     with _open(initialized) as conn:
         conn.execute(f"DROP TABLE {index.BUILD_TABLE}")
 
-    with pytest.raises(index.SearchIndexError, match="before an index said which build wrote"):
-        index.update(initialized)
-    assert index.reindex(initialized) == []
+    with caplog.at_level("INFO"):
+        assert index.update(initialized) == []
+    assert "rebuilding search index" in caplog.text
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
 
 

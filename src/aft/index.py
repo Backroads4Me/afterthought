@@ -121,6 +121,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import zlib
@@ -134,6 +135,8 @@ from aft import db, inject, lint, page, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError, path_key
+
+LOGGER = logging.getLogger(__name__)
 
 INDEX_NAME = "index.sqlite"
 
@@ -491,6 +494,14 @@ class _File:
     state: str
 
 
+def _is_current_build(conn: sqlite3.Connection) -> bool:
+    """Whether the index was written by the current build stamp."""
+    recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
+    if recorded is None:
+        return not conn.execute(_HOLDS_ROWS).fetchone()[0]
+    return recorded[0] == BUILD_STAMP
+
+
 def update(config: Config) -> list[str]:
     """Bring the index in step with the vault and the archive, leaving untouched rows alone.
 
@@ -506,6 +517,9 @@ def update(config: Config) -> list[str]:
     and a search that rebuilds it. `reindex` never asks: dropping the index is the one answer
     that does not depend on what moved.
 
+    When a build stamp mismatch occurs, the index is automatically rebuilt from scratch under
+    the write lock (reindex) rather than raising SearchIndexError.
+
     What it returns is the report: one line per file it could not read or parse, naming the
     file and the reason. None of those recorded a hash, so the next update reads them again.
 
@@ -513,7 +527,13 @@ def update(config: Config) -> list[str]:
     a file holding no rows at all has never been built and is written now
     (`_require_current_build`).
     """
-    with _reading(config) as probe:
+    with _reading(config, allow_mismatch=True) as probe:
+        if not _is_current_build(probe):
+            LOGGER.info(
+                "rebuilding search index at %s due to build stamp bump",
+                _db_path(config),
+            )
+            return reindex(config)
         if not _moved(probe, config):
             return []
     with _writing(config) as conn:
@@ -648,8 +668,8 @@ def _moved(conn: sqlite3.Connection, config: Config) -> bool:
     The content hash stays the authority for what a row *is*: this decides only whether to look,
     and a run that looks and finds the bytes unchanged rewrites nothing.
     """
-    if conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone() is None:
-        return True  # nothing has said which build wrote these rows: build them and say so
+    if not _is_current_build(conn):
+        return True
     filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
     if filed_by is None or filed_by[0] != _project_registry(config).digest:
         return True  # what said which project each page's rows belong to is not what it was
@@ -1527,7 +1547,7 @@ def _record_build(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def _reading(config: Config) -> Iterator[sqlite3.Connection]:
+def _reading(config: Config, *, allow_mismatch: bool = False) -> Iterator[sqlite3.Connection]:
     """One look at the index that asks for nothing: no write lock, no transaction held open.
 
     `update` uses this to ask whether anything moved at all (`_moved`) before it takes the lock
@@ -1537,7 +1557,7 @@ def _reading(config: Config) -> Iterator[sqlite3.Connection]:
     The connection is opened the same way a writing one is, so the build stamp is still asked
     before anything is read from the rows: an index another build wrote is refused here too,
     rather than read as though its rows meant what this build's would."""
-    conn = _connect(config)
+    conn = _connect(config, allow_mismatch=allow_mismatch)
     try:
         yield conn
     finally:
@@ -1594,7 +1614,9 @@ def _drain_log(conn: sqlite3.Connection, path: Path) -> None:
         )
 
 
-def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
+def _connect(
+    config: Config, *, rebuild: bool = False, allow_mismatch: bool = False
+) -> sqlite3.Connection:
     """Open the index, creating it on first use.
 
     Connections stay in autocommit so the only transaction is the one `_writing` opens by hand,
@@ -1618,7 +1640,7 @@ def _connect(config: Config, *, rebuild: bool = False) -> sqlite3.Connection:
         if _journal_mode(conn) != WAL_MODE:
             _enter_wal(conn, path)
         _create(conn)
-        if not rebuild:
+        if not rebuild and not allow_mismatch:
             _require_current_build(conn, path)
     except BaseException as exc:
         if conn is not None:
@@ -1742,6 +1764,7 @@ def _find_vault(db_target: sqlite3.Connection | Config) -> Path | None:
 def backlinks(db_target: sqlite3.Connection | Config, target: str) -> list[dict[str, Any]]:
     """Return source paths and line contexts referencing the given target."""
     if isinstance(db_target, Config):
+        update(db_target)
         with _reading(db_target) as conn:
             return _backlinks_conn(conn, target, config=db_target)
     return _backlinks_conn(db_target, target, config=None)
