@@ -1351,6 +1351,22 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `complete_json()` and `work.run()` fail-fast while active without network calls; `aft model cooldown`
   and `--clear` inspect and reset status; `aft budget reset` also clears cooldown. Tests in
   `tests/test_model.py` and `tests/test_work.py`. Review checkpoint: no.
+- **F67 Deterministic temporal query parsing in aft search** (ruling 2026-10-06). DESIGN 10
+  (search). Parse natural temporal language (today, yesterday, last 3 days, past week, 2026-09,
+  since Tuesday) in search queries deterministically without an LLM. Pure-Python regex parser in
+  `src/aft/temporal.py` extracts ISO start/end boundaries, strips temporal expressions from the
+  FTS5 lexical query string, and applies date range bounds to the SQLite query using the `time`
+  column. Tests in `tests/test_temporal.py` and `tests/test_search.py`. Review checkpoint: no.
+- **F68 Code-span masking for clean wikilink extraction** (ruling 2026-10-06). DESIGN 11 (library
+  and references). Ensure wikilink extraction (`[[target]]`, `[[target|alias]]`) in `src/aft/page.py`
+  masks fenced code blocks (``` or ~~~) and inline backtick code spans (`...`), preventing
+  false-positive graph edges from example snippets, shell commands, or diffs. Tests in
+  `tests/test_page.py`. Review checkpoint: no.
+- **F69 LongMemEval-S evaluation benchmark harness** (ruling 2026-10-06). Add reproducible
+  benchmarking runner in `eval/longmemeval.py` measuring retrieval recall (Recall@1, Recall@3,
+  Recall@5, Recall@10) and ranking quality (Session NDCG@10) across multi-session test sets in
+  isolated sandbox vaults. Metric calculation in `src/aft/eval.py` and CLI support in
+  `src/aft/cli.py` (`aft eval benchmark`). Tests in `tests/test_eval.py`. Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
