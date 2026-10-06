@@ -196,7 +196,12 @@ def install(
     timer_path = directory / TIMER_NAME
     legacy_service = directory / LEGACY_SERVICE_NAME
     legacy_timer = directory / LEGACY_TIMER_NAME
-    has_legacy = legacy_service.is_file() or legacy_service.is_symlink() or legacy_timer.is_file() or legacy_timer.is_symlink()
+    has_legacy = (
+        legacy_service.is_file()
+        or legacy_service.is_symlink()
+        or legacy_timer.is_file()
+        or legacy_timer.is_symlink()
+    )
 
     existing_service = service_path.read_text(encoding="utf-8") if service_path.is_file() else None
     existing_timer = timer_path.read_text(encoding="utf-8") if timer_path.is_file() else None
@@ -248,7 +253,11 @@ def install(
         directory.mkdir(parents=True, exist_ok=True)
         if has_legacy:
             if legacy_timer.is_file() or legacy_timer.is_symlink():
-                _apply((("systemctl", "--user", "disable", "--now", LEGACY_TIMER_NAME),), directory, runner)
+                _apply(
+                    (("systemctl", "--user", "disable", "--now", LEGACY_TIMER_NAME),),
+                    directory,
+                    runner,
+                )
                 legacy_timer.unlink(missing_ok=True)
             if legacy_service.is_file() or legacy_service.is_symlink():
                 legacy_service.unlink(missing_ok=True)
@@ -283,7 +292,11 @@ def uninstall(
     directory = unit_dir(target_dir)
     service_path = directory / SERVICE_NAME
     timer_path = directory / TIMER_NAME
-    legacy = tuple(p for p in (directory / LEGACY_SERVICE_NAME, directory / LEGACY_TIMER_NAME) if p.is_file() or p.is_symlink())
+    legacy = tuple(
+        p
+        for p in (directory / LEGACY_SERVICE_NAME, directory / LEGACY_TIMER_NAME)
+        if p.is_file() or p.is_symlink()
+    )
 
     existing = tuple(p for p in (service_path, timer_path) if p.is_file() or p.is_symlink())
     all_existing = existing + legacy
