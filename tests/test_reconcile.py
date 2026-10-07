@@ -292,6 +292,36 @@ def test_a_stated_preference_is_withdrawn_only_on_your_own_words(cfg, fake):
     )
 
 
+def test_an_agent_claim_without_tool_backing_cannot_withdraw_a_stated_line(cfg, fake):
+    """M2: an agent claim (assistant text without tool backing) is inferred and cannot
+    withdraw a user stated line under R4."""
+    session_digest(cfg, 10, waiting=True)
+    seed_recent(
+        cfg,
+        ["- The build command is uv run pytest. [stated] 2026-10-01 [^r0]"],
+        [source("r0", "s10", "The build command is uv run pytest.")],
+    )
+    entries = [
+        Entry(
+            id="e70",
+            time=NOW,
+            role=ASSISTANT,
+            text="The build command has changed to cargo test.",
+            is_error=False,
+        ),
+    ]
+    evidence.store(cfg, agent="c", session_id="s10", project_id=None, entries=entries)
+    fake.script = [answer(1, "The build command has changed to cargo test.", "#1")]
+    rep = schedule.run(cfg, now=NOW).reports[SLUG]
+    assert len(fake.requests) == 1
+    assert rep.withdrawn == []
+    assert [(r.rule, r.statement) for r in rep.refused] == [
+        ("R4", "The build command is uv run pytest.")
+    ]
+    assert "only on your own words or [observed] evidence" in rep.refused[0].reason
+    assert "The build command is uv run pytest. [stated] 2026-10-01 [^r0]" in recent_text(cfg)
+
+
 def test_your_own_newer_words_withdraw_your_preference(cfg, fake):
     """The authority table's positive row: your own later words replace your earlier ones,
     so a withdrawal on them happens."""

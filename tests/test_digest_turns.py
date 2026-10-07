@@ -122,9 +122,19 @@ def test_an_observed_item_is_kept_as_observed(session: Session):
         session,
         summary(),
         settled(),
+        {"items": [seen("The file was written.", "written", "e3#t1")]},
+    )
+    assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e3#t1")]
+
+
+def test_an_assistant_claim_without_tool_backing_becomes_inferred(session: Session):
+    wrote = run(
+        session,
+        summary(),
+        settled(),
         {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
     )
-    assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e2")]
+    assert [(f.source, f.entry) for f in wrote.facts] == [("inferred", "e2")]
 
 
 def test_a_later_stated_item_replaces_an_earlier_one(session: Session):
@@ -713,8 +723,8 @@ def test_an_item_the_verifier_confirms_is_kept(session: Session):
     assert "[#1] USER ITEM" in sent and "Capture runs at session end." in sent
     assert "[#2] ASSISTANT" in sent and ASSISTANT_ANSWER in sent
     # Two entries after the item's own: the second user turn is in, the last one is not.
-    assert "[#3] USER" in sent
-    assert "[#4]" not in sent, "the window holds the item's entry and two on each side"
+    assert "[#4] USER" in sent
+    assert "[#5]" not in sent, "the window holds the item's entry and two on each side"
 
 
 def test_an_item_the_verifier_finds_not_asserted_is_dropped(session: Session):
@@ -777,16 +787,15 @@ def test_the_check_never_asks_about_an_observed_item(session: Session):
         session,
         summary(),
         settled(SETTLED),
-        {"items": [seen("The hook writes one row and returns.", "the hook writes one row", "e2")]},
+        {"items": [seen("The file was written.", "written", "e3#t1")]},
         {"replacements": []},
         check(),
     )
-    assert [(f.source, f.entry) for f in wrote.facts] == [("stated", "e1"), ("observed", "e2")]
+    assert [(f.source, f.entry) for f in wrote.facts] == [("stated", "e1"), ("observed", "e3#t1")]
     # Summary, turns, observed, final state, and one check call: the observed item is
     # never asked about.
     assert len(fake.requests) == 5
-    assert "the hook writes one row" in fake.requests[-1]["messages"][1]["content"]
-    assert "The hook writes one row and returns." not in fake.requests[-1]["messages"][1]["content"]
+    assert "The file was written." not in fake.requests[-1]["messages"][1]["content"]
 
 
 def test_each_stated_item_gets_its_own_call_after_the_final_state(session: Session):

@@ -14,7 +14,7 @@ no file in the repository records. Skip what the session did, what the user deci
 steps, file listings, and code. Never extract agent harness mechanics, internal agent
 coordination rules, worker timeouts, worker worktrees, or session monitoring crons.
 
-The words to quote are the assistant's own words, or the error lines a failed command left.
+Only what a command's output, a file, or an error showed counts as observed. Quote the ERROR line, or the assistant's sentence reporting what a command or file showed (such as what a log, command, or file showed). The assistant's plans, intentions, guesses and explanations are not observations: leave them out.
 
 For each item:
 - statement: one sentence, in plain present tense, that stands on its own, calling the user

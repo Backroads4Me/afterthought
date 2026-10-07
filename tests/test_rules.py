@@ -931,6 +931,20 @@ def test_a_verified_quote_carries_the_replacement_however_the_fact_dates_itself(
     assert outcome == apply("supersede")
 
 
+def test_an_agent_claim_cannot_supersede_a_user_stated_procedure_or_fact():
+    """M2: an agent claim tagged [inferred] has no authority under R4 to supersede a
+    standing procedure or fact, and downgrades to a conflict note."""
+    for kind in ("procedure", "fact", "state"):
+        target = line(TARGET_BY_KIND[kind])
+        outcome = check(
+            decide("supersede"),
+            new_fact(source="inferred", date=NEWER),
+            target,
+            ctx(sig("a", NEWER)),
+        )
+        assert outcome == downgrade("conflict", "R4"), f"{kind} was not downgraded to conflict"
+
+
 def test_an_unverified_quote_newer_than_the_line_carries_no_replacement():
     outcome = check(
         decide("supersede"),

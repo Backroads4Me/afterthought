@@ -1967,6 +1967,15 @@ def verify(
                 )
                 continue
         if fact["source"] == "observed":
+            is_tool_entry = entry.role == TOOL or entry.is_error
+            has_tool_backing = is_tool_entry or any(
+                e.role == TOOL and evidence.find_quote(config, session_id, e.id, fact["quote"])
+                for e in part
+            )
+            if not has_tool_backing:
+                # An assistant claim without verified tool/error backing becomes gated [inferred].
+                fact = {**fact, "source": "inferred", "term": LONG}
+        if fact["source"] in ("observed", "inferred"):
             missing = ungrounded(fact["statement"], entry.text, when=entry.time)
             if missing:
                 dropped.append(
