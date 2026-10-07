@@ -245,7 +245,7 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
                     doc.scrub_source(sid, marker=FORGOTTEN_MARKER)
 
                 if doc.render() != original_text:
-                    p.write_text(doc.render(), encoding="utf-8")
+                    pagewrite.atomic_write_text(p, doc.render())
                     if rel not in pages_modified:
                         pages_modified.append(rel)
                     lines_withdrawn.extend(withdrawn_on_page)
@@ -360,7 +360,7 @@ def _scrub_archive_pages(
 
         scrubbed_text = "\n".join(scrubbed_lines)
         if scrubbed_text != original_text:
-            path.write_text(scrubbed_text, encoding="utf-8")
+            pagewrite.atomic_write_text(path, scrubbed_text)
             changed.append(path.relative_to(config.vault).as_posix())
     return changed
 
@@ -421,7 +421,7 @@ def _scrub_report_pages(config: Config, words: list[str]) -> list[str]:
         for phrase in phrases:
             scrubbed = scrubbed.replace(phrase, FORGOTTEN_MARKER)
         if scrubbed != text:
-            path.write_text(scrubbed, encoding="utf-8")
+            pagewrite.atomic_write_text(path, scrubbed)
             changed.append(path.relative_to(config.vault).as_posix())
     return changed
 
@@ -490,6 +490,6 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
         if len(page.parse(redacted, path).errors) > len(page.parse(text, path).errors):
             refused.append(rel)
             continue
-        path.write_text(redacted, encoding="utf-8")
+        pagewrite.atomic_write_text(path, redacted)
         changed.append(rel)
     return changed, refused

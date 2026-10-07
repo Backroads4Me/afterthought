@@ -336,7 +336,7 @@ def run_project(
 
         for p, content in pre_run_content.items():
             try:
-                p.write_bytes(content)
+                pagewrite.atomic_write_bytes(p, content)
             except OSError:
                 pass
 
@@ -556,8 +556,8 @@ def run_project(
                 target_file = _recent_page(vault_path, page_slug)
                 record_write(target_file)
                 if not target_file.exists():
-                    target_file.write_text(
-                        _recent_text(page_slug, project, run_project_id), "utf-8"
+                    pagewrite.atomic_write_text(
+                        target_file, _recent_text(page_slug, project, run_project_id)
                     )
             elif new_fact.scope == "global":
                 g_file = "preferences.md" if new_fact.kind == "preference" else "environment.md"
@@ -570,7 +570,7 @@ def run_project(
                         else vaultmod.ENVIRONMENT
                     )
                     record_write(target_file)
-                    target_file.write_text(content, encoding="utf-8")
+                    pagewrite.atomic_write_text(target_file, content)
                 else:
                     record_write(target_file)
             else:
@@ -580,7 +580,8 @@ def run_project(
                     proj_id = run_project_id or (project.id if project else f"p_{page_slug}")
                     proj_title = project.title if project else page_slug.capitalize()
                     record_write(overview_path)
-                    overview_path.write_text(
+                    pagewrite.atomic_write_text(
+                        overview_path,
                         f"---\n"
                         f"type: Project\n"
                         f"title: {proj_title}\n"
@@ -589,7 +590,6 @@ def run_project(
                         f"aft:\n"
                         f"  project: {proj_id}\n"
                         f"---\n",
-                        encoding="utf-8",
                     )
                 else:
                     record_write(overview_path)
@@ -772,7 +772,7 @@ def run_project(
                     )
 
             record_write(target_file)
-            target_file.write_text(doc.render(), encoding="utf-8")
+            pagewrite.atomic_write_text(target_file, doc.render())
         return True
 
     try:
@@ -859,7 +859,7 @@ def run_project(
                 daft["consumed"] = run_id
                 new_fm_yaml = yaml.safe_dump(dfm, sort_keys=False, allow_unicode=True).strip()
                 record_write(digest_path)
-                digest_path.write_text(f"---\n{new_fm_yaml}\n---\n{dbody}", encoding="utf-8")
+                pagewrite.atomic_write_text(digest_path, f"---\n{new_fm_yaml}\n---\n{dbody}")
             report.digests_consumed.append(digest_path.relative_to(vault_path).as_posix())
 
         # The short-term machinery edits ``projects/<page_slug>/recent.md``. Until the run
@@ -1097,7 +1097,7 @@ def _short_term(
         if cur_line is not None:
             doc.remove_short_term(cur_line)
             record_write(recent)
-            recent.write_text(doc.render(), encoding="utf-8")
+            pagewrite.atomic_write_text(recent, doc.render())
         report.lifted.append(LiftedFact(statement=statement, why=why))
 
     doc = pagewrite.PageDoc.read(recent, vault=vault_path)
@@ -1133,7 +1133,7 @@ def _short_term(
         changed = True
     if changed:
         record_write(recent)
-        recent.write_text(doc.render(), encoding="utf-8")
+        pagewrite.atomic_write_text(recent, doc.render())
 
 
 def _stored_long_term(
@@ -1215,7 +1215,7 @@ def expire_short_term(
     ):
         return None
     record_write(recent)
-    recent.write_text(doc.render(), encoding="utf-8")
+    pagewrite.atomic_write_text(recent, doc.render())
     return report, written
 
 

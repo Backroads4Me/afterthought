@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import re
 from collections import Counter
 from collections.abc import Iterator, Sequence
@@ -42,6 +43,38 @@ from pathlib import Path
 import yaml
 
 from aft import evidence, page, vault
+
+NEW_PAGE_MODE = 0o600
+"""The permissions of a page this module creates: the private mode the digest writer
+uses, so a page is never readable beyond its owner's account."""
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` so no reader ever sees a partial file.
+
+    The bytes go to a temporary file in the destination's own directory, and
+    ``os.replace`` moves it over the target in one step. A process that dies mid-write
+    leaves the previous content standing, and a reader meets either the old file or the
+    new one, never half of either. The replaced file keeps its permissions; a file
+    created here gets ``NEW_PAGE_MODE``. The temporary file is removed when the write
+    fails.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = (path.stat().st_mode & 0o777) if path.exists() else NEW_PAGE_MODE
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp.write_bytes(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Write ``text`` to ``path`` as :func:`atomic_write_bytes` writes bytes."""
+    atomic_write_bytes(path, text.encode(encoding))
+
 
 SIGNALS_GATE = 3
 SESSIONS_GATE = 2
@@ -887,17 +920,8 @@ class PageDoc:
         return header + "\n" + text
 
     def _write_archive(self, path: Path, was: bytes | None, now: bytes) -> None:
-        """Write the archive atomically, never truncating existing content (F1 fix)."""
-        import os
-
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-        try:
-            tmp.write_bytes(now)
-            os.replace(tmp, path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        """Write the archive atomically, never truncating existing content (F1)."""
+        atomic_write_bytes(path, now)
 
     # Lines and frontmatter
 
