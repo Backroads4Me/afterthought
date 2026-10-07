@@ -1698,3 +1698,52 @@ def test_the_counts_on_a_candidate_count_sessions_and_not_imported_copies(initia
         " (signals 1/3, sessions 1/2)"
     ) in doc.render()
     written(initialized, doc)
+
+
+def test_atomic_write_text_replaces_a_page_whole(tmp_path):
+    page_path = tmp_path / "overview.md"
+    page_path.write_text("before\n")
+    pagewrite.atomic_write_text(page_path, "after café\n")
+    assert page_path.read_text() == "after café\n"
+
+
+def test_atomic_write_creates_missing_directories(tmp_path):
+    page_path = tmp_path / "projects" / "widget" / "overview.md"
+    pagewrite.atomic_write_text(page_path, "after\n")
+    assert page_path.read_text() == "after\n"
+
+
+def test_an_atomic_write_that_fails_leaves_the_page_standing_and_no_temporary_behind(
+    tmp_path, monkeypatch
+):
+    """A write that dies part way never truncates the page it was replacing, and leaves no
+    half-written file beside it: the temporary goes with the failure."""
+    page_path = tmp_path / "overview.md"
+    page_path.write_text("before\n")
+    write, failures = Path.write_bytes, iter([OSError("no space left on device")])
+
+    def flaky(self, data, **kwargs):
+        error = next(failures, None)
+        if error is not None:
+            raise error
+        return write(self, data, **kwargs)
+
+    monkeypatch.setattr(Path, "write_bytes", flaky)
+    with pytest.raises(OSError, match="no space left on device"):
+        pagewrite.atomic_write_bytes(page_path, b"after\n")
+    assert page_path.read_text() == "before\n"
+    assert list(tmp_path.iterdir()) == [page_path]
+
+
+def test_an_atomic_write_keeps_the_replaced_page_s_permissions(tmp_path):
+    page_path = tmp_path / "overview.md"
+    page_path.write_text("before\n")
+    page_path.chmod(0o640)
+    pagewrite.atomic_write_text(page_path, "after\n")
+    assert page_path.stat().st_mode & 0o777 == 0o640
+
+
+def test_an_atomic_write_gives_a_new_page_the_private_page_mode(tmp_path):
+    page_path = tmp_path / "overview.md"
+    pagewrite.atomic_write_text(page_path, "after\n")
+    assert page_path.stat().st_mode & 0o777 == pagewrite.NEW_PAGE_MODE

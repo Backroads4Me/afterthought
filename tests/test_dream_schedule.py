@@ -777,3 +777,74 @@ def test_a_session_below_the_root_dates_the_name_its_record_settled(widget, init
     result = schedule.run(initialized, process, now=NOW)
     assert result.active == ["elsewhere-widgets"]
     assert process.calls == [], "a session below the root hid behind a fresh one"
+
+
+RECENT_PAGE = (
+    "---\ntype: Project\ntitle: t\ndescription: d\n"
+    "sources:\n  - {id: s1, resource: 'aft://session/c/s0#e1', quote: q}\n"
+    "aft:\n  project: p_1\n---\n\n"
+    "## State\n\n- The rewrite is paused. [observed] 2026-08-01 [^s1]\n"
+)
+
+
+def test_a_crashed_run_rolls_back_rather_than_checkpointing(widget, initialized):
+    """A dream run that died mid-write left its marker and its partial edits in the vault;
+    the next run rolls those back instead of committing them under the checkpoint message
+    (M8)."""
+    rel = digest(initialized, "widget", "a", "2026-09-29T08:00:00Z")
+    prefs = initialized.vault / "global" / "preferences.md"
+    was = prefs.read_text()
+    schedule.run_marker_path(initialized).write_text("crashed\n")
+    prefs.write_text(was + "\n- No RGB lighting.\n")
+    stray = initialized.vault / "projects" / "widget" / "leftover.md"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("half a page")
+    process = Recorder()
+    result = schedule.run(initialized, process, now=NOW)
+    assert "checkpoint: human edits" not in subjects(initialized)
+    assert prefs.read_text() == was
+    assert not stray.exists()
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""
+    assert not schedule.run_marker_path(initialized).exists()
+    assert result.ran == ["widget"]
+    assert process.calls == [("widget", [rel])]
+
+
+def test_a_crash_marker_with_a_clean_tree_rolls_nothing_back(initialized):
+    """A marker with no dirty tree behind it, left by a run that died before it wrote,
+    costs the next run nothing but the marker itself."""
+    schedule.run_marker_path(initialized).write_text("crashed\n")
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    assert not schedule.run_marker_path(initialized).exists()
+    assert result == schedule.Run()
+    assert "checkpoint: human edits" not in subjects(initialized)
+
+
+def test_a_run_that_dies_leaves_its_edits_to_the_next_run(widget, initialized, monkeypatch):
+    """A run that raises with its write uncommitted keeps its marker standing: the next
+    run rolls the partial edit back and does the work again, instead of committing the
+    dead run's bytes as a person's (M8)."""
+    recent = initialized.vault / "projects" / "widget" / "recent.md"
+    recent.parent.mkdir(parents=True, exist_ok=True)
+    recent.write_text(RECENT_PAGE)
+    vault.commit(initialized.vault, ["projects/widget/recent.md"], "seed recent")
+
+    original_commit = vault.commit
+
+    def die(vault_path, paths, message):
+        raise vault.VaultError("could not commit to the vault")
+
+    monkeypatch.setattr(vault, "commit", die)
+    with pytest.raises(vault.VaultError):
+        schedule.run(initialized, Recorder(), now=NOW)
+    assert schedule.run_marker_path(initialized).exists()
+    assert "The rewrite is paused." not in recent.read_text()
+    assert run_git(["status", "--porcelain"], initialized.vault) != ""
+    monkeypatch.setattr(vault, "commit", original_commit)
+    result = schedule.run(initialized, Recorder(), now=NOW)
+    assert not schedule.run_marker_path(initialized).exists()
+    assert result.expired == ["widget"]
+    assert "checkpoint: human edits" not in subjects(initialized)
+    assert subjects(initialized).count("aft: expire short-term memory widget") == 1
+    assert "The rewrite is paused." not in recent.read_text()
+    assert run_git(["status", "--porcelain"], initialized.vault) == ""

@@ -190,9 +190,9 @@ def settle(
             if archive_before is None:
                 archive.unlink(missing_ok=True)
             else:
-                archive.write_bytes(archive_before)
+                pagewrite.atomic_write_bytes(archive, archive_before)
             raise NoteError(f"cannot settle {rel}:{line}: {exc}") from None
-        path.write_text(rendered, encoding="utf-8")
+        pagewrite.atomic_write_text(path, rendered)
         message = f"aft: settle {rel}:{line} ({choice}): {statement_before[:60]}"
         changed = [rel, archive.relative_to(config.vault).as_posix()]
         from aft.dream import report
