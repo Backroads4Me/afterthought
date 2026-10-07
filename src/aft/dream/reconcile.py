@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 from aft import digest, evidence, model, page, pagewrite
 from aft.config import Config
 from aft.dream import rules, shortterm
-from aft.readers import USER
+from aft.readers import TOOL, USER
 
 if TYPE_CHECKING:
     from aft.dream.apply import ProjectRunReport
@@ -277,14 +277,20 @@ def _refused_withdrawal(
     they allow it.
 
     The answer's evidence is one verified quote out of the newest primary session, so it
-    travels to the rules as one quote whose tag follows the entry's role: ``stated`` when
-    the entry is one of your turns, ``observed`` otherwise. The verdict is the one a
+    travels to the rules as one quote whose tag follows the entry: ``stated`` when
+    the entry is one of your turns, ``observed`` for tool or error output, and
+    ``inferred`` for assistant claims. The verdict is the one a
     supersede of this line on this evidence gets, judged by the rules module's own
     ``_supersede``, so a withdrawal answers to the same authority table and R4 a supersede
     does (DESIGN 6). A refusal writes nothing: the note a downgraded supersede would write
     is the decide step's to settle, so the line stands and the report carries why.
     """
-    tagged = "stated" if entry.role == USER else "observed"
+    if entry.role == USER:
+        tagged = "stated"
+    elif entry.role == TOOL or entry.is_error:
+        tagged = "observed"
+    else:
+        tagged = "inferred"
     quote_date = f"{entry.time:%Y-%m-%d}"
     quote = rules.Evidence(
         source=entry.id,
@@ -309,6 +315,8 @@ def _refused_withdrawal(
     if not authorized:
         reason = (
             f"a {current.kind} line is withdrawn only on your own words"
+            if current.kind in ("preference", "decision")
+            else f"a {current.kind} line is withdrawn only on your own words or [observed] evidence"
             if current.kind
             else "the line has no kind the authority table gives a row"
         )

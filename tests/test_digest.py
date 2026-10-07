@@ -134,7 +134,14 @@ def write_transcript(path: Path, cwd: Path, *extra: dict) -> Path:
             "uuid": "e3",
             "timestamp": NOW.isoformat(),
             "message": {
-                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "written"}]
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "written",
+                        "is_error": True,
+                    }
+                ]
             },
         },
         record("e4", "user", SECOND_PROMPT),
@@ -165,6 +172,31 @@ def record(
     if model:
         message["model"] = model
     return {"type": role, "uuid": entry_id, "timestamp": when.isoformat(), "message": message}
+
+
+def tool_record(
+    entry_id: str,
+    tool_id: str,
+    content: str,
+    is_error: bool = True,
+    when: datetime = NOW,
+) -> dict:
+    """One tool result record of a Claude Code transcript, written at ``when``."""
+    return {
+        "type": "user",
+        "uuid": entry_id,
+        "timestamp": when.isoformat(),
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": content,
+                    "is_error": is_error,
+                }
+            ]
+        },
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -1453,8 +1485,8 @@ def test_a_global_fact_that_is_not_stated_carries_the_rule_it_will_be_skipped_fo
         answer(
             said(
                 statement="The archive is worth its size in quotes.",
-                quote="the hook writes one row",
-                entry="e2",
+                quote="written",
+                entry="e3#t1",
                 kind="state",
                 source="observed",
                 scope="global",
@@ -1646,7 +1678,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
             said(
                 statement=grown,
                 quote="one row per session",
-                entry="e6",
+                entry="e6#t1",
                 kind="state",
                 source="observed",
             )
@@ -1655,7 +1687,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
             said(
                 statement=ended,
                 quote="without a model call",
-                entry="e7",
+                entry="e7#t1",
                 kind="state",
                 source="observed",
             )
@@ -1664,10 +1696,10 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
     try:
         first = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         filed_first = (cfg.vault / page_path()).read_bytes()
-        append_records(session.transcript, record("e6", "user", grown))
+        append_records(session.transcript, tool_record("e6", "t1", grown))
         second = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         filed_second = (cfg.vault / f"{stem}-2.md").read_bytes()
-        append_records(session.transcript, record("e7", "user", ended))
+        append_records(session.transcript, tool_record("e7", "t1", ended))
         third = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
         asked = len(fake.requests)
         filed = pages(cfg)
@@ -1686,7 +1718,7 @@ def test_each_job_of_one_session_on_one_day_files_its_own_page(session: Session)
     assert "Capture runs at session end, not per turn. [stated]" in body(cfg, first.path)
     assert f"{grown} [observed]" in body(cfg, second.path)
     assert f"{ended} [observed]" in body(cfg, third.path)
-    assert watermark(cfg) == "e7"
+    assert watermark(cfg) == "e7#t1"
 
 
 def test_a_part_filed_while_the_model_answered_is_left_standing(
@@ -3436,7 +3468,7 @@ def test_a_run_purges_the_archive_past_its_window_and_the_index_forgets_it(sessi
         fake.stop()
     assert first.digested == 1
     assert first.purged == 0, "a run purged text that was still inside its window"
-    assert archived == 4
+    assert archived == 5
     assert before[indexmod.EVIDENCE] == 2, "the archive's own words are not searchable"
     assert later.purged == archived, "a run let past its window stay in the archive"
     assert evidence.entries(cfg, SESSION) == []
@@ -3764,15 +3796,53 @@ def test_a_long_and_a_short_fact_are_written_with_their_terms(session: Session):
         session,
         answer(
             said(),
-            said(statement="The hook rewrite is paused.", source="observed", term="short"),
+            said(
+                statement="The hook rewrite is written.",
+                quote="written",
+                entry="e3#t1",
+                source="observed",
+                term="short",
+            ),
         ),
     )
     kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
     assert [(f["statement"], f["term"]) for f in kept] == [
         ("Capture runs at session end, not per turn.", "long"),
-        ("The hook rewrite is paused.", "short"),
+        ("The hook rewrite is written.", "short"),
     ]
-    assert "The hook rewrite is paused. [observed]" in body(session.cfg, wrote.path)
+    assert "The hook rewrite is written. [observed]" in body(session.cfg, wrote.path)
+
+
+def test_assistant_prose_without_tool_backing_becomes_inferred_while_tool_output_stays_observed(
+    session: Session,
+):
+    """M2: an assistant prose statement without tool or error backing is marked inferred,
+    while an observation backed by a tool result or error output carries [observed]."""
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The hook rewrite is written.",
+                quote="written",
+                entry="e3#t1",
+                source="observed",
+            ),
+            said(
+                statement="The hook writes one row and returns without calling a model.",
+                quote="Done: the hook writes one row",
+                entry="e2",
+                source="observed",
+            ),
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The hook rewrite is written.", "observed"),
+        ("The hook writes one row and returns without calling a model.", "inferred"),
+    ]
+    page_body = body(session.cfg, wrote.path)
+    assert "The hook rewrite is written. [observed]" in page_body
+    assert "The hook writes one row and returns without calling a model. [inferred]" in page_body
 
 
 def test_a_fact_recorded_without_a_term_reads_as_long():
