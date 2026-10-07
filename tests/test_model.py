@@ -86,6 +86,45 @@ def test_invalid_output_is_retried_once(serve):
     assert len(fake.requests) == 2
 
 
+def test_a_schema_failure_sends_a_repair_turn_and_raises_the_temperature(serve):
+    """A retry is not the same ask again: the failed answer and the validator's reason go
+    back to the model as a repair turn, at a temperature raised off the first ask's."""
+    fake, cfg = serve({"answer": 7}, {"answer": "fixed"})
+    assert call(cfg) == {"answer": "fixed"}
+    assert len(fake.requests) == 2
+    assert fake.requests[0]["temperature"] == 0.0
+    assert fake.requests[1]["temperature"] == pytest.approx(model.RETRY_TEMPERATURE_STEP)
+    assert fake.requests[1]["messages"] == [
+        {"role": "system", "content": "You answer briefly."},
+        {"role": "user", "content": "Is it working?"},
+        {"role": "assistant", "content": json.dumps({"answer": 7})},
+        {
+            "role": "user",
+            "content": (
+                "Your previous response failed JSON schema validation: "
+                "$.answer should be string, found integer. "
+                "Please output valid JSON strictly conforming to the required schema."
+            ),
+        },
+    ]
+
+
+def test_the_retry_temperature_rises_by_the_step_and_stops_at_the_cap():
+    assert model.retry_temperature(0.0, 0) == 0.0
+    assert model.retry_temperature(0.0, 1) == pytest.approx(0.2)
+    assert model.retry_temperature(0.0, 2) == pytest.approx(0.4)
+    assert model.retry_temperature(0.0, 5) == pytest.approx(model.RETRY_TEMPERATURE_CAP)
+    # A base above the cap is a retry's floor as well: a retry never asks colder.
+    assert model.retry_temperature(0.9, 1) == pytest.approx(0.9)
+
+
+def test_a_5xx_retry_is_asked_at_the_raised_temperature(serve):
+    fake, cfg = serve(Reply(status=503), {"answer": "later"})
+    assert call(cfg) == {"answer": "later"}
+    assert fake.requests[0]["temperature"] == 0.0
+    assert fake.requests[1]["temperature"] == pytest.approx(model.RETRY_TEMPERATURE_STEP)
+
+
 def test_output_that_is_not_json_counts_as_invalid(serve):
     fake, cfg = serve(Reply(content="I would rather talk in prose."), {"answer": "ok"})
     assert call(cfg) == {"answer": "ok"}

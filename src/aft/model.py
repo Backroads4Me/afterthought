@@ -5,7 +5,10 @@ decoding is constrained by the schema the caller passed. vLLM and hosted endpoin
 both take that field as written. The answer is still checked with ``aft.schema``,
 because constrained decoding is a strong expectation rather than a guarantee:
 output that fails validation, and a 5xx, are each retried once before the call
-raises (DESIGN 14).
+raises (DESIGN 14). A retry is not the same ask again: a schema failure sends the
+model its own invalid answer beside the validator's reason as a repair turn, and
+each attempt after the first is asked at a temperature raised off the first ask's,
+so a model that repeats itself at temperature 0 is given room to answer differently.
 
 An endpoint that needs a key gets it from the environment variable named by
 ``model.api_key_env``, sent as a bearer token and kept out of every report (DESIGN 13).
@@ -43,6 +46,20 @@ MIN_KEY_CHARS = 16
 WITHHELD = "[details withheld]"
 # OpenAI requires the name of a json_schema response format to match [a-zA-Z0-9_-]{1,64}.
 SCHEMA_NAME = "aft"
+
+# A retry asks at a temperature raised by this step per attempt, capped here, because a
+# model asked twice for the same thing at temperature 0 tends to answer twice the same
+# way. A base above the cap is a retry's floor as well: a retry never asks colder than
+# the caller chose.
+RETRY_TEMPERATURE_STEP = 0.2
+RETRY_TEMPERATURE_CAP = 0.7
+
+# The repair turn a schema failure appends to the conversation: the model sees its own
+# invalid answer and the reason it failed before it is asked once more.
+REPAIR_TURN = (
+    "Your previous response failed JSON schema validation: {error}. "
+    "Please output valid JSON strictly conforming to the required schema."
+)
 
 # An endpoint that answered with a server error, a rate limit, or nothing at all is left
 # to cool down in this file: no call is made until the deadline passes, so a down
@@ -84,6 +101,10 @@ def complete_json(
     when the endpoint is cooling down from an earlier failure, when the endpoint cannot
     be reached, answers with a non-2xx, an unusable body or no usable token count, or
     returns output that fails ``schema`` twice.
+
+    A retry is not the same ask again: a schema failure sends the model its own invalid
+    answer beside the validator's reason as a repair turn, and every attempt after the
+    first is asked at ``retry_temperature``.
     """
 
     # A cooldown an earlier failure left is answered before anything is sent: the point
@@ -115,7 +136,10 @@ def complete_json(
     }
 
     problems: list[str] = []
-    for _ in range(ATTEMPTS):
+    for attempt in range(ATTEMPTS):
+        # A retry is a different ask: the temperature rises off the first attempt's, so
+        # a model that answered twice alike at one temperature is given room not to.
+        body["temperature"] = retry_temperature(config.settings.model.temperature, attempt)
         try:
             content = _chat(config, body)
         except _Retryable as exc:
@@ -124,11 +148,29 @@ def complete_json(
         try:
             answer = _checked(content, schema)
         except schemamod.SchemaError as exc:
-            problems.append(f"the answer failed its schema: {_quoted(config, str(exc))}")
+            error = _quoted(config, str(exc))
+            problems.append(f"the answer failed its schema: {error}")
+            # The retry carries the failed answer and the reason it failed, so the model
+            # is told what was wrong rather than asked the same question again cold.
+            body["messages"] = [
+                *body["messages"],
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": REPAIR_TURN.format(error=error)},
+            ]
             continue
         return answer
 
     raise ModelError("; ".join(problems))
+
+
+def retry_temperature(base: float, attempt: int) -> float:
+    """The temperature of the call numbered ``attempt``, where 0 is the first ask.
+
+    Each attempt after the first rises by RETRY_TEMPERATURE_STEP and stops at
+    RETRY_TEMPERATURE_CAP. A base above the cap never falls: a retry asks at least as
+    hot as the caller chose.
+    """
+    return min(base + RETRY_TEMPERATURE_STEP * attempt, max(base, RETRY_TEMPERATURE_CAP))
 
 
 def cooldown_path(config: Config) -> Path:
