@@ -2,33 +2,132 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+LOGGER = logging.getLogger(__name__)
+
 TIMEOUT_SECONDS = 10
+DEFAULT_WRITE_TIMEOUT = 120.0
 
 
 class GitError(Exception):
     pass
 
 
-def git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
+def git(
+    args: list[str],
+    cwd: Path,
+    check: bool = True,
+    timeout: float | None = TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
             ["git", *args],
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise GitError(f"git {' '.join(args)}: {exc}") from exc
     if check and result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed in {cwd}: {result.stderr.strip()}")
     return result
+
+
+def clear_stale_index_lock(repo_path: Path, max_age_seconds: float = 30.0) -> bool:
+    """Remove a stale git index.lock file if its age exceeds max_age_seconds."""
+    lock_paths: list[Path] = []
+    dot_git = repo_path / ".git"
+    if dot_git.is_dir():
+        lock_paths.append(dot_git / "index.lock")
+    elif dot_git.is_file():
+        git_dir = _worktree_git_dir(dot_git, repo_path)
+        if git_dir is not None:
+            lock_paths.append(git_dir / "index.lock")
+    if (repo_path / "index.lock").is_file():
+        lock_paths.append(repo_path / "index.lock")
+
+    if not any(lp.exists() for lp in lock_paths):
+        fallback = _git_dir_fallback(repo_path)
+        if fallback is not None:
+            lock_paths.append(fallback / "index.lock")
+
+    cleared = False
+    seen: set[Path] = set()
+    for lock_path in lock_paths:
+        try:
+            resolved = lock_path.resolve()
+        except OSError:
+            resolved = lock_path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+
+        try:
+            stat_result = lock_path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            LOGGER.warning("Could not stat git index lock at %s: %s", lock_path, exc)
+            continue
+
+        age = time.time() - stat_result.st_mtime
+        if age > max_age_seconds:
+            try:
+                lock_path.unlink()
+                LOGGER.warning(
+                    "Removed stale git index lock at %s (age %.1fs > %.1fs)",
+                    lock_path,
+                    age,
+                    max_age_seconds,
+                )
+                cleared = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                LOGGER.warning("Could not remove stale git index lock at %s: %s", lock_path, exc)
+
+    return cleared
+
+
+def _worktree_git_dir(dot_git_file: Path, repo_path: Path) -> Path | None:
+    try:
+        content = dot_git_file.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith("gitdir:"):
+                target = Path(line.removeprefix("gitdir:").strip())
+                if not target.is_absolute():
+                    target = (repo_path / target).resolve()
+                return target
+    except OSError:
+        pass
+    return None
+
+
+def _git_dir_fallback(repo_path: Path) -> Path | None:
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-dir"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        if res.returncode == 0:
+            out = res.stdout.strip()
+            if out:
+                return Path(out)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 @dataclass(frozen=True)

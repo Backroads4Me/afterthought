@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import time
+from pathlib import Path
 
-from aft import vault
-from aft.gitutil import git
-from conftest import run_git
+import pytest
+
+from aft import gitutil, vault
+from aft.gitutil import clear_stale_index_lock, git
+from conftest import make_repo, run_git
 
 
 def test_obsidian_graph_constant_structure():
@@ -145,3 +151,115 @@ def test_init_preserves_customized_graph_json(cfg):
     created = vault.init(cfg)
     assert ".obsidian/graph.json" not in created
     assert graph_path.read_text(encoding="utf-8") == custom_content
+
+
+def test_clear_stale_index_lock_removes_old_lock_and_leaves_fresh(tmp_path):
+    """clear_stale_index_lock clears locks older than max_age_seconds and keeps fresh ones."""
+    repo = make_repo(tmp_path / "repo")
+    lock_file = repo / ".git" / "index.lock"
+
+    # A fresh lock file must not be removed
+    lock_file.write_text("locked", encoding="utf-8")
+    assert lock_file.is_file()
+    assert clear_stale_index_lock(repo, max_age_seconds=30.0) is False
+    assert lock_file.is_file()
+
+    # A stale lock file past max_age_seconds must be removed
+    past_time = time.time() - 60.0
+    os.utime(lock_file, (past_time, past_time))
+    assert clear_stale_index_lock(repo, max_age_seconds=30.0) is True
+    assert not lock_file.exists()
+
+    # Worktree support: verify cleanup in a linked worktree
+    wt_path = tmp_path / "worktree"
+    run_git(["worktree", "add", str(wt_path), "-b", "wt-branch"], repo)
+    wt_git_file = wt_path / ".git"
+    assert wt_git_file.is_file()
+
+    wt_raw = wt_git_file.read_text(encoding="utf-8").strip().removeprefix("gitdir:").strip()
+    wt_git_dir = Path(wt_raw)
+    wt_lock = wt_git_dir / "index.lock"
+
+    # Fresh in worktree
+    wt_lock.write_text("locked", encoding="utf-8")
+    assert clear_stale_index_lock(wt_path, max_age_seconds=30.0) is False
+    assert wt_lock.is_file()
+
+    # Stale in worktree
+    os.utime(wt_lock, (past_time, past_time))
+    assert clear_stale_index_lock(wt_path, max_age_seconds=30.0) is True
+    assert not wt_lock.exists()
+
+
+def test_vault_commit_proceeds_with_stale_index_lock(initialized):
+    """vault.commit removes a stale index.lock and successfully commits."""
+    vault_path = initialized.vault
+    note_path = vault_path / "note.md"
+    note_path.write_text("new content\n", encoding="utf-8")
+
+    # Leave a stale index.lock behind as if from an aborted git process
+    lock_file = vault_path / ".git" / "index.lock"
+    lock_file.write_text("aborted lock", encoding="utf-8")
+    past_time = time.time() - 60.0
+    os.utime(lock_file, (past_time, past_time))
+
+    committed = vault.commit(vault_path, ["note.md"], "test: commit with stale lock")
+    assert committed is True
+    assert not lock_file.exists()
+    assert "test: commit with stale lock" in run_git(["log", "-1", "--format=%s"], vault_path)
+
+
+def test_vault_commit_retries_and_recovers_from_index_lock_error(initialized, monkeypatch):
+    """vault.commit retries once if git add or commit encounters an index.lock error."""
+    vault_path = initialized.vault
+    note_path = vault_path / "retry_note.md"
+    note_path.write_text("retry content\n", encoding="utf-8")
+
+    first_add = True
+    orig_git = gitutil.git
+
+    def fake_git(args, cwd, check=True, timeout=gitutil.TIMEOUT_SECONDS):
+        nonlocal first_add
+        if args[:2] == ["add", "-A"] and first_add:
+            first_add = False
+            lock = cwd / ".git" / "index.lock"
+            lock.write_text("stale", encoding="utf-8")
+            past = time.time() - 60.0
+            os.utime(lock, (past, past))
+            raise gitutil.GitError(
+                f"git add failed in {cwd}: fatal: Unable to create '{lock}': File exists."
+            )
+        return orig_git(args, cwd, check=check, timeout=timeout)
+
+    monkeypatch.setattr(vault, "git", fake_git)
+    committed = vault.commit(vault_path, ["retry_note.md"], "test: retry on lock")
+    assert committed is True
+    assert first_add is False
+
+
+def test_git_accepts_custom_timeout(initialized, monkeypatch):
+    """git() respects custom timeout values and raises GitError on timeout."""
+    # Custom float timeout succeeds on fast command
+    res = git(["status"], cwd=initialized.vault, timeout=15.0)
+    assert res.returncode == 0
+
+    # timeout=None succeeds
+    res_none = git(["status"], cwd=initialized.vault, timeout=None)
+    assert res_none.returncode == 0
+
+    # Very small timeout triggers GitError
+    with pytest.raises(gitutil.GitError) as exc_info:
+        git(["status"], cwd=initialized.vault, timeout=0.000001)
+    assert "timed out" in str(exc_info.value).lower()
+
+    # Verify timeout argument is passed directly to subprocess.run
+    recorded_timeouts = []
+    real_run = subprocess.run
+
+    def intercept_run(*args, **kwargs):
+        recorded_timeouts.append(kwargs.get("timeout"))
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", intercept_run)
+    git(["status"], cwd=initialized.vault, timeout=45.0)
+    assert recorded_timeouts[-1] == 45.0

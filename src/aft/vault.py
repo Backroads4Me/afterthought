@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import fcntl
 import json
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from aft.config import Config
-from aft.gitutil import GitError, git
+from aft.gitutil import (
+    DEFAULT_WRITE_TIMEOUT,
+    GitError,
+    clear_stale_index_lock,
+    git,
+)
 from aft.registry import VERSION as REGISTRY_VERSION
 
 
@@ -193,15 +199,29 @@ def init(config: Config) -> list[str]:
 def commit(vault: Path, paths: list[str], message: str) -> bool:
     """Stage ``paths`` (which may include removals) and commit them. Returns whether a
     commit was made."""
-    git(["add", "-A", "--", *paths], cwd=vault)
+    clear_stale_index_lock(vault)
+    _git_write_with_lock_retry(["add", "-A", "--", *paths], vault)
     staged = git(["diff", "--cached", "--quiet"], cwd=vault, check=False)
     if staged.returncode == 0:
         return False
     try:
-        git(["commit", "-q", "-m", message], cwd=vault)
+        _git_write_with_lock_retry(["commit", "-q", "-m", message], vault)
     except GitError as exc:
         raise VaultError(f"could not commit to the vault: {exc}") from exc
     return True
+
+
+def _git_write_with_lock_retry(
+    args: list[str],
+    vault: Path,
+    timeout: float | None = DEFAULT_WRITE_TIMEOUT,
+) -> subprocess.CompletedProcess:
+    try:
+        return git(args, cwd=vault, timeout=timeout)
+    except GitError as exc:
+        if "index.lock" in str(exc) and clear_stale_index_lock(vault):
+            return git(args, cwd=vault, timeout=timeout)
+        raise
 
 
 @contextmanager
