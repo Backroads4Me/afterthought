@@ -829,6 +829,8 @@ def test_a_run_that_dies_leaves_its_edits_to_the_next_run(widget, initialized, m
     recent.write_text(RECENT_PAGE)
     vault.commit(initialized.vault, ["projects/widget/recent.md"], "seed recent")
 
+    original_commit = vault.commit
+
     def die(vault_path, paths, message):
         raise vault.VaultError("could not commit to the vault")
 
@@ -838,7 +840,7 @@ def test_a_run_that_dies_leaves_its_edits_to_the_next_run(widget, initialized, m
     assert schedule.run_marker_path(initialized).exists()
     assert "The rewrite is paused." not in recent.read_text()
     assert run_git(["status", "--porcelain"], initialized.vault) != ""
-    monkeypatch.undo()
+    monkeypatch.setattr(vault, "commit", original_commit)
     result = schedule.run(initialized, Recorder(), now=NOW)
     assert not schedule.run_marker_path(initialized).exists()
     assert result.expired == ["widget"]
