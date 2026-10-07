@@ -1974,3 +1974,110 @@ def test_page_links_population_reindex_and_backlinks(initialized: Config) -> Non
     bl_reindex = index.backlinks(initialized, "references/sqlite")
     assert len(bl_reindex) == 1
     assert bl_reindex[0]["source_path"] == source_rel
+
+
+def test_page_links_skip_multiline_fenced_code(initialized: Config) -> None:
+    """A wikilink-shaped line inside a fence spanning lines creates no link (M12, F68).
+
+    The fence is masked on the whole text before any link is read, so the links the block
+    quotes stay quoted, and a link after the block still lands on its own line."""
+    ref_page = (
+        "---\n"
+        "type: Reference\n"
+        "title: SQLite\n"
+        "sources: []\n"
+        "---\n\n"
+        "## References\n\n"
+        "- SQLite is an embedded SQL database. [stated] 2026-09-28 [^s1]\n"
+    )
+    source_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Widget\n"
+        "sources: []\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- Uses [[references/sqlite]] for persistence. [stated] 2026-09-28 [^s1]\n"
+        "\n"
+        "## Notes\n\n"
+        "```bash\n"
+        "if [[ -f build.lock ]]; then echo locked; fi\n"
+        "echo [[also-fake]]\n"
+        "```\n"
+        "\n"
+        "## Decisions\n\n"
+        "- Ships with [[global/preferences]] merged. [observed] 2026-09-29 [^s2]\n"
+    )
+    write(initialized, "references/sqlite.md", ref_page)
+    source_rel = write(initialized, "projects/widget/overview.md", source_page)
+
+    assert index.update(initialized) == []
+
+    conn = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    try:
+        rows = conn.execute(
+            f"SELECT source_path, target, target_path, line_index FROM {index.LINKS_TABLE} "
+            "ORDER BY line_index"
+        ).fetchall()
+        assert [(row[1], row[2], row[3]) for row in rows] == [
+            ("references/sqlite", "references/sqlite.md", 9),
+            ("global/preferences", "global/preferences.md", 20),
+        ]
+        assert rows[0][0] == source_rel
+    finally:
+        conn.close()
+
+
+def test_backlinks_project_target_returns_links(initialized: Config) -> None:
+    """Backlinks to a project overview target answer instead of crashing (M12)."""
+    alpha_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Alpha\n"
+        "sources: []\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- Alpha owns the build. [stated] 2026-09-28 [^s1]\n"
+    )
+    beta_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Beta\n"
+        "sources: []\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- Beta depends on [[projects/alpha]] for its build. [stated] 2026-09-28 [^s1]\n"
+    )
+    write(initialized, "projects/alpha/overview.md", alpha_page)
+    write(initialized, "projects/beta/overview.md", beta_page)
+
+    assert index.update(initialized) == []
+
+    blinks = index.backlinks(initialized, "projects/alpha")
+    assert len(blinks) == 1
+    assert blinks[0]["source_path"] == "projects/beta/overview.md"
+    assert blinks[0]["target"] == "projects/alpha"
+    assert blinks[0]["target_path"] == "projects/alpha/overview.md"
+    assert "Beta depends on [[projects/alpha]]" in blinks[0]["context"]
+
+    # The connection form of the same call, which shares the candidate building.
+    with _open(initialized) as conn:
+        assert index.backlinks(conn, "projects/alpha") == blinks
+
+
+def test_resolve_target_path_precedence(initialized: Config) -> None:
+    """Targets answer from the exact path first, then project before global before
+    reference, and a stem match decides by that precedence, not filesystem order."""
+    vault = initialized.vault
+    # A project page answers a bare name before a reference page of the same stem.
+    write(initialized, "references/alpha.md", "# alpha\n")
+    write(initialized, "projects/alpha/overview.md", "# alpha\n")
+    assert index.resolve_target_path(vault, "alpha") == "projects/alpha/overview.md"
+    # An exact relative path beats every other form of the same target.
+    assert index.resolve_target_path(vault, "references/alpha") == "references/alpha.md"
+    # No candidate names the target, so the stem match decides: the projects file wins
+    # whatever order the filesystem lists the two in.
+    write(initialized, "references/hold/beta.md", "# beta\n")
+    write(initialized, "projects/other/beta.md", "# beta\n")
+    assert index.resolve_target_path(vault, "beta") == "projects/other/beta.md"
+    assert index.resolve_target_path(vault, "no-such-target") is None

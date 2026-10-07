@@ -1397,6 +1397,117 @@ def test_search_links_and_read_backlinks_section(
     assert "## Backlinks / Referenced In" not in no_backlinks_content
 
 
+def test_search_links_filters_withdrawn_source_line(populated_vault: Config) -> None:
+    """A link on a withdrawn fact line answers no query, with or without --archive (M12)."""
+    ref_page = (
+        "---\n"
+        "type: Reference\n"
+        "title: Old DB\n"
+        "sources: []\n"
+        "---\n\n"
+        "## References\n\n"
+        "- The old database held everything. [stated] 2026-09-20 [^s1]\n"
+    )
+    (populated_vault.vault / "references").mkdir(parents=True, exist_ok=True)
+    (populated_vault.vault / "references/old-db.md").write_text(ref_page, encoding="utf-8")
+    source_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Widget Notes\n"
+        "sources: []\n"
+        "aft:\n"
+        "  project: p_widget\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- The system uses [[references/sqlite]] for local storage. [stated] 2026-09-28 [^s1]\n"
+        "- ~~The system ran on [[references/old-db]] once.~~ [stated] 2026-09-20 [^s1]"
+        " withdrawn 2026-09-27\n"
+    )
+    (populated_vault.vault / "projects/widget/notes.md").write_text(source_page, encoding="utf-8")
+    index.update(populated_vault)
+
+    # The live line's link still answers, from the pages collection.
+    hits = search.search(populated_vault, links="references/sqlite")
+    assert [hit.path for hit in hits] == ["projects/widget/notes.md"]
+    assert hits[0].collection == index.PAGES
+
+    # The withdrawn line's link answers no query at all (DESIGN 12): its words left
+    # memory, so no flag brings them back.
+    assert search.search(populated_vault, links="references/old-db") == []
+    assert search.search(populated_vault, links="references/old-db", archive=True) == []
+
+
+def test_search_links_filters_archived_sources(
+    populated_vault: Config, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A link from an archived project's page, or from the archive tree, answers only
+    --archive and carries the archive collection's name (M12)."""
+    monkeypatch.setenv("AFT_HOME", str(populated_vault.home))
+    ref_page = (
+        "---\n"
+        "type: Reference\n"
+        "title: SQLite\n"
+        "sources: []\n"
+        "---\n\n"
+        "## References\n\n"
+        "- SQLite is an embedded database. [stated] 2026-09-28 [^s1]\n"
+    )
+    (populated_vault.vault / "references").mkdir(parents=True, exist_ok=True)
+    (populated_vault.vault / "references/sqlite.md").write_text(ref_page, encoding="utf-8")
+
+    # An archived project's page keeps its link, but its project is out of memory.
+    reg = Registry.load(populated_vault.registry_path)
+    reg.set_archived("gadget", "2026-09-28")
+    reg.save()
+    gadget_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Gadget Notes\n"
+        "sources: []\n"
+        "aft:\n"
+        "  project: p_gadget\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- The gadget stores its logs in [[references/sqlite]]. [stated] 2026-09-28 [^s1]\n"
+    )
+    (populated_vault.vault / "projects/gadget/notes.md").write_text(gadget_page, encoding="utf-8")
+
+    # So does a page resting in the archive tree.
+    resting_page = (
+        "---\n"
+        "type: Project\n"
+        "title: Widget Archive\n"
+        "sources: []\n"
+        "---\n\n"
+        "## Facts\n\n"
+        "- The prototype used [[references/sqlite]] directly. [stated] 2026-09-20 [^s1]\n"
+    )
+    resting = populated_vault.vault / "archive/projects/widget/old.md"
+    resting.parent.mkdir(parents=True, exist_ok=True)
+    resting.write_text(resting_page, encoding="utf-8")
+
+    index.update(populated_vault)
+
+    # The default search reaches neither source: both answer only --archive.
+    assert search.search(populated_vault, links="references/sqlite") == []
+
+    hits = search.search(populated_vault, links="references/sqlite", archive=True)
+    assert [hit.path for hit in hits] == [
+        "archive/projects/widget/old.md",
+        "projects/gadget/notes.md",
+    ]
+    assert all(hit.collection == index.ARCHIVE for hit in hits)
+    assert [hit.project for hit in hits] == ["widget", "gadget"]
+
+    # The CLI names the collection on the line, so an archived hit reads as archived.
+    capsys.readouterr()
+    assert main(["search", "--links", "references/sqlite", "--archive"]) == 0
+    out = capsys.readouterr().out
+    assert "projects/gadget/notes.md\tarchive\t" in out
+    assert main(["search", "--links", "references/sqlite"]) == 0
+    assert "projects/gadget/notes.md" not in capsys.readouterr().out
+
+
 def test_search_query_stripping_preserves_page_results(populated_vault: Config) -> None:
     """Temporal phrases are stripped from FTS5 lexical queries so pages still match."""
     now = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)

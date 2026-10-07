@@ -31,7 +31,7 @@ from typing import Any
 
 from aft import evidence, index, inject, keys, page, vault
 from aft.config import Config
-from aft.registry import Registry
+from aft.registry import Registry, path_key
 from aft.temporal import TemporalConstraint, parse_temporal
 
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
@@ -266,33 +266,53 @@ def search(
 
     if links is not None:
         blinks = index.backlinks(config, links)
+        registry = Registry.load(config.registry_path)
         hits: list[Hit] = []
         for b in blinks:
             src = b["source_path"]
             context = b.get("context") or b.get("line_context") or ""
             line_idx = b["line_index"]
             heading = ""
+            fact_state = ""
+            frontmatter: dict | None = None
             project_slug = ""
             parts = Path(src).parts
-            if len(parts) >= 2 and parts[0] == "projects":
+            if parts[:2] == ("archive", "projects") and len(parts) >= 3:
+                project_slug = parts[2]
+            elif len(parts) >= 2 and parts[0] == "projects":
                 project_slug = parts[1]
             try:
                 src_path = config.vault / src
                 if src_path.is_file():
                     parsed = page.parse(src_path.read_text(encoding="utf-8"), Path(src))
+                    frontmatter = parsed.frontmatter
                     for f in parsed.facts:
                         if f.line == line_idx:
                             heading = f.section
+                            fact_state = f.state
                             break
             except Exception:
                 pass
+            # A link hit answers from where its line is indexed, as any row does (DESIGN
+            # 10, F49). A withdrawn line answers no query at all. A line resting in the
+            # archive - superseded or stale - and the page of an archived project answer
+            # only --archive, which names the archive collection on the hit.
+            if fact_state == page.WITHDRAWN:
+                continue
+            home = index.PAGES
+            if fact_state in (page.SUPERSEDED, page.STALE) or _page_archived(
+                config, src, frontmatter, registry
+            ):
+                home = index.ARCHIVE
+            if home == index.ARCHIVE and not archive:
+                continue
             if not heading:
                 heading = f"line {line_idx}"
             hit = Hit(
                 path=src,
                 description=f"links to [[{b['target']}]]",
                 snippet=context,
-                collection=index.PAGES,
+                collection=home,
                 heading=heading,
                 project=project_slug,
                 rank=0.0,
@@ -453,6 +473,40 @@ def _scope(collection: str, narrow_id: str | None) -> tuple[str, list[Any]]:
 def search_links(config: Config, target: str, *, limit: int = 8) -> list[Hit]:
     """Query backlinks to a target as search hits."""
     return search(config, links=target, limit=limit)
+
+
+def _page_archived(config: Config, rel: str, frontmatter: dict | None, registry: Registry) -> bool:
+    """Whether the page a link hit names answers only ``aft search --archive`` (DESIGN 10,
+    F49).
+
+    Everything under the vault's ``archive/`` tree is archived text, and so is the page
+    of a project ``aft project archive`` took out of memory. The project is named the way
+    the index names it when it files the page's rows: the page's own ``aft.project``, then
+    the path its ``aft.path`` records, then the directory the file sits under - and a page
+    carrying none of those, or one scoped to several projects, is not archived by one of
+    them being archived.
+    """
+    if rel.startswith("archive/"):
+        return True
+    aft = (frontmatter or {}).get("aft")
+    if not isinstance(aft, dict):
+        return False
+    listed = aft.get("projects")
+    if isinstance(listed, list) and listed:
+        return False
+    project_value = aft.get("project")
+    if isinstance(project_value, str) and project_value:
+        project = registry.by_id(project_value)
+        return project is not None and project.archived
+    recorded = aft.get("path")
+    if isinstance(recorded, str) and recorded:
+        project = registry.by_path_key(path_key(config.host, Path(recorded)))
+        return project is not None and project.archived
+    slug = vault.path_slug(rel)
+    if slug is not None:
+        project = registry.by_slug(slug)
+        return project is not None and project.archived
+    return False
 
 
 backlinks = index.backlinks
