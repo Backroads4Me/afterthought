@@ -11,7 +11,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,6 +29,9 @@ _EVAL_SCRIPT = Path(__file__).resolve().parent.parent / "eval" / "longmemeval.py
 _spec = importlib.util.spec_from_file_location("longmemeval", _EVAL_SCRIPT)
 assert _spec is not None and _spec.loader is not None
 longmemeval = importlib.util.module_from_spec(_spec)
+# The module must be registered before it runs: its own dataclasses resolve their
+# annotations through sys.modules.
+sys.modules["longmemeval"] = longmemeval
 _spec.loader.exec_module(longmemeval)
 
 HOST = "testhost"
@@ -531,39 +537,69 @@ def test_compute_ndcg_at_k():
 
 def test_benchmark_report_dataclass():
     report = evalmod.BenchmarkReport(
-        recall_at_1=0.8,
-        recall_at_3=0.9,
-        recall_at_5=0.95,
-        recall_at_10=1.0,
+        recall_any_at_1=0.8,
+        recall_any_at_3=0.9,
+        recall_any_at_5=0.95,
+        recall_any_at_10=1.0,
+        recall_all_at_10=0.7,
         ndcg_at_10=0.85,
         avg_latency_ms=12.5,
         peak_rss_mb=45.2,
         total_queries=10,
     )
-    assert report.recall_1 == 0.8
-    assert report.recall_3 == 0.9
-    assert report.recall_5 == 0.95
-    assert report.recall_10 == 1.0
-    assert report.ndcg_10 == 0.85
+    assert report.recall_any_at_1 == 0.8
+    assert report.recall_any_at_3 == 0.9
+    assert report.recall_any_at_5 == 0.95
+    assert report.recall_any_at_10 == 1.0
+    assert report.recall_all_at_10 == 0.7
+    assert report.ndcg_at_10 == 0.85
     assert report.avg_latency_ms == 12.5
     assert report.peak_rss_mb == 45.2
     assert report.total_queries == 10
 
     d = report.to_dict()
-    assert d["recall@1"] == 0.8
-    assert d["recall@3"] == 0.9
-    assert d["recall@5"] == 0.95
-    assert d["recall@10"] == 1.0
+    assert d["recall_any@1"] == 0.8
+    assert d["recall_any@3"] == 0.9
+    assert d["recall_any@5"] == 0.95
+    assert d["recall_any@10"] == 1.0
+    assert d["recall_all@10"] == 0.7
     assert d["ndcg@10"] == 0.85
     assert d["avg_latency_ms"] == 12.5
     assert d["peak_rss_mb"] == 45.2
     assert d["total_queries"] == 10
 
     table = report.format_table()
-    assert "LongMemEval-S Retrieval Benchmark Summary" in table
+    assert "LongMemEval-S Retrieval Benchmark (raw-retrieval baseline)" in table
     assert "Queries evaluated : 10" in table
-    assert "Recall@1          : 0.8000" in table
+    assert "Recall-any@1      : 0.8000" in table
+    assert "Recall-all@10     : 0.7000" in table
     assert str(report) == table
+
+
+def published_item(**overrides: Any) -> dict[str, Any]:
+    """One LongMemEval-S item in the published shape, for the harness tests."""
+    item: dict[str, Any] = {
+        "question_id": "q-1",
+        "question_type": "single-session-user",
+        "question": "How do we hash passwords?",
+        "answer": "Argon2id with a 64MB memory cost",
+        "question_date": "2023/05/20 (Sat) 02:21",
+        "haystack_dates": ["2023/05/18 (Thu) 10:00", "2023/05/19 (Fri) 11:30"],
+        "haystack_session_ids": ["answer_1", "distractor_1"],
+        "answer_session_ids": ["answer_1"],
+        "haystack_sessions": [
+            [
+                {"role": "user", "content": "How do we hash passwords?"},
+                {"role": "assistant", "content": "We use Argon2id with 64MB memory cost."},
+            ],
+            [
+                {"role": "user", "content": "What is our caching strategy?"},
+                {"role": "assistant", "content": "Redis with LRU eviction."},
+            ],
+        ],
+    }
+    item.update(overrides)
+    return item
 
 
 def test_longmemeval_runner_synthetic(tmp_path: Path):
@@ -611,19 +647,22 @@ def test_longmemeval_runner_synthetic(tmp_path: Path):
 
     report = longmemeval.run_benchmark(dataset_file, output_path=output_file)
     assert report.total_queries == 2
-    assert report.recall_at_1 == 1.0
-    assert report.recall_at_3 == 1.0
-    assert report.recall_at_5 == 1.0
-    assert report.recall_at_10 == 1.0
+    assert report.recall_any_at_1 == 1.0
+    assert report.recall_any_at_3 == 1.0
+    assert report.recall_any_at_5 == 1.0
+    assert report.recall_any_at_10 == 1.0
+    assert report.recall_all_at_10 == 1.0
     assert report.ndcg_at_10 == pytest.approx(1.0)
     assert report.avg_latency_ms >= 0.0
     assert report.peak_rss_mb > 0.0
 
     assert output_file.is_file()
     saved = json.loads(output_file.read_text(encoding="utf-8"))
-    assert saved["recall@1"] == 1.0
+    assert saved["recall_any@1"] == 1.0
     assert "queries" in saved
     assert len(saved["queries"]) == 2
+    assert saved["queries"][0]["ranked_sessions"] == ["session-crypto"]
+    assert saved["queries"][1]["ranked_sessions"] == ["session-cache"]
 
     # Test runner with limit=1
     limited_report = longmemeval.run_benchmark(dataset_file, limit=1)
@@ -632,3 +671,247 @@ def test_longmemeval_runner_synthetic(tmp_path: Path):
     # Test CLI invocation
     rc = longmemeval.main(["--dataset", str(dataset_file), "--limit", "1"])
     assert rc == 0
+
+
+def test_published_longmemeval_schema_parses_with_parallel_session_ids():
+    """Turns live in haystack_sessions, with ids and dates in the parallel lists."""
+    (case,) = longmemeval.parse_questions([published_item()])
+    assert case.question == "How do we hash passwords?"
+    assert case.question_type == "single-session-user"
+    assert case.session_ids == ("answer_1", "distractor_1")
+    assert case.answer_session_ids == ("answer_1",)
+    assert case.question_date == datetime(2023, 5, 20, 2, 21, tzinfo=UTC)
+    assert [entry.role for entry in case.sessions[0]] == ["user", "assistant"]
+    assert case.sessions[0][1].text == "We use Argon2id with 64MB memory cost."
+    assert case.sessions[0][0].time == datetime(2023, 5, 18, 10, 0, tzinfo=UTC)
+    assert case.sessions[1][0].time == datetime(2023, 5, 19, 11, 30, tzinfo=UTC)
+
+
+def test_haystack_ids_fall_back_to_the_session_record_then_the_position():
+    """A short parallel id list leaves room for record ids and positional names."""
+    item = {
+        "question": "what was decided",
+        "haystack_sessions": [
+            {
+                "session_id": "from-record",
+                "messages": [{"role": "user", "content": "hello there"}],
+            },
+            [{"role": "user", "content": "and again"}],
+        ],
+        "haystack_session_ids": ["parallel-id"],
+    }
+    (case,) = longmemeval.parse_questions([item])
+    assert case.session_ids == ("parallel-id", "session-1")
+
+
+def test_answer_sessions_fall_back_to_ground_truth():
+    """A fixture without answer_session_ids still names its answer session."""
+    item = {
+        "question": "what was decided",
+        "ground_truth": "golden-1",
+        "haystack_sessions": [[{"role": "user", "content": "hello there"}]],
+    }
+    (case,) = longmemeval.parse_questions([item])
+    assert case.answer_session_ids == ("golden-1",)
+
+
+def test_wrapper_document_pools_top_level_sessions_into_every_question():
+    """A dict of sessions plus a queries list gives each query the shared haystack."""
+    data = {
+        "sessions": [
+            {"session_id": "one", "messages": [{"role": "user", "content": "alpha beta"}]},
+            {"session_id": "two", "messages": [{"role": "user", "content": "gamma delta"}]},
+        ],
+        "queries": [{"question": "alpha beta", "ground_truth": "one"}],
+    }
+    (case,) = longmemeval.parse_questions(data)
+    assert case.session_ids == ("one", "two")
+
+
+def test_multi_target_recall_and_ndcg_metrics():
+    """recall_all demands every answer session; NDCG prices the misses."""
+    ranked = ["s1", "s2", "s3", "s4"]
+    assert evalmod.compute_recall_any_at_k(ranked, ["s2"], 2) == 1.0
+    assert evalmod.compute_recall_any_at_k(ranked, ["s9"], 3) == 0.0
+    assert evalmod.compute_recall_any_at_k(ranked, ["s9", "s3"], 3) == 1.0
+    assert evalmod.compute_recall_any_at_k(ranked, [], 3) == 0.0
+    assert evalmod.compute_recall_any_at_k(ranked, ["s4"], 0) == 0.0
+
+    assert evalmod.compute_recall_all_at_k(ranked, ["s1", "s2"], 2) == 1.0
+    assert evalmod.compute_recall_all_at_k(ranked, ["s1", "s2"], 1) == 0.0
+    assert evalmod.compute_recall_all_at_k(ranked, ["s1", "s4"], 3) == 0.0
+    assert evalmod.compute_recall_all_at_k(ranked, ["s1", "s4"], 4) == 1.0
+    assert evalmod.compute_recall_all_at_k(ranked, ["s1", "s9"], 10) == 0.0
+    assert evalmod.compute_recall_all_at_k(ranked, [], 10) == 0.0
+
+    # Two relevant sessions at ranks 0 and 1: a perfect ranking.
+    assert evalmod.compute_ndcg_at_k_multi(ranked, ["s1", "s2"], 10) == pytest.approx(1.0)
+    # Relevant sessions at ranks 0 and 2 against an ideal of ranks 0 and 1.
+    expected = (1.0 + 1.0 / math.log2(4)) / (1.0 + 1.0 / math.log2(3))
+    assert evalmod.compute_ndcg_at_k_multi(["s1", "s3", "s2"], ["s1", "s2"], 10) == pytest.approx(
+        expected
+    )
+    # One of two relevant sessions found, and found first.
+    one_of_two = 1.0 / (1.0 + 1.0 / math.log2(3))
+    assert evalmod.compute_ndcg_at_k_multi(ranked, ["s1", "s9"], 10) == pytest.approx(one_of_two)
+    assert evalmod.compute_ndcg_at_k_multi(ranked, ["s9"], 10) == 0.0
+    assert evalmod.compute_ndcg_at_k_multi(ranked, ["s1"], 0) == 0.0
+
+
+def test_ranked_sessions_deduplicates_per_session():
+    """A session surfacing through both a digest row and an evidence row ranks once."""
+    hits = [
+        search.Hit(
+            path="digests/default/2023/05/2023-05-18-claude-answer_1.md", description="", snippet=""
+        ),
+        search.Hit(path="aft://session/claude/answer_1#e-0", description="", snippet=""),
+        search.Hit(path="aft://session/claude/distractor_1#e-3", description="", snippet=""),
+        search.Hit(path="projects/widget/overview.md", description="", snippet=""),
+    ]
+    assert longmemeval.ranked_sessions(hits) == ["answer_1", "distractor_1"]
+    assert longmemeval.ranked_sessions(hits, allowed={"answer_1"}) == ["answer_1"]
+
+
+def test_published_schema_ranks_the_answer_session_end_to_end(tmp_path: Path):
+    """A file in the published shape runs, and the ranking is read at session level."""
+    dataset_file = tmp_path / "longmemeval_s.json"
+    dataset_file.write_text(json.dumps([published_item()]), encoding="utf-8")
+    output_file = tmp_path / "results.json"
+
+    report = longmemeval.run_benchmark(dataset_file, output_path=output_file)
+    assert report.total_queries == 1
+    assert report.recall_any_at_1 == 1.0
+    assert report.recall_all_at_10 == 1.0
+    assert report.ndcg_at_10 == pytest.approx(1.0)
+
+    saved = json.loads(output_file.read_text(encoding="utf-8"))
+    (record,) = saved["queries"]
+    assert record["ranked_sessions"] == ["answer_1"]
+    assert record["question_date"] == "2023-05-20T02:21:00+00:00"
+
+
+def test_multi_session_answers_score_recall_any_and_recall_all(tmp_path: Path):
+    """recall_any needs one answer session; recall_all needs all of them."""
+    database_turns = [
+        {"role": "user", "content": "What do we run the database with?"},
+        {
+            "role": "assistant",
+            "content": "We run the database on Postgres, and the cache sits beside it.",
+        },
+    ]
+    cache_turns = [
+        {"role": "user", "content": "What do we run the cache with?"},
+        {
+            "role": "assistant",
+            "content": "We run the cache on Redis, and the database talks to it.",
+        },
+    ]
+    logo_turns = [
+        {"role": "user", "content": "What color is the logo?"},
+        {"role": "assistant", "content": "The logo is blue."},
+    ]
+    data = [
+        {
+            "question_id": "q-both",
+            "question_type": "multi-session",
+            "question": "What do we run the database and the cache with?",
+            "question_date": "2023/06/01 (Thu) 09:00",
+            "haystack_dates": [
+                "2023/05/20 (Sat) 10:00",
+                "2023/05/21 (Sun) 10:00",
+                "2023/05/22 (Mon) 10:00",
+            ],
+            "haystack_session_ids": ["answer_db", "answer_cache", "distractor"],
+            "answer_session_ids": ["answer_db", "answer_cache"],
+            "haystack_sessions": [database_turns, cache_turns, logo_turns],
+        },
+        {
+            "question_id": "q-one",
+            "question_type": "multi-session",
+            "question": "What do we run the database with?",
+            "question_date": "2023/06/02 (Fri) 09:00",
+            "haystack_dates": ["2023/05/20 (Sat) 10:00", "2023/05/21 (Sun) 10:00"],
+            "haystack_session_ids": ["answer_db2", "answer_unrelated2"],
+            "answer_session_ids": ["answer_db2", "answer_unrelated2"],
+            "haystack_sessions": [database_turns, logo_turns],
+        },
+    ]
+    dataset_file = tmp_path / "longmemeval_multi.json"
+    dataset_file.write_text(json.dumps(data), encoding="utf-8")
+    output_file = tmp_path / "results.json"
+
+    report = longmemeval.run_benchmark(dataset_file, output_path=output_file)
+    assert report.recall_any_at_1 == 1.0
+    assert report.recall_any_at_10 == 1.0
+    assert report.recall_all_at_10 == pytest.approx(0.5)
+    one_of_two = 1.0 / (1.0 + 1.0 / math.log2(3))
+    assert report.ndcg_at_10 == pytest.approx((1.0 + one_of_two) / 2)
+
+    saved = json.loads(output_file.read_text(encoding="utf-8"))
+    both, one = saved["queries"]
+    assert sorted(both["ranked_sessions"]) == ["answer_cache", "answer_db"]
+    assert one["ranked_sessions"] == ["answer_db2"]
+
+
+def test_temporal_filtering_uses_haystack_dates_and_question_date(tmp_path: Path):
+    """Entry times come from haystack_dates, and the question is asked at question_date.
+
+    Both sessions say the same thing months apart; only the one inside the window
+    "last week" opens from the question's date may reach the evidence index.
+    """
+    item = {
+        "question_id": "q-time",
+        "question_type": "temporal-reasoning",
+        "question": "Did we agree on what backup schedule to use last week?",
+        "question_date": "2023/05/20 (Sat) 02:21",
+        "haystack_dates": ["2023/05/16 (Tue) 10:00", "2023/04/02 (Sun) 10:00"],
+        "haystack_session_ids": ["answer_recent", "answer_old"],
+        "answer_session_ids": ["answer_recent"],
+        "haystack_sessions": [
+            [
+                {"role": "user", "content": "Did we agree on what backup schedule to use?"},
+                {
+                    "role": "assistant",
+                    "content": "The backup schedule we agreed on is nightly at 02:00.",
+                },
+            ],
+            [
+                {"role": "user", "content": "Did we agree on what backup schedule to use?"},
+                {
+                    "role": "assistant",
+                    "content": "The backup schedule we agreed on is hourly at night.",
+                },
+            ],
+        ],
+    }
+    (case,) = longmemeval.parse_questions([item])
+    assert case.question_date == datetime(2023, 5, 20, 2, 21, tzinfo=UTC)
+    assert case.sessions[0][0].time == datetime(2023, 5, 16, 10, 0, tzinfo=UTC)
+    assert case.sessions[1][0].time == datetime(2023, 4, 2, 10, 0, tzinfo=UTC)
+
+    with longmemeval.isolated_vault() as config:
+        longmemeval.ingest_question(config, case)
+        hits = search.search(
+            config, case.question, all_projects=True, limit=20, now=case.question_date
+        )
+    evidence_sessions = {
+        longmemeval._session_of_hit(hit.path) for hit in hits if hit.collection == "evidence"
+    }
+    assert evidence_sessions == {"answer_recent"}
+
+
+def test_benchmark_asks_each_question_at_its_question_date(monkeypatch, tmp_path: Path):
+    """run_benchmark hands the question's date to search as the reference time."""
+    dataset_file = tmp_path / "longmemeval_s.json"
+    dataset_file.write_text(json.dumps([published_item()]), encoding="utf-8")
+    captured: dict[str, Any] = {}
+
+    real_search = search.search
+
+    def spy(config: Any, query: str, **kwargs: Any) -> list[search.Hit]:
+        captured["now"] = kwargs.get("now")
+        return real_search(config, query, **kwargs)
+
+    monkeypatch.setattr(search, "search", spy)
+    longmemeval.run_benchmark(dataset_file)
+    assert captured["now"] == datetime(2023, 5, 20, 2, 21, tzinfo=UTC)

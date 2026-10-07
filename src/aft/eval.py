@@ -258,86 +258,77 @@ def _hit_matches(hit: str, ground_truth: str) -> bool:
     return bool(re.search(pattern, hit.casefold()))
 
 
+def compute_recall_any_at_k(ranked_hits: list[str], ground_truths: list[str], k: int) -> float:
+    """Whether any one ground-truth target is retrieved within the top K hits."""
+    if k <= 0 or not ground_truths:
+        return 0.0
+    top = ranked_hits[:k]
+    return 1.0 if any(_hit_matches(hit, want) for hit in top for want in ground_truths) else 0.0
+
+
+def compute_recall_all_at_k(ranked_hits: list[str], ground_truths: list[str], k: int) -> float:
+    """Whether every ground-truth target is retrieved within the top K hits."""
+    if k <= 0 or not ground_truths:
+        return 0.0
+    top = ranked_hits[:k]
+    hits_wanted = (any(_hit_matches(hit, want) for hit in top) for want in ground_truths)
+    return 1.0 if all(hits_wanted) else 0.0
+
+
+def compute_ndcg_at_k_multi(ranked_hits: list[str], ground_truths: list[str], k: int = 10) -> float:
+    """NDCG@K over a session ranking that carries one row per session, all targets relevant.
+
+    Every position holding a relevant target contributes 1.0 / log2(position + 2), and
+    the ideal ranking places all targets first, so a ranking that misses a target scores
+    below 1.0 even when what it did find ranks first.
+    """
+    if k <= 0 or not ground_truths:
+        return 0.0
+    dcg = sum(
+        1.0 / math.log2(rank_idx + 2)
+        for rank_idx, hit in enumerate(ranked_hits[:k])
+        if any(_hit_matches(hit, want) for want in ground_truths)
+    )
+    ideal = sum(1.0 / math.log2(rank_idx + 2) for rank_idx in range(min(len(ground_truths), k)))
+    return dcg / ideal if ideal else 0.0
+
+
 def compute_recall_at_k(ranked_hits: list[str], ground_truth: str, k: int) -> float:
     """Compute retrieval Recall@K for a single ground-truth target."""
-    if k <= 0:
-        return 0.0
-    for hit in ranked_hits[:k]:
-        if _hit_matches(hit, ground_truth):
-            return 1.0
-    return 0.0
+    return compute_recall_any_at_k(ranked_hits, [ground_truth], k)
 
 
 def compute_ndcg_at_k(ranked_hits: list[str], ground_truth: str, k: int = 10) -> float:
-    """Compute ranking quality NDCG@K using 1.0 / math.log2(rank_idx + 2)."""
-    if k <= 0:
-        return 0.0
-    for rank_idx, hit in enumerate(ranked_hits[:k]):
-        if _hit_matches(hit, ground_truth):
-            return 1.0 / math.log2(rank_idx + 2)
-    return 0.0
+    """Compute ranking quality NDCG@K for a single ground-truth target."""
+    return compute_ndcg_at_k_multi(ranked_hits, [ground_truth], k)
 
 
 @dataclass
 class BenchmarkReport:
-    """Summary of multi-session retrieval recall and ranking metrics."""
+    """Summary of LongMemEval-S session-level retrieval metrics.
 
-    recall_at_1: float = 0.0
-    recall_at_3: float = 0.0
-    recall_at_5: float = 0.0
-    recall_at_10: float = 0.0
+    The harness scores raw transcript retrieval - evidence rows and raw-dump digest
+    files - so these numbers are a raw-retrieval baseline for the index, not a
+    measure of the digest and dream pipeline's curated memory.
+    """
+
+    recall_any_at_1: float = 0.0
+    recall_any_at_3: float = 0.0
+    recall_any_at_5: float = 0.0
+    recall_any_at_10: float = 0.0
+    recall_all_at_10: float = 0.0
     ndcg_at_10: float = 0.0
     avg_latency_ms: float = 0.0
     peak_rss_mb: float = 0.0
     total_queries: int = 0
 
-    def __init__(
-        self,
-        recall_at_1: float = 0.0,
-        recall_at_3: float = 0.0,
-        recall_at_5: float = 0.0,
-        recall_at_10: float = 0.0,
-        ndcg_at_10: float = 0.0,
-        avg_latency_ms: float = 0.0,
-        peak_rss_mb: float = 0.0,
-        total_queries: int = 0,
-        **kwargs: Any,
-    ) -> None:
-        self.recall_at_1 = float(kwargs.get("recall_1", recall_at_1))
-        self.recall_at_3 = float(kwargs.get("recall_3", recall_at_3))
-        self.recall_at_5 = float(kwargs.get("recall_5", recall_at_5))
-        self.recall_at_10 = float(kwargs.get("recall_10", recall_at_10))
-        self.ndcg_at_10 = float(kwargs.get("ndcg_10", ndcg_at_10))
-        self.avg_latency_ms = float(avg_latency_ms)
-        self.peak_rss_mb = float(peak_rss_mb)
-        self.total_queries = int(total_queries)
-
-    @property
-    def recall_1(self) -> float:
-        return self.recall_at_1
-
-    @property
-    def recall_3(self) -> float:
-        return self.recall_at_3
-
-    @property
-    def recall_5(self) -> float:
-        return self.recall_at_5
-
-    @property
-    def recall_10(self) -> float:
-        return self.recall_at_10
-
-    @property
-    def ndcg_10(self) -> float:
-        return self.ndcg_at_10
-
     def to_dict(self) -> dict[str, Any]:
         return {
-            "recall@1": self.recall_at_1,
-            "recall@3": self.recall_at_3,
-            "recall@5": self.recall_at_5,
-            "recall@10": self.recall_at_10,
+            "recall_any@1": self.recall_any_at_1,
+            "recall_any@3": self.recall_any_at_3,
+            "recall_any@5": self.recall_any_at_5,
+            "recall_any@10": self.recall_any_at_10,
+            "recall_all@10": self.recall_all_at_10,
             "ndcg@10": self.ndcg_at_10,
             "avg_latency_ms": self.avg_latency_ms,
             "peak_rss_mb": self.peak_rss_mb,
@@ -346,18 +337,19 @@ class BenchmarkReport:
 
     def format_table(self) -> str:
         lines = [
-            "=" * 44,
-            "LongMemEval-S Retrieval Benchmark Summary",
-            "=" * 44,
+            "=" * 60,
+            "LongMemEval-S Retrieval Benchmark (raw-retrieval baseline)",
+            "=" * 60,
             f"Queries evaluated : {self.total_queries}",
-            f"Recall@1          : {self.recall_at_1:.4f}",
-            f"Recall@3          : {self.recall_at_3:.4f}",
-            f"Recall@5          : {self.recall_at_5:.4f}",
-            f"Recall@10         : {self.recall_at_10:.4f}",
+            f"Recall-any@1      : {self.recall_any_at_1:.4f}",
+            f"Recall-any@3      : {self.recall_any_at_3:.4f}",
+            f"Recall-any@5      : {self.recall_any_at_5:.4f}",
+            f"Recall-any@10     : {self.recall_any_at_10:.4f}",
+            f"Recall-all@10     : {self.recall_all_at_10:.4f}",
             f"Session NDCG@10   : {self.ndcg_at_10:.4f}",
             f"Avg Latency       : {self.avg_latency_ms:.2f} ms",
             f"Peak RSS          : {self.peak_rss_mb:.2f} MB",
-            "=" * 44,
+            "=" * 60,
         ]
         return "\n".join(lines)
 
