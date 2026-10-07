@@ -20,6 +20,11 @@ runs and nothing is written this time. Otherwise they are committed on their own
 can be reverted alone. The bare bullets the person added to fact pages are then tagged
 ``[stated]`` in a commit of their own, citing that checkpoint as their source (R2: your
 own edit).
+
+A run marks itself in progress before it writes and unmarks itself when it ends cleanly
+(M8). A marker standing when no run is under it is a run that died mid-write: the next
+run rolls the dirty working tree it left back instead of committing its partial edits as
+a person's.
 """
 
 from __future__ import annotations
@@ -27,7 +32,8 @@ from __future__ import annotations
 import os
 import re
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime, timedelta
@@ -43,6 +49,8 @@ from aft.registry import Registry
 
 DIGESTS = "digests"
 CHECKPOINT_MESSAGE = "checkpoint: human edits"
+RUN_MARKER = "dream-run-in-progress"
+"""The name of the file in the afterthought home that says a dream run is writing the vault."""
 
 Process = Callable[[Config, str, Sequence[Path]], Any]
 """What a run does with one project that is ready: its slug and its waiting digests, in
@@ -93,10 +101,14 @@ class Run:
 
 def run(config: Config, process: Process | None = None, now: datetime | None = None) -> Run:
     """Run the dream once: the short-term memory of every project with nothing waiting
-    expired as maintenance, then every quiet project with waiting digests, one at a time."""
+    expired as maintenance, then every quiet project with waiting digests, one at a time.
+    A run the last one left mid-write has its partial edits rolled back first (M8)."""
     vault.require(config)
     with vault.locked(config):
         now = now or datetime.now(UTC)
+        # A run the last one left mid-write has its partial edits rolled back here, before
+        # this run can commit them as a person's under the checkpoint message.
+        _recover_interrupted_run(config)
         since = now - timedelta(minutes=config.settings.dream.quiet_minutes)
         result = Run(waiting=waiting_digests(config.vault))
         activity = last_activity(config)
@@ -118,84 +130,150 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             # vault, so it never carries a hand edit in its own commit.
             if changes:
                 return result
-            _expire_short_term(config, result, now, None, None)
-            # A run with nothing waiting still writes the idle and gone section: a home
-            # whose every project is idle is exactly the state the section exists to name
-            # (DESIGN 7, F49). It appends to the day's report, once a day.
+            with _run_in_progress(config, now):
+                _expire_short_term(config, result, now, None, None)
+                # A run with nothing waiting still writes the idle and gone section: a home
+                # whose every project is idle is exactly the state the section exists to name
+                # (DESIGN 7, F49). It appends to the day's report, once a day.
+                try:
+                    reportmod.write_idle_gone(config, now=now)
+                except Exception as exc:
+                    result.failures["idle-gone report"] = str(exc)
+            return result
+        if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
+            result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
+        # The checkpoint above went in first, so a person's hand edits are never under the
+        # marker: every write from here on is this run's, and the next run meets a dirty
+        # tree only if this one died mid-write, to roll it back rather than commit it as
+        # a person's.
+        with _run_in_progress(config, now):
+            if result.checkpoint is not None:
+                result.tagged = tag_hand_edits(config, result.checkpoint)
+                if result.tagged:
+                    result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
+            checkpoint_reported = _expire_short_term(
+                config, result, now, result.checkpoint, result.tag_commit
+            )
+            budget = config.settings.work.daily_token_budget
+            registry = Registry.load(config.registry_path)
+            for slug in ready:
+                # The daily cap counts the dream's model calls with the digests' (DESIGN 13): a
+                # project waits for the next day once it is spent, its digests still waiting.
+                if model.tokens_used_today(config, now) >= budget:
+                    result.over_budget.append(slug)
+                    continue
+                # One slug's digests may hold two directories' sessions (a project registered
+                # over the claim, or a record from before paths were kept), so they are run by
+                # the project each digest's own record names (DESIGN 7, F49).
+                groups = apply.digest_groups(config, registry, slug, result.waiting[slug])
+                taken = 0
+                reports: list[Any] = []
+                for group in groups:
+                    # Any failure in one project is that project's own: its writes are rolled back
+                    # by run_project, its error reaches the day's report, and the other projects
+                    # still run (DESIGN 9, and BUILD-PLAN M4 follow-up).
+                    try:
+                        if process is not None:
+                            rep = process(config, slug, group)
+                        else:
+                            rep = apply.run_project(config, slug, group, now=now)
+                        result.ran.append(slug)
+                    except Exception as exc:
+                        result.failures[slug] = str(exc)
+                        rep = ProjectRunReport(project=slug, error=str(exc))
+                    else:
+                        taken += len(group)
+                    if rep is None:
+                        continue
+                    reports.append(rep)
+                    # A failed run has nothing to revert of its own, but it still names the
+                    # checkpoint and tag commits, so the run's Revert item is never lost
+                    # (DESIGN 9 item 9).
+                    if getattr(rep, "commit", None) is not None or slug in result.failures:
+                        checkpoint, tag_commit = (
+                            (None, None)
+                            if checkpoint_reported
+                            else (result.checkpoint, result.tag_commit)
+                        )
+                        failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
+                        if failure is None:
+                            checkpoint_reported = True
+                        elif slug in result.failures:
+                            result.failures[slug] = (
+                                f"{result.failures[slug]}; its report failed: {failure}"
+                            )
+                        else:
+                            result.failures[slug] = f"report not written: {failure}"
+                if taken:
+                    result.taken[slug] = taken
+                if reports:
+                    result.reports[slug] = _merge_reports(slug, reports)
+            # gone are named in the report; nothing is archived or forgotten without the
+            # person's go-ahead (DESIGN 7, F49).
             try:
                 reportmod.write_idle_gone(config, now=now)
             except Exception as exc:
                 result.failures["idle-gone report"] = str(exc)
-            return result
-        if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
-            result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
-            result.tagged = tag_hand_edits(config, result.checkpoint)
-            if result.tagged:
-                result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
-        checkpoint_reported = _expire_short_term(
-            config, result, now, result.checkpoint, result.tag_commit
-        )
-        budget = config.settings.work.daily_token_budget
-        registry = Registry.load(config.registry_path)
-        for slug in ready:
-            # The daily cap counts the dream's model calls with the digests' (DESIGN 13): a
-            # project waits for the next day once it is spent, its digests still waiting.
-            if model.tokens_used_today(config, now) >= budget:
-                result.over_budget.append(slug)
-                continue
-            # One slug's digests may hold two directories' sessions (a project registered
-            # over the claim, or a record from before paths were kept), so they are run by
-            # the project each digest's own record names (DESIGN 7, F49).
-            groups = apply.digest_groups(config, registry, slug, result.waiting[slug])
-            taken = 0
-            reports: list[Any] = []
-            for group in groups:
-                # Any failure in one project is that project's own: its writes are rolled back
-                # by run_project, its error reaches the day's report, and the other projects
-                # still run (DESIGN 9, and BUILD-PLAN M4 follow-up).
-                try:
-                    if process is not None:
-                        rep = process(config, slug, group)
-                    else:
-                        rep = apply.run_project(config, slug, group, now=now)
-                    result.ran.append(slug)
-                except Exception as exc:
-                    result.failures[slug] = str(exc)
-                    rep = ProjectRunReport(project=slug, error=str(exc))
-                else:
-                    taken += len(group)
-                if rep is None:
-                    continue
-                reports.append(rep)
-                # A failed run has nothing to revert of its own, but it still names the checkpoint
-                # and tag commits, so the run's Revert item is never lost (DESIGN 9 item 9).
-                if getattr(rep, "commit", None) is not None or slug in result.failures:
-                    checkpoint, tag_commit = (
-                        (None, None)
-                        if checkpoint_reported
-                        else (result.checkpoint, result.tag_commit)
-                    )
-                    failure = _report_run(config, slug, rep, now, checkpoint, tag_commit)
-                    if failure is None:
-                        checkpoint_reported = True
-                    elif slug in result.failures:
-                        result.failures[slug] = (
-                            f"{result.failures[slug]}; its report failed: {failure}"
-                        )
-                    else:
-                        result.failures[slug] = f"report not written: {failure}"
-            if taken:
-                result.taken[slug] = taken
-            if reports:
-                result.reports[slug] = _merge_reports(slug, reports)
-        # gone are named in the report; nothing is archived or forgotten without the
-        # person's go-ahead (DESIGN 7, F49).
-        try:
-            reportmod.write_idle_gone(config, now=now)
-        except Exception as exc:
-            result.failures["idle-gone report"] = str(exc)
 
         return result
+
+
+def run_marker_path(config: Config) -> Path:
+    """Where a dream run's in-progress marker lives: the afterthought home, beside the
+    vault lock and the other run state, never the vault itself, so git never reads it as
+    a person's uncommitted edit (M8)."""
+    return config.home / RUN_MARKER
+
+
+@contextmanager
+def _run_in_progress(config: Config, now: datetime) -> Iterator[None]:
+    """Mark a dream run in progress for the writes of the body it wraps.
+
+    The marker comes off when the body ends cleanly, by return or fall-through; a body
+    that raises, as a crashed run's does, leaves it standing, so the next run rolls the
+    partial edits back instead of committing them as a person's. The vault lock is held
+    for the whole body, so a marker standing while this run holds the lock belongs to a
+    run that is no longer alive.
+    """
+    marker = run_marker_path(config)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    pagewrite.atomic_write_text(marker, f"{now.isoformat()} pid={os.getpid()}\n")
+    finished = False
+    try:
+        yield
+        finished = True
+    finally:
+        if finished:
+            marker.unlink(missing_ok=True)
+
+
+def _recover_interrupted_run(config: Config) -> bool:
+    """Roll back the dirty working tree a crashed dream run left, and drop its marker.
+
+    A run marks itself before it writes and unmarks itself when it ends cleanly, so a
+    marker standing with no run under it is a run that died mid-write: every uncommitted
+    change in the vault is that run's partial work, never a person's hand edit, and it
+    is reverted rather than committed under ``CHECKPOINT_MESSAGE``. Returns whether a
+    crashed run was recovered.
+    """
+    marker = run_marker_path(config)
+    if not marker.is_file():
+        return False
+    changes = uncommitted(config.vault)
+    if changes:
+        paths = sorted(changes)
+        # The checkout runs only on the paths still differing from the index, because a
+        # checkout is all or nothing: one pathspec it does not know would leave every
+        # restoration undone. The reset first takes the staged half of the dirt away, so
+        # the diff names exactly the worktree the crashed run left behind.
+        git(["reset", "-q", "--", *paths], cwd=config.vault, check=False)
+        diff = git(["diff", "--name-only", "-z"], cwd=config.vault).stdout
+        restore = [rel for rel in diff.split("\0") if rel]
+        if restore:
+            git(["checkout", "-q", "--", *restore], cwd=config.vault, check=False)
+        git(["clean", "-qfd", "--", *paths], cwd=config.vault, check=False)
+    marker.unlink(missing_ok=True)
+    return True
 
 
 def _merge_reports(slug: str, reports: Sequence[Any]) -> Any:
@@ -357,7 +435,7 @@ def tag_hand_edits(config: Config, checkpoint: str) -> list[str]:
         added = _added_lines(root, checkpoint, rel)
         text = _tagged(root / rel, added, checkpoint, when)
         if text is not None:
-            (root / rel).write_text(text, encoding="utf-8")
+            pagewrite.atomic_write_text(root / rel, text)
             tagged.append(rel)
     if tagged:
         vault.commit(root, tagged, f"aft: tag hand edits from {checkpoint}")
