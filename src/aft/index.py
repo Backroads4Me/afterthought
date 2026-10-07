@@ -119,6 +119,7 @@ those says the row is stale on its own terms.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import logging
@@ -1675,7 +1676,15 @@ def _db_path(config: Config) -> Path:
 
 
 def resolve_target_path(vault_root: Path, target: str) -> str | None:
-    """Resolve a wikilink target to a vault-relative path if a matching page exists."""
+    """Resolve a wikilink target to a vault-relative path if a matching page exists.
+
+    A target is answered from where the vault files it: the exact relative path first,
+    then its ``.md`` and ``overview.md`` forms, then the project, global and reference
+    locations. Only when nothing names the target directly does a stem match over the
+    vault decide, and that match has its own precedence - a project page ahead of a
+    global page ahead of a reference ahead of the rest, ties broken by path - so two
+    pages of one stem resolve the same way whatever order the filesystem lists them in.
+    """
     t = target.split("#", 1)[0].strip()
     if not t:
         return None
@@ -1688,16 +1697,15 @@ def resolve_target_path(vault_root: Path, target: str) -> str | None:
     if len(p.parts) == 1:
         candidates.extend(
             [
+                f"projects/{t}/overview.md",
+                f"global/{t}.md",
                 f"references/{t}.md",
                 f"references/{t}",
-                f"global/{t}.md",
-                f"projects/{t}/overview.md",
                 f"projects/{t}",
             ]
         )
     elif len(p.parts) == 2 and p.parts[0] == "projects":
         candidates.append(f"{t}/overview.md")
-
     for cand in candidates:
         cand_path = vault_root / cand
         if cand_path.is_file():
@@ -1706,37 +1714,64 @@ def resolve_target_path(vault_root: Path, target: str) -> str | None:
             except ValueError:
                 return cand
 
+    # Nothing named the target directly. A stem match over the vault is the last
+    # resort, and it decides by the precedence above rather than by the order the
+    # filesystem happens to list the files in.
     target_clean = t.removesuffix(".md")
+    ranked: list[tuple[int, str]] = []
     for md_file in vault_root.rglob("*.md"):
+        if md_file.stem != target_clean:
+            continue
         try:
             rel = md_file.relative_to(vault_root).as_posix()
         except ValueError:
             continue
-        if rel == t or rel == f"{t}.md" or rel.removesuffix(".md") == target_clean:
-            return rel
-        if md_file.stem == target_clean:
-            return rel
-
+        ranked.append((_stem_rank(rel), rel))
+    if ranked:
+        return min(ranked)[1]
     return None
+
+
+def _stem_rank(rel: str) -> int:
+    """The precedence a stem match carries, by the directory the file sits in: the same
+    order the candidate list asks in, so a bare name resolves to the project page before
+    the global page, the global page before the reference, and a page filed nowhere last."""
+    top = Path(rel).parts[0] if Path(rel).parts else ""
+    if top == "projects":
+        return 0
+    if top == "global":
+        return 1
+    if top == "references":
+        return 2
+    return 3
 
 
 def _sync_page_links(conn: sqlite3.Connection, config: Config, rel: str, text: str) -> None:
     """Parse wikilinks from page rows/facts and insert into page_links."""
-    for line_idx, line in enumerate(text.splitlines(), start=1):
-        targets = page.extract_wikilinks(line)
-        if not targets:
+    # Code is masked on the whole text, not line by line: a fence spanning several lines
+    # hides the links inside it only when the fence is read as one block (F68). Masking
+    # keeps every character offset where it was, so a match's offset names the line the
+    # link sits on in the text as written.
+    masked = page.mask_markdown_code(text)
+    line_starts = [0]
+    for line in text.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line))
+    seen: set[tuple[int, str]] = set()
+    for match in page.WIKILINK_PATTERN.finditer(masked):
+        raw = match.group(1)
+        if "\n" in raw:
+            continue  # a link split across lines is no link, as the line reader saw it
+        target = raw.strip()
+        line_idx = bisect.bisect_right(line_starts, match.start())
+        if (line_idx, target) in seen:
             continue
-        seen: set[str] = set()
-        for target in targets:
-            if target in seen:
-                continue
-            seen.add(target)
-            target_path = resolve_target_path(config.vault, target)
-            conn.execute(
-                f"INSERT OR REPLACE INTO {LINKS_TABLE} "
-                "(source_path, target, target_path, line_index) VALUES (?, ?, ?, ?)",
-                (rel, target, target_path, line_idx),
-            )
+        seen.add((line_idx, target))
+        target_path = resolve_target_path(config.vault, target)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {LINKS_TABLE} "
+            "(source_path, target, target_path, line_index) VALUES (?, ?, ?, ?)",
+            (rel, target, target_path, line_idx),
+        )
 
 
 def _find_vault(db_target: sqlite3.Connection | Config) -> Path | None:
@@ -1793,7 +1828,7 @@ def _backlinks_conn(
         candidates.add(f"global/{t}.md")
         candidates.add(f"projects/{t}/overview.md")
     elif len(p.parts) == 2 and p.parts[0] == "projects":
-        candidates.append(f"{t}/overview.md")
+        candidates.add(f"{t}/overview.md")
 
     if vault_root is not None:
         resolved = resolve_target_path(vault_root, t)
