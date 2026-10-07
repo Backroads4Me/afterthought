@@ -24,9 +24,11 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import random
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,7 @@ REPAIR_TURN = (
 # endpoint costs one line per run instead of the same error job after job (F66).
 COOLDOWN_FILE = "model-cooldown.json"
 COOLDOWN_SECONDS = 900.0
+COOLDOWN_BASE_SECONDS = 30.0
 
 
 class ModelError(Exception):
@@ -94,6 +97,7 @@ def complete_json(
     user: str,
     schema: dict,
     max_tokens: int,
+    endpoint: str | None = None,
 ) -> dict:
     """Ask the model for one JSON object that satisfies ``schema``.
 
@@ -109,9 +113,10 @@ def complete_json(
 
     # A cooldown an earlier failure left is answered before anything is sent: the point
     # of the record is that a down endpoint costs no calls at all while it lasts (F66).
-    cooling, reason = is_in_cooldown(config)
+    target_endpoint = endpoint or config.settings.model.endpoint
+    cooling, reason = is_in_cooldown(config, endpoint=target_endpoint)
     if cooling:
-        record = get_cooldown(config) or {}
+        record = get_cooldown(config, endpoint=target_endpoint) or {}
         raise ModelError(f"Model endpoint is in cooldown until {record.get('until')}: {reason}")
     if not config.settings.model.name:
         raise ModelError("model.name is empty; set it in config.toml")
@@ -141,7 +146,7 @@ def complete_json(
         # a model that answered twice alike at one temperature is given room not to.
         body["temperature"] = retry_temperature(config.settings.model.temperature, attempt)
         try:
-            content = _chat(config, body)
+            content = _chat(config, body, endpoint=target_endpoint)
         except _Retryable as exc:
             problems.append(str(exc))
             continue
@@ -173,33 +178,107 @@ def retry_temperature(base: float, attempt: int) -> float:
     return min(base + RETRY_TEMPERATURE_STEP * attempt, max(base, RETRY_TEMPERATURE_CAP))
 
 
+def parse_retry_after(value: str | None, now: datetime | None = None) -> float | None:
+    """Parse a Retry-After header value into seconds from now.
+
+    Accepts integer/float delta-seconds or an HTTP-date string. Returns None if unparseable.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    val = value.strip()
+    try:
+        return max(0.0, float(val))
+    except ValueError:
+        pass
+    try:
+        dt = parsedate_to_datetime(val)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        current = now if now is not None else datetime.now(UTC)
+        diff = (dt - current).total_seconds()
+        return max(0.0, diff)
+    except Exception:
+        return None
+
+
+def calculate_backoff(
+    consecutive_errors: int,
+    base: float = COOLDOWN_BASE_SECONDS,
+    cap: float = COOLDOWN_SECONDS,
+    jitter: float | None = None,
+) -> float:
+    """Capped exponential backoff with jitter based on consecutive errors."""
+    if consecutive_errors < 1:
+        consecutive_errors = 1
+    exp = min(consecutive_errors - 1, 10)
+    if jitter is None:
+        jitter = random.uniform(0.0, 1.0)
+    return min(base * (2**exp) + jitter, cap)
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """True when exc is a socket or read timeout rather than a connection failure."""
+    if isinstance(exc, TimeoutError):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, TimeoutError):
+        return True
+    text = str(exc).lower()
+    if "timed out" in text or "timeout" in text:
+        if "refused" not in text and "nodename nor servname provided" not in text:
+            return True
+    return False
+
+
 def cooldown_path(config: Config) -> Path:
     """Where the endpoint's cooldown state lives."""
     return config.home / COOLDOWN_FILE
 
 
-def get_cooldown(config: Config) -> dict[str, Any] | None:
+def _read_all_cooldowns(config: Config) -> dict[str, dict[str, Any]]:
+    path = cooldown_path(config)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if "until" in data and ("active" in data or "consecutive_errors" in data):
+        endpoint = config.settings.model.endpoint
+        return {endpoint: data}
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
+
+
+def _write_all_cooldowns(config: Config, data: dict[str, dict[str, Any]]) -> None:
+    path = cooldown_path(config)
+    try:
+        config.home.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def get_cooldown(config: Config, endpoint: str | None = None) -> dict[str, Any] | None:
     """The endpoint's cooldown record, or None when it is not cooling down.
 
     A record left with ``active`` false, or one that cannot be read, is as good as
     absent.
     """
-    try:
-        record = json.loads(cooldown_path(config).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    target = endpoint or config.settings.model.endpoint
+    all_records = _read_all_cooldowns(config)
+    record = all_records.get(target)
     if not isinstance(record, dict) or not record.get("active"):
         return None
     return record
 
 
-def is_in_cooldown(config: Config) -> tuple[bool, str]:
+def is_in_cooldown(config: Config, endpoint: str | None = None) -> tuple[bool, str]:
     """Whether the endpoint is cooling down, and the reason when it is.
 
     A record whose deadline has passed cools down no longer, whether or not a later
     call got far enough to clear it.
     """
-    record = get_cooldown(config)
+    record = get_cooldown(config, endpoint=endpoint)
     if record is None:
         return False, ""
     until = _time(record.get("until"))
@@ -208,58 +287,98 @@ def is_in_cooldown(config: Config) -> tuple[bool, str]:
     return True, str(record.get("reason") or "")
 
 
-def cooldown_until(config: Config) -> datetime | None:
+def cooldown_until(config: Config, endpoint: str | None = None) -> datetime | None:
     """When the endpoint's cooldown ends, or None while it is not cooling down."""
-    cooling, _ = is_in_cooldown(config)
+    cooling, _ = is_in_cooldown(config, endpoint=endpoint)
     if not cooling:
         return None
-    record = get_cooldown(config) or {}
+    record = get_cooldown(config, endpoint=endpoint) or {}
     return _time(record.get("until"))
 
 
-def set_cooldown(config: Config, reason: str, duration_seconds: float = COOLDOWN_SECONDS) -> None:
-    """Cool the endpoint down for ``duration_seconds`` from now (15 minutes by default).
+def set_cooldown(
+    config: Config,
+    reason: str,
+    duration_seconds: float | str | None = None,
+    endpoint: str | None = None,
+    *,
+    retry_after: float | int | str | None = None,
+    jitter: float | None = None,
+) -> None:
+    """Cool the endpoint down.
 
-    ``consecutive_errors`` counts the errors in a row across calls, so a report can
-    tell one bad moment from an endpoint that keeps failing. Writing the record is
-    best-effort: the caller already holds the error worth reporting, and a home that
-    cannot be written only means the next call meets the endpoint again.
+    If Retry-After / retry_after was provided (integer seconds or HTTP date string),
+    that duration is honored. Otherwise, exponential backoff with jitter is applied
+    based on consecutive errors.
     """
-    previous = get_cooldown(config) or {}
+    target = endpoint or config.settings.model.endpoint
+    all_records = _read_all_cooldowns(config)
+    previous = all_records.get(target, {})
+    consecutive_errors = int(previous.get("consecutive_errors") or 0) + 1
+
+    if retry_after is not None:
+        if isinstance(retry_after, (int, float)):
+            wait = float(retry_after)
+        else:
+            parsed = parse_retry_after(str(retry_after))
+            wait = (
+                parsed
+                if parsed is not None
+                else calculate_backoff(consecutive_errors, jitter=jitter)
+            )
+    elif duration_seconds is not None:
+        if isinstance(duration_seconds, (int, float)):
+            wait = float(duration_seconds)
+        else:
+            parsed = parse_retry_after(str(duration_seconds))
+            wait = (
+                parsed
+                if parsed is not None
+                else calculate_backoff(consecutive_errors, jitter=jitter)
+            )
+    else:
+        wait = calculate_backoff(consecutive_errors, jitter=jitter)
+
     record = {
         "active": True,
         "reason": reason,
-        "until": (datetime.now(UTC) + timedelta(seconds=duration_seconds)).isoformat(),
-        "consecutive_errors": int(previous.get("consecutive_errors") or 0) + 1,
+        "until": (datetime.now(UTC) + timedelta(seconds=wait)).isoformat(),
+        "consecutive_errors": consecutive_errors,
+        "duration_seconds": wait,
     }
-    try:
-        config.home.mkdir(parents=True, exist_ok=True)
-        cooldown_path(config).write_text(json.dumps(record) + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    all_records[target] = record
+    _write_all_cooldowns(config, all_records)
 
 
-def clear_cooldown(config: Config) -> bool:
-    """End any cooldown, True when there was a record to end.
-
-    A file that cannot be removed is marked inactive instead, so a home that cannot
-    let go of it still stops cooling down.
-    """
-    path = cooldown_path(config)
-    try:
-        path.unlink()
-    except FileNotFoundError:
+def clear_cooldown(config: Config, endpoint: str | None = None) -> bool:
+    """End any cooldown for the endpoint, True when there was an active record to end."""
+    target = endpoint or config.settings.model.endpoint
+    all_records = _read_all_cooldowns(config)
+    if target not in all_records:
         return False
-    except OSError:
-        record = get_cooldown(config)
-        if record is None:
-            return False
-        record["active"] = False
+    record = all_records[target]
+    if not isinstance(record, dict) or not record.get("active"):
+        return False
+
+    del all_records[target]
+    path = cooldown_path(config)
+
+    active_remaining = [
+        k for k, v in all_records.items() if isinstance(v, dict) and v.get("active")
+    ]
+    if not active_remaining:
         try:
-            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True
         except OSError:
-            return False
-    return True
+            all_records[target] = {**record, "active": False}
+            _write_all_cooldowns(config, all_records)
+            return True
+    else:
+        _write_all_cooldowns(config, all_records)
+        return True
 
 
 def tokens_used(config: Config, since: datetime | None = None) -> int:
@@ -336,9 +455,10 @@ def usage_path(config: Config) -> Path:
     return config.home / USAGE_LOG
 
 
-def _chat(config: Config, body: dict) -> str:
+def _chat(config: Config, body: dict, endpoint: str | None = None) -> str:
     """One HTTP call. Returns the assistant message content."""
-    url = config.settings.model.endpoint.rstrip("/") + "/chat/completions"
+    target_endpoint = endpoint or config.settings.model.endpoint
+    url = target_endpoint.rstrip("/") + "/chat/completions"
     headers = _headers(config)
     started = datetime.now(UTC)
     try:
@@ -354,7 +474,7 @@ def _chat(config: Config, body: dict) -> str:
             raw = response.read().decode(errors="replace")
         # The endpoint answered, so it is up: no cooldown stands any longer, whatever
         # it went on to say.
-        clear_cooldown(config)
+        clear_cooldown(config, endpoint=target_endpoint)
     except urllib.error.HTTPError as exc:
         target = exc.headers.get("location")
         if 300 <= exc.code < 400 and target:
@@ -375,19 +495,30 @@ def _chat(config: Config, body: dict) -> str:
         message = f"{url} returned {exc.code}: {excerpt}"
         # A server error or a rate limit is the endpoint's own state, not a session's:
         # it goes down as a cooldown, so the calls after this one fail fast (F66).
-        if exc.code >= 500 or exc.code == 429:
-            set_cooldown(config, message)
+        if exc.code == 429:
+            retry_after_val = exc.headers.get("Retry-After") if exc.headers else None
+            parsed_wait = parse_retry_after(retry_after_val) if retry_after_val else None
+            set_cooldown(
+                config,
+                message,
+                duration_seconds=parsed_wait,
+                endpoint=target_endpoint,
+            )
+        elif exc.code >= 500:
+            set_cooldown(config, message, endpoint=target_endpoint)
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
     except (OSError, http.client.HTTPException, ValueError) as exc:
         # Covers a refused connection, a DNS failure, a timeout, a reply that is not
         # HTTP, an answer cut off mid-body and a URL urllib cannot use alike: the
-        # endpoint is treated as down and the work stays queued (DESIGN 14). It also
-        # goes down as a cooldown, so the next call reads the record instead of meeting
-        # the same refusal itself (F66).
+        # endpoint is treated as down and the work stays queued (DESIGN 14).
         message = f"cannot reach {url}: {_quoted(config, str(exc))}"
-        set_cooldown(config, message)
+        if _is_timeout(exc):
+            # A socket/read timeout on slow generation is transient, not an outage:
+            # retry without immediately declaring a long hard outage cooldown.
+            raise _Retryable(message) from exc
+        set_cooldown(config, message, endpoint=target_endpoint)
         raise ModelError(message) from exc
 
     try:

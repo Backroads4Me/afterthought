@@ -1550,6 +1550,10 @@ def _verified_items(
     if check.verifier_endpoint:
         # A second endpoint is its own service: it takes the key name the config gives it
         # and no extra_body, never the [model] table's key or request fields.
+        cooling, reason = model.is_in_cooldown(config, endpoint=check.verifier_endpoint)
+        if cooling:
+            record = model.get_cooldown(config, endpoint=check.verifier_endpoint) or {}
+            raise ModelError(f"Model endpoint is in cooldown until {record.get('until')}: {reason}")
         config = replace(
             config,
             settings=replace(
@@ -1596,7 +1600,10 @@ def _verified_items(
         question = f"[{fact.kind}] {fact.statement} (words: {fact.quote})"
         try:
             answer = _model_answer(
-                config, verify_prompt_text(), f"{question}\n\n{listing}", verify_schema()
+                config,
+                verify_prompt_text(),
+                f"{question}\n\n{listing}",
+                verify_schema(),
             )
         except AnswerRefused as exc:
             dropped.append(
