@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from aft import index, lint, page, vault
 from aft.config import Config, load
+from aft.filter import sanitize_text
 from aft.library import manifest as manifest_mod
 from aft.library.manifest import Manifest
 from aft.library.survey import HTML_EXTS, JSON_EXTS, MARKDOWN_EXTS, TEXT_EXTS, survey
@@ -228,6 +229,16 @@ def _read_text(path: Path) -> str:
         return path.read_bytes().decode("utf-8", errors="replace")
 
 
+def _sanitized(chunks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Extraction with the characters a reader never sees out of headings and text alike.
+
+    Extracted text is what the index, the reference pages and every quote check read, so
+    a document cannot hide an instruction in invisible characters and have it survive
+    extraction into any of them.
+    """
+    return [(sanitize_text(heading), sanitize_text(text)) for heading, text in chunks]
+
+
 def extract_document(path: Path) -> Extraction:
     """Extract a document's text, chunked by the kind of document it is.
 
@@ -241,13 +252,13 @@ def extract_document(path: Path) -> Extraction:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         pdf = extract_pdf(path)
-        return Extraction(list(pdf.chunks), pdf.problem)
+        return Extraction(_sanitized(pdf.chunks), pdf.problem)
     if suffix in MARKDOWN_EXTS or suffix in TEXT_EXTS:
-        return Extraction(extract_markdown_chunks(_read_text(path)))
+        return Extraction(_sanitized(extract_markdown_chunks(_read_text(path))))
     if suffix in JSON_EXTS:
-        return Extraction(extract_json_chunks(_read_text(path)))
+        return Extraction(_sanitized(extract_json_chunks(_read_text(path))))
     if suffix in HTML_EXTS:
-        return Extraction(extract_html_chunks(_read_text(path)))
+        return Extraction(_sanitized(extract_html_chunks(_read_text(path))))
     return Extraction([])
 
 

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from aft import page as pagemod
 from aft.config import Config
+from aft.filter import sanitize_text
 from aft.keys import Resolution
 from aft.registry import Project
 
@@ -573,9 +574,11 @@ def _read_page(path: Path) -> pagemod.Page | None:
 
 def _read(path: Path) -> str | None:
     """The block is built from whatever the vault holds, so an absent or unreadable page
-    contributes nothing rather than failing the session that asked for it."""
+    contributes nothing rather than failing the session that asked for it. Whatever a page
+    holds is sanitized as it is read, so characters a reader never sees - zero-width spaces,
+    bidirectional controls, Unicode tags - do not reach the block a session starts with."""
     try:
-        return path.read_text()
+        return sanitize_text(path.read_text())
     except (OSError, UnicodeDecodeError):
         return None
 

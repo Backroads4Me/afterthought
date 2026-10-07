@@ -46,6 +46,7 @@ import yaml
 
 from aft import __version__, index, pagewrite, redact, vault
 from aft.config import Config, is_excluded
+from aft.filter import sanitize_text
 from aft.library.propose import record_verified_quote
 from aft.registry import Project, Registry, split_key
 
@@ -185,14 +186,17 @@ def read_file(
     ``capture.redact_patterns`` before it becomes anything at all - statement, quote, or
     verified record. Redacting later would leave the secret in the digest's own frontmatter,
     and a dropped line is reported in its redacted form for the same reason. Verification
-    then asks after the redacted text, which is the text the digest actually holds.
+    then asks after the redacted text, which is the text the digest actually holds. Each
+    line is sanitized first, so characters a reader never sees - zero-width spaces,
+    bidirectional controls, Unicode tags - cannot ride into a statement, a quote, or the
+    record behind them.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     lines: list[tuple[str, str]] = []
     dropped: list[tuple[str, str]] = []
     for line in _body(raw).splitlines():
-        quote = redact.redact(line, patterns, builtin=builtin).strip()
+        quote = redact.redact(sanitize_text(line), patterns, builtin=builtin).strip()
         if not quote:
             continue
         if quote.startswith("#"):

@@ -415,3 +415,31 @@ def test_a_project_named_in_capture_exclude_projects_is_never_read(memory: Confi
 
     assert claude_memory.run(config) == 1
     assert digests(config) == []
+
+
+# Characters a reader never sees: a zero-width space in one line, and a Unicode tag block
+# spelling "Ignore" in another. Copied verbatim, either would ride from a memory file an
+# agent wrote into a digest, its quote record, and the memory the dream builds from them;
+# sanitized, the tag block is gone whole, since what it hides is not text a reader held.
+INVISIBLE = """\
+---
+name: invisible-lines
+---
+
+## Notes
+
+- The daemon listens\u200b on 8123.
+- The tag block says\U000e0049\U000e0067\U000e006e\U000e006f\U000e0072\U000e0065 nothing.
+"""
+
+
+def test_an_imported_memory_with_invisible_and_tag_characters_is_sanitized(memory: Config):
+    memory_file(Path(os.environ["HOME"]), memory_path_project(memory), "invisible.md", INVISIBLE)
+
+    assert claude_memory.run(memory) == 0
+
+    text = next(path for path in digests(memory) if "invisible" in path.name).read_text()
+    assert "- The daemon listens on 8123. [inferred] " in text
+    assert "- The tag block says nothing. [inferred] " in text
+    assert "\u200b" not in text
+    assert "\U000e0049" not in text

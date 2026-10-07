@@ -880,6 +880,13 @@ def test_sanitize_text_removes_invisible_and_bidirectional_characters():
     assert sanitize_text(raw) == "zerowidthspacesandwordjoinersanddiroverridesclean"
 
 
+def test_sanitize_text_strips_all_invisible_and_tag_characters():
+    raw = "\u2066isolate\u2069\u200e\u200f\u00ad\u180e\u2061\ufe0f\U000e0049\U000e0067hidden"
+    assert sanitize_text(raw) == "isolatehidden"
+    # NFKC folds a compatibility spelling to its canonical form.
+    assert sanitize_text("\ufb01le") == "file"
+
+
 def test_filter_entries_strips_zero_width_characters_from_all_roles(cfg):
     entries = [
         said("user\u200b prompt\ufeff with invisibles", "u1"),
