@@ -1199,6 +1199,22 @@ def test_an_invented_answer_then_a_real_one_keeps_the_real_one(session: Session)
     ]
 
 
+def test_the_ask_after_an_invented_answer_is_guided(session: Session):
+    """The retry that follows an answer whose every quote was missing is not the same ask
+    again: the chunk goes back carrying guidance to quote the sentence that holds the
+    claim, verbatim from the entries (finding T17)."""
+    fake, cfg = serve(session.cfg, made_up(), answer(said(), summary="Built the capture hook."))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert digest.QUOTE_RETRY_GUIDANCE not in fake.requests[0]["messages"][1]["content"]
+    assert digest.QUOTE_RETRY_GUIDANCE in fake.requests[1]["messages"][1]["content"]
+    assert [fact.statement for fact in wrote.facts] == [
+        "Capture runs at session end, not per turn."
+    ]
+
+
 def test_a_part_about_another_session_is_refused_and_the_rest_kept(session: Session):
     """F37 hands an invented part to F36: the part is recorded and refused, the others stay."""
     wide = long_transcript("wide-made-up.jsonl", session)

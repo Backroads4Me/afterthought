@@ -1645,11 +1645,15 @@ def _asked(
     make,
 ) -> tuple[list[Fact], list[Dropped]]:
     """One call's items, verified, asked again once when two or more items all quote words
-    their entries do not hold (finding T17), as the base pipeline asks."""
+    their entries do not hold (finding T17), as the base pipeline asks. The retry carries
+    QUOTE_RETRY_GUIDANCE, so the model is told what quoting means rather than asked the
+    same thing again."""
     kept: list[Fact] = []
     dropped: list[Dropped] = []
-    for _ in range(2):
-        made = make(_model_answer(config, prompt, text, schema))
+    for attempt in range(2):
+        # The only way a second attempt happens here is the first answer quoting nothing
+        # its entries hold, so the retry is the guided one.
+        made = make(_model_answer(config, prompt, _guided_chunk(text, attempt > 0), schema))
         facts, refused = made if isinstance(made, tuple) else (made, [])
         kept, dropped = verify(config, session_id, part, facts, role=role)
         proposals = {
@@ -1792,6 +1796,22 @@ MIN_FACTS_ALL_UNQUOTED = 2
 QUOTE_NOT_FOUND = "the quote is not found in entry"
 QUOTE_TOO_SHORT = "the quote is too short to cite: fewer than four words, not a sentence"
 
+# What an ask carries when the answer before it quoted nothing its entries hold (finding
+# T17): the model is guided to the sentence that holds the claim, so the retry is not the
+# failed ask repeated word for word.
+QUOTE_RETRY_GUIDANCE = (
+    "Your previous answer quoted words that are not in the entries above. "
+    "Answer again: for each item you report, find the sentence of the entries above that "
+    "contains the claim and quote it verbatim, exactly as it is written there. Never "
+    "paraphrase a quote and never write one from memory."
+)
+
+
+def _guided_chunk(chunk: str, guided: bool) -> str:
+    """The chunk an ask carries: the quote-retry guidance joins it when the answer before
+    this one quoted nothing its entries hold (finding T17)."""
+    return f"{chunk}\n\n{QUOTE_RETRY_GUIDANCE}" if guided else chunk
+
 
 # What a turn holds that is not the user's own words (DESIGN 6, R2): a paste, a slash
 # command's text, a shell command run from the prompt and its output. A block with no closing
@@ -1851,17 +1871,25 @@ def _matching_answer(
     An answer does not match when ``mismatch`` names a problem, or when every one of two or
     more facts quotes words its entry does not hold: its summary and handoff, which carry no
     quote, came from the same reading. Two such answers are that part's failure, as a
-    refused schema is (finding T17); ``_digest_parts`` decides what the job keeps.
+    refused schema is (finding T17); ``_digest_parts`` decides what the job keeps. The ask
+    that follows a missing-quote answer is guided (QUOTE_RETRY_GUIDANCE); one that follows
+    any other mismatch is not, because quoting advice does not answer an invented entry or
+    a placeholder.
     """
     problem = ""
+    chunk = render(part)
+    guided = False
     for _ in range(2):
-        answer = _model_answer(config, prompt, render(part), schema)
+        answer = _model_answer(config, prompt, _guided_chunk(chunk, guided), schema)
         found = mismatch(answer, part)
         if found is None:
             kept, dropped = verify(config, session_id, part, answer["facts"], role=role)
             if not unquoted(answer["facts"], kept, dropped):
                 return answer, kept, dropped
             found = "no fact's quote is in the entry it cites"
+            # Only the missing-quote mismatch asks again guided: quoting advice does not
+            # answer an invented entry or a placeholder.
+            guided = True
         problem = found
     raise AnswerRefused(f"the answer does not match its chunk: {problem}")
 

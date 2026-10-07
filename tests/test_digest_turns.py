@@ -355,6 +355,36 @@ def test_a_turn_the_answer_skipped_is_asked_again(session: Session):
     ]
 
 
+def test_the_turns_ask_after_an_answer_with_no_quotes_is_guided(session: Session):
+    """The retry that follows a turns answer whose every quote was missing carries the
+    guidance to quote the sentence that holds the claim (finding T17)."""
+    fake, cfg = serve(
+        session.cfg,
+        summary(),
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "the moon is made of cheese"),
+            item(
+                "e4",
+                "decision",
+                "A slow endpoint is not retried forever.",
+                "the endpoint never came back",
+            ),
+        ),
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+        ),
+        {"items": []},
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert digest.QUOTE_RETRY_GUIDANCE not in fake.requests[1]["messages"][1]["content"]
+    assert digest.QUOTE_RETRY_GUIDANCE in fake.requests[2]["messages"][1]["content"]
+    assert [f.statement for f in wrote.facts] == ["Capture runs at session end."]
+
+
 def test_a_refused_summary_still_keeps_what_the_user_settled(session: Session):
     """The turns and observed questions do not read the summary (BUILD-PLAN F55)."""
     wrote = run(
