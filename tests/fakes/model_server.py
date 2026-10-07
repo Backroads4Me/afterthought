@@ -57,6 +57,7 @@ class Reply:
     raw: bytes | None = None
     finish_reason: str = "stop"
     null_content: bool = False
+    headers: dict[str, str] | None = None
     """Answer with ``"content": null``, as a reasoning model that ran out of tokens does."""
 
 
@@ -115,7 +116,7 @@ class FakeEndpoint:
                 if reply.raw is not None:
                     _send_raw(self, reply.raw)
                     return
-                _send(self, reply.status, _payload(call, reply))
+                _send(self, reply.status, _payload(call, reply), reply=reply)
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -177,12 +178,20 @@ def _payload(call: int, reply: Reply) -> dict:
     return payload
 
 
-def _send(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
+def _send(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    payload: dict,
+    reply: Reply | None = None,
+) -> None:
     body = json.dumps(payload).encode()
     try:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(body)))
+        if reply and reply.headers:
+            for k, v in reply.headers.items():
+                handler.send_header(k, v)
         handler.end_headers()
         handler.wfile.write(body)
     except OSError:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 
 import pytest
@@ -679,3 +680,124 @@ def test_set_cooldown_counts_the_errors_in_a_row(cfg):
     assert record is not None
     assert record["reason"] == "second failure"
     assert record["consecutive_errors"] == 2
+
+
+def test_consecutive_errors_increase_cooldown_duration_up_to_cap(cfg):
+    """Consecutive errors trigger exponential backoff until reaching the 900s cap."""
+    durations: list[float] = []
+    for i in range(1, 10):
+        model.set_cooldown(cfg, f"failure {i}", jitter=0.0)
+        record = model.get_cooldown(cfg)
+        assert record is not None
+        assert record["consecutive_errors"] == i
+        durations.append(record["duration_seconds"])
+
+    # Duration doubles each step until reaching 900.0s
+    assert durations[0] == 30.0
+    assert durations[1] == 60.0
+    assert durations[2] == 120.0
+    assert durations[3] == 240.0
+    assert durations[4] == 480.0
+    assert durations[5] == 900.0
+    assert durations[6] == 900.0
+    for prev, nxt in zip(durations[:5], durations[1:6], strict=True):
+        assert nxt > prev
+
+
+def test_consecutive_errors_with_jitter_strictly_increase_up_to_cap(cfg):
+    """With default jitter, consecutive error durations still increase until cap."""
+    durations: list[float] = []
+    for i in range(1, 8):
+        model.set_cooldown(cfg, f"failure {i}")
+        record = model.get_cooldown(cfg)
+        assert record is not None
+        durations.append(record["duration_seconds"])
+
+    # Each step before cap strictly increases
+    for prev, nxt in zip(durations[:5], durations[1:6], strict=True):
+        assert nxt > prev
+    assert durations[-1] == 900.0
+
+
+def test_http_429_retry_after_integer_seconds_sets_cooldown(serve):
+    """HTTP 429 with Retry-After delta seconds sets cooldown duration to that value."""
+    fake, cfg = serve(Reply(status=429, headers={"Retry-After": "45"}))
+    with pytest.raises(model.ModelError, match="429"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert record["active"] is True
+    assert record["duration_seconds"] == 45.0
+    until = datetime.fromisoformat(record["until"])
+    now = datetime.now(UTC)
+    assert 40 <= (until - now).total_seconds() <= 50
+    assert len(fake.requests) == 1
+
+
+def test_http_429_retry_after_http_date_sets_cooldown(serve):
+    """HTTP 429 with Retry-After HTTP date string sets cooldown to the target time."""
+    target_time = datetime.now(UTC) + timedelta(seconds=75)
+    date_str = format_datetime(target_time, usegmt=True)
+    fake, cfg = serve(Reply(status=429, headers={"Retry-After": date_str}))
+    with pytest.raises(model.ModelError, match="429"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert record["active"] is True
+    until = datetime.fromisoformat(record["until"])
+    now = datetime.now(UTC)
+    assert 70 <= (until - now).total_seconds() <= 80
+    assert len(fake.requests) == 1
+
+
+def test_http_429_without_retry_after_falls_back_to_backoff(serve):
+    """HTTP 429 with no Retry-After uses standard backoff."""
+    fake, cfg = serve(Reply(status=429))
+    with pytest.raises(model.ModelError, match="429"):
+        call(cfg)
+    record = model.get_cooldown(cfg)
+    assert record is not None
+    assert record["consecutive_errors"] == 1
+    assert 30.0 <= record["duration_seconds"] <= 31.0
+
+
+def test_cooldown_records_for_different_endpoints_do_not_interfere(serve, home):
+    """A cooldown on a secondary verifier endpoint does not block the primary model."""
+    fake, cfg = serve({"answer": "yes"})
+    verifier_endpoint = "http://127.0.0.1:9999/v1"
+
+    # Put the verifier endpoint in cooldown
+    model.set_cooldown(cfg, "verifier unreachable", endpoint=verifier_endpoint)
+    assert model.is_in_cooldown(cfg, endpoint=verifier_endpoint) == (True, "verifier unreachable")
+
+    # Main model endpoint is not in cooldown
+    assert model.is_in_cooldown(cfg) == (False, "")
+    assert model.get_cooldown(cfg) is None
+
+    # Main model can be called successfully
+    assert call(cfg) == {"answer": "yes"}
+    assert len(fake.requests) == 1
+
+    # Verifier endpoint is still in cooldown after successful main model call
+    assert model.is_in_cooldown(cfg, endpoint=verifier_endpoint) == (True, "verifier unreachable")
+
+    # Clearing main model cooldown does not clear verifier cooldown
+    assert model.clear_cooldown(cfg) is False
+    assert model.is_in_cooldown(cfg, endpoint=verifier_endpoint) == (True, "verifier unreachable")
+
+    # Clearing verifier cooldown ends its record
+    assert model.clear_cooldown(cfg, endpoint=verifier_endpoint) is True
+    assert model.is_in_cooldown(cfg, endpoint=verifier_endpoint) == (False, "")
+
+
+def test_socket_timeout_does_not_declare_outage_cooldown(serve, monkeypatch):
+    """A slow generation socket timeout retries without setting an outage cooldown."""
+    monkeypatch.setattr(model, "TIMEOUT_SECONDS", 0.2)
+    fake, cfg = serve(Reply(content={"answer": "slow"}, delay=2.0))
+    with pytest.raises(model.ModelError, match="cannot reach"):
+        call(cfg)
+    # Slow generation timed out both attempts
+    assert len(fake.requests) == 2
+    # No cooldown is declared for a transient slow timeout
+    assert model.get_cooldown(cfg) is None
+    assert model.is_in_cooldown(cfg) == (False, "")
