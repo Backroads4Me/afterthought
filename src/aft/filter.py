@@ -37,6 +37,7 @@ watermark (M2.2) - carries this one boolean too.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import replace
 
@@ -51,8 +52,6 @@ CAP_MARKER = " [...]"
 
 FILTERED_INJECTION = "[filtered injection attempt]"
 
-_INVISIBLE_CHARS = re.compile(r"[\u200B-\u200D\u2060\uFEFF\u202A-\u202E]")
-
 _INJECTION_PATTERNS = (
     r"(?i)\bignore\s+(?:previous|all|above|prior)\s+instructions\b",
     r"(?i)\bsystem\s+prompt\s+override\b",
@@ -65,8 +64,31 @@ _INJECTION_COMPILED: tuple[re.Pattern[str], ...] = tuple(
 
 
 def sanitize_text(text: str) -> str:
-    """Strip invisible and bidirectional override characters from text."""
-    return _INVISIBLE_CHARS.sub("", text)
+    """The text with the characters a reader never sees gone, then normalized.
+
+    Format characters (Unicode category ``Cf``: zero-width spaces and joiners, the soft
+    hyphen, bidirectional controls and isolates), Unicode tag characters
+    (U+E0000..U+E007F, the block invisible instructions are smuggled through) and
+    variation selectors (U+FE00..U+FE0F and U+E0100..U+E01EF) change what a model reads
+    without changing what a person sees, so they are stripped before NFKC folds what is
+    left to its canonical form.
+    """
+    if text.isascii():
+        # Every character the scan below removes is outside ASCII, and NFKC leaves ASCII
+        # alone, so a text with no non-ASCII character in it has nothing to be cleaned of.
+        return text
+    return unicodedata.normalize("NFKC", "".join(c for c in text if not _invisible(c)))
+
+
+def _invisible(character: str) -> bool:
+    """Whether one character is invisible to a reader and so not to be trusted."""
+    code_point = ord(character)
+    return (
+        unicodedata.category(character) == "Cf"
+        or 0xE0000 <= code_point <= 0xE007F
+        or 0xFE00 <= code_point <= 0xFE0F
+        or 0xE0100 <= code_point <= 0xE01EF
+    )
 
 
 def strip_injections(text: str) -> str:
