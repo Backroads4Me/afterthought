@@ -5,8 +5,10 @@ secret patterns plus the user's own, applied before anything is archived. The bu
 patterns recognize credentials by their shape alone, never by a name beside them (such as
 password, token, or key), so test passwords and token counts stay intact. The list of
 shapes covers private key blocks, the ``sk-``, ``ghp_``, ``github_pat_``, ``xox*`` and AWS
-access key id tokens, the Google, GitLab and npm token prefixes, ``Authorization:``
-headers, bearer tokens, and credentials in URLs.
+access key id tokens, the Google, GitLab and npm token prefixes, the Stripe live keys and
+webhook signing secrets, the Hugging Face, PyPI, SendGrid and DigitalOcean token shapes,
+JSON Web Tokens, Slack webhook URLs, ``Authorization:`` headers, bearer tokens, and
+credentials in URLs.
 
 Patterns from ``capture.redact_patterns`` are applied after built-in patterns, adding to the
 list rather than replacing it. When ``capture.builtin_redaction`` is false, the built-in
@@ -24,6 +26,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import cache
 
 REDACTED = "[redacted]"
 
@@ -60,7 +63,33 @@ _TOKENS = (
     # own prefix, so neither needs a name beside it to say what it is.
     r"(?<!\w)glpat-[A-Za-z0-9_-]{16,}",
     r"(?<!\w)npm_[A-Za-z0-9]{16,}",
+    # Stripe live-mode secret and restricted keys, and webhook signing secrets.
+    # The test-mode shapes (sk_test_, rk_test_) and the publishable pk_live_
+    # prefix are not live credentials, so they stay.
+    r"(?<!\w)(?:sk|rk)_live_[A-Za-z0-9]{16,}",
+    r"(?<!\w)whsec_[A-Za-z0-9]{16,}",
+    # A Hugging Face access token: hf_ and a long alphanumeric body. A name
+    # starting hf_ carries a short word, an underscore or a dot, not a run.
+    r"(?<!\w)hf_[A-Za-z0-9]{20,}",
+    # A PyPI API token: the macaroon header every token carries, naming
+    # pypi.org, then its body. The pypi- prefix alone would take an ordinary
+    # hyphenated phrase, so the fixed header is what says token.
+    r"(?<!\w)pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{24,}",
+    # A SendGrid API key: SG. then its two parts, 22 and 43 characters of the
+    # base64url alphabet. The lengths are the shape; a hostname or an
+    # abbreviation after SG. falls short of the first part.
+    r"(?<!\w)SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}",
+    # A DigitalOcean personal access token: dop_v1_ and 64 hex characters. The
+    # run may be shorter when the filter cut the entry mid-token, so 32 hex
+    # characters or more go.
+    r"(?<!\w)dop_v1_[a-f0-9]{32,}",
 )
+
+# A JSON Web Token: three dot-separated base64url segments whose first begins
+# eyJ, the base64 of the brace and quote every JWT header opens with. The
+# minimums keep ordinary dotted text out: a real header runs past ten
+# characters, a payload past ten, and a signature is a long run or nothing.
+_JWT = r"(?<!\w)eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}"
 
 # An Authorization header, scheme and all: which scheme was used says nothing a digest
 # needs, and the value runs to the end of the line.
@@ -76,17 +105,32 @@ _BEARER = r"\bbearer\s+[A-Za-z0-9._~+/=-]{16,}"
 # an email address in prose.
 _URL_CREDENTIAL = r"(?<=://)[^\s/@:]+(?::[^\s/@]*)?@"
 
+# A Slack incoming webhook: the secret is the path under the fixed host, so the
+# pattern takes the path and leaves the host and its services prefix, the way a
+# URL credential leaves its host. A bare mention of the host matches nothing.
+_SLACK_WEBHOOK = r"(?<=hooks\.slack\.com/services/)[A-Za-z0-9/_-]{20,}"
+
 _BUILTIN_SOURCES: tuple[str, ...] = (
     _KEY_BLOCK,
     *_TOKENS,
+    _JWT,
     _HEADER,
     _BEARER,
     _URL_CREDENTIAL,
+    _SLACK_WEBHOOK,
 )
 
-_BUILTIN: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(source, _FLAGS) for source in _BUILTIN_SOURCES
-)
+
+@cache
+def _builtin() -> tuple[re.Pattern[str], ...]:
+    """The built-in patterns, compiled on first use.
+
+    Compiling them at import would charge every process that merely imports
+    this module, and two of those - ``aft inject`` and the session-start hook -
+    run under a 150 ms budget and never redact anything. The paths that do
+    redact pay for the compilation once and share the result.
+    """
+    return tuple(re.compile(source, _FLAGS) for source in _BUILTIN_SOURCES)
 
 
 class BadPattern(Exception):
@@ -134,7 +178,7 @@ def redact(
     leaves whatever it was written for in the clear.
     """
     out = text
-    active = (*_BUILTIN, *compile_patterns(patterns)) if builtin else compile_patterns(patterns)
+    active = (*_builtin(), *compile_patterns(patterns)) if builtin else compile_patterns(patterns)
     for pattern in active:
         out = pattern.sub(REDACTED, out)
     return out
