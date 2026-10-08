@@ -1411,6 +1411,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     end to end, the config overrides land, attribution credits only cited sessions.
     Review checkpoint: yes.
 
+- **F72 LongMemEval-S pipeline diagnostics** (ruling 2026-10-08). In `eval/longmemeval.py`
+  pipeline mode:
+  - **Line matching:** a page hit credits the line the query ranks first among the hit
+    section's injected lines by stemmed BM25, in an in-memory FTS5 table built with
+    `index.TOKENIZER` the way `aft.dream.decide.related` builds its own; no line matching
+    any query word credits no session. Replaces raw word overlap.
+  - **Records:** each question's record lists every session's outcome by id (digested,
+    empty, below the floor, failed, left queued) and, for the `full` ranking, each ranked
+    session with the hit that credited it (collection, path, heading, matched statement).
+  - **Sandboxes:** kept by default; `--discard-sandbox` deletes a finished, scored one.
+  - **Rescore:** `--rescore` re-scores the sandboxes a JSONL names without calling the
+    model, writing a new JSONL, so a scoring change can be measured on kept runs.
+  - Tests in `tests/test_eval.py`. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
