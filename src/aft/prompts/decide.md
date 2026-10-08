@@ -28,6 +28,13 @@ Choose one action:
   on. A long-term fact that will not stay true is not worth keeping either. A short-term
   fact is meant to be temporary, so that alone is no reason to skip it.
 
+Each line shows its source tag in brackets, its date, and one quote from its evidence; the
+new fact shows its own tag, date and quote. A tag says who asserted a line: [stated] the
+user, [observed] a session, [inferred] or [suggested] the model, which is tentative. Newer
+evidence about the same thing that says something different means the thing has changed:
+supersede. Evidence that is not newer does not replace a line: confirm when the two say the
+same thing, conflict when they say different things that cannot both be true.
+
 Two lines say the same thing when an agent reading either would act the same way, even if
 the wording differs. Before naming a line for supersede or conflict, check that it is about
 the same thing as the new fact. A fact about something else, or one that can be true at the

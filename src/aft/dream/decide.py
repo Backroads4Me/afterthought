@@ -1,9 +1,9 @@
 """Retrieval and the decision call (design 9, a run, steps 2 and 3).
 
 For one verified fact from a waiting digest, ``related`` finds the ten existing lines most
-like it with a keyword search, ``ask`` puts the fact and those lines, numbered ``L1`` to
-``L10``, to the model for one decision, and ``decide`` does both and resolves the line the
-decision names. What comes back is a ``Proposal``: the decision and its target, which
+like it with a stemmed keyword search, ``ask`` puts the fact and those lines, numbered
+``L1`` to ``L10``, each shown with its source tag, date and one quote, to the model for one
+decision, and ``decide`` does both and resolves the line the decision names.
 ``Proposal.check`` hands to ``aft.dream.rules`` unchanged. Nothing here writes a file; the
 model only judges meaning, and the rules and the page writer decide what changes (R9).
 
@@ -22,7 +22,9 @@ Where the lines come from:
   it decides later ones (design 9), so a line added a moment ago has to be found, and the
   index is only brought up to date after the run commits. An index row is also a whole
   section, and the decision names one line. So the lines are ranked here, one row per line,
-  with the same SQLite FTS5 BM25 ranking ``aft.index`` uses, in a table held in memory.
+  with the same SQLite FTS5 BM25 ranking ``aft.index`` uses, in a table held in memory. The
+  table stems its words with the tokenizer ``aft.index`` builds its collections from, so a
+  fact about ``pause`` finds the line that says ``paused`` (design 10, search).
 * **Lines that stand, and candidates.** Active lines, lines under an open note (they are
   still injected, design 6's fact state) and candidates. Superseded, withdrawn and stale
   lines are not memory, and the rules give no authority over them.
@@ -41,7 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from aft import model, page
+from aft import index, model, page
 from aft.config import Config
 from aft.dream import rules
 
@@ -54,6 +56,13 @@ LIMIT = 10
 
 MAX_TOKENS = 256
 """The answer is three short fields, the longest a 200-character reason."""
+
+QUOTE_LIMIT = 160
+"""How much of a line's source quote the decision context shows: the words the line stands
+on, not the whole entry."""
+
+_CREATE_LINES = f"CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='{index.TOKENIZER}')"
+"""The in-memory retrieval table, stemmed exactly as ``aft.index`` stems its collections."""
 
 RETRIEVED = (page.ACTIVE, page.CONFLICT, page.NEEDS_YOU, page.CANDIDATE)
 """The line states a decision may name: the ones that stand as memory, and candidates."""
@@ -176,7 +185,10 @@ def related(
         return ()
     conn = sqlite3.connect(":memory:")
     try:
-        conn.execute("CREATE VIRTUAL TABLE lines USING fts5(statement)")
+        # Stemmed like the search index (design 10): a fact about "pausing" must find
+        # the line that says "paused". The statement is a module constant built from
+        # aft.index's tokenizer, so the two tables cannot drift apart.
+        conn.execute(_CREATE_LINES)
         conn.executemany(
             "INSERT INTO lines (rowid, statement) VALUES (?, ?)",
             [(n, fact.statement) for n, (_, _, fact, _) in enumerate(candidates)],
@@ -202,9 +214,12 @@ def ask(
 
 
 def render(new_fact: rules.NewFact, quote: str, lines: Sequence[Line]) -> str:
-    """The user message: the fact, its quote, and the numbered lines."""
+    """The user message: the fact with its tag, date and quote, and the numbered lines
+    with theirs, so newer dated evidence about the same thing can be told from a
+    conflict."""
     parts = [
-        f"New fact ({new_fact.kind}, {new_fact.term} term): {new_fact.statement}",
+        f"New fact ([{new_fact.source}], {new_fact.kind}, {new_fact.term} term,"
+        f" {new_fact.date}): {new_fact.statement}",
         f"Quote: {json.dumps(quote, ensure_ascii=False)}",
         "",
     ]
@@ -213,11 +228,24 @@ def render(new_fact: rules.NewFact, quote: str, lines: Sequence[Line]) -> str:
     else:
         parts.append("Existing lines:")
         parts.extend(
-            f"{line.label} ({line.fact.kind or 'candidate'}{', recent' if line.recent else ''}):"
-            f" {line.fact.statement}"
+            f"{line.label} ([{line.fact.source}], {line.fact.kind or 'candidate'},"
+            f" {line.fact.date}{', recent' if line.recent else ''}):"
+            f" {line.fact.statement}\n{_line_quote(line)}"
             for line in lines
         )
     return "\n".join(parts) + "\n"
+
+
+def _line_quote(line: Line) -> str:
+    """One short quote from the line's cited sources: the first footnote whose entry the
+    page's frontmatter holds, cut to ``QUOTE_LIMIT``; ``none`` when none survives."""
+    for ref in line.fact.refs:
+        quote = str(line.sources.get(ref, {}).get("quote", "")).strip()
+        if quote:
+            if len(quote) > QUOTE_LIMIT:
+                quote = quote[:QUOTE_LIMIT].rstrip() + "..."
+            return f"  Quote: {json.dumps(quote, ensure_ascii=False)}"
+    return "  Quote: none."
 
 
 def prompt() -> str:

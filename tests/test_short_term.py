@@ -506,7 +506,9 @@ def test_a_later_long_term_fact_lifts_the_line_it_confirms(cfg, fake):
     # The recent line shares the most words with the new fact, so it is L1.
     fake.script = [reply("confirm", "L1"), LINES_REPLY, reply("add")]
     rep = schedule.run(cfg, now=NOW).reports[SLUG]
-    assert "L1 (state, recent): The hook rewrite is paused." in str(fake.requests[0])
+    assert "L1 ([observed], state, 2026-10-01, recent): The hook rewrite is paused." in str(
+        fake.requests[0]
+    )
     assert "The hook rewrite is paused." not in recent_text(cfg)
     assert "- The hook rewrite is paused. [observed]" in overview_text(cfg)
     assert [lifted.why for lifted in rep.lifted] == ["a later session's long-term fact confirms it"]
