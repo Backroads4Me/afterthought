@@ -74,6 +74,14 @@ class FakeEndpoint:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
+    def reply_for(self, call: int, body: dict) -> Reply:
+        """The reply one call gets: the script's, in order, the last one repeating.
+
+        A subclass may route by the request instead - parallel jobs interleave their calls
+        on one endpoint, and a script of ordered replies cannot serve two of them at once.
+        """
+        return self.script[min(call, len(self.script) - 1)] if self.script else Reply()
+
     def __enter__(self) -> FakeEndpoint:
         self.start()
         return self
@@ -110,7 +118,7 @@ class FakeEndpoint:
                     fake.requests.append(_json_or_empty(body))
                     fake.headers.append({k.lower(): v for k, v in self.headers.items()})
                     call = len(fake.requests) - 1
-                reply = fake.script[min(call, len(fake.script) - 1)] if fake.script else Reply()
+                reply = fake.reply_for(call, fake.requests[-1])
                 if reply.delay:
                     time.sleep(reply.delay)
                 if reply.raw is not None:

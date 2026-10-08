@@ -19,11 +19,12 @@ from typing import Any
 import pytest
 
 from aft import eval as evalmod
-from aft import inject, keys, model, search
+from aft import index, inject, keys, model, search
 from aft.cli import main
 from aft.config import Config
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
+from fakes.model_server import MODEL_NAME, FakeEndpoint, Reply
 
 _EVAL_SCRIPT = Path(__file__).resolve().parent.parent / "eval" / "longmemeval.py"
 _spec = importlib.util.spec_from_file_location("longmemeval", _EVAL_SCRIPT)
@@ -915,3 +916,337 @@ def test_benchmark_asks_each_question_at_its_question_date(monkeypatch, tmp_path
     monkeypatch.setattr(search, "search", spy)
     longmemeval.run_benchmark(dataset_file)
     assert captured["now"] == datetime(2023, 5, 20, 2, 21, tzinfo=UTC)
+
+
+# ------------------------------------------------------------------ pipeline mode (F71)
+
+_PROMPT_MARKERS = (
+    ("summary", "write what it did and where the work stood"),
+    ("digest", "extract what a future session would need to know"),
+    ("reconcile", "check what it shows about the project's short-term memory"),
+    ("turns", "You label what a user said"),
+    ("observed", "You read the assistant's own words"),
+    ("decide", "You maintain a project's memory"),
+    ("final", "You read the items one part of a working session settled"),
+)
+
+
+class RoutedEndpoint(FakeEndpoint):
+    """The fake endpoint that answers by the prompt a call carries, not by call order.
+
+    One question's pipeline calls run in a fixed order, but parallel jobs interleave
+    their calls on the one endpoint the caller's config names, so a script of ordered
+    replies cannot serve two questions at once. Each kind of call gets its own scripted
+    answer; a call the test scripted no answer for is refused with a 500, the same loud
+    nothing an unscripted ordered endpoint gives.
+    """
+
+    def __init__(self, by_kind: dict[str, Any]) -> None:
+        super().__init__([])
+        self.by_kind = by_kind
+
+    def reply_for(self, call: int, body: dict) -> Reply:
+        messages = body.get("messages") or []
+        system = str(messages[0].get("content") or "") if messages else ""
+        user = str(messages[1].get("content") or "") if len(messages) > 1 else ""
+        kind = next((name for name, marker in _PROMPT_MARKERS if marker in system), "")
+        if kind in ("summary", "digest", "turns", "observed"):
+            # A digest-side call carries the session's own words, so the session it belongs
+            # to is named by the word only that session says, which the test gives as the
+            # "word" key: the answer is keyed "<word>:<kind>".
+            word = str(self.by_kind.get("word", ""))
+            which = "answer" if word and word in user.lower() else "distractor"
+            kind = f"{which}:{kind}"
+        answer = self.by_kind.get(kind)
+        if answer is None:
+            return Reply(status=500)
+        return answer if isinstance(answer, Reply) else Reply(content=answer)
+
+
+def pipeline_home_config(home: Path, vault: Path, endpoint: str) -> None:
+    """The caller's config: the sandbox copies its model table, so the endpoint lives here."""
+    (home / "config.toml").write_text(
+        f'vault = "{vault}"\nhost = "{HOST}"\n'
+        f'[model]\nendpoint = "{endpoint}"\nname = "{MODEL_NAME}"\n',
+        encoding="utf-8",
+    )
+
+
+def turn_item(turn: str, label: str, statement: str = "", quote: str = "") -> dict:
+    """One turns answer item of the shape the schema describes."""
+    return {
+        "turn": turn,
+        "label": label,
+        "statement": statement,
+        "quote": quote,
+        "scope": "project",
+        "term": "long",
+        "proposal": "",
+    }
+
+
+HASH_QUESTION = {
+    "question_id": "q-hash",
+    "question_type": "single-session-user",
+    "question": "What memory cost does our password hashing use?",
+    "answer": "Argon2id with a 64MB memory cost",
+    "question_date": "2023/05/20 (Sat) 02:21",
+    "haystack_dates": ["2023/05/18 (Thu) 10:00", "2023/05/19 (Fri) 11:30"],
+    "haystack_session_ids": ["answer_1", "distractor_1"],
+    "answer_session_ids": ["answer_1"],
+    # Two prompts a session: the digest floor is two user prompts, and a thinner session
+    # is never digested at all.
+    "haystack_sessions": [
+        [
+            {"role": "user", "content": "We hash passwords with Argon2id at a 64MB memory cost."},
+            {"role": "assistant", "content": "Configured: Argon2id, 64MB per hash."},
+            {"role": "user", "content": "Good. The deployment notes should carry that setting."},
+            {"role": "assistant", "content": "Noted for the deployment notes."},
+        ],
+        [
+            {"role": "user", "content": "What is our caching strategy?"},
+            {"role": "assistant", "content": "Redis with LRU eviction."},
+            {"role": "user", "content": "Thanks. Let us leave the cache topic for later."},
+            {"role": "assistant", "content": "Sounds good."},
+        ],
+    ],
+}
+
+ANSWER_TURNS = {
+    "summary": {
+        "summary": "Settled how passwords are hashed, and the memory cost of it.",
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+    },
+    "turns": {
+        "items": [
+            turn_item(
+                "#1",
+                "fact",
+                "We hash passwords with Argon2id at a 64MB memory cost.",
+                "We hash passwords with Argon2id at a 64MB memory cost.",
+            ),
+            turn_item("#3", "none"),
+        ]
+    },
+    "observed": {"items": []},
+    "decide": {"action": "add", "line": None, "reason": "the user stated it themselves"},
+}
+
+DISTRACTOR_TURNS = {
+    "summary": {
+        "summary": "Asked about the cache.",
+        "handoff": {"in_flight": {"text": "", "entry": ""}, "failed": [], "open": []},
+    },
+    "turns": {"items": [turn_item("#1", "question"), turn_item("#3", "none")]},
+    "observed": {"items": []},
+}
+
+
+def pipeline_endpoint() -> RoutedEndpoint:
+    """The routed endpoint one two-session question runs against.
+
+    The digest-side calls carry the session's own words in their user message, so the two
+    sessions are told apart by the words only one of them says, and each gets the answers
+    written for it whatever order the calls arrive in. The answer session settles one fact
+    the dream decides on; the distractor settles nothing, so it draws no decide call.
+    """
+    return RoutedEndpoint(
+        {
+            "word": "argon2id",
+            "answer:summary": ANSWER_TURNS["summary"],
+            "answer:turns": ANSWER_TURNS["turns"],
+            "answer:observed": ANSWER_TURNS["observed"],
+            "distractor:summary": DISTRACTOR_TURNS["summary"],
+            "distractor:turns": DISTRACTOR_TURNS["turns"],
+            "distractor:observed": DISTRACTOR_TURNS["observed"],
+            "decide": ANSWER_TURNS["decide"],
+        }
+    )
+
+
+def write_dataset(path: Path, *items: dict) -> Path:
+    path.write_text(json.dumps(list(items)), encoding="utf-8")
+    return path
+
+
+ATTRIBUTION_PAGE = """\
+---
+type: Project
+title: Widget
+description: A widget that turns water into widgets.
+sources:
+  - id: s1
+    resource: aft://session/claude/answer_1#u1
+    quote: the daemon listens on 8123
+  - id: s2
+    resource: aft://session/claude/distractor_1#u1
+    quote: the cache holds two gigabytes
+aft:
+  project: p_widget
+---
+
+## Facts
+
+- The daemon listens on 8123. [observed] 2026-09-30 [^s1]
+- The cache holds two gigabytes. [observed] 2026-09-30 [^s2]
+"""
+
+
+def test_a_page_hit_credits_only_the_sessions_its_matched_line_cites(initialized: Config):
+    """A section's other lines say nothing about a hit: only the matched line's sources."""
+    write(initialized.vault / "projects/widget/overview.md", ATTRIBUTION_PAGE)
+    hit = search.Hit(
+        path="projects/widget/overview.md",
+        description="Widget",
+        snippet="The daemon listens on 8123.",
+        collection=index.PAGES,
+        heading="Facts",
+    )
+    sessions = longmemeval._page_hit_sessions(
+        initialized, hit, "what port does the daemon listen on"
+    )
+    assert sessions == ["answer_1"]
+
+
+def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
+    """The answer session's fact reaches a page line, and every ranking credits its session."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        report = longmemeval.run_pipeline(dataset, workdir, output, keep_sandbox=True)
+    assert report.total == 1
+    assert report.scored == 1
+    assert report.errors == 0
+    assert report.stopped == 0
+    assert report.model == MODEL_NAME
+    assert report.digests["recall_any@1"] == 1.0
+    assert report.full["recall_any@1"] == 1.0
+    assert report.coverage == 1.0
+
+    (record,) = longmemeval._read_records(output)
+    assert record["id"] == "q-hash"
+    assert record["mode"] == "pipeline"
+    assert record["question_date"] == "2023-05-20T02:21:00+00:00"
+    assert record["answer_session_ids"] == ["answer_1"]
+    assert record["scored"] is True
+    assert record["stopped"] == ""
+    assert record["sessions"] == 2
+    assert record["sessions_digested"] == 2
+    assert record["sessions_empty"] == 0
+    assert record["sessions_failed"] == 0
+    assert record["work_failures"] == []
+    assert record["dream_failures"] == {}
+    assert record["model"] == MODEL_NAME
+    assert record["pipeline"] == "turns"
+    assert len(record["prompt_hash"]) == 64
+    assert record["tokens"] > 0
+    assert record["sandbox"] == str(workdir / "q-hash")
+    # --keep-sandbox leaves the sandbox standing: config, vault and project all there.
+    assert (workdir / "q-hash" / "home" / "config.toml").is_file()
+    assert (workdir / "q-hash" / "vault" / "projects").is_dir()
+
+    rankings = record["rankings"]
+    assert rankings["digests"]["ranked_sessions"][0] == "answer_1"
+    assert rankings["digests"]["recall_any@1"] == 1.0
+    assert rankings["full"]["ranked_sessions"][0] == "answer_1"
+    assert rankings["full"]["recall_any@1"] == 1.0
+    assert rankings["full"]["recall_all@10"] == 1.0
+    assert rankings["coverage"] == 1.0
+
+
+def test_the_sandbox_config_carries_the_caller_s_model_and_caps_that_never_bind(home, tmp_path):
+    """The caller's model table goes over whole, and the sandbox's own caps never bind."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    # A stopped run is the cheap way to a kept sandbox: the config is written before the
+    # first call, and a stopped question's sandbox is kept whether it was asked for or not.
+    endpoint = RoutedEndpoint({"summary": Reply(status=500)})
+    with endpoint:
+        url = endpoint.endpoint
+        pipeline_home_config(home, tmp_path / "vault", url)
+        longmemeval.run_pipeline(dataset, workdir, output)
+    (record,) = longmemeval._read_records(output)
+    assert record["stopped"]
+    sandbox = Path(record["sandbox"])
+    text = (sandbox / "home" / "config.toml").read_text(encoding="utf-8")
+    assert f'endpoint = "{url}"' in text
+    assert f'name = "{MODEL_NAME}"' in text
+    assert f"daily_token_budget = {longmemeval.SANDBOX_BUDGET}" in text
+    assert f"retention_days = {longmemeval.SANDBOX_RETENTION_DAYS}" in text
+    assert "quiet_minutes = 0" in text
+    assert 'host = "evalhost"' in text
+    vault_dir = sandbox / "vault"
+    assert f'vault = "{vault_dir}"' in text
+    # The sandbox's calls are the sandbox's cost: nothing lands in the caller's home.
+    assert not (home / "usage.jsonl").exists()
+
+
+def test_a_stopped_question_is_flagged_not_scored_and_keeps_its_sandbox(home, tmp_path):
+    """An endpoint that never answers stops the run: the record says so and scores nothing."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    endpoint = RoutedEndpoint({"summary": Reply(status=500)})
+    with endpoint:
+        pipeline_home_config(home, tmp_path / "vault", endpoint.endpoint)
+        report = longmemeval.run_pipeline(dataset, workdir, output)
+    assert report.scored == 0
+    assert report.stopped == 1
+    (record,) = longmemeval._read_records(output)
+    assert record["stopped"]
+    assert record["scored"] is False
+    assert record["sessions_digested"] == 0
+    assert Path(record["sandbox"]).is_dir()
+
+
+def test_parallel_jobs_run_questions_as_separate_processes(home, tmp_path):
+    """Two questions at once land as two scored records, one per process, ids apart.
+
+    The two questions carry identical session text under different ids, so their calls
+    draw the same answers however the endpoint interleaves them.
+    """
+    questions = []
+    for name in ("q-one", "q-two"):
+        item = json.loads(json.dumps(HASH_QUESTION))
+        item["question_id"] = name
+        item["haystack_session_ids"] = [f"answer_{name}", f"distractor_{name}"]
+        item["answer_session_ids"] = [f"answer_{name}"]
+        questions.append(item)
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", *questions)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        report = longmemeval.run_pipeline(dataset, workdir, output, jobs=2)
+    assert report.scored == 2
+    records = longmemeval._read_records(output)
+    assert sorted(record["id"] for record in records) == ["q-one", "q-two"]
+    assert all(record["scored"] is True for record in records)
+    assert all(record["sessions_digested"] == 2 for record in records)
+    assert all(not record["stopped"] for record in records)
+    # Each question ran in the sandbox its own id named.
+    assert {record["sandbox"] for record in records} == {
+        str(workdir / "q-one"),
+        str(workdir / "q-two"),
+    }
+
+
+def test_resume_skips_the_ids_a_finished_record_stands_for(home, tmp_path):
+    """A rerun answers only the questions no finished record stands for."""
+    second = dict(HASH_QUESTION, question_id="q-cache")
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION, second)
+    ids = tmp_path / "first.ids"
+    ids.write_text("q-hash\n", encoding="utf-8")
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        first = longmemeval.run_pipeline(dataset, workdir, output, ids_path=ids)
+        assert first.scored == 1
+        rerun = longmemeval.run_pipeline(dataset, workdir, output, resume=True)
+    assert rerun.scored == 1
+    records = longmemeval._read_records(output)
+    assert [record["id"] for record in records] == ["q-hash", "q-cache"]

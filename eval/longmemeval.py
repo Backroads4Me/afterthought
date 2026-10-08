@@ -1,47 +1,78 @@
 #!/usr/bin/env python3
 """LongMemEval-S benchmark runner for afterthought.
 
-Evaluates session-level retrieval (Recall-any@1/3/5/10, Recall-all@10, Session
-NDCG@10) against the published LongMemEval-S schema, one question at a time, each
-in an isolated temporary AFT_HOME and vault.
-
 Each question is asked of its own haystack: the question's sessions are ingested
 alone into a fresh vault, stored as evidence with the dates the dataset carries,
 and mirrored as digest files that dump the same transcript text. No digest or
 dream pipeline runs over those sessions, so the digests are raw dumps and the
 scores measure FTS5 retrieval over raw transcripts - a raw-retrieval baseline for
 the index, not a measure of afterthought's curated memory.
+
+``--mode pipeline`` (BUILD-PLAN F71) runs the real capture, digest and dream path
+instead: each session is written as a Claude transcript and enqueued in haystack
+date order, ``work.run`` and a dream run follow once per session date with ``now``
+just after that date, and the question is scored three ways - the digest rows
+alone, the fraction of answer sessions any page line cites, and the production
+search with a page hit credited to the sessions its matched line cites. Each
+question runs in its own sandbox under ``--workdir``: a home, a vault and a git
+repository registered as the sandbox's one project, outside the system temporary
+directory because a directory under it resolves to no project (DESIGN 7, F49).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import resource
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+import tomllib
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from importlib.resources import files
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
+from aft import (
+    capture,
+    cli,
+    db,
+    evidence,
+    index,
+    inject,
+    keys,
+    model,
+    page,
+    queue,
+    readers,
+    search,
+    vault,
+    work,
+)
 from aft import config as configmod
-from aft import evidence, index, search, vault
+from aft import filter as filtermod
+from aft import registry as registrymod
 from aft.config import Config
+from aft.dream import schedule
 from aft.eval import (
     BenchmarkReport,
     compute_ndcg_at_k_multi,
     compute_recall_all_at_k,
     compute_recall_any_at_k,
 )
-from aft.readers import Entry
+from aft.events import SESSION_END, SessionEvent
+from aft.readers import ASSISTANT, CLAUDE, Entry
 
 # The agent and project every ingested session is filed under: LongMemEval
 # sessions carry no agent or project of their own.
@@ -77,7 +108,9 @@ class QuestionCase:
 
     Sessions and ids run in parallel. Every entry of a session carries that
     session's own date, and ``question_date`` is the reference time the question
-    is asked at.
+    is asked at. ``question_id`` is the id the dataset item carries, so ``--ids``
+    and ``--resume`` can name questions; a fixture without one takes its position
+    in the file, ``q-1`` first.
     """
 
     question: str
@@ -86,6 +119,7 @@ class QuestionCase:
     session_ids: tuple[str, ...]
     sessions: tuple[tuple[Entry, ...], ...]
     answer_session_ids: tuple[str, ...]
+    question_id: str = ""
 
 
 @contextmanager
@@ -262,6 +296,7 @@ def _answer_session_ids(item: dict[str, Any]) -> tuple[str, ...]:
 def _question_case(
     item: dict[str, Any],
     shared: tuple[list[str], list[tuple[Entry, ...]]] | None = None,
+    question_id: str = "",
 ) -> QuestionCase | None:
     """One dataset item as a question case, or None when it names no question.
 
@@ -288,6 +323,7 @@ def _question_case(
         session_ids=tuple(ids),
         sessions=tuple(sessions),
         answer_session_ids=_answer_session_ids(item),
+        question_id=question_id,
     )
 
 
@@ -298,10 +334,15 @@ def parse_questions(data: Any) -> list[QuestionCase]:
     ``haystack_sessions`` hold lists of turns, with ids and dates in the parallel
     ``haystack_session_ids`` and ``haystack_dates``. A wrapper document with a
     ``queries`` (or ``items``, ``cases``, ``examples``, ``data``) list pools its
-    top-level sessions into every question's haystack.
+    top-level sessions into every question's haystack. Each case takes the item's
+    own id when it carries one, else its position in the file, ``q-1`` first.
     """
     if isinstance(data, list):
-        cases = [_question_case(item) for item in data if isinstance(item, dict)]
+        cases = (
+            _question_case(item, question_id=_case_id(item, position))
+            for position, item in enumerate(data, start=1)
+            if isinstance(item, dict)
+        )
         return [case for case in cases if case is not None]
     if isinstance(data, dict):
         raw_queries: Any = None
@@ -311,13 +352,23 @@ def parse_questions(data: Any) -> list[QuestionCase]:
                 break
         if raw_queries is None:
             if "question" in data or "query" in data:
-                case = _question_case(data)
+                case = _question_case(data, question_id=_case_id(data, 1))
                 return [case] if case is not None else []
             return []
         shared = _parse_haystack(data, datetime.now(UTC))
-        cases = [_question_case(item, shared) for item in raw_queries if isinstance(item, dict)]
+        cases = (
+            _question_case(item, shared, question_id=_case_id(item, position))
+            for position, item in enumerate(raw_queries, start=1)
+            if isinstance(item, dict)
+        )
         return [case for case in cases if case is not None]
     return []
+
+
+def _case_id(item: dict[str, Any], position: int) -> str:
+    """The id a question answers to: the dataset's own, else its position."""
+    named = str(item.get("question_id") or "").strip()
+    return named or f"q-{position}"
 
 
 def ingest_question(config: Config, case: QuestionCase) -> None:
@@ -490,6 +541,900 @@ def run_benchmark(
     return report
 
 
+# ------------------------------------------------------------------ pipeline mode (F71)
+#
+# The sandbox one question runs in: a home, a vault and a git repository registered as
+# the sandbox's one project, under --workdir. The workdir is the caller's to place
+# outside the system temporary directory and ~/Downloads, because no directory under
+# either becomes a project (DESIGN 7, F49) and the run asserts the project resolves to
+# a slug before any session is replayed.
+
+PIPELINE_HOST = "evalhost"
+SANDBOX_BUDGET = 1_000_000_000
+SANDBOX_RETENTION_DAYS = 36_500
+JOBS_MAX = 3
+REPLAY_AFTER = timedelta(minutes=1)
+SESSION_PREFIX = "aft://session/"
+
+
+class PipelineError(Exception):
+    """A pipeline run that cannot start: a workdir where no project may live, a sandbox
+    config that does not parse, a project that resolves to no slug."""
+
+
+@dataclass(frozen=True)
+class Sandbox:
+    """One question's isolated home, vault and project, and the config they answer to."""
+
+    root: Path
+    home: Path
+    vault: Path
+    repo: Path
+    config: Config
+
+
+@dataclass(frozen=True)
+class SessionOutcome:
+    """Where one session of a haystack ended after the replay."""
+
+    session_id: str
+    outcome: str
+
+
+DIGESTED = "digested"
+EMPTY = "empty"
+BELOW_FLOOR = "below the floor"
+FAILED = "failed"
+LEFT = "left queued"
+
+
+@dataclass
+class ReplayResult:
+    """What one question's replay did, as the record reports it."""
+
+    outcomes: list[SessionOutcome] = field(default_factory=list)
+    stopped: str = ""
+    failures: list[str] = field(default_factory=list)
+    dream_failures: dict[str, str] = field(default_factory=dict)
+    dream_deferred: list[str] = field(default_factory=list)
+
+
+def _safe_name(raw: str) -> str:
+    """A name a filesystem takes: any other character becomes an underscore."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", raw) or "unnamed"
+
+
+def _session_file(root: Path, session_id: str) -> Path:
+    """Where one replayed session's transcript is written."""
+    return root / "sessions" / f"{_safe_name(session_id)}.jsonl"
+
+
+def write_claude_transcript(path: Path, entries: Sequence[Entry], cwd: Path) -> Path:
+    """One session as a Claude Code transcript, every record dated as the dataset gave it.
+
+    The reader reads user and assistant entries back with their own times (M2.1), so the
+    digest sees the dataset's dates, not the runner's clock.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"cwd": str(cwd)}) + "\n")
+        for entry in entries:
+            message: dict[str, Any] = {"content": [{"type": "text", "text": entry.text}]}
+            if entry.role == ASSISTANT:
+                message["model"] = "claude-real"
+            handle.write(
+                json.dumps(
+                    {
+                        "type": entry.role,
+                        "uuid": entry.id,
+                        "timestamp": entry.time.isoformat(),
+                        "message": message,
+                    }
+                )
+                + "\n"
+            )
+    return path
+
+
+def _model_table(caller: Config) -> str:
+    """The caller's ``[model]`` table, as the sandbox's config carries it.
+
+    Every field the caller set goes over: an endpoint that needs a key or a request
+    field would otherwise answer differently in the sandbox than at home.
+    """
+    m = caller.settings.model
+    lines = ["[model]", f'endpoint = "{m.endpoint}"']
+    if m.name:
+        lines.append(f'name = "{m.name}"')
+    if m.api_key_env:
+        lines.append(f'api_key_env = "{m.api_key_env}"')
+    if m.temperature:
+        lines.append(f"temperature = {m.temperature!r}")
+    if m.extra_body:
+        lines.append(f"extra_body = {json.dumps(m.extra_body)}")
+    return "\n".join(lines) + "\n"
+
+
+def _sandbox_config_text(vault_dir: Path, caller: Config) -> str:
+    """The sandbox's config.toml: the caller's model, caps that never bind, no quiet time.
+
+    The budget and the retention window are set high enough never to bind, and the dream
+    quiet period is zero so a dream run follows its digest run at once (BUILD-PLAN F71).
+    """
+    text = (
+        f'vault = "{vault_dir}"\n'
+        f'host = "{PIPELINE_HOST}"\n'
+        "\n"
+        f"{_model_table(caller)}\n"
+        "[work]\n"
+        f"daily_token_budget = {SANDBOX_BUDGET}\n"
+        "\n"
+        "[evidence]\n"
+        f"retention_days = {SANDBOX_RETENTION_DAYS}\n"
+        "\n"
+        "[dream]\n"
+        "quiet_minutes = 0\n"
+    )
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise PipelineError(f"the sandbox config does not parse: {exc}") from exc
+    return text
+
+
+def _init_repo(repo: Path) -> None:
+    """A git repository with one commit, the shape a project root resolves from."""
+    from aft import gitutil
+
+    gitutil.git(["init", "-q"], cwd=repo)
+    (repo / "README.md").write_text("# sandbox project\n", encoding="utf-8")
+    gitutil.git(["add", "README.md"], cwd=repo)
+    gitutil.git(["commit", "-q", "-m", "init"], cwd=repo)
+
+
+@contextmanager
+def pipeline_sandbox(root: Path, caller: Config, keep: dict[str, bool]) -> Iterator[Sandbox]:
+    """One question's sandbox, registered as the runner's world for the body's duration.
+
+    The environment (AFT_HOME, the git identity) and the sweep's session directories are
+    the process's own, so they are saved and restored around the body; the sweep sees no
+    session directories at all, because the replay enqueues each transcript itself, the
+    way a hook does. ``keep`` is the caller's decision at the end of the body: a failed
+    or stopped question's sandbox is always kept, and --keep-sandbox keeps every one.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    home = root / "home"
+    vault_dir = root / "vault"
+    repo = root / "project"
+    home.mkdir()
+    vault_dir.mkdir()
+    (home / configmod.CONFIG_NAME).write_text(
+        _sandbox_config_text(vault_dir, caller), encoding="utf-8"
+    )
+    old_home = os.environ.get(configmod.HOME_ENV)
+    git_env = {
+        "GIT_AUTHOR_NAME": "Eval Runner",
+        "GIT_AUTHOR_EMAIL": "eval@example.com",
+        "GIT_COMMITTER_NAME": "Eval Runner",
+        "GIT_COMMITTER_EMAIL": "eval@example.com",
+    }
+    saved_git = {k: os.environ.get(k) for k in git_env}
+    saved_dirs = capture.SESSION_DIRS
+    try:
+        os.environ[configmod.HOME_ENV] = str(home)
+        for name, value in git_env.items():
+            os.environ[name] = value
+        capture.SESSION_DIRS = {}
+        cfg = configmod.load()
+        vault.init(cfg)
+        repo.mkdir()
+        _init_repo(repo)
+        if cli.main(["project", "add", str(repo)]) != 0:
+            raise PipelineError(f"the sandbox project did not register: {repo}")
+        resolution = keys.resolve(repo, registrymod.Registry.load(cfg.registry_path), cfg.host)
+        if resolution.slug is None:
+            raise PipelineError(f"the sandbox project resolved to no slug: {repo}")
+        yield Sandbox(root=root, home=home, vault=vault_dir, repo=repo, config=cfg)
+    finally:
+        if old_home is not None:
+            os.environ[configmod.HOME_ENV] = old_home
+        else:
+            os.environ.pop(configmod.HOME_ENV, None)
+        for name, value in saved_git.items():
+            if value is not None:
+                os.environ[name] = value
+            else:
+                os.environ.pop(name, None)
+        capture.SESSION_DIRS = saved_dirs
+        if not keep.get("keep", False):
+            shutil.rmtree(root, ignore_errors=True)
+
+
+def _replay_order(case: QuestionCase) -> list[tuple[datetime, str, tuple[Entry, ...]]]:
+    """The haystack in session-date order, dataset order kept within one date.
+
+    A session's date is its entries' own (every entry carries it); a session with no
+    entries takes the question's date, the same fallback the parser stamped it with.
+    """
+    dated = []
+    for session_id, entries in zip(case.session_ids, case.sessions, strict=True):
+        when = entries[0].time if entries else (case.question_date or datetime.now(UTC))
+        dated.append((when, session_id, entries))
+    dated.sort(key=lambda item: item[0])
+    return dated
+
+
+def replay(sandbox: Sandbox, case: QuestionCase) -> ReplayResult:
+    """Replay one question's haystack through capture, digest and dream, in date order.
+
+    Each session is written as a Claude transcript and enqueued the way a hook enqueues
+    a session end. For each session date in order, ``work.run`` then one dream run
+    happen with ``now`` just after that date, so supersede and short-term expiry see the
+    dataset's order (BUILD-PLAN F71). A run that stops leaves its reason in ``stopped``
+    and its jobs queued, where the next date's run picks them up.
+    """
+    cfg = sandbox.config
+    result = ReplayResult()
+    skipped: set[str] = set()
+    for when, session_id, entries in _replay_order(case):
+        if not entries:
+            # A session with nothing to say is decided now: the baseline ingests it the
+            # same way, and a transcript of no records is not one the reader reads.
+            skipped.add(session_id)
+            continue
+        transcript = _session_file(sandbox.root, session_id)
+        write_claude_transcript(transcript, entries, sandbox.repo)
+        queue.enqueue(
+            cfg,
+            SessionEvent(
+                agent=CLAUDE,
+                kind=SESSION_END,
+                session_id=session_id,
+                cwd=sandbox.repo,
+                transcript_path=transcript,
+                time=when,
+                detail=None,
+            ),
+        )
+        now = when + REPLAY_AFTER
+        report = work.run(cfg, now=now)
+        result.failures.extend(report.failures)
+        if report.stopped:
+            result.stopped = report.stopped
+        dream = schedule.run(cfg, now=now)
+        result.dream_failures.update(dream.failures)
+        result.dream_deferred.extend(dream.over_budget + dream.budget_stopped)
+    result.outcomes = [SessionOutcome(sid, EMPTY) for sid in case.session_ids if sid in skipped]
+    result.outcomes.extend(_classify(sandbox, case, skipped))
+    return result
+
+
+def _classify(sandbox: Sandbox, case: QuestionCase, skipped: set[str]) -> list[SessionOutcome]:
+    """Each replayed session's outcome, read from the queue, the vault and the transcript.
+
+    A digest page standing for the session is digested; a failed job row is failed; a
+    row still open is work the run left queued. A closed job with no page either read
+    nothing at all or stopped under the two-prompt floor, which the transcript itself
+    decides, or the filter emptied it, which closed with a watermark and is empty.
+    """
+    cfg = sandbox.config
+    states = _session_states(cfg)
+    digested = _digested_sessions(cfg)
+    outcomes: list[SessionOutcome] = []
+    for session_id in case.session_ids:
+        if session_id in skipped:
+            continue
+        status, watermark = states.get(session_id, ("", None))
+        if session_id in digested:
+            outcome = DIGESTED
+        elif status == queue.FAILED:
+            outcome = FAILED
+        elif status != queue.DONE:
+            outcome = LEFT
+        elif watermark is None:
+            outcome = _unread(sandbox, session_id)
+        else:
+            outcome = EMPTY
+        outcomes.append(SessionOutcome(session_id, outcome))
+    return outcomes
+
+
+def _session_states(config: Config) -> dict[str, tuple[str, str | None]]:
+    """Each session's job status and its digest watermark, from the sandbox's queue."""
+    path = config.home / queue.QUEUE_NAME
+    if not path.is_file():
+        return {}
+    states: dict[str, tuple[str, str | None]] = {}
+    conn = db.connect(path)
+    try:
+        marks = dict(conn.execute("SELECT session_id, watermark FROM sessions"))
+        for session_id, status in conn.execute("SELECT session_id, status FROM jobs"):
+            states[session_id] = (status, marks.get(session_id))
+    finally:
+        conn.close()
+    return states
+
+
+def _digested_sessions(config: Config) -> set[str]:
+    """The sessions a digest page stands for, by the name the page carries."""
+    found: set[str] = set()
+    root = config.vault / schedule.DIGESTS
+    if not root.is_dir():
+        return found
+    for path in root.glob("*/*/*/*.md"):
+        match = _DIGEST_STEM.match(path.stem)
+        if match:
+            found.add(match.group("session"))
+    return found
+
+
+def _unread(sandbox: Sandbox, session_id: str) -> str:
+    """Whether a session that closed with no page and no watermark was under the floor."""
+    try:
+        entries = list(readers.read(CLAUDE, _session_file(sandbox.root, session_id)))
+    except readers.ReaderError:
+        return EMPTY
+    if not entries:
+        return EMPTY
+    if filtermod.prompt_count(entries) < filtermod.MIN_SESSION_PROMPTS:
+        return BELOW_FLOOR
+    return EMPTY
+
+
+def _terms(query: str) -> frozenset[str]:
+    """The words a query is credited by, lowercased and split on non-word characters."""
+    return frozenset(re.findall(r"\w+", query.lower()))
+
+
+def _session_of_source(resource: str) -> str | None:
+    """The session an ``aft://session/`` source cites, or None for any other resource."""
+    if not resource.startswith(SESSION_PREFIX):
+        return None
+    parts = resource.removeprefix(SESSION_PREFIX).split("/")
+    if len(parts) < 2:
+        return None
+    return parts[1].partition("#")[0] or None
+
+
+def _page_hit_sessions(config: Config, hit: search.Hit, query: str) -> list[str]:
+    """The sessions the line a page hit matched cites, never the section's every line.
+
+    The pages collection indexes a page's active lines one section to a row, so a hit
+    names a section, not a line. The matched line is the section's line that shares the
+    most of the query's words with it, the first on a tie; a section whose every line
+    shares none credits no session. Only that line's own sources are credited (BUILD-PLAN
+    F71): the sessions a section's other lines cite say nothing about this hit.
+    """
+    rel = PurePosixPath(hit.path)
+    if rel.is_absolute() or ".." in rel.parts:
+        return []
+    try:
+        text = (config.vault / Path(rel)).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    frontmatter, _, _, error = page.split_frontmatter(text)
+    if error or not isinstance(frontmatter, dict):
+        return []
+    sources = {
+        str(source.get("id")): str(source.get("resource") or "")
+        for source in frontmatter.get("sources") or []
+        if isinstance(source, dict)
+    }
+    parsed = page.parse(text, Path(rel))
+    terms = _terms(query)
+    best: tuple[int, page.Fact] | None = None
+    for fact in parsed.facts:
+        if fact.section != hit.heading or fact.struck or fact.state not in inject.INJECTED:
+            continue
+        statement = fact.statement.lower()
+        score = sum(1 for term in terms if term in statement)
+        if score and (best is None or score > best[0]):
+            best = (score, fact)
+    if best is None:
+        return []
+    sessions: list[str] = []
+    for ref in best[1].refs:
+        session_id = _session_of_source(sources.get(ref, ""))
+        if session_id and session_id not in sessions:
+            sessions.append(session_id)
+    return sessions
+
+
+def _hit_sessions(config: Config, hit: search.Hit, query: str) -> list[str]:
+    """The sessions one search hit answers for, by what named it."""
+    if hit.collection == index.PAGES:
+        return _page_hit_sessions(config, hit, query)
+    session_id = _session_of_hit(hit.path)
+    return [session_id] if session_id else []
+
+
+def ranked_full(
+    hits: list[search.Hit], config: Config, query: str, allowed: set[str] | None = None
+) -> list[str]:
+    """The sessions a production search ranked, in order of first appearance.
+
+    A page hit credits the sessions its matched line cites, a digest hit the session its
+    file name carries, an evidence hit the session its resource names; a session filling
+    several hits ranks once, at its best position. Sessions outside ``allowed`` when it
+    is given, and hits that name no session, are not part of the ranking.
+    """
+    ranked: list[str] = []
+    seen: set[str] = set()
+    for hit in hits:
+        for session_id in _hit_sessions(config, hit, query):
+            if session_id in seen or (allowed is not None and session_id not in allowed):
+                continue
+            seen.add(session_id)
+            ranked.append(session_id)
+    return ranked
+
+
+def _cited_sessions(config: Config) -> set[str]:
+    """Every session any page line's source cites, over the project and global pages."""
+    cited: set[str] = set()
+    for root in (config.vault / "projects", config.vault / "global"):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.md")):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            frontmatter, _, _, error = page.split_frontmatter(text)
+            if error or not isinstance(frontmatter, dict):
+                continue
+            for source in frontmatter.get("sources") or []:
+                if not isinstance(source, dict):
+                    continue
+                session_id = _session_of_source(str(source.get("resource") or ""))
+                if session_id:
+                    cited.add(session_id)
+    return cited
+
+
+def coverage_fraction(config: Config, answers: Sequence[str]) -> float:
+    """The fraction of answer sessions any page line's source cites.
+
+    An upper bound for curated memory rather than a ranking: a page line resting on a
+    session says the pipeline read that session at all, whether or not the line survived
+    or answers anything (BUILD-PLAN F71).
+    """
+    wanted = set(answers)
+    if not wanted:
+        return 0.0
+    return len(wanted & _cited_sessions(config)) / len(wanted)
+
+
+def _session_metrics(ranked: list[str], answers: list[str]) -> dict[str, float]:
+    """The session-level metrics one ranking scores, as the baseline reports them."""
+    return {
+        "recall_any@1": compute_recall_any_at_k(ranked, answers, 1),
+        "recall_any@3": compute_recall_any_at_k(ranked, answers, 3),
+        "recall_any@5": compute_recall_any_at_k(ranked, answers, 5),
+        "recall_any@10": compute_recall_any_at_k(ranked, answers, 10),
+        "recall_all@10": compute_recall_all_at_k(ranked, answers, SESSION_K),
+        "ndcg@10": compute_ndcg_at_k_multi(ranked, answers, SESSION_K),
+    }
+
+
+def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
+    """The three session rankings of one question, each scored with the session metrics.
+
+    (a) ``digests``: the digest rows only, attributed by digest file name. (b)
+    ``coverage``: the fraction of answer sessions any page line's source cites, an upper
+    bound for curated memory rather than a ranking. (c) ``full``: the production search
+    over everything, with a page hit credited to the sessions its matched line cites.
+    """
+    cfg = sandbox.config
+    hits = search.search(
+        cfg,
+        case.question,
+        all_projects=True,
+        limit=SESSION_K * HITS_PER_SESSION,
+        now=case.question_date,
+    )
+    allowed = set(case.session_ids)
+    answers = list(case.answer_session_ids)
+    digests = ranked_sessions(
+        [hit for hit in hits if hit.collection == index.DIGESTS], allowed=allowed
+    )[:SESSION_K]
+    full = ranked_full(hits, cfg, case.question, allowed=allowed)[:SESSION_K]
+    return {
+        "digests": {"ranked_sessions": digests, **_session_metrics(digests, answers)},
+        "full": {"ranked_sessions": full, **_session_metrics(full, answers)},
+        "coverage": coverage_fraction(cfg, answers),
+    }
+
+
+def _prompt_hash() -> str:
+    """A digest over every shipped prompt and schema, which names the prompts a run used."""
+    combined = hashlib.sha256()
+    root = files("aft") / "prompts"
+    for item in sorted(root.iterdir(), key=lambda f: f.name):
+        if item.is_file():
+            combined.update(item.name.encode("utf-8"))
+            combined.update(item.read_bytes())
+    return combined.hexdigest()
+
+
+def _require_replayable(root: Path) -> None:
+    """The workdir must sit outside the directories no directory becomes a project in."""
+    refused = (Path(tempfile.gettempdir()).resolve(), Path.home().resolve() / "Downloads")
+    for place in refused:
+        if root == place or place in root.parents:
+            raise PipelineError(
+                f"--workdir {root} is under {place}, where no directory becomes a project,"
+                " so the sandbox project would resolve to no slug (DESIGN 7, F49)"
+            )
+
+
+def _outcome_counts(outcomes: Sequence[SessionOutcome]) -> dict[str, int]:
+    counts = {DIGESTED: 0, EMPTY: 0, BELOW_FLOOR: 0, FAILED: 0, LEFT: 0}
+    for outcome in outcomes:
+        counts[outcome.outcome] = counts.get(outcome.outcome, 0) + 1
+    return counts
+
+
+def _record_body(
+    case: QuestionCase, replayed: ReplayResult, scoring: dict[str, Any], sandbox: Sandbox
+) -> dict[str, Any]:
+    """The durable record of one finished question (BUILD-PLAN F71)."""
+    counts = _outcome_counts(replayed.outcomes)
+    cfg = sandbox.config
+    return {
+        "sessions": len(case.session_ids),
+        "sessions_digested": counts[DIGESTED],
+        "sessions_empty": counts[EMPTY],
+        "sessions_below_floor": counts[BELOW_FLOOR],
+        "sessions_failed": counts[FAILED],
+        "sessions_left_queued": counts[LEFT],
+        "stopped": replayed.stopped,
+        "work_failures": replayed.failures,
+        "dream_failures": replayed.dream_failures,
+        "dream_deferred": replayed.dream_deferred,
+        "tokens": model.tokens_used(cfg),
+        "model": cfg.settings.model.name or None,
+        "pipeline": cfg.settings.digest.pipeline,
+        "prompt_hash": _prompt_hash(),
+        "scored": not replayed.stopped,
+        "sandbox": str(sandbox.root),
+        "rankings": scoring,
+    }
+
+
+def _question_head(case: QuestionCase) -> dict[str, Any]:
+    """The fields every record of one question carries, finished or not."""
+    return {
+        "id": case.question_id,
+        "mode": "pipeline",
+        "question": case.question,
+        "question_type": case.question_type,
+        "question_date": case.question_date.isoformat() if case.question_date else None,
+        "answer_session_ids": list(case.answer_session_ids),
+    }
+
+
+def _run_one_question(
+    case: QuestionCase, root: Path, caller: Config, keep_sandbox: bool
+) -> dict[str, Any]:
+    """One question through its sandbox, as one durable record."""
+    sandbox_root = root / _safe_name(case.question_id)
+    keep = {"keep": keep_sandbox}
+    started = time.perf_counter()
+    head = _question_head(case)
+    try:
+        with pipeline_sandbox(sandbox_root, caller, keep) as sandbox:
+            try:
+                replayed = replay(sandbox, case)
+                scoring = score_question(sandbox, case)
+                seconds = time.perf_counter() - started
+                if replayed.stopped:
+                    # A stopped question's sandbox is always kept, scored or not.
+                    keep["keep"] = True
+                return {
+                    **head,
+                    "wall_seconds": round(seconds, 3),
+                    **_record_body(case, replayed, scoring, sandbox),
+                }
+            except Exception as exc:
+                keep["keep"] = True
+                return {
+                    **head,
+                    "wall_seconds": round(time.perf_counter() - started, 3),
+                    "error": str(exc),
+                    "scored": False,
+                    "sandbox": str(sandbox_root),
+                }
+    except Exception as exc:
+        return {
+            **head,
+            "wall_seconds": round(time.perf_counter() - started, 3),
+            "error": f"sandbox: {exc}",
+            "scored": False,
+        }
+
+
+def _append_record(path: Path, record: dict[str, Any]) -> None:
+    """One JSONL record appended as its question finished."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def _recorded_ids(path: Path) -> set[str]:
+    """The ids a record already stands for, which --resume skips.
+
+    A record that carries an error is not one: the question never finished, so a rerun
+    answers it again once the reason is fixed.
+    """
+    done: set[str] = set()
+    if not path.is_file():
+        return done
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and "error" not in record:
+            question_id = record.get("id")
+            if question_id:
+                done.add(str(question_id))
+    return done
+
+
+def _read_ids(path: Path) -> set[str]:
+    """The question ids a fixed list names, one per line, ``#`` comments allowed."""
+    wanted: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            wanted.add(name)
+    if not wanted:
+        raise PipelineError(f"the ids file names no question: {path}")
+    return wanted
+
+
+def _progress_line(record: dict[str, Any]) -> str:
+    """The one line a finished question prints, as it finishes."""
+    if "error" in record:
+        return f"{record['id']}: failed: {record['error']}"
+    rankings = record.get("rankings") or {}
+    return (
+        f"{record['id']}: digested {record['sessions_digested']}/{record['sessions']},"
+        f" coverage {rankings.get('coverage', 0.0):.2f},"
+        f" stopped {'yes: ' + record['stopped'] if record['stopped'] else 'no'}"
+    )
+
+
+def _run_pipeline_parallel(
+    questions: list[QuestionCase],
+    root: Path,
+    dataset: Path | str,
+    output: Path,
+    keep_sandbox: bool,
+    jobs: int,
+) -> list[dict[str, Any]]:
+    """Questions as separate processes, since each sandbox sets the process environment.
+
+    Each child is this script asked for one question id; the records land in the shared
+    JSONL, one appended line per finished question.
+    """
+    jobs_dir = root / ".jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    script = Path(__file__).resolve()
+    plans: list[tuple[str, Path]] = []
+    for case in questions:
+        ids_file = jobs_dir / f"{_safe_name(case.question_id)}.ids"
+        ids_file.write_text(f"{case.question_id}\n", encoding="utf-8")
+        plans.append((case.question_id, ids_file))
+
+    def run_child(plan: tuple[str, Path]) -> tuple[str, int]:
+        question_id, ids_file = plan
+        command = [
+            sys.executable,
+            str(script),
+            "--mode",
+            "pipeline",
+            "--dataset",
+            str(dataset),
+            "--workdir",
+            str(root),
+            "--output",
+            str(output),
+            "--ids",
+            str(ids_file),
+        ]
+        if keep_sandbox:
+            command.append("--keep-sandbox")
+        # The child sees the same system temporary directory the caller does: a runner
+        # whose tempdir was moved in process would otherwise hand its children a world
+        # where the workdir sits under the system temp and no project may live there.
+        env = {**os.environ, "TMPDIR": tempfile.gettempdir()}
+        completed = subprocess.run(command, capture_output=True, text=True, env=env)
+        return question_id, completed.returncode
+
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        outcomes = list(pool.map(run_child, plans))
+    records: list[dict[str, Any]] = []
+    written = {
+        str(record.get("id")): record
+        for record in _read_records(output)
+        if isinstance(record, dict) and record.get("id")
+    }
+    for question_id, code in outcomes:
+        record = written.get(question_id)
+        if record is not None:
+            records.append(record)
+        else:
+            records.append(
+                {
+                    "id": question_id,
+                    "mode": "pipeline",
+                    "error": f"the question's process exited {code} with no record",
+                    "scored": False,
+                }
+            )
+    return records
+
+
+def _read_records(path: Path) -> list[Any]:
+    """Every JSONL record a results file holds, in file order."""
+    records: list[Any] = []
+    if not path.is_file():
+        return records
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
+_METRIC_KEYS = (
+    "recall_any@1",
+    "recall_any@3",
+    "recall_any@5",
+    "recall_any@10",
+    "recall_all@10",
+    "ndcg@10",
+)
+
+
+@dataclass
+class PipelineReport:
+    """What a pipeline run scored, as the command line prints it."""
+
+    total: int = 0
+    scored: int = 0
+    errors: int = 0
+    stopped: int = 0
+    model: str | None = None
+    pipeline: str = ""
+    digests: dict[str, float] = field(default_factory=dict)
+    full: dict[str, float] = field(default_factory=dict)
+    coverage: float = 0.0
+
+    def format_table(self) -> str:
+        def means(label: str, values: dict[str, float]) -> str:
+            rows = [f"{label}{key:<18}: {value:.4f}" for key, value in sorted(values.items())]
+            return "\n".join(rows) if rows else f"{label}{'(none scored)':<18}: 0.0000"
+
+        lines = [
+            "LongMemEval-S pipeline benchmark",
+            f"Questions evaluated : {self.scored} scored of {self.total}"
+            + (f", {self.errors} failed" if self.errors else "")
+            + (f", {self.stopped} stopped" if self.stopped else ""),
+            f"Model               : {self.model or '(none named)'}",
+            f"Digest pipeline     : {self.pipeline or '(default)'}",
+            means("Coverage".ljust(24), {"coverage": self.coverage}),
+            "",
+            "digests ranking (recall over digest rows alone):",
+            means("  ", self.digests),
+            "",
+            "full ranking (production search, pages by cited line):",
+            means("  ", self.full),
+        ]
+        return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.format_table()
+
+
+def _summarize(records: Sequence[dict[str, Any]], caller: Config) -> PipelineReport:
+    """The run's means over its scored records."""
+    finished = [record for record in records if "error" not in record]
+    scored = [record for record in finished if record.get("scored")]
+    report = PipelineReport(
+        total=len(records),
+        scored=len(scored),
+        errors=len(records) - len(finished),
+        stopped=sum(1 for record in finished if record.get("stopped")),
+        model=caller.settings.model.name or None,
+        pipeline=caller.settings.digest.pipeline,
+    )
+
+    def mean(key: str, ranking: str) -> float:
+        values = [
+            record["rankings"][ranking][key]
+            for record in scored
+            if isinstance(record.get("rankings"), dict)
+            and isinstance(record["rankings"].get(ranking), dict)
+            and key in record["rankings"][ranking]
+        ]
+        return sum(values) / len(values) if values else 0.0
+
+    for ranking in ("digests", "full"):
+        values = {key: mean(key, ranking) for key in _METRIC_KEYS}
+        if ranking == "digests":
+            report.digests = values
+        else:
+            report.full = values
+    coverages = [
+        record["rankings"]["coverage"]
+        for record in scored
+        if isinstance(record.get("rankings"), dict) and "coverage" in record["rankings"]
+    ]
+    report.coverage = sum(coverages) / len(coverages) if coverages else 0.0
+    return report
+
+
+def run_pipeline(
+    dataset_path: Path | str,
+    workdir: Path | str,
+    output_path: Path | str | None = None,
+    *,
+    ids_path: Path | str | None = None,
+    resume: bool = False,
+    keep_sandbox: bool = False,
+    jobs: int = 1,
+    limit: int | None = None,
+) -> PipelineReport:
+    """Run LongMemEval-S in pipeline mode over per-question sandboxes (BUILD-PLAN F71).
+
+    Each question's haystack goes through the real capture, digest and dream path on the
+    configured model; one JSONL record per question is appended to ``--output`` as the
+    question finishes, and ``--resume`` skips ids a finished record already stands for.
+    With ``--jobs N`` (at most 3) the questions run as separate processes, since each
+    sandbox sets the process environment.
+    """
+    if not 1 <= jobs <= JOBS_MAX:
+        raise PipelineError(f"--jobs must be between 1 and {JOBS_MAX}, not {jobs}")
+    root = Path(workdir).expanduser().resolve()
+    _require_replayable(root)
+    questions = parse_questions(load_dataset(dataset_path))
+    if ids_path is not None:
+        wanted = _read_ids(Path(ids_path))
+        known = {case.question_id for case in questions}
+        missing = sorted(wanted - known)
+        if missing:
+            print(f"ids not in the dataset: {', '.join(missing)}", file=sys.stderr)
+        questions = [case for case in questions if case.question_id in wanted]
+    if limit is not None and limit > 0:
+        questions = questions[:limit]
+    if not questions:
+        raise PipelineError("no question to run")
+    output = Path(output_path).expanduser().resolve() if output_path else None
+    if resume and output is not None:
+        done = _recorded_ids(output)
+        questions = [case for case in questions if case.question_id not in done]
+    if not questions:
+        return PipelineReport(model=configmod.load().settings.model.name or None)
+    caller = configmod.load()
+    if jobs == 1:
+        records = []
+        for case in questions:
+            record = _run_one_question(case, root, caller, keep_sandbox)
+            records.append(record)
+            if output is not None:
+                _append_record(output, record)
+            print(_progress_line(record), flush=True)
+    else:
+        if output is None:
+            raise PipelineError("--output is required with --jobs, so records land somewhere")
+        records = _run_pipeline_parallel(questions, root, dataset_path, output, keep_sandbox, jobs)
+    return _summarize(records, caller)
+
+
 def main(args: list[str] | None = None) -> int:
     """CLI entrypoint for benchmark runner."""
     parser = argparse.ArgumentParser(
@@ -513,7 +1458,63 @@ def main(args: list[str] | None = None) -> int:
         default=None,
         help="Optional path to write benchmark results as JSON",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("baseline", "pipeline"),
+        default="baseline",
+        help=(
+            "baseline: raw dumps scored with the existing metrics. pipeline: each "
+            "question's haystack goes through the real capture, digest and dream path "
+            "in its own sandbox (BUILD-PLAN F71)"
+        ),
+    )
+    parser.add_argument(
+        "--workdir",
+        type=Path,
+        default=None,
+        help=(
+            "pipeline mode: directory the per-question sandboxes live under; place it "
+            "outside the system temporary directory, where no directory becomes a project"
+        ),
+    )
+    parser.add_argument(
+        "--ids",
+        type=Path,
+        default=None,
+        help="pipeline mode: file naming the question ids to run, one per line",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="pipeline mode: skip question ids a finished record already stands for",
+    )
+    parser.add_argument(
+        "--keep-sandbox",
+        action="store_true",
+        help="pipeline mode: keep every sandbox instead of deleting each finished one",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="pipeline mode: questions to run at once, as separate processes (max 3)",
+    )
     parsed = parser.parse_args(args)
+    if parsed.mode == "pipeline":
+        if parsed.workdir is None:
+            parser.error("--mode pipeline requires --workdir")
+        report = run_pipeline(
+            dataset_path=parsed.dataset,
+            workdir=parsed.workdir,
+            output_path=parsed.output,
+            ids_path=parsed.ids,
+            resume=parsed.resume,
+            keep_sandbox=parsed.keep_sandbox,
+            jobs=parsed.jobs,
+            limit=parsed.limit,
+        )
+        print(report.format_table())
+        return 0 if report.errors == 0 else 1
     run_benchmark(
         dataset_path=parsed.dataset,
         limit=parsed.limit,
