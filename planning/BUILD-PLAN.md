@@ -1380,6 +1380,37 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   isolated sandbox vaults. Metric calculation in `src/aft/eval.py` and CLI support in
   `src/aft/cli.py` (`aft eval benchmark`). Tests in `tests/test_eval.py`. Review checkpoint: no.
 
+- **F71 LongMemEval-S pipeline mode** (ruling 2026-10-08). Add `--mode pipeline` to
+  `eval/longmemeval.py`: each question's haystack goes through the real capture, digest and
+  dream path on the configured model, instead of the raw dumps the baseline stores.
+  - **Sandbox config:** the sandbox `config.toml` copies the `[model]` table (endpoint, name,
+    extra_body) from the caller's config, sets `work.daily_token_budget` and
+    `evidence.retention_days` high enough never to bind, and sets the digest and dream
+    `quiet_minutes` to 0.
+  - **Project:** a git repository registered as the sandbox's one project, created outside
+    the system temporary directory (under `--workdir`), because a directory under it
+    resolves to no project. The run asserts the project resolves to a slug.
+  - **Replay:** each session is written as a Claude transcript and enqueued, in haystack date
+    order, and `work.run` then the dream schedule run once per session date with `now` just
+    after that date, so supersede and short-term expiry see the dataset's order.
+  - **Scoring:** three session rankings per question, each scored with the existing metrics:
+    (a) `digests`, digest rows only, attributed by digest file name; (b) `coverage`, the
+    fraction of answer sessions cited by any page line's source (an upper bound for curated
+    memory, not a ranking); (c) `full`, production search over everything, with a page hit
+    credited to the sessions its matched line cites, never to every session a section
+    cites.
+  - **Durability:** one JSONL record per question written as it finishes, with sessions
+    digested, empty, below the floor and failed, `work.run`'s stopped reason (a stopped
+    question is flagged, not scored), tokens from the sandbox `usage.jsonl`, wall time,
+    model name, pipeline and prompt hashes. `--resume` skips ids already recorded.
+    `--keep-sandbox` keeps every sandbox; a failed or stopped question's sandbox is always
+    kept.
+  - **Sample:** `--ids FILE` runs a fixed list of question ids. `--jobs N` (at most 3)
+    runs questions as separate processes, since the sandbox sets process environment.
+  - **Tests** in `tests/test_eval.py` with the fake endpoint: a two-session haystack runs
+    end to end, the config overrides land, attribution credits only cited sessions.
+    Review checkpoint: yes.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
