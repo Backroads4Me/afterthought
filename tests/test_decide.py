@@ -261,11 +261,70 @@ def test_the_call_sends_the_prompt_the_schema_and_the_numbered_lines(home, vault
     assert body["response_format"]["json_schema"]["schema"] == json.loads(
         decide.SCHEMA_PATH.read_text()
     )
-    assert "New fact (state, long term): The GPU host runs SGLang for the digest model." in user
+    assert (
+        "New fact ([stated], state, long term, 2026-10-04):"
+        " The GPU host runs SGLang for the digest model." in user
+    )
     assert 'Quote: "switched to \\"sglang\\""' in user
     for line in proposal.lines:
         kind = line.fact.kind or "candidate"
-        assert f"{line.label} ({kind}): {line.fact.statement}\n" in user
+        assert (
+            f"{line.label} ([{line.fact.source}], {kind}, {line.fact.date}):"
+            f" {line.fact.statement}\n" in user
+        )
+
+
+def test_the_context_shows_each_lines_tag_date_and_quote(home, vault, fake):
+    """M14: every existing line shows its tag, date and one quote, so the model can tell
+    newer evidence about the same thing from a conflict without reading the page."""
+    cfg = _config(home, vault, fake)
+    fake.script = [fake_reply("skip", None)]
+
+    proposal = decide.decide(cfg, _fact(VLLM), "the gpu host runs vllm", "widget")
+
+    user = fake.requests[0]["messages"][1]["content"]
+    observed = next(line for line in proposal.lines if line.fact.statement == VLLM)
+    assert (
+        f"{observed.label} ([observed], state, 2026-09-30): {VLLM}\n"
+        '  Quote: "the gpu host runs vllm"\n' in user
+    )
+    candidate = next(line for line in proposal.lines if line.fact.statement == CARD)
+    assert (
+        f"{candidate.label} ([inferred], candidate, 2026-09-30): {CARD}\n"
+        '  Quote: "the gpu host runs vllm"\n' in user
+    )
+
+
+def test_a_long_source_quote_is_cut_to_the_limit(vault):
+    """The context shows the words a line stands on, not the whole source entry."""
+    long_quote = "the gpu host runs vllm and the digest model follows it " * 5
+    assert len(long_quote) > decide.QUOTE_LIMIT
+    (vault / "projects" / "widget" / "overview.md").write_text(
+        PROJECT_PAGE.replace('quote: "the gpu host runs vllm"', f'quote: "{long_quote.strip()}"')
+    )
+
+    new_fact = _fact(VLLM)
+    rendered = decide.render(new_fact, "quote", decide.related(vault, new_fact, "widget"))
+
+    expected = "  Quote: " + json.dumps(
+        long_quote.strip()[: decide.QUOTE_LIMIT].rstrip() + "...", ensure_ascii=False
+    )
+    assert expected in rendered
+
+
+def test_a_line_whose_footnote_has_no_entry_shows_no_quote(vault):
+    """A footnote the page's frontmatter does not name gives no quote; the line still
+    shows its tag and date."""
+    (vault / "projects" / "widget" / "overview.md").write_text(
+        PROJECT_PAGE.replace("[^s2]", "[^s9]")
+    )
+
+    new_fact = _fact(VLLM)
+    lines = decide.related(vault, new_fact, "widget")
+    vllm = next(line for line in lines if line.fact.statement == VLLM)
+    rendered = decide.render(new_fact, "quote", lines)
+
+    assert f"{vllm.label} ([observed], state, 2026-09-30): {VLLM}\n  Quote: none.\n" in rendered
 
 
 def test_a_fact_with_no_related_lines_is_still_asked(home, vault, fake):
@@ -329,6 +388,38 @@ def test_retrieval_ranks_the_closest_line_first(vault):
 
     assert lines[0].fact.statement == CAPTURE
     assert [line.label for line in lines] == [f"L{n}" for n in range(1, len(lines) + 1)]
+
+
+def test_retrieval_stems_so_pausing_finds_paused(vault):
+    """Design 10: retrieval stems its words like the search index, so "pausing" finds the
+    line that says "paused"; without the stemmer the two share no word."""
+    text = PROJECT_PAGE.replace(
+        "- The capture hook enqueues work and returns. [observed] 2026-09-30 [^s1]",
+        "- The capture queue is paused. [observed] 2026-09-30 [^s1]",
+    )
+    (vault / "projects" / "widget" / "overview.md").write_text(text)
+
+    lines = decide.related(vault, _fact("Pausing was deliberate."), "widget")
+
+    assert [line.fact.statement for line in lines] == ["The capture queue is paused."]
+
+
+def test_a_resumed_fact_is_shown_the_paused_lines_date(vault):
+    """M14's example: "resumed" against a "paused" line matches on the thing itself, and
+    the dates in the context are what let the model resolve it as a supersede."""
+    text = PROJECT_PAGE.replace(
+        "- The capture hook enqueues work and returns. [observed] 2026-09-30 [^s1]",
+        "- The search indexer is paused. [observed] 2026-09-30 [^s1]",
+    )
+    (vault / "projects" / "widget" / "overview.md").write_text(text)
+
+    new_fact = _fact("The user resumed the search indexer.")
+    lines = decide.related(vault, new_fact, "widget")
+
+    assert "The search indexer is paused." in {line.fact.statement for line in lines}
+    rendered = decide.render(new_fact, "resumed the search indexer", lines)
+    assert "New fact ([stated], state, long term, 2026-10-04):" in rendered
+    assert "([observed], state, 2026-09-30): The search indexer is paused." in rendered
 
 
 def test_retrieval_takes_active_and_candidate_lines_only(vault):
@@ -463,15 +554,41 @@ def test_the_decide_prompt_keeps_conflict_to_the_same_thing():
     assert "is not a supersede or a conflict: choose confirm if a line already" in words
 
 
-def test_the_decide_prompt_shipped_is_the_plans_text():
-    """The plan's own words are the prompt (BUILD-PLAN M4.3), as for the digest prompt."""
-    from pathlib import Path
-
+def test_the_decide_prompt_keeps_the_plans_text():
+    """The plan's own words still ship (BUILD-PLAN M4.3). M14 extends the prompt between
+    the plan's lines; it never rewords or drops one."""
     plan = Path(__file__).resolve().parents[1] / "planning" / "BUILD-PLAN.md"
     lines = plan.read_text(encoding="utf-8").splitlines(keepends=True)
     start = next(i for i, line in enumerate(lines) if "(`src/aft/prompts/decide.md`)" in line)
     fences = [i for i in range(start, len(lines)) if lines[i].strip() in ("```text", "```")][:2]
-    assert decide.prompt() == "".join(lines[fences[0] + 1 : fences[1]])
+    plan_prompt = lines[fences[0] + 1 : fences[1]]
+
+    shipped = decide.prompt().splitlines(keepends=True)
+    cursor = 0
+    for plan_line in plan_prompt:
+        while cursor < len(shipped) and shipped[cursor] != plan_line:
+            cursor += 1
+        assert cursor < len(shipped), f"the plan's line is gone from the prompt: {plan_line!r}"
+        cursor += 1
+
+
+def test_the_decide_prompt_explains_the_fields():
+    """M14: the prompt explains the tag, date and quote fields, and dates decide a
+    supersede from a conflict."""
+    words = " ".join(decide.prompt().split())
+    assert (
+        "Each line shows its source tag in brackets, its date, and one quote from its"
+        " evidence; the new fact shows its own tag, date and quote." in words
+    )
+    assert "[stated] the user, [observed] a session, [inferred] or [suggested] the model" in words
+    assert (
+        "Newer evidence about the same thing that says something different means the thing"
+        " has changed: supersede." in words
+    )
+    assert (
+        "Evidence that is not newer does not replace a line: confirm when the two say the"
+        " same thing, conflict when they say different things that cannot both be true." in words
+    )
 
 
 def test_the_decide_prompt_says_questions_proposals_requests_are_not_decisions():
