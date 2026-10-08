@@ -94,6 +94,10 @@ class Run:
     over_budget: list[str] = field(default_factory=list)
     """Projects left waiting because the day's token budget was spent (DESIGN 13)."""
 
+    budget_stopped: list[str] = field(default_factory=list)
+    """Projects whose run stopped mid-way because the day's token budget ran out (DESIGN
+    13): the digest being applied and the digests after it wait for the next run."""
+
     expired: list[str] = field(default_factory=list)
     """Projects whose short-term memory this run expired as maintenance, with nothing
     waiting for them (DESIGN 6, R10; BUILD-PLAN F47)."""
@@ -182,14 +186,25 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                         result.failures[slug] = str(exc)
                         rep = ProjectRunReport(project=slug, error=str(exc))
                     else:
-                        taken += len(group)
+                        if getattr(rep, "stopped_for_budget", False):
+                            # The run stopped mid-group (DESIGN 13): count only the
+                            # digests it marked consumed, and leave the rest waiting.
+                            taken += len(getattr(rep, "digests_consumed", []))
+                        else:
+                            taken += len(group)
                     if rep is None:
                         continue
                     reports.append(rep)
+                    if getattr(rep, "stopped_for_budget", False):
+                        result.budget_stopped.append(slug)
                     # A failed run has nothing to revert of its own, but it still names the
                     # checkpoint and tag commits, so the run's Revert item is never lost
                     # (DESIGN 9 item 9).
-                    if getattr(rep, "commit", None) is not None or slug in result.failures:
+                    if (
+                        getattr(rep, "commit", None) is not None
+                        or getattr(rep, "stopped_for_budget", False)
+                        or slug in result.failures
+                    ):
                         checkpoint, tag_commit = (
                             (None, None)
                             if checkpoint_reported

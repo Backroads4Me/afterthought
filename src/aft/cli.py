@@ -1174,6 +1174,11 @@ def _dream(config: Config) -> None:
         # DESIGN 7, F49), so the line counts the digests the runs together took up.
         taken = result.taken.get(slug, len(result.waiting[slug]))
         print(f"aft dream: {slug}: {taken} digest(s) taken up")
+    for slug in result.budget_stopped:
+        print(
+            f"aft dream: {slug}: stopped mid-project, the day's token budget is spent;"
+            " the rest of its digests wait"
+        )
     for slug, err in result.failures.items():
         print(f"aft dream: {slug}: failed: {err}")
     for slug in result.active:

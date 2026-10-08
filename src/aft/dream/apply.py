@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import digest, evidence, lint, page, pagewrite, queue
+from aft import digest, evidence, lint, model, page, pagewrite, queue
 from aft import vault as vaultmod
 from aft.config import Config
 from aft.dream import decide, maintain, reconcile, rules, shortterm
@@ -162,6 +162,10 @@ class ProjectRunReport:
     project: str
     commit: str | None = None
     digests_consumed: list[str] = field(default_factory=list)
+    stopped_for_budget: bool = False
+    """The day's token budget ran out before the run applied everything it read (DESIGN
+    13): the digest being applied and the digests after it, or the short-term lines being
+    decided, wait for the next run."""
     added: list[AddedFact] = field(default_factory=list)
     confirmed: list[ConfirmedFact] = field(default_factory=list)
     superseded: list[SupersededFact] = field(default_factory=list)
@@ -343,6 +347,10 @@ def run_project(
     # Short-term lines a decision or their sessions carry to long-term memory, with why.
     to_lift: list[tuple[str, str]] = []
 
+    # Set when the day's token budget ran out before a decide call: the digest being
+    # applied and the digests after it wait for the next run (DESIGN 13).
+    budget_stop = False
+
     def settle(
         new_fact: rules.NewFact,
         evidence_list: list[rules.Evidence],
@@ -356,7 +364,11 @@ def run_project(
         memory: the retrieval leaves ``recent.md`` out (R10), and a decision that names one
         of its lines anyway is judged as a new long-term line, which lands on the
         overview."""
-        nonlocal project, run_project_id, page_slug, run_id
+        nonlocal project, run_project_id, page_slug, run_id, budget_stop
+        if budget_stop:
+            # The day's budget already stopped this run: nothing further is decided, and
+            # what was not applied waits for the next one (DESIGN 13).
+            return False
         verified_evidence = [e for e in evidence_list if e.verified]
         if not verified_evidence:
             report.rejected.append(
@@ -437,6 +449,14 @@ def run_project(
                 return False
 
         quote_to_send = "\n".join(q for q in verified_quotes if q) if verified_quotes else ""
+        # The day's cap counts the dream's decide calls with the digests' (DESIGN 13), so
+        # the check sits before each call: a project with more waiting facts than the day
+        # has room for stops at the day's last affordable decision instead of spending
+        # into a budget it has already used up.
+        if model.tokens_used_today(config, now) >= config.settings.work.daily_token_budget:
+            budget_stop = True
+            report.stopped_for_budget = True
+            return False
         proposal = decide.decide(
             config,
             new_fact,
@@ -851,6 +871,15 @@ def run_project(
                     )
 
                 settle(new_fact, evidence_list, sources_map)
+                if budget_stop:
+                    break
+
+            if budget_stop:
+                # The budget ran out inside this digest: its remaining facts were never
+                # decided, so it is left unconsumed and the digests after it wait for the
+                # next run, which applies this one again from its start (DESIGN 13). The
+                # facts applied so far stand under this run's commit.
+                break
 
             # Mark digest consumed with run id
             dfm, dbody, _, _ = page.split_frontmatter(d_text)

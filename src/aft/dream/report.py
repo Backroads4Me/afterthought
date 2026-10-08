@@ -107,6 +107,11 @@ def format_run_section(
     lines.append(f"- Tokens used: {tokens_used}")
     lines.append(f"- Digests processed: {len(report.digests_consumed)}")
     lines.append(f"- Backlog remaining: {backlog}")
+    if report.stopped_for_budget:
+        lines.append(
+            "- Stopped: the day's token budget ran out mid-project;"
+            " what was not applied waits for the next run"
+        )
     if report.oversize_pages:
         lines.append(f"- Oversize pages: {len(report.oversize_pages)}")
         for op in report.oversize_pages:
