@@ -521,6 +521,11 @@ def test_the_pipeline_end_to_end(pipeline: Pipeline, capsys, monkeypatch) -> Non
     # had forgotten the forgetting would file it again here.
     age(pipeline.transcripts[0], WORKED_AGAIN_AT - timedelta(hours=1))
     age(pipeline.transcripts[1], WORKED_AGAIN_AT - timedelta(hours=1))
+    with queue._writing(cfg) as conn:
+        conn.execute(
+            "UPDATE jobs SET claimed_time = ?, updated_time = ?",
+            (PI_AT.isoformat(), PI_AT.isoformat()),
+        )
     again = work.run(cfg, now=WORKED_AGAIN_AT)
     # Exactly one session was swept, and it was the one nobody forgot: the sweep is awake
     # and reading this directory, and the forgotten transcript is declined on the record

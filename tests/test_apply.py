@@ -2434,7 +2434,8 @@ def test_edit_quote_matches_only_added_lines(initialized, home):
     # Added line matches
     v, origin, dt, yours = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "brand new added line")
     assert v is True
-    assert yours is True
+    assert yours is False
+    assert apply._is_quote_yours(cfg, f"aft://edit/{sha}") is False
 
     # Removed line does NOT match
     v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{sha}", "initial line to be removed")
@@ -2473,6 +2474,57 @@ def test_edit_quote_matches_only_added_lines(initialized, home):
 
     v, _, _, _ = apply._lookup_evidence(cfg, f"aft://edit/{single_sha}", "No RGB lighting.")
     assert v is True
+
+
+test_evidence_source_edit_uri = test_edit_quote_matches_only_added_lines
+
+
+def test_settle_file_edit_question_note_keep_leaves_stated_active(initialized, home, fake):
+    """Settling a file-edit question note via notes.settle(config, rel, line, notes.KEEP)
+    clears the question callout and leaves the fact as active [stated]."""
+    from aft import notes
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## Decisions\n\n- Line. [stated] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "line"}],
+    )
+    write_digest(cfg, "widget", "d1", facts=[], sources=[])
+
+    page_file = cfg.vault / "projects" / "widget" / "overview.md"
+    page_file.write_text(page_file.read_text() + "- Releases are cut from main only.\n")
+    import os
+
+    os.utime(page_file, (LONG_AGO.timestamp(), LONG_AGO.timestamp()))
+
+    res = schedule.run(cfg, now=NOW)
+    assert res.checkpoint is not None
+    assert "projects/widget/overview.md" in res.tagged
+
+    parsed = page.parse(page_file.read_text(), page_file)
+    fact = next(f for f in parsed.facts if f.statement == "Releases are cut from main only.")
+    assert fact.state == page.NEEDS_YOU
+    assert fact.source == "stated"
+    assert len(fact.callouts) == 1
+    assert fact.callouts[0].type == "question"
+    assert fact.callouts[0].text == ["File edit in checkpoint. Confirm to keep this fact."]
+
+    rel = "projects/widget/overview.md"
+    notes.settle(cfg, rel, fact.line, notes.KEEP, now=NOW)
+
+    parsed_after = page.parse(page_file.read_text(), page_file)
+    fact_after = next(
+        f for f in parsed_after.facts if f.statement == "Releases are cut from main only."
+    )
+    assert fact_after.state == page.ACTIVE
+    assert fact_after.source == "stated"
+    assert fact_after.callouts == []
 
 
 def test_lookup_evidence_worker_digest_exact_match_no_leak(initialized, home):

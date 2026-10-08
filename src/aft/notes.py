@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from aft.config import Config
 from aft.page import FACT_DIRS
@@ -125,9 +126,10 @@ def open_notes(config: Config, slug: str | None, everywhere: bool = False) -> li
 def settle(
     config: Config,
     where: str,
-    choice: str,
+    choice: str | int,
     statement: str | None = None,
     now: datetime | None = None,
+    *args: Any,
 ) -> str:
     """Settle the note under the line at ``where`` (``<page>:<line>``) as the user chose,
     and commit it. Returns the commit message.
@@ -143,11 +145,34 @@ def settle(
     from aft import vault as vaultmod
     from aft.dream import rules
 
+    if isinstance(choice, int):
+        rel = where
+        line = choice
+        actual_choice = str(statement)
+        if actual_choice == REPLACE:
+            actual_statement = now if isinstance(now, str) else (args[0] if args else None)
+            actual_now = (
+                args[1]
+                if len(args) > 1
+                else (
+                    args[0]
+                    if args and isinstance(args[0], datetime)
+                    else (now if isinstance(now, datetime) else None)
+                )
+            )
+        else:
+            actual_statement = None
+            actual_now = args[0] if args else (now if isinstance(now, datetime) else None)
+        choice = actual_choice
+        statement = actual_statement
+        now = actual_now
+    else:
+        rel, line = _where(where)
+
     if choice not in CHOICES:
         raise NoteError(f"unknown choice {choice!r}; expected one of {', '.join(CHOICES)}")
     if (choice == REPLACE) != bool(statement and statement.strip()):
         raise NoteError("--replace takes the new statement, and only --replace does")
-    rel, line = _where(where)
     path = config.vault / rel
     if not path.is_file():
         raise NoteError(f"no page {rel} in the vault")

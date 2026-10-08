@@ -495,7 +495,7 @@ def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | No
     try:
         doc = pagewrite.PageDoc(text, path)
         ids = [
-            doc.add_source(f"aft://edit/{checkpoint}", title=f"Hand edit {when}", quote=statement)
+            doc.add_source(f"aft://edit/{checkpoint}", title=f"File edit {when}", quote=statement)
             for _, statement in bare
         ]
     except pagewrite.WriteError:
@@ -505,11 +505,30 @@ def _tagged(path: Path, added: set[int], checkpoint: str, when: str) -> str | No
     for (number, statement), source in zip(bare, ids, strict=True):
         lines[number - 1 + shift] = f"- {statement} [stated] {when} [^{source}]"
     result = "\n".join(lines)
+    try:
+        doc = pagewrite.PageDoc(result, path)
+        for source in reversed(ids):
+            fact = next((f for f in doc.page.facts if source in f.refs), None)
+            if fact is not None and not fact.callouts:
+                doc.add_callout(
+                    fact,
+                    "question",
+                    "File edit in checkpoint. Confirm to keep this fact.",
+                    when,
+                )
+    except pagewrite.WriteError:
+        return None
+    result = doc.render()
     after = page.parse(result, path)
-    facts = {fact.line: fact for fact in after.facts}
-    for number, statement in bare:
-        fact = facts.get(number + shift)
-        if fact is None or fact.statement != statement or fact.source != "stated":
+    facts_by_ref = {ref: fact for fact in after.facts for ref in fact.refs}
+    for (_, statement), source in zip(bare, ids, strict=True):
+        fact = facts_by_ref.get(source)
+        if (
+            fact is None
+            or fact.statement != statement
+            or fact.source != "stated"
+            or fact.state != page.NEEDS_YOU
+        ):
             return None
     if _new_problem(before, after):
         return None

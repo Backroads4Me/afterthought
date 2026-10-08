@@ -504,7 +504,7 @@ def tag_day(cfg, sha: str) -> str:
     return datetime.fromtimestamp(stamp, UTC).date().isoformat()
 
 
-def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
+def test_checkpoint_tags_a_bare_bullet_into_stated_fact(widget, initialized):
     root = initialized.vault
     overview = root / "projects" / "widget" / "overview.md"
     overview.parent.mkdir(parents=True)
@@ -541,13 +541,17 @@ def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
         .isoformat()
     )
     text = overview.read_text()
-    assert f"- Releases are cut from main only. [stated] {day} [^s2]\n" in text
+    assert (
+        f"- Releases are cut from main only. [stated] {day} [^s2]\n\n"
+        f"> [!question] {day}\n"
+        "> File edit in checkpoint. Confirm to keep this fact.\n"
+    ) in text
     assert "- Typed in full form. [observed] 2026-09-20 [^s1]\n" in text
     assert "- Old bare line typed before the checkpoint.\n" in text
     assert "> - yes, still true\n" in text
     assert "(signals 1/3, sessions 1/2)\n- A hunch.\n" in text
     assert (
-        f"  - id: s2\n    resource: aft://edit/{sha}\n    title: Hand edit {day}\n"
+        f"  - id: s2\n    resource: aft://edit/{sha}\n    title: File edit {day}\n"
         "    quote: Releases are cut from main only.\n"
     ) in text
     assert "- hand line in an index" in index.read_text()
@@ -558,6 +562,13 @@ def test_checkpoint_tags_added_bare_bullets_stated(widget, initialized):
         "stated",
         "decision",
     )
+    assert fact.state == page.NEEDS_YOU
+    assert len(fact.callouts) == 1
+    assert fact.callouts[0].type == "question"
+    assert fact.callouts[0].text == ["File edit in checkpoint. Confirm to keep this fact."]
+
+
+test_checkpoint_tags_added_bare_bullets_stated = test_checkpoint_tags_a_bare_bullet_into_stated_fact
 
 
 def test_checkpoint_tags_a_bare_bullet_that_ends_in_a_date(widget, initialized):
@@ -579,11 +590,15 @@ def test_checkpoint_tags_a_bare_bullet_that_ends_in_a_date(widget, initialized):
     assert subjects(initialized)[0] == f"aft: tag hand edits from {result.checkpoint}"
 
     text = overview.read_text()
-    assert f"- The 3.13 wheel build broke on 2026-09-27 [stated] {day} [^s2]\n" in text
+    assert (
+        f"- The 3.13 wheel build broke on 2026-09-27 [stated] {day} [^s2]\n\n"
+        f"> [!question] {day}\n"
+        "> File edit in checkpoint. Confirm to keep this fact.\n"
+    ) in text
     assert "- Cut releases by hand. [observed] 2026-09-20\n" in text
     assert (
         f"  - id: s2\n    resource: aft://edit/{result.checkpoint}\n"
-        f"    title: Hand edit {day}\n    quote: The 3.13 wheel build broke on 2026-09-27\n"
+        f"    title: File edit {day}\n    quote: The 3.13 wheel build broke on 2026-09-27\n"
     ) in text
     fact = next(f for f in page.parse(text, overview).facts if f.refs == ("s2",))
     assert (fact.statement, fact.source, fact.kind) == (
@@ -591,6 +606,10 @@ def test_checkpoint_tags_a_bare_bullet_that_ends_in_a_date(widget, initialized):
         "stated",
         "decision",
     )
+    assert fact.state == page.NEEDS_YOU
+    assert len(fact.callouts) == 1
+    assert fact.callouts[0].type == "question"
+    assert fact.callouts[0].text == ["File edit in checkpoint. Confirm to keep this fact."]
 
 
 def test_checkpoint_tags_a_bare_bullet_that_carries_its_own_note(widget, initialized):
@@ -613,11 +632,21 @@ def test_checkpoint_tags_a_bare_bullet_that_carries_its_own_note(widget, initial
     text = overview.read_text()
     assert f"- We ship on Tuesdays. [stated] {day} [^s2]\n" in text
     assert f"- Releases are cut from main only. [stated] {day} [^s3]\n" in text
+    assert (
+        f"  - id: s2\n    resource: aft://edit/{result.checkpoint}\n"
+        f"    title: File edit {day}\n    quote: We ship on Tuesdays.\n"
+    ) in text
+    assert (
+        f"  - id: s3\n    resource: aft://edit/{result.checkpoint}\n"
+        f"    title: File edit {day}\n    quote: Releases are cut from main only.\n"
+    ) in text
     facts = {f.statement: f for f in page.parse(text, overview).facts}
     noted = facts["We ship on Tuesdays."]
     assert (noted.source, noted.state) == ("stated", page.NEEDS_YOU)
     assert noted.callouts[0].text == ["Is that still the cadence?"]
-    assert facts["Releases are cut from main only."].state == page.ACTIVE
+    unnoted = facts["Releases are cut from main only."]
+    assert (unnoted.source, unnoted.state) == ("stated", page.NEEDS_YOU)
+    assert unnoted.callouts[0].text == ["File edit in checkpoint. Confirm to keep this fact."]
     assert [message for _, message in page.parse(text, overview).errors] == [
         "fact line must read '- <statement> [<source>] YYYY-MM-DD [^id]'",
         "a callout cannot mark a refused fact line",

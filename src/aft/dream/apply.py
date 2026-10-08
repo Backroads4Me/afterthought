@@ -1462,7 +1462,7 @@ def _lookup_evidence(
                     if c_res.returncode == 0:
                         stamp = int(c_res.stdout.strip())
                         c_date = datetime.fromtimestamp(stamp, UTC).date().isoformat()
-                        return True, rules.PRIMARY, c_date, True
+                        return True, rules.PRIMARY, c_date, False
         except Exception:
             return False, rules.PRIMARY, fallback_date, False
         return False, rules.PRIMARY, fallback_date, False
@@ -1479,7 +1479,7 @@ def _is_quote_yours(config: Config, resource: str, default: bool = False) -> boo
     if evidence.is_library_resource(resource):
         return False
     if resource.startswith("aft://edit/"):
-        return True
+        return False
     if resource.startswith("aft://session/"):
         uri = resource.removeprefix("aft://session/")
         parts = uri.split("#", 1)
