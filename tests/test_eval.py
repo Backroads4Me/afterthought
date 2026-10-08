@@ -1250,3 +1250,12 @@ def test_resume_skips_the_ids_a_finished_record_stands_for(home, tmp_path):
     assert rerun.scored == 1
     records = longmemeval._read_records(output)
     assert [record["id"] for record in records] == ["q-hash", "q-cache"]
+
+
+def test_the_sandbox_config_writes_extra_body_as_a_toml_table():
+    """An extra_body with nested tables reaches the sandbox as TOML it reads back whole."""
+    import tomllib
+
+    body = {"chat_template_kwargs": {"enable_thinking": False}, "stop": ["a", "b"], "n": 1}
+    parsed = tomllib.loads(f"extra_body = {longmemeval._toml_value(body)}\n")
+    assert parsed["extra_body"] == body

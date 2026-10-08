@@ -636,6 +636,17 @@ def write_claude_transcript(path: Path, entries: Sequence[Entry], cwd: Path) -> 
     return path
 
 
+def _toml_value(value: Any) -> str:
+    """One value as TOML writes it inline: tables as ``{ key = value }``, the rest as JSON
+    spells strings, numbers, booleans and arrays, which TOML reads the same way."""
+    if isinstance(value, dict):
+        items = ", ".join(f"{json.dumps(str(k))} = {_toml_value(v)}" for k, v in value.items())
+        return "{ " + items + " }" if items else "{}"
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    return json.dumps(value)
+
+
 def _model_table(caller: Config) -> str:
     """The caller's ``[model]`` table, as the sandbox's config carries it.
 
@@ -651,7 +662,7 @@ def _model_table(caller: Config) -> str:
     if m.temperature:
         lines.append(f"temperature = {m.temperature!r}")
     if m.extra_body:
-        lines.append(f"extra_body = {json.dumps(m.extra_body)}")
+        lines.append(f"extra_body = {_toml_value(m.extra_body)}")
     return "\n".join(lines) + "\n"
 
 
