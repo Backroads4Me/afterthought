@@ -1092,6 +1092,29 @@ aft:
 """
 
 
+STEM_PAGE = """\
+---
+type: Project
+title: Widget
+description: A widget that turns water into widgets.
+sources:
+  - id: s1
+    resource: aft://session/claude/answer_1#u1
+    quote: the ingest is paused at midnight
+  - id: s2
+    resource: aft://session/claude/distractor_1#u1
+    quote: the cache holds two gigabytes
+aft:
+  project: p_widget
+---
+
+## Facts
+
+- The cache holds two gigabytes. [observed] 2026-09-30 [^s2]
+- The ingest is paused at midnight. [observed] 2026-09-30 [^s1]
+"""
+
+
 def test_a_page_hit_credits_only_the_sessions_its_matched_line_cites(initialized: Config):
     """A section's other lines say nothing about a hit: only the matched line's sources."""
     write(initialized.vault / "projects/widget/overview.md", ATTRIBUTION_PAGE)
@@ -1102,10 +1125,61 @@ def test_a_page_hit_credits_only_the_sessions_its_matched_line_cites(initialized
         collection=index.PAGES,
         heading="Facts",
     )
-    sessions = longmemeval._page_hit_sessions(
+    sessions, statement = longmemeval._page_hit_sessions(
         initialized, hit, "what port does the daemon listen on"
     )
     assert sessions == ["answer_1"]
+    assert statement == "The daemon listens on 8123."
+
+
+def test_a_page_hit_whose_section_matches_no_query_word_credits_no_session(initialized: Config):
+    """No line matching any query word credits no session (BUILD-PLAN F72)."""
+    write(initialized.vault / "projects/widget/overview.md", ATTRIBUTION_PAGE)
+    hit = search.Hit(
+        path="projects/widget/overview.md",
+        description="Widget",
+        snippet="The daemon listens on 8123.",
+        collection=index.PAGES,
+        heading="Facts",
+    )
+    matched = longmemeval._page_hit_sessions(initialized, hit, "purple elephants giraffes")
+    assert matched == ([], None)
+
+
+def test_a_page_hit_matches_a_line_by_stem_not_raw_word(initialized: Config):
+    """The matched line is the one the query's stems rank first (BUILD-PLAN F72).
+
+    "pausing" shares no raw word with either line; its stem matches only the paused
+    line, whose session is credited, and the cache line, which matches nothing, credits
+    none - the raw word overlap this replaces would have credited neither.
+    """
+    write(initialized.vault / "projects/widget/overview.md", STEM_PAGE)
+    hit = search.Hit(
+        path="projects/widget/overview.md",
+        description="Widget",
+        snippet="The ingest is paused at midnight.",
+        collection=index.PAGES,
+        heading="Facts",
+    )
+    sessions, statement = longmemeval._page_hit_sessions(initialized, hit, "pausing tonight")
+    assert statement == "The ingest is paused at midnight."
+    assert sessions == ["answer_1"]
+
+
+def test_line_ranking_orders_by_stemmed_bm25():
+    """The in-memory table ranks by stemmed BM25, ties keeping statement order (F72)."""
+    statements = [
+        "The cache holds two gigabytes.",
+        "The ingest is paused at midnight.",
+    ]
+    # A stem-only match ("pausing" against "paused") ranks the one line it matches.
+    assert longmemeval._ranked_lines(sorted(longmemeval._terms("pausing")), statements) == [1]
+    # Both lines match "the"; the cache line also matches "cache", so it ranks first.
+    assert longmemeval._ranked_lines(sorted(longmemeval._terms("the cache")), statements) == [0, 1]
+    # Nothing matches nothing, and there is nothing to rank without either side.
+    assert longmemeval._ranked_lines(sorted(longmemeval._terms("purple")), statements) == []
+    assert longmemeval._ranked_lines([], statements) == []
+    assert longmemeval._ranked_lines(["cache"], []) == []
 
 
 def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
@@ -1115,7 +1189,7 @@ def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
     output = tmp_path / "results.jsonl"
     with pipeline_endpoint() as fake:
         pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
-        report = longmemeval.run_pipeline(dataset, workdir, output, keep_sandbox=True)
+        report = longmemeval.run_pipeline(dataset, workdir, output)
     assert report.total == 1
     assert report.scored == 1
     assert report.errors == 0
@@ -1136,6 +1210,7 @@ def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
     assert record["sessions_digested"] == 2
     assert record["sessions_empty"] == 0
     assert record["sessions_failed"] == 0
+    assert record["session_outcomes"] == {"answer_1": "digested", "distractor_1": "digested"}
     assert record["work_failures"] == []
     assert record["dream_failures"] == {}
     assert record["model"] == MODEL_NAME
@@ -1143,7 +1218,7 @@ def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
     assert len(record["prompt_hash"]) == 64
     assert record["tokens"] > 0
     assert record["sandbox"] == str(workdir / "q-hash")
-    # --keep-sandbox leaves the sandbox standing: config, vault and project all there.
+    # The sandbox is kept by default: config, vault and project all still there.
     assert (workdir / "q-hash" / "home" / "config.toml").is_file()
     assert (workdir / "q-hash" / "vault" / "projects").is_dir()
 
@@ -1153,6 +1228,11 @@ def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
     assert rankings["full"]["ranked_sessions"][0] == "answer_1"
     assert rankings["full"]["recall_any@1"] == 1.0
     assert rankings["full"]["recall_all@10"] == 1.0
+    credited = rankings["full"]["ranked_hits"]
+    assert [hit["session"] for hit in credited] == rankings["full"]["ranked_sessions"]
+    assert credited and all(
+        set(hit) == {"session", "collection", "path", "heading", "statement"} for hit in credited
+    )
     assert rankings["coverage"] == 1.0
 
 
@@ -1259,3 +1339,135 @@ def test_the_sandbox_config_writes_extra_body_as_a_toml_table():
     body = {"chat_template_kwargs": {"enable_thinking": False}, "stop": ["a", "b"], "n": 1}
     parsed = tomllib.loads(f"extra_body = {longmemeval._toml_value(body)}\n")
     assert parsed["extra_body"] == body
+
+
+def test_discard_sandbox_deletes_only_a_finished_scored_sandbox(home, tmp_path):
+    """Sandboxes are kept by default; --discard-sandbox deletes only a finished, scored one."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        longmemeval.run_pipeline(dataset, workdir, output, discard_sandbox=True)
+    (record,) = longmemeval._read_records(output)
+    assert record["scored"] is True
+    assert not Path(record["sandbox"]).exists()
+
+    # A stopped question's sandbox survives --discard-sandbox: it is the reason a run
+    # keeps what it kept, and the thing a later look at the sandbox answers for.
+    stopped_output = tmp_path / "stopped.jsonl"
+    endpoint = RoutedEndpoint({"summary": Reply(status=500)})
+    with endpoint:
+        pipeline_home_config(home, tmp_path / "vault-stopped", endpoint.endpoint)
+        longmemeval.run_pipeline(dataset, workdir / "stopped", stopped_output, discard_sandbox=True)
+    (stopped,) = longmemeval._read_records(stopped_output)
+    assert stopped["scored"] is False
+    assert Path(stopped["sandbox"]).is_dir()
+
+
+def test_rescore_reranks_a_kept_sandbox_without_the_model(home, tmp_path, monkeypatch):
+    """--rescore reads the sandboxes a records JSONL names and never calls the model."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        report = longmemeval.run_pipeline(dataset, workdir, output)
+    assert report.scored == 1
+
+    def refuse(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("rescore reached for the model")
+
+    monkeypatch.setattr(model, "complete_json", refuse)
+    # The endpoint is down here: any model call rescore made would fail loudly twice.
+    rescored_path = tmp_path / "rescored.jsonl"
+    rescored = longmemeval.rescore_pipeline(output, dataset, rescored_path)
+    assert rescored.scored == 1
+    assert rescored.full == report.full
+    (original,) = longmemeval._read_records(output)
+    (fresh,) = longmemeval._read_records(rescored_path)
+    assert fresh["id"] == "q-hash"
+    assert fresh["rankings"] == original["rankings"]
+    assert fresh["session_outcomes"] == {"answer_1": "digested", "distractor_1": "digested"}
+
+
+def test_rescore_rescores_only_sandboxes_that_still_stand(home, tmp_path, monkeypatch):
+    """A record whose sandbox is gone is copied unchanged; a standing one is re-scored."""
+    second = dict(HASH_QUESTION, question_id="q-gone")
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION, second)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    kept_ids = tmp_path / "kept.ids"
+    kept_ids.write_text("q-hash\n", encoding="utf-8")
+    gone_ids = tmp_path / "gone.ids"
+    gone_ids.write_text("q-gone\n", encoding="utf-8")
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        longmemeval.run_pipeline(dataset, workdir, output, ids_path=kept_ids)
+        longmemeval.run_pipeline(dataset, workdir, output, ids_path=gone_ids, discard_sandbox=True)
+    records = {record["id"]: record for record in longmemeval._read_records(output)}
+    assert Path(records["q-hash"]["sandbox"]).is_dir()
+    assert not Path(records["q-gone"]["sandbox"]).exists()
+
+    def fake_score(sandbox: Any, case: Any) -> dict[str, Any]:
+        return {"marker": case.question_id}
+
+    monkeypatch.setattr(longmemeval, "score_question", fake_score)
+    rescored_path = tmp_path / "rescored.jsonl"
+    longmemeval.rescore_pipeline(output, dataset, rescored_path)
+    fresh = {record["id"]: record for record in longmemeval._read_records(rescored_path)}
+    assert fresh["q-hash"]["rankings"] == {"marker": "q-hash"}
+    assert fresh["q-gone"]["rankings"] == records["q-gone"]["rankings"]
+
+
+def test_rescore_refuses_to_write_over_its_input(tmp_path):
+    """The new JSONL is a new file: the records it reads stay as the run left them."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    output = tmp_path / "results.jsonl"
+    with pytest.raises(longmemeval.PipelineError, match="other than the records it reads"):
+        longmemeval.rescore_pipeline(output, dataset, output)
+
+
+def test_the_rescore_command_wires_the_flags(home, tmp_path):
+    """--mode pipeline --rescore <records> --output <new> re-scores through main()."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    workdir = tmp_path / "work"
+    output = tmp_path / "results.jsonl"
+    with pipeline_endpoint() as fake:
+        pipeline_home_config(home, tmp_path / "vault", fake.endpoint)
+        longmemeval.run_pipeline(dataset, workdir, output)
+    rescored_path = tmp_path / "rescored.jsonl"
+    assert (
+        longmemeval.main(
+            [
+                "--dataset",
+                str(dataset),
+                "--mode",
+                "pipeline",
+                "--rescore",
+                str(output),
+                "--output",
+                str(rescored_path),
+            ]
+        )
+        == 0
+    )
+    (fresh,) = longmemeval._read_records(rescored_path)
+    assert fresh["id"] == "q-hash"
+    assert fresh["rankings"]["full"]["ranked_sessions"][0] == "answer_1"
+
+
+def test_the_rescore_command_requires_an_output(tmp_path):
+    """A rescore that has nowhere new to write the records is refused at the command line."""
+    dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
+    with pytest.raises(SystemExit):
+        longmemeval.main(
+            [
+                "--dataset",
+                str(dataset),
+                "--mode",
+                "pipeline",
+                "--rescore",
+                str(tmp_path / "r.jsonl"),
+            ]
+        )
