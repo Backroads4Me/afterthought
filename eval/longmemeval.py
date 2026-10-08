@@ -926,8 +926,7 @@ def _page_hit_sessions(config: Config, hit: search.Hit, query: str) -> list[str]
     for fact in parsed.facts:
         if fact.section != hit.heading or fact.struck or fact.state not in inject.INJECTED:
             continue
-        statement = fact.statement.lower()
-        score = sum(1 for term in terms if term in statement)
+        score = len(terms & _terms(fact.statement))
         if score and (best is None or score > best[0]):
             best = (score, fact)
     if best is None:
@@ -1026,11 +1025,14 @@ def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
     over everything, with a page hit credited to the sessions its matched line cites.
     """
     cfg = sandbox.config
+    # Search deep enough to rank the whole haystack: search has no collection filter, so
+    # a shallow limit would let evidence and page rows crowd digest rows out of the
+    # digest-only ranking. The full ranking keeps hit order, so its top ten is unchanged.
     hits = search.search(
         cfg,
         case.question,
         all_projects=True,
-        limit=SESSION_K * HITS_PER_SESSION,
+        limit=max(SESSION_K, len(case.session_ids)) * (HITS_PER_SESSION + 1),
         now=case.question_date,
     )
     allowed = set(case.session_ids)
