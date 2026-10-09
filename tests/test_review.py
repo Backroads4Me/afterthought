@@ -555,7 +555,8 @@ def test_the_review_prompt_wording_matches_the_digest_and_decide_prompts():
         "review.md": review.prompt(),
     }
     shared = [
-        "a future session would make a mistake, or ask the user again, without it",
+        "a future session would make a mistake, ask the user again, or give less "
+        "fitting help without it",
         "Never a fact, long or short term: the status of a pull request, task, branch or"
         " commit; who is working on what; a test's name or result; a review's outcome;"
         " what a change or fix did to the code; and anything the repository's own"
@@ -568,6 +569,18 @@ def test_the_review_prompt_wording_matches_the_digest_and_decide_prompts():
         words = " ".join(text.split())
         for sentence in shared:
             assert sentence in words, f"{name} drops part of the shared wording"
+
+
+def test_the_review_prompt_keeps_facts_about_the_users_life():
+    """F73: the user's life, tastes and plans pass the keep test, and a dated event is a
+    durable record kept long-term with its date, so age alone withdraws nothing."""
+    words = " ".join(review.prompt().split())
+    assert "A fact about the user's life, interests, tastes or plans passes it." in words
+    assert (
+        'A dated event is a durable record ("On 2023-11-30 the user got 8 postcards"), '
+        "not a fact that stops being true, so it is kept long-term with its date in the "
+        "statement." in words
+    )
 
 
 def test_the_schema_names_twenty_lines():

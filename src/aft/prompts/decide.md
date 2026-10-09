@@ -8,8 +8,11 @@ short-term fact is a temporary condition that changes how an agent should act (s
 paused, a temporary setting, a freeze), not progress on the work, and it is meant to change. The new fact says which term it is, and an existing line marked recent is
 short-term memory.
 
-A fact earns its place in memory only when a future session would make a mistake, or ask
-the user again, without it. Never a fact, long or short term: the status of a pull
+A fact earns its place in memory only when a future session would make a mistake, ask
+the user again, or give less fitting help without it. A fact about the user's life,
+interests, tastes or plans passes it. A dated event is a durable record ("On 2023-11-30
+the user got 8 postcards"), not a fact that stops being true, so it is kept long-term
+with its date in the statement. Never a fact, long or short term: the status of a pull
 request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
 documents already say. A question, a proposal or a request from the user is never a

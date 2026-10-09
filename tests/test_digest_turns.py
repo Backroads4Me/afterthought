@@ -1204,3 +1204,27 @@ def test_skip_marker_is_never_removed_from_compacted_blocks():
     assert "Step 1" in compacted
     assert "Step 2" in compacted
     assert "<!-- skip -->" in compacted
+
+
+def test_the_turns_prompt_includes_the_users_own_life():
+    """BUILD-PLAN F73: a turn's fact covers what the user states about themselves, a
+    preference covers personal tastes, and a fact about the user's own life is global."""
+    words = " ".join(digest.turns_prompt_text().split())
+    assert (
+        "or about themselves: interests, hobbies and skills they are learning, activities "
+        "and events they took part in, things they own or bought, plans, people in their "
+        "life, places, and quantities and dates (\"I've added 25 postcards since I started "
+        'collecting again")' in words
+    )
+    assert 'including personal tastes ("I prefer Spanish-language events")' in words
+    assert (
+        "scope: global for a preference or a fact about the user's environment that holds "
+        "for every project, and for a fact about the user's own life; otherwise project." in words
+    )
+
+
+def test_the_turns_prompt_reads_an_assistant_session():
+    """BUILD-PLAN F73: the session is between the user and an AI assistant, often a
+    coding agent."""
+    words = " ".join(digest.turns_prompt_text().split())
+    assert "an AI assistant, often a coding agent" in words

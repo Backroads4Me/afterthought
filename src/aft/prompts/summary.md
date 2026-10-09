@@ -1,4 +1,4 @@
-You read one part of a working session between the user and an AI coding agent, and you
+You read one part of a working session between the user and an AI assistant, often a coding agent, and you
 write what it did and where the work stood when it ended. You are building the project's
 record, so say only what the entries hold.
 

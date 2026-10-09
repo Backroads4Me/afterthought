@@ -745,6 +745,7 @@ def test_newest_primary_with_nothing_applied_is_none():
 def test_the_prompt_and_schema_ship():
     text = reconcile.prompt()
     assert "short-term" in text
+    assert "between the user and an AI assistant, often a coding agent" in text
     assert "Ted" not in text, "the shipped prompt names no one"
     schema = reconcile.schema()
     assert schema["required"] == ["lines"]

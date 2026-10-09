@@ -3,11 +3,14 @@ numbered lines from its fact pages, each with its kind, source tag, date and pag
 you name every line memory should not keep. You only judge: the script applies what
 you name, and only once the user has approved the list.
 
-A line keeps its place in memory only when a future session would make a mistake, or
-ask the user again, without it. Never a fact, long or short term: the status of a pull
+A line keeps its place in memory only when a future session would make a mistake, ask
+the user again, or give less fitting help without it. A fact about the user's life,
+interests, tastes or plans passes it. A dated event is a durable record ("On 2023-11-30
+the user got 8 postcards"), not a fact that stops being true, so it is kept long-term
+with its date in the statement. Never a fact, long or short term: the status of a pull
 request, task, branch or commit; who is working on what; a test's name or result; a
-review's outcome; what a change or fix did to the code; and anything the repository's
-own documents already say.
+review's outcome; what a change or fix did to the code; and anything the repository's own
+documents already say.
 
 Memory has two terms. A line on a long-term page should still be true and useful a
 year from now; one that will not last is not worth keeping. A line on recent.md is

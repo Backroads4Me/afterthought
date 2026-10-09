@@ -1,4 +1,4 @@
-You read one part of a working session between the user and an AI coding agent, and you
+You read one part of a working session between the user and an AI assistant, often a coding agent, and you
 check what it shows about the project's short-term memory. The short-term lines are
 numbered; the session's entries are labelled like [#3], each with who wrote it and when.
 
