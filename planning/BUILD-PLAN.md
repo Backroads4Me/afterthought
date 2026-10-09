@@ -1425,6 +1425,33 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     model, writing a new JSONL, so a scoring change can be measured on kept runs.
   - Tests in `tests/test_eval.py`. Review checkpoint: no.
 
+- **F73 Broader memory: the user's life, not only the work** (ruling 2026-10-08, DESIGN 2
+  and 6 Kinds). Prompt changes only; the trust rules, schemas and grounding are unchanged.
+  - **`turns.md`, `digest.md`, `summary.md`, `reconcile.md`:** the session is between the
+    user and an AI assistant, often a coding agent, not only a coding agent. A `fact`
+    includes what the user states about themselves: interests, hobbies and skills they are
+    learning, activities and events they took part in, things they own or bought, plans,
+    people in their life, places, and quantities and dates ("I've added 25 postcards since
+    I started collecting again"). A `preference` includes personal tastes ("I prefer
+    Spanish-language events"). A fact about the user's own life is `global` scope.
+  - **`decide.md`, `review.md`:** the worth-keeping test becomes: a future session would
+    make a mistake, ask the user again, or give less fitting help without it. A fact about
+    the user's life, interests, tastes or plans passes it. A dated event is a durable
+    record ("On 2023-11-30 the user got 8 postcards"), not a fact that stops being true,
+    so it is kept long-term with its date in the statement. The never-a-fact list
+    (work status, test results, review outcomes, what a change did) stays.
+  - **Measure:** before merging, lead reruns the six F72 diagnostic questions
+    (`~/src/aft-eval-data/longmemeval/pipeline/diag6-ids.txt`) and compares coverage and
+    digest recall with the F72 run; and runs `scripts/eval_digest.py` on the existing
+    coding-session key to check the coding-memory precision does not drop.
+  - Tests: the prompt-shape tests that pin these prompts' text are updated. Review
+    checkpoint: yes (prompt change).
+- **F74 LongMemEval-S searches from the sandbox project** (ruling 2026-10-08). Pipeline-mode
+  scoring searches as a session in the sandbox project would (`project=` the sandbox slug,
+  not `all_projects=True`), so the tier order matches production: project rows first, global
+  pages next. With no project pinned, global pages outrank every project row whatever their
+  relevance. Baseline mode is unchanged. Tests in `tests/test_eval.py`. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1

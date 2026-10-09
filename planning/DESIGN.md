@@ -33,6 +33,9 @@ unreliable notes. Existing memory systems fail in four recurring ways:
   it is in, including where the last session left off, without being asked.
 - Every session is captured without the agent doing anything, except what you mark as off
   the record.
+- Memory covers the user as well as the work: their interests, activities, possessions,
+  plans, people and tastes, and dated events in their life, so a later session can answer
+  about them or tailor its help without asking again. Work-status noise stays out.
 - Memory stays readable, editable and diffable as markdown in git, in Open Knowledge
   Format (OKF) v0.2, openable as an Obsidian vault.
 - One local model does all model work. Load stays bounded and degrades by queueing, never
@@ -216,7 +219,7 @@ heading and no line needs extra markup:
 | `preference` | What you want | "No RGB lighting." |
 | `decision` | A choice and its reason | "The index is SQLite FTS5 because it needs no service." |
 | `state` | How something is currently configured or running | "The model server runs vLLM on the GPU machine, port 8000." |
-| `fact` | A durable truth about the project or its world | "The protocol's current field is offset-encoded, not two's complement." |
+| `fact` | A durable truth about the project, its world or the user, including a dated event | "The protocol's current field is offset-encoded, not two's complement." |
 | `lesson` | What went wrong and what fixed it | "When the libolm build fails on ABI mismatch, pin version X." |
 | `procedure` | How to do something | "Release by tagging on main after the gate passes." |
 | `reference` | Where authoritative information lives and when to use it | "For message definitions use [[protocol-spec-2023]]; it replaces the 2016 edition." |
