@@ -283,7 +283,15 @@ class PageDoc:
 
     # Operations
 
-    def add_source(self, resource: str, *, title: str = "", quote: str = "") -> str:
+    def add_source(
+        self,
+        resource: str,
+        *,
+        title: str = "",
+        quote: str = "",
+        verified: str = "",
+        check: str = "",
+    ) -> str:
         """Add a source to the frontmatter and return its id (design 6, sources).
 
         The entry is appended below the ones already there in their own indentation;
@@ -305,6 +313,10 @@ class PageDoc:
         if title:
             entry.append(f"  title: {_scalar(title)}")
         entry.append(f"  quote: {_scalar(quote)}")
+        if verified:
+            entry.append(f"  verified: {_scalar(verified)}")
+        if check:
+            entry.append(f"  check: {_scalar(check)}")
         key = self._key_line("sources", bounds)
         if key is None:
             # Sources come before generated, status and aft, as in the page in design 6.

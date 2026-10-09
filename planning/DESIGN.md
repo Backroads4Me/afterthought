@@ -489,7 +489,9 @@ Filtered conversation is stored compressed in the home directory, outside git. I
 search and `aft trace` one uniform record of both agents' sessions, independent of each
 agent's own cleanup (Claude Code on this host keeps 90 days; pi sets no limit), and it lets
 `aft redigest` regenerate recent digests when the prompts improve. Its job is short-term: the memories themselves are the digests and curated
-pages, which keep their verbatim quotes permanently. Filtered conversation is therefore
+pages, which keep their verbatim quotes permanently. Each source records its verification
+date and check hash when verified at digest time, so waiting digests and recurrence aging
+survive purge and vault cloning. Filtered conversation is therefore
 purged after 90 days by default, configurable in `config.toml`. The archive is evidence,
 never memory: nothing in it is injected.
 
@@ -625,7 +627,7 @@ A long-term fact whose `confirm` names a line on `recent.md` promotes that line
 
 | Rule | What it enforces | Checked by |
 |---|---|---|
-| **R1 Provenance** | Every fact line carries one source tag and at least one source with a verified quote. | Script |
+| **R1 Provenance** | Every fact line carries one source tag and at least one source whose quote was verified against the archive when the digest was made, or is verified now. | Script |
 | **R2 Stated means you asserted it** | `[stated]` requires a quote from one of your turns (or your own edit) that the digest judged an assertion in your own words: not tentative, not a request for the task at hand, not a question, and not text you pasted (section 6). Your approval of an agent's proposal ("yes, do option B") is `[stated]` as the decision it approves, and the line cites two sources: your words of approval and the agent's words stating what was proposed, each verified in its own entry; the statement holds no name or number that neither says (a word with a digit, one of `_/.:-`, or a capital past its first letter, where plain words are not checked). A name your reply takes from the message it answers is cited the same way, with the one sentence of that message that holds it. A date the statement gives for a relative one your turn holds ("tomorrow", "next Friday") is grounded when the script computes the same date from the turn's own time. | Script, model |
 | **R3 Recurrence gate** | An `[inferred]` or `[suggested]` fact needs 3 or more signals across 2 or more primary sessions before it leaves Candidates. Signals older than 30 days count half. An explicit correction from you skips the gate. Lessons are stored as facts ("when X broke, Y fixed it"), never as instructions. | Script counts, model matches |
 | **R4 Authority by kind** | Replacing a line needs a verified quote newer than the line's latest evidence, and the authority the table below gives. Without it the result is a conflict, and the old line stands. | Script |
@@ -956,7 +958,7 @@ explains how to do but never does on its own.
 | You are mid-edit in Obsidian | Dreaming skips that project until the quiet period passes. |
 | Something in the pipeline looks wrong, or the endpoint is down for a while | `aft pause` stops digesting and dreaming; sessions keep being queued, and `aft resume` picks them up. |
 | The index is corrupt | `aft reindex` rebuilds it from files. |
-| A transcript or its archived evidence expires | Digests and pages keep their verbatim quotes; `aft trace` shows the quote and says the full context is gone. |
+| A transcript or its archived evidence expires | Digests and pages keep their verbatim quotes and verified records; dreaming applies waiting digests from their recorded verification without reading the archive; `aft trace` shows the quote and says the full context is gone. |
 | A library file is edited or deleted | `aft lint` reports the hash mismatch; restore it from git or re-import the collection. |
 
 ## 15. Build plan

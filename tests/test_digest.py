@@ -437,6 +437,8 @@ def test_a_verified_fact_is_written_with_its_entry_and_its_quote(session: Sessio
     source = frontmatter(session.cfg, wrote.path)["sources"][0]
     assert source["resource"] == f"aft://session/{CLAUDE}/{SESSION}#e1"
     assert source["quote"] == "Capture runs at session end."
+    assert source["verified"] == f"{NOW:%Y-%m-%d}"
+    assert source["check"] == evidence.quote_check(SESSION, "e1", "Capture runs at session end.")
 
 
 def test_a_fabricated_quote_is_dropped_and_the_page_says_why(session: Session):

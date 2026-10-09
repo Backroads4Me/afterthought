@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from aft import cli, lint, page
+from aft import cli, evidence, lint, page
 from aft.config import Config
 from aft.dream import apply, rules
 from aft.dream.decide import Proposal
@@ -158,6 +158,8 @@ def test_propose_facts_from_notes(library_env):
     source = fm["sources"][0]
     assert source["resource"] == "aft://library/rvc/notes.md"
     assert source["quote"] == "Always connect ground before positive terminal."
+    assert "verified" in source
+    assert source["check"] == evidence.quote_check("rvc", "notes.md", source["quote"])
 
     assert "## Lessons" in body
     assert lint.lint_vault(cfg.vault) == []

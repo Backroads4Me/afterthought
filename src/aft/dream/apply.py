@@ -435,18 +435,23 @@ def run_project(
             else:
                 missing = digest.ungrounded(new_fact.statement, said)
             if missing:
-                report.rejected.append(
-                    RejectedFact(
-                        statement=new_fact.statement,
-                        decision_action="add",
-                        rule="R2",
-                        reason=(
-                            "the statement names words neither the user's turn nor a proposal"
-                            f" holds: {', '.join(missing)}"
-                        ),
-                    )
+                any_turn_present = any(turn is not None for _, turn in user_quotes)
+                all_recorded = all(
+                    bool(sources_map.get(e.source, {}).get("check")) for e in verified_evidence
                 )
-                return False
+                if any_turn_present or not all_recorded:
+                    report.rejected.append(
+                        RejectedFact(
+                            statement=new_fact.statement,
+                            decision_action="add",
+                            rule="R2",
+                            reason=(
+                                "the statement names words neither the user's turn nor a proposal"
+                                f" holds: {', '.join(missing)}"
+                            ),
+                        )
+                    )
+                    return False
 
         quote_to_send = "\n".join(q for q in verified_quotes if q) if verified_quotes else ""
         # The day's cap counts the dream's decide calls with the digests' (DESIGN 13), so
@@ -623,6 +628,14 @@ def run_project(
                 res = str(src_entry.get("resource", ""))
                 q = str(src_entry.get("quote", ""))
                 title = str(src_entry.get("title", ""))
+                v_date = str(src_entry.get("verified", ""))
+                c_hash = str(src_entry.get("check", ""))
+                if not c_hash and res:
+                    parsed = evidence.parse_resource(res)
+                    if parsed:
+                        c_hash = evidence.quote_check(parsed[0], parsed[1], q)
+                        if not v_date:
+                            v_date = new_fact.date or today
 
                 sid: str | None = None
                 for existing_id, existing_s in doc.sources.items():
@@ -630,7 +643,9 @@ def run_project(
                         sid = existing_id
                         break
                 if sid is None and res and q:
-                    sid = doc.add_source(resource=res, title=title, quote=q)
+                    sid = doc.add_source(
+                        resource=res, title=title, quote=q, verified=v_date, check=c_hash
+                    )
                 if sid:
                     refs_to_use.append(sid)
 
@@ -1378,17 +1393,35 @@ def _lookup_library_evidence(
     the home directory is gone. What a person excluded keeps no copy at all, so its proof is the
     record `aft library propose` left, which holds the quote as it was checked.
     """
+
+
+def _lookup_library_evidence(
+    config: Config,
+    resource: str,
+    quote: str,
+    fallback_date: str = "",
+    source_entry: dict | None = None,
+) -> tuple[bool, str, str, bool]:
     from aft.library import importing
     from aft.library.propose import is_verified_import_quote
     from aft.library.survey import file_sha256
 
-    stands = True, rules.LIBRARY, fallback_date, False
-    refused = False, rules.LIBRARY, fallback_date, False
-
     rel = resource.removeprefix(evidence.LIBRARY_RESOURCE).strip()
     collection, _, within = rel.partition("/")
     if not collection or not within:
-        return refused
+        return False, rules.LIBRARY, fallback_date, False
+
+    recorded_date = str(source_entry.get("verified", "")) if source_entry else ""
+    ev_date = recorded_date or fallback_date
+    stands = True, rules.LIBRARY, ev_date, False
+    refused = False, rules.LIBRARY, ev_date, False
+
+    # F75: Verify digest-time check record if present
+    recorded_check = source_entry.get("check") if source_entry else None
+    if recorded_check:
+        expected_check = evidence.quote_check(collection, within, quote)
+        if recorded_check == expected_check:
+            return stands
 
     lib_root = (config.vault / "library" / collection).resolve()
     lib_path = (lib_root / within).resolve()
@@ -1423,7 +1456,9 @@ def _lookup_evidence(
         return False, rules.PRIMARY, fallback_date, False
 
     if evidence.is_library_resource(resource):
-        return _lookup_library_evidence(config, resource, quote, fallback_date)
+        return _lookup_library_evidence(
+            config, resource, quote, fallback_date=fallback_date, source_entry=source_entry
+        )
 
     if resource.startswith("aft://session/"):
         uri = resource.removeprefix("aft://session/")
@@ -1433,6 +1468,24 @@ def _lookup_evidence(
             agent = agent_sess[0] if len(agent_sess) > 1 else ""
             sess_id = agent_sess[-1]
             entry_id = parts[1]
+
+            # F75: Check digest-time verification record
+            recorded_check = source_entry.get("check") if source_entry else None
+            if recorded_check:
+                expected_check = evidence.quote_check(sess_id, entry_id, quote)
+                if recorded_check == expected_check:
+                    recorded_date = str(source_entry.get("verified", "")) if source_entry else ""
+                    ev_date = recorded_date or fallback_date
+                    is_worker = _worker_digest_names(config, agent, sess_id)
+                    origin = rules.WORKER if is_worker else rules.PRIMARY
+                    title = str(source_entry.get("title", "")) if source_entry else ""
+                    if "(the proposal approved)" in title:
+                        is_yours = False
+                    else:
+                        is_yours = _is_quote_yours(config, resource, default=True)
+                    return True, origin, ev_date, is_yours
+
+            # Pre-F75 or hash mismatch: verify against archive
             db_path = config.home / "evidence.sqlite"
             if db_path.exists():
                 try:

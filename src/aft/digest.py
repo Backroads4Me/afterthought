@@ -2254,10 +2254,14 @@ def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) ->
     The source names the session and the entry the quote came from, so `aft trace` and
     the dream's quote check both find the words again where the page says they are.
     """
+    v_date = fact.date or datetime.now(UTC).date().isoformat()
+    check_hash = evidence.quote_check(session.session_id, fact.entry, fact.quote)
     source = doc.add_source(
         f"aft://session/{session.agent}/{session.session_id}#{fact.entry}",
         title=f"{session.agent} session {session.session_id}",
         quote=fact.quote,
+        verified=v_date,
+        check=check_hash,
     )
     sources = [source]
     if fact.proposal is not None:
@@ -2267,6 +2271,8 @@ def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) ->
                 f"aft://session/{session.agent}/{session.session_id}#{entry}",
                 title=f"{session.agent} session {session.session_id} (the proposal approved)",
                 quote=quote,
+                verified=v_date,
+                check=evidence.quote_check(session.session_id, entry, quote),
             )
         )
     doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, sources)

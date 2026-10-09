@@ -73,6 +73,7 @@ def write_digest(
     consumed: str | None = None,
     store_evidence: bool = True,
     with_project: bool = True,
+    with_check: bool = False,
 ) -> Path:
     if store_evidence:
         from aft.readers import USER, Entry
@@ -133,7 +134,19 @@ def write_digest(
         aft_dict["consumed"] = consumed
     aft_dict["facts"] = facts
 
-    cleaned_sources = [{k: v for k, v in s.items() if k not in ("role", "text")} for s in sources]
+    cleaned_sources = []
+    for s in sources:
+        cs = {k: v for k, v in s.items() if k not in ("role", "text")}
+        if with_check:
+            res = cs.get("resource", "")
+            q = cs.get("quote", "")
+            if "check" not in cs and res:
+                parsed = evidence.parse_resource(res)
+                if parsed:
+                    cs["check"] = evidence.quote_check(parsed[0], parsed[1], q)
+            if "verified" not in cs:
+                cs["verified"] = TODAY
+        cleaned_sources.append(cs)
     fm = {
         "type": "Session Digest",
         "title": f"Digest {filename}",
@@ -3768,3 +3781,266 @@ def test_dream_supersedes_made_false_line_fixture(initialized, home, fake):
     overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "~~Notes are settled with aft settle.~~" in overview
     assert "The aft settle command was removed. [stated]" in overview
+
+
+def register(cfg: configmod.Config, slug: str, title: str | None = None) -> None:
+    reg = Registry.load(cfg.registry_path)
+    reg.add(slug, title or slug.capitalize())
+    reg.save()
+
+
+def test_f75_purge_then_dream_still_applies_waiting_digest(initialized, home, fake):
+    """Purge then dream still applies a waiting digest because digest-time quote
+    check is trusted (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Capture runs at session end, not per turn."
+    statement = "Capture runs at session end, not per turn."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=True,
+        with_check=True,
+    )
+    # Purge evidence from archive
+    evidence.purge(cfg, NOW + timedelta(days=95))
+    with evidence._reading(cfg) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert statement in overview
+
+
+def test_f75_vault_with_empty_archive_clone_applies_waiting_digests(initialized, home, fake):
+    """A vault with an empty archive (a clone) applies its waiting digests (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Python 3.12 is the minimum supported version."
+    statement = "Python 3.12 is the minimum supported version."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=False,
+        with_check=True,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert statement in overview
+
+
+def test_f75_edited_quote_with_stale_hash_rejected_once_evidence_gone(initialized, home, fake):
+    """An edited quote with a stale hash is rejected once its evidence is gone (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "SQLite WAL mode is enabled by default."
+    stale_hash = evidence.quote_check("sess1", "e1", "Old unedited quote")
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": "SQLite WAL mode is enabled.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+                "verified": TODAY,
+                "check": stale_hash,
+            }
+        ],
+        store_evidence=False,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 0
+    assert len(rep.rejected) == 1
+    assert rep.rejected[0].rule == "R1"
+    assert rep.rejected[0].reason == "quote not verified"
+
+
+def test_f75_pre_f75_digest_falls_back_to_archive(initialized, home, fake):
+    """A pre-F75 digest without check hash falls back to archive: applies if in
+    archive, rejects if gone (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    # Case A: pre-F75 digest with evidence in archive applies
+    quote = "Tests use pytest with uv run."
+    statement = "Tests use pytest with uv run."
+    d1 = write_digest(
+        cfg,
+        "widget",
+        "d-pre-present",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=True,
+        with_check=False,
+    )
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [d1], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+
+    # Case B: pre-F75 digest without evidence in archive is rejected under R1
+    d2 = write_digest(
+        cfg,
+        "widget",
+        "d-pre-gone",
+        facts=[
+            {
+                "statement": "Evidence is purged.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess2#e2",
+                "quote": "Evidence is purged.",
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+    fake.script = [reply("add")]
+    rep2 = apply.run_project(cfg, "widget", [d2], now=NOW)
+    assert len(rep2.added) == 0
+    assert len(rep2.rejected) == 1
+    assert rep2.rejected[0].rule == "R1"
+    assert rep2.rejected[0].reason == "quote not verified"
+
+
+def test_f75_r3_counts_signal_older_than_retention_at_half_weight(initialized, home, fake):
+    """R3 counts a signal older than retention at half weight using recorded date (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    old_date = (NOW - timedelta(days=95)).strftime("%Y-%m-%d")
+    old_q1 = "SGLang works faster for serving."
+    old_q2 = "Benchmarking showed lower latency."
+    today_q1 = "SGLang latency is confirmed lower."
+    today_q2 = "Serving throughput improved by 20%."
+
+    # Seed overview with Candidate having 2 sources from old session sess0
+    seed_overview(
+        cfg,
+        "widget",
+        body=(
+            "## Candidates\n\n"
+            f"- SGLang serving is faster. [suggested] {old_date} [^s1] [^s2] "
+            "(signals 2/3, sessions 1/2)\n"
+        ),
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess0#e1",
+                "quote": old_q1,
+                "verified": old_date,
+                "check": evidence.quote_check("sess0", "e1", old_q1),
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess0#e2",
+                "quote": old_q2,
+                "verified": old_date,
+                "check": evidence.quote_check("sess0", "e2", old_q2),
+            },
+        ],
+    )
+    # Old evidence is NOT in archive.
+    # New session digest arrives with 2 signals from a second primary session sess1.
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-new",
+        facts=[
+            {
+                "statement": "SGLang serving is faster.",
+                "kind": "fact",
+                "source": "suggested",
+                "date": TODAY,
+                "refs": ["s3", "s4"],
+            }
+        ],
+        sources=[
+            {
+                "id": "s3",
+                "resource": "aft://session/claude/sess1#e3",
+                "quote": today_q1,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess1", "e3", today_q1),
+            },
+            {
+                "id": "s4",
+                "resource": "aft://session/claude/sess1#e4",
+                "quote": today_q2,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess1", "e4", today_q2),
+            },
+        ],
+        store_evidence=True,
+    )
+
+    fake.script = [reply("confirm", "L1")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.promoted) == 1
+    assert rep.promoted[0].statement == "SGLang serving is faster."

@@ -280,7 +280,7 @@ def _sources(config: Config, sources: dict[str, dict], refs, fallback: str) -> l
         resource = str(entry.get("resource", ""))
         quote = str(entry.get("quote", ""))
         verified, origin, when, yours = _lookup_evidence(
-            config, resource, quote, fallback_date=fallback
+            config, resource, quote, fallback_date=fallback, source_entry=entry
         )
         found.append(
             Source(ref, resource, quote, when if verified else fallback, yours, verified, origin)
