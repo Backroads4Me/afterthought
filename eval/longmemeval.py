@@ -948,6 +948,11 @@ def _session_of_source(resource: str) -> str | None:
     return parts[1].partition("#")[0] or None
 
 
+_CREATE_LINES = f"CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='{index.TOKENIZER}')"
+"""The in-memory retrieval table, stemmed exactly as ``aft.index`` stems its
+collections, built the way ``aft.dream.decide.related`` builds its own."""
+
+
 def _ranked_lines(words: Sequence[str], statements: Sequence[str]) -> list[int]:
     """The statements the words rank by stemmed BM25, best first, as their positions.
 
@@ -959,16 +964,10 @@ def _ranked_lines(words: Sequence[str], statements: Sequence[str]) -> list[int]:
         return []
     conn = sqlite3.connect(":memory:")
     try:
-        # The table stems exactly as aft.index stems its collections (index.TOKENIZER,
-        # the way aft.dream.decide.related stems its own). The DDL is a literal because
-        # SQLite takes no parameters in CREATE VIRTUAL TABLE; the words and statements
-        # below all travel as bound parameters.
-        conn.execute(
-            "CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='porter unicode61')"
-        )
+        conn.execute(_CREATE_LINES)
         conn.executemany(
             "INSERT INTO lines (rowid, statement) VALUES (?, ?)",
-            ((rowid, statement) for rowid, statement in enumerate(statements)),
+            list(enumerate(statements)),
         )
         match = " OR ".join(f'"{word}"' for word in words)
         ranked = conn.execute(
