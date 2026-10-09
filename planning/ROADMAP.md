@@ -4,6 +4,21 @@ This document tracks evaluated design proposals and feature candidates for the a
 
 ---
 
+## Priority: Detailed Personal Memory Toggle (`memory.personal`)
+
+**Priority: high.** Ranked ahead of sections 1-7, the deferred Low findings and the prompt ideas in section 8; after the open trust and privacy findings (M6/F75, M15).
+
+### Overview
+A setting for users whose use is not mainly coding: `memory.personal = "basic"` (default) keeps the short user profile of BUILD-PLAN F76, and `"detailed"` keeps everything about the user's life (activities, purchases, dated events and quantities, people, places, tastes) and gives non-project memory more weight.
+
+### Proposed Design
+- **One prompt per stage**, with the single "what a fact about the user covers" paragraph chosen by the setting; never a forked prompt set, which would double tuning and evaluation and drift.
+- **`detailed` weighting in code:** personal pages are injected before project sections with a larger share of `inject.max_chars`, and rank with project memory in search rather than in the global tier.
+- **Evals per level:** `basic` holds coding precision and raises profile recall on the synthetic set; `detailed` targets personal recall on the synthetic set, confirmed on LongMemEval-S.
+- **Switching** applies to new sessions; earlier sessions are re-extracted only while their evidence is in the archive.
+
+---
+
 ## 1. Pinning Feature (`aft pin` / `aft unpin`)
 
 ### Overview
