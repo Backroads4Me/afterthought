@@ -1576,6 +1576,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     appears in no archive row, digest or model request (assert on the fake endpoint's
     requests). Review checkpoint: yes (authority and privacy; lead reviews in full).
 
+- **T37 One archive lookup for a source's role and time** (follow-up to F75, 2026-10-09).
+  `src/aft/dream/apply.py` queries the evidence archive for an entry's role and time inline
+  in three places. Add one function in `src/aft/evidence.py` that returns an entry's role
+  and its UTC said-date (or None when the row is gone), use it in all three places, and
+  delete the inline queries and their duplicated date parsing. Behavior is unchanged; the
+  existing F75 tests must pass untouched. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
