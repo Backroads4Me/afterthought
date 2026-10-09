@@ -44,7 +44,7 @@ from pathlib import Path
 
 import yaml
 
-from aft import __version__, index, pagewrite, redact, vault
+from aft import __version__, evidence, index, pagewrite, redact, vault
 from aft.config import Config, is_excluded
 from aft.filter import sanitize_text
 from aft.library.propose import record_verified_quote
@@ -281,7 +281,22 @@ def render(candidate: Candidate, stamp: str) -> tuple[str, str]:
     dumped = yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=100_000)
     doc = pagewrite.PageDoc(f"---\n{dumped}---\n", candidate.digest_rel)
     for statement, quote in candidate.lines:
-        source_id = doc.add_source(candidate.resource, title=candidate.path.name, quote=quote)
+        parsed = evidence.parse_resource(candidate.resource)
+        c_hash = (
+            evidence.library_quote_check(parsed[0], parsed[1], quote)
+            if parsed
+            else evidence.library_quote_check(
+                RESOURCE_ROOT, f"{candidate.project.slug}/{candidate.path.name}", quote
+            )
+        )
+        source_id = doc.add_source(
+            candidate.resource,
+            title=candidate.path.name,
+            quote=quote,
+            verified=candidate.body_date,
+            said=candidate.body_date,
+            check=c_hash,
+        )
         doc.add_fact("fact", statement, "inferred", candidate.body_date, [source_id])
     return doc.render(), candidate.digest_rel
 

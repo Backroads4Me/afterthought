@@ -105,10 +105,11 @@ FACTS: tuple[SeedFact, ...] = (
     ),
     SeedFact(
         "Decisions",
-        "Rule R1: every fact line carries one source tag and at least one source with a verified "
-        "quote.",
+        "Rule R1: every fact line carries one source tag and at least one source whose quote was "
+        "verified against the archive when the digest was made, or is verified now.",
         "The rules",
-        "Every fact line carries one source tag and at least one source with a verified quote.",
+        "Every fact line carries one source tag and at least one source whose quote was "
+        "verified against the archive when the digest was made, or is verified now.",
     ),
     SeedFact(
         "Decisions",

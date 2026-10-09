@@ -739,6 +739,11 @@ def propose_facts(
                         "resource": f"aft://library/{manifest.name}/{vf.fact.file}",
                         "title": f"{manifest.name}/{vf.fact.file}",
                         "quote": vf.fact.quote,
+                        "verified": today_str,
+                        "said": today_str,
+                        "check": evidence.library_quote_check(
+                            manifest.name, vf.fact.file, vf.fact.quote
+                        ),
                     }
                 )
                 aft_facts_list.append(

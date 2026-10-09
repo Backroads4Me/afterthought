@@ -2207,7 +2207,7 @@ def _page(
         role=role,
         refused_parts=refused_parts,
     )
-    text, written, refused = _written(frontmatter, rel, session, facts)
+    text, written, refused = _written(frontmatter, rel, session, facts, config=config)
     if refused:
         # A line the writer would not take never reached the page, so the record beside it
         # names it as dropped and keeps the kept list to the lines a reader can find.
@@ -2224,7 +2224,7 @@ def _page(
             role=role,
             refused_parts=refused_parts,
         )
-        text, written, _ = _written(frontmatter, rel, session, facts)
+        text, written, _ = _written(frontmatter, rel, session, facts, config=config)
     return text, tuple(written), tuple(refused)
 
 
@@ -2291,6 +2291,7 @@ def _written(
     rel: str,
     session: queue.Job | SessionRef,
     facts: Sequence[Fact],
+    config: Config | None = None,
 ) -> tuple[str, list[Fact], list[Dropped]]:
     """The page these facts make, and the ones the page writer would not take.
 
@@ -2304,7 +2305,7 @@ def _written(
     for fact in facts:
         before = doc.render()
         try:
-            _add(doc, session, fact)
+            _add(doc, session, fact, config=config)
         except pagewrite.WriteError as exc:
             doc = pagewrite.PageDoc(before, rel)
             refused.append(_refused(_words(fact), str(exc)))
@@ -2313,25 +2314,92 @@ def _written(
     return doc.render(), written, refused
 
 
-def _add(doc: pagewrite.PageDoc, session: queue.Job | SessionRef, fact: Fact) -> None:
+def _add(
+    doc: pagewrite.PageDoc,
+    session: queue.Job | SessionRef,
+    fact: Fact,
+    config: Config | None = None,
+) -> None:
     """One fact onto the page, with the source its line cites (DESIGN 6).
 
     The source names the session and the entry the quote came from, so `aft trace` and
     the dream's quote check both find the words again where the page says they are.
     """
+    v_date = datetime.now(UTC).date().isoformat()
+    fact_said = fact.date or v_date
+    fact_role = ""
+    prop_said = fact.date or v_date
+    if config is not None:
+        try:
+            with evidence._reading(config) as conn:
+                row = conn.execute(
+                    "SELECT role, time FROM evidence WHERE session_id = ? AND entry_id = ?",
+                    (session.session_id, fact.entry),
+                ).fetchone()
+                if row is not None:
+                    if row[0]:
+                        fact_role = row[0]
+                    if row[1] and not fact.date:
+                        try:
+                            dt = datetime.fromisoformat(row[1])
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=UTC)
+                            fact_said = dt.astimezone(UTC).date().isoformat()
+                        except Exception:
+                            fact_said = row[1][:10]
+                if fact.proposal is not None:
+                    prow = conn.execute(
+                        "SELECT time FROM evidence WHERE session_id = ? AND entry_id = ?",
+                        (session.session_id, fact.proposal[0]),
+                    ).fetchone()
+                    if prow is not None and prow[0]:
+                        try:
+                            dt = datetime.fromisoformat(prow[0])
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=UTC)
+                            prop_said = dt.astimezone(UTC).date().isoformat()
+                        except Exception:
+                            prop_said = prow[0][:10]
+        except Exception:
+            pass
+
+    if fact_role and fact_said:
+        check_hash = evidence.quote_check(
+            session.session_id, fact.entry, fact_role, fact_said, fact.quote
+        )
+    else:
+        check_hash = ""
+        fact_said = ""
+        fact_role = ""
+
     source = doc.add_source(
         f"aft://session/{session.agent}/{session.session_id}#{fact.entry}",
         title=f"{session.agent} session {session.session_id}",
         quote=fact.quote,
+        verified=v_date,
+        said=fact_said,
+        role=fact_role,
+        check=check_hash,
     )
     sources = [source]
     if fact.proposal is not None:
-        entry, quote = fact.proposal
+        entry = fact.proposal[0]
+        quote = fact.proposal[1]
+        prop_role = "assistant"
+        prop_check = (
+            evidence.quote_check(session.session_id, entry, prop_role, prop_said, quote)
+            if prop_said
+            else ""
+        )
         sources.append(
             doc.add_source(
                 f"aft://session/{session.agent}/{session.session_id}#{entry}",
                 title=f"{session.agent} session {session.session_id} (the proposal approved)",
                 quote=quote,
+                verified=v_date,
+                said=prop_said,
+                role=prop_role,
+                check=prop_check,
             )
         )
     doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, sources)

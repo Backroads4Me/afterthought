@@ -435,18 +435,23 @@ def run_project(
             else:
                 missing = digest.ungrounded(new_fact.statement, said)
             if missing:
-                report.rejected.append(
-                    RejectedFact(
-                        statement=new_fact.statement,
-                        decision_action="add",
-                        rule="R2",
-                        reason=(
-                            "the statement names words neither the user's turn nor a proposal"
-                            f" holds: {', '.join(missing)}"
-                        ),
-                    )
+                any_turn_present = any(turn is not None for _, turn in user_quotes)
+                all_recorded = all(
+                    bool(sources_map.get(e.source, {}).get("check")) for e in verified_evidence
                 )
-                return False
+                if any_turn_present or not all_recorded:
+                    report.rejected.append(
+                        RejectedFact(
+                            statement=new_fact.statement,
+                            decision_action="add",
+                            rule="R2",
+                            reason=(
+                                "the statement names words neither the user's turn nor a proposal"
+                                f" holds: {', '.join(missing)}"
+                            ),
+                        )
+                    )
+                    return False
 
         quote_to_send = "\n".join(q for q in verified_quotes if q) if verified_quotes else ""
         # The day's cap counts the dream's decide calls with the digests' (DESIGN 13), so
@@ -623,6 +628,79 @@ def run_project(
                 res = str(src_entry.get("resource", ""))
                 q = str(src_entry.get("quote", ""))
                 title = str(src_entry.get("title", ""))
+                v_date = str(src_entry.get("verified", ""))
+                s_said = str(src_entry.get("said", ""))
+                s_role = str(src_entry.get("role", ""))
+                c_hash = str(src_entry.get("check", ""))
+                if res:
+                    parsed = evidence.parse_resource(res)
+                    if parsed:
+                        if res.startswith("aft://session/"):
+                            sess_id, entry_id = parsed
+                            if not s_role:
+                                db_path = config.home / "evidence.sqlite"
+                                row = None
+                                if db_path.exists():
+                                    try:
+                                        with evidence._reading(config) as conn:
+                                            row = conn.execute(
+                                                "SELECT role, time FROM evidence"
+                                                " WHERE session_id = ? AND entry_id = ?",
+                                                (sess_id, entry_id),
+                                            ).fetchone()
+                                    except Exception:
+                                        row = None
+                                if row is not None:
+                                    s_role = str(row[0]) if row[0] else ""
+                                    if row[1]:
+                                        try:
+                                            dt = datetime.fromisoformat(str(row[1]))
+                                            if dt.tzinfo is None:
+                                                dt = dt.replace(tzinfo=UTC)
+                                            s_said = dt.astimezone(UTC).date().isoformat()
+                                        except Exception:
+                                            s_said = str(row[1])[:10]
+                                else:
+                                    s_role = ""
+                                    s_said = ""
+                                    c_hash = ""
+                            elif not s_said:
+                                db_path = config.home / "evidence.sqlite"
+                                if db_path.exists():
+                                    try:
+                                        with evidence._reading(config) as conn:
+                                            row = conn.execute(
+                                                "SELECT time FROM evidence"
+                                                " WHERE session_id = ? AND entry_id = ?",
+                                                (sess_id, entry_id),
+                                            ).fetchone()
+                                            if row is not None and row[0]:
+                                                try:
+                                                    dt = datetime.fromisoformat(str(row[0]))
+                                                    if dt.tzinfo is None:
+                                                        dt = dt.replace(tzinfo=UTC)
+                                                    s_said = dt.astimezone(UTC).date().isoformat()
+                                                except Exception:
+                                                    s_said = str(row[0])[:10]
+                                    except Exception:
+                                        pass
+                            if s_role and s_said:
+                                if not c_hash:
+                                    c_hash = evidence.quote_check(
+                                        sess_id, entry_id, s_role, s_said, q
+                                    )
+                                if not v_date:
+                                    v_date = today
+                            else:
+                                s_role = ""
+                                s_said = ""
+                                c_hash = ""
+                        elif evidence.is_library_resource(res):
+                            collection, within = parsed
+                            if not c_hash:
+                                c_hash = evidence.library_quote_check(collection, within, q)
+                            if not v_date:
+                                v_date = today
 
                 sid: str | None = None
                 for existing_id, existing_s in doc.sources.items():
@@ -630,7 +708,15 @@ def run_project(
                         sid = existing_id
                         break
                 if sid is None and res and q:
-                    sid = doc.add_source(resource=res, title=title, quote=q)
+                    sid = doc.add_source(
+                        resource=res,
+                        title=title,
+                        quote=q,
+                        verified=v_date,
+                        said=s_said,
+                        role=s_role,
+                        check=c_hash,
+                    )
                 if sid:
                     refs_to_use.append(sid)
 
@@ -1363,7 +1449,11 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
 
 
 def _lookup_library_evidence(
-    config: Config, resource: str, quote: str, fallback_date: str
+    config: Config,
+    resource: str,
+    quote: str,
+    fallback_date: str = "",
+    source_entry: dict | None = None,
 ) -> tuple[bool, str, str, bool]:
     """Whether a collection quote stands, and what it is worth.
 
@@ -1382,13 +1472,22 @@ def _lookup_library_evidence(
     from aft.library.propose import is_verified_import_quote
     from aft.library.survey import file_sha256
 
-    stands = True, rules.LIBRARY, fallback_date, False
-    refused = False, rules.LIBRARY, fallback_date, False
-
     rel = resource.removeprefix(evidence.LIBRARY_RESOURCE).strip()
     collection, _, within = rel.partition("/")
     if not collection or not within:
-        return refused
+        return False, rules.LIBRARY, fallback_date, False
+
+    recorded_said = str(source_entry.get("said", "")) if source_entry else ""
+    ev_date = recorded_said or fallback_date
+    stands = True, rules.LIBRARY, ev_date, False
+    refused = False, rules.LIBRARY, ev_date, False
+
+    # F75: Verify digest-time check record if present
+    recorded_check = source_entry.get("check") if source_entry else None
+    if recorded_check:
+        expected_check = evidence.library_quote_check(collection, within, quote)
+        if recorded_check == expected_check:
+            return stands
 
     lib_root = (config.vault / "library" / collection).resolve()
     lib_path = (lib_root / within).resolve()
@@ -1423,7 +1522,9 @@ def _lookup_evidence(
         return False, rules.PRIMARY, fallback_date, False
 
     if evidence.is_library_resource(resource):
-        return _lookup_library_evidence(config, resource, quote, fallback_date)
+        return _lookup_library_evidence(
+            config, resource, quote, fallback_date=fallback_date, source_entry=source_entry
+        )
 
     if resource.startswith("aft://session/"):
         uri = resource.removeprefix("aft://session/")
@@ -1433,6 +1534,39 @@ def _lookup_evidence(
             agent = agent_sess[0] if len(agent_sess) > 1 else ""
             sess_id = agent_sess[-1]
             entry_id = parts[1]
+
+            # F75: Check digest-time verification record
+            recorded_check = source_entry.get("check") if source_entry else None
+            if recorded_check:
+                recorded_role = str(source_entry.get("role", "")) if source_entry else ""
+                recorded_said = str(source_entry.get("said", "")) if source_entry else ""
+                expected_check = evidence.quote_check(
+                    sess_id, entry_id, recorded_role, recorded_said, quote
+                )
+                if recorded_check == expected_check:
+                    is_worker = _worker_digest_names(config, agent, sess_id)
+                    origin = rules.WORKER if is_worker else rules.PRIMARY
+                    db_path = config.home / "evidence.sqlite"
+                    row = None
+                    if db_path.exists():
+                        try:
+                            with evidence._reading(config) as conn:
+                                query = (
+                                    "SELECT time, role FROM evidence "
+                                    "WHERE session_id = ? AND entry_id = ?"
+                                )
+                                row = conn.execute(query, (sess_id, entry_id)).fetchone()
+                        except Exception:
+                            row = None
+                    if row is not None:
+                        ev_date = str(row[0])[:10]
+                        is_yours = str(row[1]) == "user"
+                    else:
+                        ev_date = recorded_said or fallback_date
+                        is_yours = recorded_role == "user" if recorded_role else False
+                    return True, origin, ev_date, is_yours
+
+            # Pre-F75 or hash mismatch: verify against archive
             db_path = config.home / "evidence.sqlite"
             if db_path.exists():
                 try:
@@ -1504,7 +1638,7 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
     return v
 
 
-def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
+def _is_quote_yours(config: Config, resource: str, recorded_role: str = "") -> bool:
     if evidence.is_library_resource(resource):
         return False
     if resource.startswith("aft://edit/"):
@@ -1527,8 +1661,10 @@ def _is_quote_yours(config: Config, resource: str, default: bool = False) -> boo
                     if row is not None:
                         return str(row[0]) == "user"
                 except Exception:
-                    return False
-    return default
+                    pass
+            if recorded_role:
+                return recorded_role == "user"
+    return False
 
 
 def _turn_text(config: Config, resource: str) -> str | None:

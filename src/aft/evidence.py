@@ -23,6 +23,7 @@ without telling anyone.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import zlib
@@ -382,11 +383,51 @@ def _entry(row: tuple) -> Entry:
     )
 
 
+SESSION_RESOURCE = "aft://session/"
 LIBRARY_RESOURCE = "aft://library/"
 """The ``aft://`` entry a quote from an imported document is cited under, with the collection's
 name and the file's path within it (design 11). No session stands behind such an entry, so it
 verifies a fact and carries no recurrence: the gate counts it nothing, and so do the counts a
 person reads on a candidate."""
+
+
+def quote_check(
+    session_id: str,
+    entry_id: str,
+    role: str,
+    said: str,
+    quote: str,
+) -> str:
+    """The digest-time verification hash for session sources (BUILD-PLAN F75).
+
+    sha256 of (session id, entry id, role, said, quote).
+    """
+    raw = f"{session_id}:{entry_id}:{role}:{said}:{quote.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def library_quote_check(collection: str, within: str, quote: str) -> str:
+    """The verification hash of (collection, within, quote) for library resources."""
+    raw = f"{collection}:{within}:{quote.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def parse_resource(resource: str) -> tuple[str, str] | None:
+    """Parse (session_id, entry_id) or (collection, within) from an aft:// resource URI."""
+    if resource.startswith(SESSION_RESOURCE):
+        uri = resource.removeprefix(SESSION_RESOURCE)
+        parts = uri.split("#", 1)
+        if len(parts) == 2:
+            agent_sess = parts[0].split("/")
+            sess_id = agent_sess[-1]
+            entry_id = parts[1]
+            return sess_id, entry_id
+    elif resource.startswith(LIBRARY_RESOURCE):
+        rel = resource.removeprefix(LIBRARY_RESOURCE).strip()
+        collection, _, within = rel.partition("/")
+        if collection and within:
+            return collection, within
+    return None
 
 
 def is_library_resource(resource: str) -> bool:

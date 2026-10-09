@@ -301,6 +301,9 @@ def test_the_digest_says_what_it_was_imported_from(memory: Config):
 
     assert "aft://library/claude-memory/widget/odd.md" in text
     assert "type: Session Digest" in text
+    assert "verified:" in text
+    assert "said:" in text
+    assert "check:" in text
 
 
 def test_the_imported_digests_pass_lint(memory: Config):

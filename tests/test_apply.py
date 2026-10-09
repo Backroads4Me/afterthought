@@ -73,6 +73,7 @@ def write_digest(
     consumed: str | None = None,
     store_evidence: bool = True,
     with_project: bool = True,
+    with_check: bool = False,
 ) -> Path:
     if store_evidence:
         from aft.readers import USER, Entry
@@ -133,7 +134,38 @@ def write_digest(
         aft_dict["consumed"] = consumed
     aft_dict["facts"] = facts
 
-    cleaned_sources = [{k: v for k, v in s.items() if k not in ("role", "text")} for s in sources]
+    cleaned_sources = []
+    for s in sources:
+        cs = {k: v for k, v in s.items() if k not in ("text",)}
+        if with_check:
+            res = cs.get("resource", "")
+            q = cs.get("quote", "")
+            if res.startswith("aft://session/"):
+                if "role" not in cs:
+                    cs["role"] = s.get("role", "user")
+                if "said" not in cs:
+                    cs["said"] = s.get("said", TODAY)
+                if "verified" not in cs:
+                    cs["verified"] = s.get("verified", TODAY)
+                if "check" not in cs and res:
+                    parsed = evidence.parse_resource(res)
+                    if parsed:
+                        cs["check"] = evidence.quote_check(
+                            parsed[0], parsed[1], cs["role"], cs["said"], q
+                        )
+            else:
+                if "said" not in cs:
+                    cs["said"] = s.get("said", TODAY)
+                if "verified" not in cs:
+                    cs["verified"] = s.get("verified", TODAY)
+                if "check" not in cs and res:
+                    parsed = evidence.parse_resource(res)
+                    if parsed:
+                        cs["check"] = evidence.library_quote_check(parsed[0], parsed[1], q)
+        else:
+            if "check" not in s:
+                cs.pop("role", None)
+        cleaned_sources.append(cs)
     fm = {
         "type": "Session Digest",
         "title": f"Digest {filename}",
@@ -3768,3 +3800,684 @@ def test_dream_supersedes_made_false_line_fixture(initialized, home, fake):
     overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
     assert "~~Notes are settled with aft settle.~~" in overview
     assert "The aft settle command was removed. [stated]" in overview
+
+
+def register(cfg: configmod.Config, slug: str, title: str | None = None) -> None:
+    reg = Registry.load(cfg.registry_path)
+    reg.add(slug, title or slug.capitalize())
+    reg.save()
+
+
+def test_f75_purge_then_dream_still_applies_waiting_digest(initialized, home, fake):
+    """Purge then dream still applies a waiting digest because digest-time quote
+    check is trusted (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Capture runs at session end, not per turn."
+    statement = "Capture runs at session end, not per turn."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=True,
+        with_check=True,
+    )
+    # Purge evidence from archive
+    evidence.purge(cfg, NOW + timedelta(days=95))
+    with evidence._reading(cfg) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert statement in overview
+
+
+def test_f75_vault_with_empty_archive_clone_applies_waiting_digests(initialized, home, fake):
+    """A vault with an empty archive (a clone) applies its waiting digests (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Python 3.12 is the minimum supported version."
+    statement = "Python 3.12 is the minimum supported version."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=False,
+        with_check=True,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+    overview = (cfg.vault / "projects" / "widget" / "overview.md").read_text()
+    assert statement in overview
+
+
+def test_f75_edited_quote_with_stale_hash_rejected_once_evidence_gone(initialized, home, fake):
+    """An edited quote with a stale hash is rejected once its evidence is gone (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "SQLite WAL mode is enabled by default."
+    stale_hash = evidence.quote_check("sess1", "e1", "user", TODAY, "Old unedited quote")
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": "SQLite WAL mode is enabled.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+                "role": "user",
+                "said": TODAY,
+                "verified": TODAY,
+                "check": stale_hash,
+            }
+        ],
+        store_evidence=False,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 0
+    assert len(rep.rejected) == 1
+    assert rep.rejected[0].rule == "R1"
+    assert rep.rejected[0].reason == "quote not verified"
+
+
+def test_f75_pre_f75_digest_falls_back_to_archive(initialized, home, fake):
+    """A pre-F75 digest without check hash falls back to archive: applies if in
+    archive, rejects if gone (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    # Case A: pre-F75 digest with evidence in archive applies
+    quote = "Tests use pytest with uv run."
+    statement = "Tests use pytest with uv run."
+    d1 = write_digest(
+        cfg,
+        "widget",
+        "d-pre-present",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[{"id": "s1", "resource": "aft://session/claude/sess1#e1", "quote": quote}],
+        store_evidence=True,
+        with_check=False,
+    )
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [d1], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+
+    # Case B: pre-F75 digest without evidence in archive is rejected under R1
+    d2 = write_digest(
+        cfg,
+        "widget",
+        "d-pre-gone",
+        facts=[
+            {
+                "statement": "Evidence is purged.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess2#e2",
+                "quote": "Evidence is purged.",
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+    fake.script = [reply("add")]
+    rep2 = apply.run_project(cfg, "widget", [d2], now=NOW)
+    assert len(rep2.added) == 0
+    assert len(rep2.rejected) == 1
+    assert rep2.rejected[0].rule == "R1"
+    assert rep2.rejected[0].reason == "quote not verified"
+
+
+def test_f75_r3_counts_signal_older_than_retention_at_half_weight(initialized, home, fake):
+    """R3 counts a signal older than retention at half weight using recorded date (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    old_date = (NOW - timedelta(days=95)).strftime("%Y-%m-%d")
+    old_q1 = "SGLang works faster for serving."
+    old_q2 = "Benchmarking showed lower latency."
+    today_q1 = "SGLang latency is confirmed lower."
+    today_q2 = "Serving throughput improved by 20%."
+
+    # Seed overview with Candidate having 2 sources from old session sess0
+    seed_overview(
+        cfg,
+        "widget",
+        body=(
+            "## Candidates\n\n"
+            f"- SGLang serving is faster. [suggested] {old_date} [^s1] [^s2] "
+            "(signals 2/3, sessions 1/2)\n"
+        ),
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess0#e1",
+                "quote": old_q1,
+                "role": "user",
+                "said": old_date,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess0", "e1", "user", old_date, old_q1),
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess0#e2",
+                "quote": old_q2,
+                "role": "user",
+                "said": old_date,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess0", "e2", "user", old_date, old_q2),
+            },
+        ],
+    )
+    # Old evidence is NOT in archive.
+    # New session digest arrives with 2 signals from a second primary session sess1.
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-new",
+        facts=[
+            {
+                "statement": "SGLang serving is faster.",
+                "kind": "fact",
+                "source": "suggested",
+                "date": TODAY,
+                "refs": ["s3", "s4"],
+            }
+        ],
+        sources=[
+            {
+                "id": "s3",
+                "resource": "aft://session/claude/sess1#e3",
+                "quote": today_q1,
+                "role": "user",
+                "said": TODAY,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess1", "e3", "user", TODAY, today_q1),
+            },
+            {
+                "id": "s4",
+                "resource": "aft://session/claude/sess1#e4",
+                "quote": today_q2,
+                "role": "user",
+                "said": TODAY,
+                "verified": TODAY,
+                "check": evidence.quote_check("sess1", "e4", "user", TODAY, today_q2),
+            },
+        ],
+        store_evidence=True,
+    )
+
+    fake.script = [reply("confirm", "L1")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.promoted) == 1
+    assert rep.promoted[0].statement == "SGLang serving is faster."
+
+
+def test_f75_purged_user_quote_keeps_user_authority_from_role(initialized, home, fake):
+    """A purged user quote keeps user authority from role (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    old_date = (NOW - timedelta(days=10)).strftime("%Y-%m-%d")
+    seed_overview(
+        cfg,
+        "widget",
+        body=(f"## Decisions\n\n- Use Postgres for storage. [stated] {old_date} [^s0]\n"),
+        sources=[
+            {
+                "id": "s0",
+                "resource": "aft://session/claude/sess0#e0",
+                "quote": "Use Postgres for storage.",
+                "role": "user",
+                "said": old_date,
+                "verified": old_date,
+                "check": evidence.quote_check(
+                    "sess0", "e0", "user", old_date, "Use Postgres for storage."
+                ),
+            }
+        ],
+    )
+
+    new_quote = "Switch to SQLite for storage."
+    new_stmt = "Switch to SQLite for storage."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": new_stmt,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": new_quote,
+                "role": "user",
+                "said": TODAY,
+                "verified": TODAY,
+            }
+        ],
+        store_evidence=False,
+        with_check=True,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("supersede", "L1")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.superseded) == 1
+    assert rep.superseded[0].new_statement == new_stmt
+
+
+def test_f75_purged_assistant_quote_does_not_gain_authority(initialized, home, fake):
+    """A purged assistant quote does not gain user authority (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    old_date = (NOW - timedelta(days=10)).strftime("%Y-%m-%d")
+    seed_overview(
+        cfg,
+        "widget",
+        body=(f"## Decisions\n\n- Use Postgres for storage. [stated] {old_date} [^s0]\n"),
+        sources=[
+            {
+                "id": "s0",
+                "resource": "aft://session/claude/sess0#e0",
+                "quote": "Use Postgres for storage.",
+                "role": "user",
+                "said": old_date,
+                "verified": old_date,
+                "check": evidence.quote_check(
+                    "sess0", "e0", "user", old_date, "Use Postgres for storage."
+                ),
+            }
+        ],
+    )
+
+    new_quote = "Switch to SQLite for storage."
+    new_stmt = "Switch to SQLite for storage."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": new_stmt,
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": new_quote,
+                "role": "assistant",
+                "said": TODAY,
+                "verified": TODAY,
+            }
+        ],
+        store_evidence=False,
+        with_check=True,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("supersede", "L1")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.superseded) == 0
+    assert len(rep.rejected) == 1
+    assert rep.rejected[0].rule == "R2"
+
+
+def test_f75_edited_role_or_said_falls_back_to_archive_and_rejected_when_gone(
+    initialized, home, fake
+):
+    """An edited role or said falls back to archive and is rejected once entry is gone (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    # Case A: Edited role (hashed as assistant, claimed as user)
+    quote1 = "The database is ready."
+    valid_hash_role = evidence.quote_check("sess1", "e1", "assistant", TODAY, quote1)
+    d1 = write_digest(
+        cfg,
+        "widget",
+        "d-edited-role",
+        facts=[
+            {
+                "statement": quote1,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote1,
+                "role": "user",  # Tampered: hashed as assistant
+                "said": TODAY,
+                "verified": TODAY,
+                "check": valid_hash_role,
+            }
+        ],
+        store_evidence=False,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("add")]
+    rep1 = apply.run_project(cfg, "widget", [d1], now=NOW)
+    assert len(rep1.added) == 0
+    assert len(rep1.rejected) == 1
+    assert rep1.rejected[0].rule == "R1"
+    assert rep1.rejected[0].reason == "quote not verified"
+
+    # Case B: Edited said (hashed with older date, claimed as TODAY)
+    quote2 = "The server is running."
+    older_said = (NOW - timedelta(days=5)).strftime("%Y-%m-%d")
+    valid_hash_said = evidence.quote_check("sess2", "e2", "user", older_said, quote2)
+    d2 = write_digest(
+        cfg,
+        "widget",
+        "d-edited-said",
+        facts=[
+            {
+                "statement": quote2,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s2",
+            }
+        ],
+        sources=[
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess2#e2",
+                "quote": quote2,
+                "role": "user",
+                "said": TODAY,  # Tampered: hashed with older_said
+                "verified": TODAY,
+                "check": valid_hash_said,
+            }
+        ],
+        store_evidence=False,
+    )
+    rep2 = apply.run_project(cfg, "widget", [d2], now=NOW)
+    assert len(rep2.added) == 0
+    assert len(rep2.rejected) == 1
+    assert rep2.rejected[0].rule == "R1"
+    assert rep2.rejected[0].reason == "quote not verified"
+
+
+def test_f75_r4_compares_said_not_verified_with_digest_made_days_after_turn(
+    initialized, home, fake
+):
+    """R4 compares said:, not verified:, with a digest made days after the turn (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    line_date = (NOW - timedelta(days=3)).strftime("%Y-%m-%d")
+    turn_date = (NOW - timedelta(days=5)).strftime("%Y-%m-%d")
+    digest_date = TODAY
+
+    seed_overview(
+        cfg,
+        "widget",
+        body=(f"## Decisions\n\n- Use Postgres for storage. [stated] {line_date} [^s0]\n"),
+        sources=[
+            {
+                "id": "s0",
+                "resource": "aft://session/claude/sess0#e0",
+                "quote": "Use Postgres for storage.",
+                "role": "user",
+                "said": line_date,
+                "verified": line_date,
+                "check": evidence.quote_check(
+                    "sess0", "e0", "user", line_date, "Use Postgres for storage."
+                ),
+            }
+        ],
+    )
+
+    new_quote = "Switch to SQLite for storage."
+    new_stmt = "Switch to SQLite for storage."
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-stale-turn",
+        facts=[
+            {
+                "statement": new_stmt,
+                "kind": "decision",
+                "source": "stated",
+                "date": turn_date,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": new_quote,
+                "role": "user",
+                "said": turn_date,
+                "verified": digest_date,
+                "check": evidence.quote_check("sess1", "e1", "user", turn_date, new_quote),
+            }
+        ],
+        store_evidence=False,
+    )
+    db_path = cfg.home / "evidence.sqlite"
+    if db_path.exists():
+        db_path.unlink()
+
+    fake.script = [reply("supersede", "L1")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.superseded) == 0
+    assert len(rep.conflicts) == 1
+
+
+def test_f75_pre_f75_assistant_source_carried_onto_page_gets_assistant_role_and_purged_not_yours(
+    initialized, home, fake
+):
+    """A pre-F75 assistant source carried onto a page gets role assistant from the archive,
+    and after a purge does not count as the user's (F75)."""
+    from aft.readers import Entry
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "The migration was completed in background."
+    statement = "The migration was completed in background."
+
+    # Archive row has role assistant
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sess1",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1",
+                time=NOW,
+                role="assistant",
+                text=quote,
+                is_error=False,
+            )
+        ],
+    )
+
+    # Pre-F75 digest: no role, no said, no check
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-pre-f75",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+
+    # The source carried onto the page gets role assistant from the archive
+    overview_path = cfg.vault / "projects" / "widget" / "overview.md"
+    ov_doc = pagewrite.PageDoc.read(overview_path)
+    page_sources = list(ov_doc.sources.values())
+    assert len(page_sources) == 1
+    src = page_sources[0]
+    assert src["role"] == "assistant"
+    assert src["said"] == TODAY
+    assert src["check"] == evidence.quote_check("sess1", "e1", "assistant", TODAY, quote)
+
+    # Purge the archive
+    evidence.purge(cfg, NOW + timedelta(days=95))
+    with evidence._reading(cfg) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+
+    # After a purge, it does not count as the user's
+    v, origin, ev_date, is_yours = apply._lookup_evidence(
+        cfg,
+        src["resource"],
+        src["quote"],
+        source_entry=src,
+    )
+    assert v is True
+    assert is_yours is False
+    assert apply._is_quote_yours(cfg, src["resource"], recorded_role=src["role"]) is False
+
+
+def test_f75_source_with_purged_archive_and_no_recorded_role_writes_no_role_said_check(
+    initialized, home, fake
+):
+    """If the archive row is gone and nothing is recorded, write no role, said or check (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Background task ran."
+    statement = "Background task ran."
+
+    # A digest whose archive row is missing and has no check
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-missing-row",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    # Since evidence is not verified without archive row or check hash, it is rejected at R1
+    assert len(rep.rejected) == 1
+    assert rep.rejected[0].rule == "R1"
