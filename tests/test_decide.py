@@ -635,7 +635,7 @@ def test_the_decide_prompt_keeps_facts_about_the_users_life():
     words = " ".join(decide.prompt().split())
     assert "A fact about the user's life, interests, tastes or plans passes it." in words
     assert (
-        'A dated event is a durable record ("On 2023-11-30 the user got 8 postcards"), '
+        'A dated event is a durable record ("On 2024-03-02 the user adopted a dog"), '
         "not a fact that stops being true, so it is kept long-term with its date in the "
         "statement." in words
     )

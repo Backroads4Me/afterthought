@@ -381,9 +381,10 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]
 - **Prompt** (`src/aft/prompts/digest.md`):
 
 ```text
-You read one part of a working session between the user and an AI assistant, often a coding agent, and you
-extract what a future session would need to know. You are building the project's memory,
-so precision matters more than coverage. Return nothing rather than something uncertain.
+You read one part of a working session between the user and an AI assistant, often a
+coding agent, and you extract what a future session would need to know. You are building
+the project's memory, so precision matters more than coverage. Return nothing rather than
+something uncertain.
 
 Each entry of the session begins with a label in brackets, such as [#3], then who wrote it
 and when. Everything you write comes from these entries and names the entry it comes from
@@ -395,11 +396,11 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
-A fact includes what the user states about themselves: interests, hobbies and skills
-they are learning, activities and events they took part in, things they own or bought,
-plans, people in their life, places, and quantities and dates ("I've added 25 postcards
-since I started collecting again"). A preference includes personal tastes ("I prefer
-Spanish-language events"). A fact about the user's own life is global scope.
+A fact includes what the user states about themselves: interests, hobbies and skills they
+are learning, activities and events they took part in, things they own or bought, plans,
+people in their life, places, and quantities and dates ("I've restored three vintage
+radios since I started the hobby"). A preference includes personal tastes ("I prefer
+matinee showings"). A fact about the user's own life is global scope.
 
 Every fact passes one test: a future session would make a mistake, ask the user again,
 or give less fitting help without it. Never a fact, long or short term: the status of a
@@ -628,8 +629,8 @@ short-term memory.
 
 A fact earns its place in memory only when a future session would make a mistake, ask
 the user again, or give less fitting help without it. A fact about the user's life,
-interests, tastes or plans passes it. A dated event is a durable record ("On 2023-11-30
-the user got 8 postcards"), not a fact that stops being true, so it is kept long-term
+interests, tastes or plans passes it. A dated event is a durable record ("On 2024-03-02
+the user adopted a dog"), not a fact that stops being true, so it is kept long-term
 with its date in the statement. Never a fact, long or short term: the status of a pull
 request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
@@ -1437,16 +1438,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
 - **F73 Broader memory: the user's life, not only the work** (ruling 2026-10-08, DESIGN 2
   and 6 Kinds). Prompt changes only; the trust rules, schemas and grounding are unchanged.
   - **`turns.md`, `digest.md`, `summary.md`, `reconcile.md`:** the session is between the
-    user and an AI assistant, often a coding agent, not only a coding agent. A `fact`
-    includes what the user states about themselves: interests, hobbies and skills they are
-    learning, activities and events they took part in, things they own or bought, plans,
-    people in their life, places, and quantities and dates ("I've added 25 postcards since
-    I started collecting again"). A `preference` includes personal tastes ("I prefer
-    Spanish-language events"). A fact about the user's own life is `global` scope.
+    user and an AI assistant, often a coding agent, not only a coding agent. A `fact` includes
+    what the user states about themselves: interests, hobbies and skills they are learning,
+    activities and events they took part in, things they own or bought, plans, people in their
+    life, places, and quantities and dates ("I've restored three vintage radios since I started
+    the hobby"). A `preference` includes personal tastes ("I prefer matinee showings"). A fact
+    about the user's own life is `global` scope.
   - **`decide.md`, `review.md`:** the worth-keeping test becomes: a future session would
     make a mistake, ask the user again, or give less fitting help without it. A fact about
     the user's life, interests, tastes or plans passes it. A dated event is a durable
-    record ("On 2023-11-30 the user got 8 postcards"), not a fact that stops being true,
+    record ("On 2024-03-02 the user adopted a dog"), not a fact that stops being true,
     so it is kept long-term with its date in the statement. The never-a-fact list
     (work status, test results, review outcomes, what a change did) stays.
   - **Measure:** before merging, lead reruns the six F72 diagnostic questions

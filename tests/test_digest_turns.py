@@ -1213,10 +1213,10 @@ def test_the_turns_prompt_includes_the_users_own_life():
     assert (
         "or about themselves: interests, hobbies and skills they are learning, activities "
         "and events they took part in, things they own or bought, plans, people in their "
-        "life, places, and quantities and dates (\"I've added 25 postcards since I started "
-        'collecting again")' in words
+        "life, places, and quantities and dates (\"I've restored three vintage radios since "
+        'I started the hobby")' in words
     )
-    assert 'including personal tastes ("I prefer Spanish-language events")' in words
+    assert 'including personal tastes ("I prefer matinee showings")' in words
     assert (
         "scope: global for a preference or a fact about the user's environment that holds "
         "for every project, and for a fact about the user's own life; otherwise project." in words

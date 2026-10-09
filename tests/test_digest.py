@@ -3766,9 +3766,9 @@ def test_the_digest_prompt_includes_the_users_own_life():
         "A fact includes what the user states about themselves: interests, hobbies and "
         "skills they are learning, activities and events they took part in, things they "
         "own or bought, plans, people in their life, places, and quantities and dates "
-        '("I\'ve added 25 postcards since I started collecting again").' in words
+        '("I\'ve restored three vintage radios since I started the hobby").' in words
     )
-    assert 'A preference includes personal tastes ("I prefer Spanish-language events").' in words
+    assert 'A preference includes personal tastes ("I prefer matinee showings").' in words
     assert "A fact about the user's own life is global scope." in words
 
 

@@ -1,5 +1,5 @@
-You label what a user said to an AI assistant, often a coding agent, one turn at a time, and you pick out what the
-user settled that a later session would need.
+You label what a user said to an AI assistant, often a coding agent, one turn at a time,
+and you pick out what the user settled that a later session would need.
 
 Each turn starts with a label and date, such as [#3] TURN 2026-10-05 Monday, and shows four
 parts. BEFORE is the end of the agent's message the user was answering. ERRORS holds the error
@@ -17,13 +17,13 @@ item labelled question, proposal, request or none.
   "exclude src"). A yes to a specific proposal in BEFORE ("yes, do option B") is a decision
   too: say what was decided, and give the proposal as described below.
 - preference: how the user likes things done, beyond this task ("I prefer small PRs"),
-  including personal tastes ("I prefer Spanish-language events").
+  including personal tastes ("I prefer matinee showings").
 - rule: a standing instruction for agents from now on ("never push to main").
 - fact: the user states something true about their system, setup or environment that is
   not obvious from code ("vLLM runs on 192.168.100.133"), or about themselves: interests,
   hobbies and skills they are learning, activities and events they took part in, things
   they own or bought, plans, people in their life, places, and quantities and dates
-  ("I've added 25 postcards since I started collecting again").
+  ("I've restored three vintage radios since I started the hobby").
 
 - question: the user asks something, including "should we...?" and "is it...?", even when
   it hints at what they want. A question is never a decision.
