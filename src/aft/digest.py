@@ -1188,11 +1188,7 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
     missing: list[str] = []
     for number, word in enumerate(_WORDS.findall(statement)):
         low = _bare(word)
-        name = word.strip(".,;:!?\"'()")
-        distinctive = any(c.isdigit() or c in "_/.:-" for c in name) or any(
-            c.isupper() for c in (name[1:] if number == 0 else name)
-        )
-        if not low or not distinctive or low in held:
+        if not low or not _key_word(word, number == 0) or low in held:
             continue
         if not low.isalpha():
             # A token holding a digit, a hyphen or any other symbol is held exactly: only
@@ -1203,6 +1199,55 @@ def ungrounded(statement: str, said: str, when: datetime | None = None) -> list[
         elif not any(len(h) >= 5 and h[:5] == low[:5] for h in held):
             missing.append(word.strip(".,;:!?\"'()"))
     return missing
+
+
+def _key_word(word: str, first: bool) -> bool:
+    """Whether ``word`` is one a check can hold (R2, DESIGN 9): it holds a digit or one
+    of ``_/.:-``, or a capital past its first letter, where the text's first word may
+    carry its opening capital. Plain words say how, not what, and are not checked."""
+    name = word.strip(".,;:!?\"'()")
+    return bool(name) and (
+        any(c.isdigit() or c in "_/.:-" for c in name)
+        or any(c.isupper() for c in (name[1:] if first else name))
+    )
+
+
+def key_tokens(text: str) -> list[str]:
+    """The tokens of ``text`` a check can hold against what was seen (BUILD-PLAN F77):
+    each backticked span counts as one token, and so does any other word holding a
+    digit, one of ``_/.:-``, or a capital past its first letter - the R2 definition
+    (DESIGN 9). A host, port, path, version, flag or config key holds one of these, so
+    it is one token; plain words are not checked."""
+    spans = list(re.finditer(r"`[^`\n]+`", text))
+    chars = list(text)
+    for span in spans:
+        for i in range(span.start(), span.end()):
+            chars[i] = " "
+    tokens: list[str] = []
+    for span in spans:
+        inner = span.group()[1:-1].strip()
+        if inner:
+            tokens.append(inner)
+    for number, word in enumerate(_WORDS.findall("".join(chars))):
+        if _key_word(word, number == 0):
+            tokens.append(word.strip(".,;:!?\"'()"))
+    return tokens
+
+
+def holds_tokens(statement: str, seen: Sequence[str]) -> bool:
+    """Whether ``seen`` holds every key token of ``statement`` verbatim (BUILD-PLAN
+    F77): a token stands when its exact text, case included, appears in one of the
+    texts as a token of its own, runs of whitespace folded as a quote check folds
+    them. A statement whose words are all plain has no key token, so nothing holds
+    it."""
+    tokens = key_tokens(statement)
+    if not tokens:
+        return False
+    folded = [" ".join(text.split()) for text in seen]
+    return all(
+        any(re.search(rf"(?<!\w){re.escape(token)}(?!\w)", text) for text in folded)
+        for token in tokens
+    )
 
 
 def grounding_sentence(text: str, statement: str, said: str, when: datetime | None = None) -> str:
@@ -2001,14 +2046,16 @@ def verify(
                     )
                 )
                 continue
-        if fact["source"] == "observed":
-            is_tool_entry = entry.role == TOOL or entry.is_error
-            has_tool_backing = is_tool_entry or any(
-                e.role == TOOL and evidence.find_quote(config, session_id, e.id, fact["quote"])
-                for e in part
-            )
-            if not has_tool_backing:
-                # An assistant claim without verified tool/error backing becomes gated [inferred].
+        if fact["source"] == "observed" and not (entry.role == TOOL or entry.is_error):
+            # BUILD-PLAN F77: an assistant report counts as seen in a tool result when
+            # the same part holds one and every key token of the statement appears in
+            # that output verbatim - agents paraphrase what a command showed, so the
+            # tokens that can be checked decide, not the whole quote. A quote from a
+            # tool or error entry stays [observed] without this check.
+            seen = [e.text for e in part if e.role == TOOL or e.is_error]
+            if not seen or not holds_tokens(fact["statement"], seen):
+                # No tool output to check against, or a key token it does not hold: the
+                # claim is the model's conclusion, gated [inferred].
                 fact = {**fact, "source": "inferred", "term": LONG}
         if fact["source"] in ("observed", "inferred"):
             missing = ungrounded(fact["statement"], entry.text, when=entry.time)

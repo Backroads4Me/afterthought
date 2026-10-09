@@ -773,6 +773,7 @@ def test_base_digest_keeps_a_short_observed_quote(session: Session):
         record("e2", "assistant", "The first run failed with exit code 1."),
         record("e3", "user", SECOND_PROMPT),
         record("e4", "assistant", SECOND_ANSWER),
+        tool_record("e5", "t1", "npm test exited 1", is_error=False),
     )
     wrote = digest_once(
         session,
@@ -792,6 +793,15 @@ def test_base_digest_keeps_a_short_observed_quote(session: Session):
 def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Session):
     """An observed statement's names are grounded in the entry it cites, as a stated one
     is in the user's turn."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+        tool_record("e3", "t1", "psql: PostgreSQL 16.4 ready", is_error=False),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
     wrote = digest_once(
         session,
         answer(
@@ -819,6 +829,7 @@ def test_base_digest_keeps_observed_fact_with_computed_relative_date(session: Se
         record("e2", "assistant", "The backup stays paused until tomorrow.", when=when),
         record("e3", "user", SECOND_PROMPT, when=when),
         record("e4", "assistant", SECOND_ANSWER, when=when),
+        tool_record("e5", "t1", "backup resumes 2026-10-06", is_error=False, when=when),
     )
     wrote = digest_once(
         session,
@@ -3868,8 +3879,9 @@ def test_a_long_and_a_short_fact_are_written_with_their_terms(session: Session):
 def test_assistant_prose_without_tool_backing_becomes_inferred_while_tool_output_stays_observed(
     session: Session,
 ):
-    """M2: an assistant prose statement without tool or error backing is marked inferred,
-    while an observation backed by a tool result or error output carries [observed]."""
+    """M2, as F77 amends it: a quote from a tool or error entry stays [observed], while
+    an assistant statement whose words give the output nothing to check - no key token -
+    is marked inferred."""
     wrote = digest_once(
         session,
         answer(
@@ -3895,6 +3907,132 @@ def test_assistant_prose_without_tool_backing_becomes_inferred_while_tool_output
     page_body = body(session.cfg, wrote.path)
     assert "The hook rewrite is written. [observed]" in page_body
     assert "The hook writes one row and returns without calling a model. [inferred]" in page_body
+
+
+def observed_part(path: Path, cwd: Path, tool_text: str, assistant_text: str) -> Path:
+    """A transcript whose part holds one tool result and the assistant's report of it."""
+    return write_records(
+        path,
+        {"cwd": str(cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", assistant_text, model="claude-real"),
+        tool_record("e3", "t1", tool_text, is_error=False),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+
+
+def test_a_paraphrased_report_whose_tokens_the_output_holds_is_observed(session: Session):
+    """F77: the assistant's own sentence is [observed] when every key token of its
+    statement appears in the part's tool output - the checkable tokens decide, not the
+    whole quote."""
+    observed_part(
+        session.transcript,
+        session.cwd,
+        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "The endpoint on port 8080 refused the connection, so the run stopped.",
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The endpoint on port 8080 refused the connection.",
+                quote="refused the connection",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The endpoint on port 8080 refused the connection.", "observed")
+    ]
+
+
+def test_a_report_with_a_token_the_output_does_not_hold_is_inferred(session: Session):
+    """F77: a key token absent from the tool output - a wrong port - leaves the report
+    [inferred] even where the quote itself stood in that output verbatim."""
+    observed_part(
+        session.transcript,
+        session.cwd,
+        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "Connection refused. The config pins port 8081 there.",
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The config pins port 8081 there.",
+                quote="Connection refused",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The config pins port 8081 there.", "inferred")
+    ]
+
+
+def test_a_report_without_a_key_token_is_inferred(session: Session):
+    """F77: a statement whose words are all plain gives the output nothing to check, so
+    the report is [inferred] however exactly the quote stood in it."""
+    observed_part(
+        session.transcript,
+        session.cwd,
+        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "Connection refused, so I stopped the run.",
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Connection refused, so I stopped the run.",
+                quote="Connection refused",
+                entry="e2",
+                source="observed",
+                kind="state",
+            )
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("Connection refused, so I stopped the run.", "inferred")
+    ]
+
+
+def test_a_part_with_no_tool_result_yields_no_observed_assistant_fact(session: Session):
+    """F77: with no tool result or error in the part there is no output to check a key
+    token against, so an assistant report is [inferred]."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record(
+            "e2",
+            "assistant",
+            "The endpoint on port 8080 refused the connection.",
+            model="claude-real",
+        ),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The endpoint on port 8080 refused the connection.",
+                quote="refused the connection",
+                entry="e2",
+                source="observed",
+            )
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The endpoint on port 8080 refused the connection.", "inferred")
+    ]
 
 
 def test_a_fact_recorded_without_a_term_reads_as_long():
@@ -4050,3 +4188,28 @@ def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
     assert digest.enclosing_sentence(turn, "use uv for installs") == "always use uv for installs"
     assert digest.enclosing_sentence(turn, "installs") == "always use uv for installs"
     assert digest.enclosing_sentence(turn, "what about poetry") == "what about poetry?"
+
+
+def test_key_tokens_are_the_checkable_words_and_whole_backticked_spans():
+    """BUILD-PLAN F77: a key token is a word holding a digit, one of ``_/.:-`` or a
+    capital past its first letter - the R2 definition - and a backticked span counts as
+    one token; plain words are not checked."""
+    assert digest.key_tokens("The endpoint on port 8080 refused.") == ["8080"]
+    assert digest.key_tokens("We use PostgreSQL 16 here.") == ["PostgreSQL", "16"]
+    assert digest.key_tokens("Run `pytest -q tests/test_page.py` now.") == [
+        "pytest -q tests/test_page.py"
+    ]
+    assert digest.key_tokens("The retry is read from config.") == []
+
+
+def test_holds_tokens_demands_a_verbatim_hold_of_every_key_token():
+    """BUILD-PLAN F77: a token stands when its exact text, case included, appears in the
+    output as a token of its own; a near miss - a wrong port - does not stand, and a
+    statement with no key token is held by nothing."""
+    output = ["curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused"]
+    assert digest.holds_tokens("The endpoint on port 8080 refused.", output)
+    assert not digest.holds_tokens("The endpoint on port 8081 refused.", output)
+    assert not digest.holds_tokens("Paused until 2026-10-05.", ["Paused until 2026-10-15."])
+    # A token is not found inside a longer one.
+    assert not digest.holds_tokens("The limit is 300000.", ["The limit is 3000000."])
+    assert not digest.holds_tokens("The endpoint refused.", output)
