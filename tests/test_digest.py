@@ -4035,6 +4035,130 @@ def test_a_part_with_no_tool_result_yields_no_observed_assistant_fact(session: S
     ]
 
 
+def test_a_report_the_successful_output_backs_is_observed(session: Session):
+    """F78: the observed check reads the part's raw entries, so a version or a count a
+    command that succeeded printed - which the filter drops - still backs the assistant's
+    report of it. F77 could check only what the filter kept, so this report read
+    [inferred]."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        tool_record("e2", "t1", "release 2.4.1 built against vllm 0.6.3", is_error=False),
+        record(
+            "e3",
+            "assistant",
+            "The release is 2.4.1, built against vllm 0.6.3.",
+            model="claude-real",
+        ),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="The release is 2.4.1, built against vllm 0.6.3.",
+                quote="The release is 2.4.1",
+                entry="e3",
+                source="observed",
+                kind="state",
+            )
+        ),
+    )
+    kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The release is 2.4.1, built against vllm 0.6.3.", "observed")
+    ]
+
+
+def test_a_rebuilt_digest_checks_the_filtered_entries_when_the_transcript_is_gone(
+    session: Session,
+):
+    """F78: a rebuild reads the archive alone - the transcript has expired or is gone - so
+    the observed check falls back to the filtered tool entries, F77's check. The output the
+    filter dropped backs nothing there, and the same report reads [inferred]."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        tool_record("e2", "t1", "release 2.4.1 built against vllm 0.6.3", is_error=False),
+        record(
+            "e3",
+            "assistant",
+            "The release is 2.4.1, built against vllm 0.6.3.",
+            model="claude-real",
+        ),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    reported = said(
+        statement="The release is 2.4.1, built against vllm 0.6.3.",
+        quote="The release is 2.4.1",
+        entry="e3",
+        source="observed",
+        kind="state",
+    )
+    fake, cfg = serve(session.cfg, answer(reported), answer(reported))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+        assert wrote is not None
+        assert [f["source"] for f in frontmatter(cfg, wrote.path)["aft"]["facts"]] == ["observed"]
+        session.transcript.unlink()
+        rebuilt = digest.redigest(cfg, SESSION, now=NOW)
+    finally:
+        fake.stop()
+    kept = frontmatter(cfg, rebuilt.path)["aft"]["facts"]
+    assert [(f["statement"], f["source"]) for f in kept] == [
+        ("The release is 2.4.1, built against vllm 0.6.3.", "inferred")
+    ]
+
+
+def test_the_raw_tool_output_reaches_no_archive_no_page_and_no_request(session: Session):
+    """F78: the raw span is read for the observed check alone. The tool output the filter
+    dropped - the release line the report is checked against - appears in no archive row,
+    no digest page and no model request."""
+    raw = "release 2.4.1 built against vllm 0.6.3"
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        tool_record("e2", "t1", raw, is_error=False),
+        record(
+            "e3",
+            "assistant",
+            "The release is 2.4.1, built against vllm 0.6.3.",
+            model="claude-real",
+        ),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    fake, cfg = serve(
+        session.cfg,
+        answer(
+            said(
+                statement="The release is 2.4.1, built against vllm 0.6.3.",
+                quote="The release is 2.4.1",
+                entry="e3",
+                source="observed",
+                kind="state",
+            )
+        ),
+    )
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    # The check ran against the raw output: the report stands [observed], not [inferred].
+    assert [f["source"] for f in frontmatter(cfg, wrote.path)["aft"]["facts"]] == ["observed"]
+    # And the raw text went nowhere.
+    assert all(raw not in entry.text for entry in evidence.entries(cfg, SESSION))
+    assert raw not in (cfg.vault / wrote.path).read_text(encoding="utf-8")
+    for request in fake.requests:
+        assert raw not in json.dumps(request)
+
+
 def test_a_fact_recorded_without_a_term_reads_as_long():
     """Library and memory-import digests carry no term (DESIGN 6)."""
     assert digest.term_of({"statement": "s"}) == digest.LONG

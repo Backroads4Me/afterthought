@@ -518,7 +518,8 @@ def digest_job(config: Config, job: queue.Job, now: datetime | None = None) -> D
     rel = _path(config, slug, job.agent, job.session_id, when)
 
     role = rules.WORKER if is_worker(job.cwd, config) else rules.PRIMARY
-    digested = _digest_parts(config, job.session_id, parts(kept), role)
+    chunks = parts(kept)
+    digested = _digest_parts(config, job.session_id, chunks, role, _raw_spans(read, chunks))
     facts, dropped = digested.facts, digested.dropped
 
     page, on_page, refused = _page(
@@ -824,18 +825,43 @@ class Digested:
     refused_parts: list[dict]
 
 
+def _raw_spans(
+    read: Sequence[Entry], chunks: Sequence[Sequence[Entry]]
+) -> list[Sequence[Entry] | None]:
+    """The raw entries of each part's span, from the read the digest already made
+    (BUILD-PLAN F78): the entries between the part's first and last, the ones the filter
+    dropped among them. A part whose ends the read does not hold - a rebuild that starts
+    from the archive, or a transcript that moved or rotated - has no raw span, and its
+    observed check falls back to the filtered entries, F77's check."""
+    where = {entry.id: n for n, entry in enumerate(read)}
+    spans: list[Sequence[Entry] | None] = []
+    for chunk in chunks:
+        first, last = where.get(chunk[0].id), where.get(chunk[-1].id)
+        spans.append(read[first : last + 1] if first is not None and last is not None else None)
+    return spans
+
+
 def _digest_parts(
-    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+    config: Config,
+    session_id: str,
+    chunks: Sequence[Sequence[Entry]],
+    role: str,
+    raws: Sequence[Sequence[Entry] | None] | None = None,
 ) -> Digested:
     """Each part of one job asked, checked and verified by the pipeline the settings name
-    (BUILD-PLAN F55)."""
+    (BUILD-PLAN F55). ``raws`` holds each part's raw span beside it, for the observed
+    check to read the tool output the filter dropped (BUILD-PLAN F78)."""
     if config.settings.digest.pipeline == TURNS:
-        return _digest_parts_turns(config, session_id, chunks, role)
-    return _digest_parts_base(config, session_id, chunks, role)
+        return _digest_parts_turns(config, session_id, chunks, role, raws)
+    return _digest_parts_base(config, session_id, chunks, role, raws)
 
 
 def _digest_parts_base(
-    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+    config: Config,
+    session_id: str,
+    chunks: Sequence[Sequence[Entry]],
+    role: str,
+    raws: Sequence[Sequence[Entry] | None] | None = None,
 ) -> Digested:
     """Ask for, check and verify each part of one job (DESIGN 8).
 
@@ -855,10 +881,11 @@ def _digest_parts_base(
     schema = digest_schema()
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     last_refused = False
-    for part in chunks:
+    for number, part in enumerate(chunks):
+        raw = raws[number] if raws is not None else None
         try:
             answer, part_facts, part_dropped = _matching_answer(
-                config, prompt, part, schema, session_id, role
+                config, prompt, part, schema, session_id, role, raw
             )
         except AnswerRefused as exc:
             result.refused_parts.append(
@@ -1713,6 +1740,7 @@ def _asked(
     part: Sequence[Entry],
     role: str,
     make,
+    raw: Sequence[Entry] | None = None,
 ) -> tuple[list[Fact], list[Dropped]]:
     """One call's items, verified, asked again once when two or more items all quote words
     their entries do not hold (finding T17), as the base pipeline asks. The retry carries
@@ -1725,7 +1753,7 @@ def _asked(
         # its entries hold, so the retry is the guided one.
         made = make(_model_answer(config, prompt, _guided_chunk(text, attempt > 0), schema))
         facts, refused = made if isinstance(made, tuple) else (made, [])
-        kept, dropped = verify(config, session_id, part, facts, role=role)
+        kept, dropped = verify(config, session_id, part, facts, role=role, raw_span=raw)
         proposals = {
             (fact["statement"], fact["entry"]): fact["proposal"]
             for fact in facts
@@ -1745,7 +1773,11 @@ def _asked(
 
 
 def _digest_parts_turns(
-    config: Config, session_id: str, chunks: Sequence[Sequence[Entry]], role: str
+    config: Config,
+    session_id: str,
+    chunks: Sequence[Sequence[Entry]],
+    role: str,
+    raws: Sequence[Sequence[Entry] | None] | None = None,
 ) -> Digested:
     """Each part asked the turns pipeline's narrow questions (BUILD-PLAN F55).
 
@@ -1766,7 +1798,8 @@ def _digest_parts_turns(
     summary_refused = ""
     before, before_id = "", ""
     entries = {entry.id: entry for chunk in chunks for entry in chunk}
-    for part in chunks:
+    for number, part in enumerate(chunks):
+        raw = raws[number] if raws is not None else None
         turns, before, before_id, answered = turn_blocks(part, before, before_id)
         try:
             summary = None
@@ -1813,6 +1846,7 @@ def _digest_parts_turns(
                         part,
                         role,
                         partial(turn_facts, labelled=labelled),
+                        raw=raw,
                     )
                     result.facts.extend(kept)
                     result.dropped.extend(dropped)
@@ -1834,6 +1868,7 @@ def _digest_parts_turns(
                     part,
                     role,
                     _observed_facts,
+                    raw=raw,
                 )
                 result.facts.extend(kept)
                 result.dropped.extend(dropped)
@@ -1934,6 +1969,7 @@ def _matching_answer(
     schema: dict,
     session_id: str,
     role: str,
+    raw: Sequence[Entry] | None = None,
 ) -> tuple[dict, list[Fact], list[Dropped]]:
     """One part's answer and its verified facts, asked again once when it does not match
     the chunk.
@@ -1953,7 +1989,9 @@ def _matching_answer(
         answer = _model_answer(config, prompt, _guided_chunk(chunk, guided), schema)
         found = mismatch(answer, part)
         if found is None:
-            kept, dropped = verify(config, session_id, part, answer["facts"], role=role)
+            kept, dropped = verify(
+                config, session_id, part, answer["facts"], role=role, raw_span=raw
+            )
             if not unquoted(answer["facts"], kept, dropped):
                 return answer, kept, dropped
             found = "no fact's quote is in the entry it cites"
@@ -1988,13 +2026,16 @@ def verify(
     part: Sequence[Entry],
     facts: Sequence[dict],
     role: str = rules.PRIMARY,
+    raw_span: Sequence[Entry] | None = None,
 ) -> tuple[list[Fact], list[Dropped]]:
     """The facts of one part that pass the design's checks, and the refusals beside them.
 
     Each check is the design's (DESIGN 8, and the kinds and scopes the plan's schema
     enumerates), and the first one a fact fails is the reason it is recorded by. Nothing
     here judges what a fact is worth: that is the prompt's job, and a script that decided
-    value as well would put its own taste into memory.
+    value as well would put its own taste into memory. ``raw_span`` is the part's raw
+    entries, read from the transcript for the observed check alone (BUILD-PLAN F78); None
+    falls back to the part's filtered entries, what a rebuild from the archive has.
     """
     by_id = _cited(part)
     kept: list[Fact] = []
@@ -2065,12 +2106,18 @@ def verify(
                 )
                 continue
         if fact["source"] == "observed" and not (entry.role == TOOL or entry.is_error):
-            # BUILD-PLAN F77: an assistant report counts as seen in a tool result when
-            # the same part holds one and every key token of the statement appears in
-            # that output verbatim - agents paraphrase what a command showed, so the
-            # tokens that can be checked decide, not the whole quote. A quote from a
-            # tool or error entry stays [observed] without this check.
-            seen = [e.text for e in part if e.role == TOOL or e.is_error]
+            # BUILD-PLAN F77, as F78 amends it: an assistant report counts as seen in a
+            # tool result when the same part's span holds one and every key token of the
+            # statement appears in that output verbatim - agents paraphrase what a command
+            # showed, so the tokens that can be checked decide, not the whole quote. The
+            # span is the raw entries the read the digest already made holds, so a command
+            # that succeeded backs what the agent reported from it; that text is read here
+            # in memory and never stored, sent or kept (F78). A part with no raw span - a
+            # rebuild from the archive, or a transcript that moved - is checked against the
+            # filtered entries, F77's check. A quote from a tool or error entry stays
+            # [observed] without this check.
+            span = part if raw_span is None else raw_span
+            seen = [e.text for e in span if e.role == TOOL or e.is_error]
             if not seen or not holds_tokens(fact["statement"], seen):
                 # No tool output to check against, or a key token it does not hold: the
                 # claim is the model's conclusion, gated [inferred].
