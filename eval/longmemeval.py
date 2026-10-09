@@ -17,6 +17,15 @@ search with a page hit credited to the sessions its matched line cites. Each
 question runs in its own sandbox under ``--workdir``: a home, a vault and a git
 repository registered as the sandbox's one project, outside the system temporary
 directory because a directory under it resolves to no project (DESIGN 7, F49).
+
+The records carry the pipeline's diagnostics (BUILD-PLAN F72): every session's
+outcome by id, and for the ``full`` ranking the hit that credited each ranked
+session - collection, path, heading, matched statement. A page hit credits the
+line the query ranks first among the section's injected lines by stemmed BM25,
+in an in-memory FTS5 table built the way ``aft.dream.decide.related`` builds its
+own. Sandboxes are kept by default; ``--discard-sandbox`` deletes a finished,
+scored one, and ``--rescore`` re-scores the sandboxes a records JSONL names
+without calling the model.
 """
 
 from __future__ import annotations
@@ -28,6 +37,7 @@ import os
 import re
 import resource
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -599,6 +609,30 @@ class ReplayResult:
     dream_deferred: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class HitCredit:
+    """The search hit that credited one session in the ``full`` ranking (F72)."""
+
+    session_id: str
+    collection: str
+    path: str
+    heading: str | None
+    """The heading a page hit matched; None for a digest or evidence hit."""
+
+    statement: str | None
+    """The statement of the line a page hit matched; None for the other collections."""
+
+    def record(self) -> dict[str, Any]:
+        """The credit as the JSONL record carries it."""
+        return {
+            "session": self.session_id,
+            "collection": self.collection,
+            "path": self.path,
+            "heading": self.heading,
+            "statement": self.statement,
+        }
+
+
 def _safe_name(raw: str) -> str:
     """A name a filesystem takes: any other character becomes an underscore."""
     return re.sub(r"[^A-Za-z0-9._-]", "_", raw) or "unnamed"
@@ -711,7 +745,8 @@ def pipeline_sandbox(root: Path, caller: Config, keep: dict[str, bool]) -> Itera
     the process's own, so they are saved and restored around the body; the sweep sees no
     session directories at all, because the replay enqueues each transcript itself, the
     way a hook does. ``keep`` is the caller's decision at the end of the body: a failed
-    or stopped question's sandbox is always kept, and --keep-sandbox keeps every one.
+    or stopped question's sandbox is always kept, and --discard-sandbox deletes only a
+    finished, scored one (BUILD-PLAN F72).
     """
     root.mkdir(parents=True, exist_ok=True)
     home = root / "home"
@@ -907,75 +942,116 @@ def _session_of_source(resource: str) -> str | None:
     return parts[1].partition("#")[0] or None
 
 
-def _page_hit_sessions(config: Config, hit: search.Hit, query: str) -> list[str]:
-    """The sessions the line a page hit matched cites, never the section's every line.
+_CREATE_LINES = f"CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='{index.TOKENIZER}')"
+"""The in-memory retrieval table, stemmed exactly as ``aft.index`` stems its
+collections, built the way ``aft.dream.decide.related`` builds its own."""
+
+
+def _ranked_lines(words: Sequence[str], statements: Sequence[str]) -> list[int]:
+    """The statements the words rank by stemmed BM25, best first, as their positions.
+
+    A statement matching none of the words is not ranked at all, so an empty result
+    means no line matched the query (BUILD-PLAN F72). Ties keep the statements' order,
+    as ``ORDER BY bm25(lines), rowid`` gives.
+    """
+    if not words or not statements:
+        return []
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(_CREATE_LINES)
+        conn.executemany(
+            "INSERT INTO lines (rowid, statement) VALUES (?, ?)",
+            list(enumerate(statements)),
+        )
+        match = " OR ".join(f'"{word}"' for word in words)
+        ranked = conn.execute(
+            "SELECT rowid FROM lines WHERE lines MATCH ? ORDER BY bm25(lines), rowid",
+            (match,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [rowid for (rowid,) in ranked]
+
+
+def _page_hit_sessions(config: Config, hit: search.Hit, query: str) -> tuple[list[str], str | None]:
+    """The sessions the line a page hit matched cites, and that line's statement.
 
     The pages collection indexes a page's active lines one section to a row, so a hit
-    names a section, not a line. The matched line is the section's line that shares the
-    most of the query's words with it, the first on a tie; a section whose every line
-    shares none credits no session. Only that line's own sources are credited (BUILD-PLAN
-    F71): the sessions a section's other lines cite say nothing about this hit.
+    names a section, not a line. The matched line is the one the query ranks first
+    among the section's injected lines by stemmed BM25, in an in-memory FTS5 table
+    built the way ``aft.dream.decide.related`` builds its own (BUILD-PLAN F72); a
+    section whose every line matches none of the query's words credits no session.
+    Only the matched line's own sources are credited (BUILD-PLAN F71): the sessions a
+    section's other lines cite say nothing about this hit.
     """
     rel = PurePosixPath(hit.path)
     if rel.is_absolute() or ".." in rel.parts:
-        return []
+        return [], None
     try:
         text = (config.vault / Path(rel)).read_text(encoding="utf-8")
     except OSError:
-        return []
+        return [], None
     frontmatter, _, _, error = page.split_frontmatter(text)
     if error or not isinstance(frontmatter, dict):
-        return []
+        return [], None
     sources = {
         str(source.get("id")): str(source.get("resource") or "")
         for source in frontmatter.get("sources") or []
         if isinstance(source, dict)
     }
     parsed = page.parse(text, Path(rel))
-    terms = _terms(query)
-    best: tuple[int, page.Fact] | None = None
-    for fact in parsed.facts:
-        if fact.section != hit.heading or fact.struck or fact.state not in inject.INJECTED:
-            continue
-        score = len(terms & _terms(fact.statement))
-        if score and (best is None or score > best[0]):
-            best = (score, fact)
-    if best is None:
-        return []
+    lines = [
+        fact
+        for fact in parsed.facts
+        if fact.section == hit.heading and not fact.struck and fact.state in inject.INJECTED
+    ]
+    ranked = _ranked_lines(sorted(_terms(query)), [fact.statement for fact in lines])
+    if not ranked:
+        return [], None
+    fact = lines[ranked[0]]
     sessions: list[str] = []
-    for ref in best[1].refs:
+    for ref in fact.refs:
         session_id = _session_of_source(sources.get(ref, ""))
         if session_id and session_id not in sessions:
             sessions.append(session_id)
-    return sessions
+    return sessions, fact.statement
 
 
-def _hit_sessions(config: Config, hit: search.Hit, query: str) -> list[str]:
-    """The sessions one search hit answers for, by what named it."""
+def _hit_credits(config: Config, hit: search.Hit, query: str) -> list[HitCredit]:
+    """The sessions one search hit credits, each with the hit that credited it (F72)."""
     if hit.collection == index.PAGES:
-        return _page_hit_sessions(config, hit, query)
+        sessions, statement = _page_hit_sessions(config, hit, query)
+        return [
+            HitCredit(session, hit.collection, hit.path, hit.heading, statement)
+            for session in sessions
+        ]
     session_id = _session_of_hit(hit.path)
-    return [session_id] if session_id else []
+    if session_id is None:
+        return []
+    return [HitCredit(session_id, hit.collection, hit.path, None, None)]
 
 
 def ranked_full(
     hits: list[search.Hit], config: Config, query: str, allowed: set[str] | None = None
-) -> list[str]:
-    """The sessions a production search ranked, in order of first appearance.
+) -> list[HitCredit]:
+    """The sessions a production search ranked, in order of first appearance, each with
+    the hit that credited it (BUILD-PLAN F72).
 
     A page hit credits the sessions its matched line cites, a digest hit the session its
     file name carries, an evidence hit the session its resource names; a session filling
     several hits ranks once, at its best position. Sessions outside ``allowed`` when it
     is given, and hits that name no session, are not part of the ranking.
     """
-    ranked: list[str] = []
+    ranked: list[HitCredit] = []
     seen: set[str] = set()
     for hit in hits:
-        for session_id in _hit_sessions(config, hit, query):
-            if session_id in seen or (allowed is not None and session_id not in allowed):
+        for credit in _hit_credits(config, hit, query):
+            if credit.session_id in seen or (
+                allowed is not None and credit.session_id not in allowed
+            ):
                 continue
-            seen.add(session_id)
-            ranked.append(session_id)
+            seen.add(credit.session_id)
+            ranked.append(credit)
     return ranked
 
 
@@ -1033,7 +1109,8 @@ def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
     (a) ``digests``: the digest rows only, attributed by digest file name. (b)
     ``coverage``: the fraction of answer sessions any page line's source cites, an upper
     bound for curated memory rather than a ranking. (c) ``full``: the production search
-    over everything, with a page hit credited to the sessions its matched line cites.
+    over everything, with a page hit credited to the sessions its matched line cites,
+    each ranked session carrying the hit that credited it (BUILD-PLAN F72).
     """
     cfg = sandbox.config
     # Search deep enough to rank the whole haystack: search has no collection filter, so
@@ -1051,10 +1128,15 @@ def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
     digests = ranked_sessions(
         [hit for hit in hits if hit.collection == index.DIGESTS], allowed=allowed
     )[:SESSION_K]
-    full = ranked_full(hits, cfg, case.question, allowed=allowed)[:SESSION_K]
+    credits = ranked_full(hits, cfg, case.question, allowed=allowed)[:SESSION_K]
+    full = [credit.session_id for credit in credits]
     return {
         "digests": {"ranked_sessions": digests, **_session_metrics(digests, answers)},
-        "full": {"ranked_sessions": full, **_session_metrics(full, answers)},
+        "full": {
+            "ranked_sessions": full,
+            "ranked_hits": [credit.record() for credit in credits],
+            **_session_metrics(full, answers),
+        },
         "coverage": coverage_fraction(cfg, answers),
     }
 
@@ -1101,6 +1183,7 @@ def _record_body(
         "sessions_below_floor": counts[BELOW_FLOOR],
         "sessions_failed": counts[FAILED],
         "sessions_left_queued": counts[LEFT],
+        "session_outcomes": {outcome.session_id: outcome.outcome for outcome in replayed.outcomes},
         "stopped": replayed.stopped,
         "work_failures": replayed.failures,
         "dream_failures": replayed.dream_failures,
@@ -1128,11 +1211,15 @@ def _question_head(case: QuestionCase) -> dict[str, Any]:
 
 
 def _run_one_question(
-    case: QuestionCase, root: Path, caller: Config, keep_sandbox: bool
+    case: QuestionCase, root: Path, caller: Config, discard_sandbox: bool
 ) -> dict[str, Any]:
-    """One question through its sandbox, as one durable record."""
+    """One question through its sandbox, as one durable record.
+
+    The sandbox is kept by default (BUILD-PLAN F72); ``--discard-sandbox`` deletes the
+    sandbox of a question that finished and scored, never a failed or stopped one.
+    """
     sandbox_root = root / _safe_name(case.question_id)
-    keep = {"keep": keep_sandbox}
+    keep = {"keep": True}
     started = time.perf_counter()
     head = _question_head(case)
     try:
@@ -1141,16 +1228,15 @@ def _run_one_question(
                 replayed = replay(sandbox, case)
                 scoring = score_question(sandbox, case)
                 seconds = time.perf_counter() - started
-                if replayed.stopped:
-                    # A stopped question's sandbox is always kept, scored or not.
-                    keep["keep"] = True
+                if discard_sandbox and not replayed.stopped:
+                    # A finished, scored question's sandbox is the only one deleted.
+                    keep["keep"] = False
                 return {
                     **head,
                     "wall_seconds": round(seconds, 3),
                     **_record_body(case, replayed, scoring, sandbox),
                 }
             except Exception as exc:
-                keep["keep"] = True
                 return {
                     **head,
                     "wall_seconds": round(time.perf_counter() - started, 3),
@@ -1224,7 +1310,7 @@ def _run_pipeline_parallel(
     root: Path,
     dataset: Path | str,
     output: Path,
-    keep_sandbox: bool,
+    discard_sandbox: bool,
     jobs: int,
 ) -> list[dict[str, Any]]:
     """Questions as separate processes, since each sandbox sets the process environment.
@@ -1257,8 +1343,8 @@ def _run_pipeline_parallel(
             "--ids",
             str(ids_file),
         ]
-        if keep_sandbox:
-            command.append("--keep-sandbox")
+        if discard_sandbox:
+            command.append("--discard-sandbox")
         # The child sees the same system temporary directory the caller does: a runner
         # whose tempdir was moved in process would otherwise hand its children a world
         # where the workdir sits under the system temp and no project may live there.
@@ -1398,7 +1484,7 @@ def run_pipeline(
     *,
     ids_path: Path | str | None = None,
     resume: bool = False,
-    keep_sandbox: bool = False,
+    discard_sandbox: bool = False,
     jobs: int = 1,
     limit: int | None = None,
 ) -> PipelineReport:
@@ -1408,7 +1494,8 @@ def run_pipeline(
     configured model; one JSONL record per question is appended to ``--output`` as the
     question finishes, and ``--resume`` skips ids a finished record already stands for.
     With ``--jobs N`` (at most 3) the questions run as separate processes, since each
-    sandbox sets the process environment.
+    sandbox sets the process environment. Sandboxes are kept by default (BUILD-PLAN
+    F72); ``--discard-sandbox`` deletes a finished, scored question's sandbox.
     """
     if not 1 <= jobs <= JOBS_MAX:
         raise PipelineError(f"--jobs must be between 1 and {JOBS_MAX}, not {jobs}")
@@ -1436,7 +1523,7 @@ def run_pipeline(
     if jobs == 1:
         records = []
         for case in questions:
-            record = _run_one_question(case, root, caller, keep_sandbox)
+            record = _run_one_question(case, root, caller, discard_sandbox)
             records.append(record)
             if output is not None:
                 _append_record(output, record)
@@ -1444,8 +1531,80 @@ def run_pipeline(
     else:
         if output is None:
             raise PipelineError("--output is required with --jobs, so records land somewhere")
-        records = _run_pipeline_parallel(questions, root, dataset_path, output, keep_sandbox, jobs)
+        records = _run_pipeline_parallel(
+            questions, root, dataset_path, output, discard_sandbox, jobs
+        )
     return _summarize(records, caller)
+
+
+@contextmanager
+def _rescore_sandbox(root: Path) -> Iterator[Sandbox]:
+    """A kept sandbox as the runner's world again, for scoring alone.
+
+    Only the environment the sandbox's config is read under changes; the body reads
+    the vault and the index and reaches no model (BUILD-PLAN F72).
+    """
+    home = root / "home"
+    old_home = os.environ.get(configmod.HOME_ENV)
+    try:
+        os.environ[configmod.HOME_ENV] = str(home)
+        cfg = configmod.load()
+        yield Sandbox(root=root, home=home, vault=cfg.vault, repo=root / "project", config=cfg)
+    finally:
+        if old_home is not None:
+            os.environ[configmod.HOME_ENV] = old_home
+        else:
+            os.environ.pop(configmod.HOME_ENV, None)
+
+
+def _rescored_record(record: dict[str, Any], cases: dict[str, QuestionCase]) -> dict[str, Any]:
+    """One record again, with fresh rankings when its kept sandbox can still be scored.
+
+    A record that scored nothing, names no sandbox, or names a sandbox that is gone -
+    discarded, or never kept - is copied unchanged; a sandbox that cannot be scored
+    keeps its rankings and says why in ``rescore_error``.
+    """
+    sandbox_path = record.get("sandbox")
+    if not record.get("scored") or not isinstance(sandbox_path, str) or not sandbox_path:
+        return record
+    case = cases.get(str(record.get("id") or ""))
+    root = Path(sandbox_path)
+    if case is None or not (root / "home").is_dir():
+        return record
+    try:
+        with _rescore_sandbox(root) as sandbox:
+            scoring = score_question(sandbox, case)
+    except Exception as exc:
+        return {**record, "rescore_error": str(exc)}
+    return {**record, "rankings": scoring}
+
+
+def rescore_pipeline(
+    records_path: Path | str,
+    dataset_path: Path | str,
+    output_path: Path | str,
+) -> PipelineReport:
+    """Re-score the kept sandboxes a records JSONL names, without calling the model.
+
+    Every record the file holds is written to the new JSONL in file order; a scored
+    record whose sandbox still stands gets fresh rankings read from that sandbox, so a
+    scoring change can be measured on kept runs (BUILD-PLAN F72). A record whose
+    rankings were refreshed prints its progress line as it is written.
+    """
+    source = Path(records_path).expanduser().resolve()
+    target = Path(output_path).expanduser().resolve()
+    if target == source:
+        raise PipelineError(
+            f"--rescore needs an --output other than the records it reads: {target}"
+        )
+    records = [record for record in _read_records(source) if isinstance(record, dict)]
+    cases = {case.question_id: case for case in parse_questions(load_dataset(dataset_path))}
+    rescored = [_rescored_record(record, cases) for record in records]
+    for original, fresh in zip(records, rescored, strict=True):
+        _append_record(target, fresh)
+        if fresh is not original:
+            print(_progress_line(fresh), flush=True)
+    return _summarize(rescored, configmod.load())
 
 
 def main(args: list[str] | None = None) -> int:
@@ -1502,9 +1661,21 @@ def main(args: list[str] | None = None) -> int:
         help="pipeline mode: skip question ids a finished record already stands for",
     )
     parser.add_argument(
-        "--keep-sandbox",
+        "--discard-sandbox",
         action="store_true",
-        help="pipeline mode: keep every sandbox instead of deleting each finished one",
+        help=(
+            "pipeline mode: delete a finished, scored question's sandbox instead of "
+            "keeping it (sandboxes are kept by default)"
+        ),
+    )
+    parser.add_argument(
+        "--rescore",
+        type=Path,
+        default=None,
+        help=(
+            "pipeline mode: re-score the kept sandboxes a records JSONL names, without "
+            "calling the model, writing every record to --output"
+        ),
     )
     parser.add_argument(
         "--jobs",
@@ -1514,6 +1685,12 @@ def main(args: list[str] | None = None) -> int:
     )
     parsed = parser.parse_args(args)
     if parsed.mode == "pipeline":
+        if parsed.rescore is not None:
+            if parsed.output is None:
+                parser.error("--mode pipeline --rescore requires --output")
+            report = rescore_pipeline(parsed.rescore, parsed.dataset, parsed.output)
+            print(report.format_table())
+            return 0 if report.errors == 0 else 1
         if parsed.workdir is None:
             parser.error("--mode pipeline requires --workdir")
         report = run_pipeline(
@@ -1522,7 +1699,7 @@ def main(args: list[str] | None = None) -> int:
             output_path=parsed.output,
             ids_path=parsed.ids,
             resume=parsed.resume,
-            keep_sandbox=parsed.keep_sandbox,
+            discard_sandbox=parsed.discard_sandbox,
             jobs=parsed.jobs,
             limit=parsed.limit,
         )
