@@ -312,6 +312,40 @@ def entry_time(config: Config, resource: str) -> datetime | None:
     return datetime.fromisoformat(row[0]) if row is not None else None
 
 
+def entry_role_said(config: Config, session_id: str, entry_id: str) -> tuple[str, str] | None:
+    """One archived entry's role and its UTC said-date, or None when the row is gone.
+
+    The said-date is the day the entry's ``time`` falls on, the same day a digest
+    records as its source's ``said`` (F75). None covers every way the archive does
+    not hold the row: no archive, one that will not open, and a session or entry it
+    has no row for, which the dream answers as a source it can no longer verify
+    (BUILD-PLAN T37).
+    """
+    if not _db_path(config).exists():
+        return None
+    try:
+        with _reading(config) as conn:
+            row = conn.execute(
+                "SELECT role, time FROM evidence WHERE session_id = ? AND entry_id = ?",
+                (session_id, entry_id),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    role = str(row[0]) if row[0] else ""
+    said = ""
+    if row[1]:
+        try:
+            moment = datetime.fromisoformat(str(row[1]))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=UTC)
+            said = moment.astimezone(UTC).date().isoformat()
+        except Exception:
+            said = str(row[1])[:10]
+    return role, said
+
+
 def session_info(config: Config, session_id: str) -> tuple[str, str | None] | None:
     """The agent and project id of an archived session, or None if not archived."""
     session_id = _require_name(session_id, "session id")

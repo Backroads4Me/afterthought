@@ -641,52 +641,19 @@ def run_project(
                         if res.startswith("aft://session/"):
                             sess_id, entry_id = parsed
                             if not s_role:
-                                db_path = config.home / "evidence.sqlite"
-                                row = None
-                                if db_path.exists():
-                                    try:
-                                        with evidence._reading(config) as conn:
-                                            row = conn.execute(
-                                                "SELECT role, time FROM evidence"
-                                                " WHERE session_id = ? AND entry_id = ?",
-                                                (sess_id, entry_id),
-                                            ).fetchone()
-                                    except Exception:
-                                        row = None
-                                if row is not None:
-                                    s_role = str(row[0]) if row[0] else ""
-                                    if row[1]:
-                                        try:
-                                            dt = datetime.fromisoformat(str(row[1]))
-                                            if dt.tzinfo is None:
-                                                dt = dt.replace(tzinfo=UTC)
-                                            s_said = dt.astimezone(UTC).date().isoformat()
-                                        except Exception:
-                                            s_said = str(row[1])[:10]
+                                found = evidence.entry_role_said(config, sess_id, entry_id)
+                                if found is not None:
+                                    s_role, archive_said = found
+                                    if archive_said:
+                                        s_said = archive_said
                                 else:
                                     s_role = ""
                                     s_said = ""
                                     c_hash = ""
                             elif not s_said:
-                                db_path = config.home / "evidence.sqlite"
-                                if db_path.exists():
-                                    try:
-                                        with evidence._reading(config) as conn:
-                                            row = conn.execute(
-                                                "SELECT time FROM evidence"
-                                                " WHERE session_id = ? AND entry_id = ?",
-                                                (sess_id, entry_id),
-                                            ).fetchone()
-                                            if row is not None and row[0]:
-                                                try:
-                                                    dt = datetime.fromisoformat(str(row[0]))
-                                                    if dt.tzinfo is None:
-                                                        dt = dt.replace(tzinfo=UTC)
-                                                    s_said = dt.astimezone(UTC).date().isoformat()
-                                                except Exception:
-                                                    s_said = str(row[0])[:10]
-                                    except Exception:
-                                        pass
+                                found = evidence.entry_role_said(config, sess_id, entry_id)
+                                if found is not None and found[1]:
+                                    s_said = found[1]
                             if s_role and s_said:
                                 if not c_hash:
                                     c_hash = evidence.quote_check(
@@ -1549,21 +1516,10 @@ def _lookup_evidence(
                 if recorded_check == expected_check:
                     is_worker = _worker_digest_names(config, agent, sess_id)
                     origin = rules.WORKER if is_worker else rules.PRIMARY
-                    db_path = config.home / "evidence.sqlite"
-                    row = None
-                    if db_path.exists():
-                        try:
-                            with evidence._reading(config) as conn:
-                                query = (
-                                    "SELECT time, role FROM evidence "
-                                    "WHERE session_id = ? AND entry_id = ?"
-                                )
-                                row = conn.execute(query, (sess_id, entry_id)).fetchone()
-                        except Exception:
-                            row = None
-                    if row is not None:
-                        ev_date = str(row[0])[:10]
-                        is_yours = str(row[1]) == "user"
+                    found = evidence.entry_role_said(config, sess_id, entry_id)
+                    if found is not None:
+                        ev_date = found[1]
+                        is_yours = found[0] == "user"
                     else:
                         ev_date = recorded_said or fallback_date
                         is_yours = recorded_role == "user" if recorded_role else False
@@ -1574,15 +1530,9 @@ def _lookup_evidence(
             if db_path.exists():
                 try:
                     if evidence.find_quote(config, sess_id, entry_id, quote):
-                        with evidence._reading(config) as conn:
-                            query = (
-                                "SELECT time, role FROM evidence "
-                                "WHERE session_id = ? AND entry_id = ?"
-                            )
-                            row = conn.execute(query, (sess_id, entry_id)).fetchone()
-                        if row is not None:
-                            entry_time, entry_role = str(row[0]), str(row[1])
-                            entry_date = entry_time[:10]
+                        found = evidence.entry_role_said(config, sess_id, entry_id)
+                        if found is not None:
+                            entry_role, entry_date = found
                             is_yours = entry_role == "user"
                             is_worker = entry_role == "worker"
                             if not is_worker:
@@ -1653,18 +1603,9 @@ def _is_quote_yours(config: Config, resource: str, recorded_role: str = "") -> b
             agent_sess = parts[0].split("/")
             sess_id = agent_sess[-1]
             entry_id = parts[1]
-            db_path = config.home / "evidence.sqlite"
-            if db_path.exists():
-                try:
-                    with evidence._reading(config) as conn:
-                        row = conn.execute(
-                            "SELECT role FROM evidence WHERE session_id = ? AND entry_id = ?",
-                            (sess_id, entry_id),
-                        ).fetchone()
-                    if row is not None:
-                        return str(row[0]) == "user"
-                except Exception:
-                    pass
+            found = evidence.entry_role_said(config, sess_id, entry_id)
+            if found is not None:
+                return found[0] == "user"
             if recorded_role:
                 return recorded_role == "user"
     return False

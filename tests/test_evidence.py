@@ -937,6 +937,19 @@ def test_session_info_returns_agent_and_project_id(cfg):
     assert evidence.session_info(cfg, "s2") is None
 
 
+def test_entry_role_said_reads_role_and_utc_said_date(cfg):
+    """One archived entry's role and its UTC said-date (T37), or None when the
+    archive holds no row for the session or entry asked for, or no archive at all."""
+    assert evidence.entry_role_said(cfg, "s1", "e1") is None
+    evidence.store(cfg, "claude", "s1", None, [entry("e1", time=at(days=3), role="assistant")])
+    assert evidence.entry_role_said(cfg, "s1", "e1") == (
+        "assistant",
+        at(days=3).date().isoformat(),
+    )
+    assert evidence.entry_role_said(cfg, "s1", "no-such-entry") is None
+    assert evidence.entry_role_said(cfg, "another-session", "e1") is None
+
+
 def test_redact_pattern_rewrites_matching_rows_and_drains_log(cfg):
     entries = [
         entry("e1", text="secret key is sk-live-9876543210"),
