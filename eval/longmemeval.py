@@ -13,7 +13,9 @@ instead: each session is written as a Claude transcript and enqueued in haystack
 date order, ``work.run`` and a dream run follow once per session date with ``now``
 just after that date, and the question is scored three ways - the digest rows
 alone, the fraction of answer sessions any page line cites, and the production
-search with a page hit credited to the sessions its matched line cites. Each
+search from the sandbox project (BUILD-PLAN F74: ``project=`` the sandbox slug, so
+project rows rank first and the global pages next, the tier order production has)
+with a page hit credited to the sessions its matched line cites. Each
 question runs in its own sandbox under ``--workdir``: a home, a vault and a git
 repository registered as the sandbox's one project, outside the system temporary
 directory because a directory under it resolves to no project (DESIGN 7, F49).
@@ -581,6 +583,8 @@ class Sandbox:
     vault: Path
     repo: Path
     config: Config
+    slug: str
+    """The sandbox project's slug, which scoring searches from (BUILD-PLAN F74)."""
 
 
 @dataclass(frozen=True)
@@ -780,7 +784,9 @@ def pipeline_sandbox(root: Path, caller: Config, keep: dict[str, bool]) -> Itera
         resolution = keys.resolve(repo, registrymod.Registry.load(cfg.registry_path), cfg.host)
         if resolution.slug is None:
             raise PipelineError(f"the sandbox project resolved to no slug: {repo}")
-        yield Sandbox(root=root, home=home, vault=vault_dir, repo=repo, config=cfg)
+        yield Sandbox(
+            root=root, home=home, vault=vault_dir, repo=repo, config=cfg, slug=resolution.slug
+        )
     finally:
         if old_home is not None:
             os.environ[configmod.HOME_ENV] = old_home
@@ -942,11 +948,6 @@ def _session_of_source(resource: str) -> str | None:
     return parts[1].partition("#")[0] or None
 
 
-_CREATE_LINES = f"CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='{index.TOKENIZER}')"
-"""The in-memory retrieval table, stemmed exactly as ``aft.index`` stems its
-collections, built the way ``aft.dream.decide.related`` builds its own."""
-
-
 def _ranked_lines(words: Sequence[str], statements: Sequence[str]) -> list[int]:
     """The statements the words rank by stemmed BM25, best first, as their positions.
 
@@ -958,10 +959,16 @@ def _ranked_lines(words: Sequence[str], statements: Sequence[str]) -> list[int]:
         return []
     conn = sqlite3.connect(":memory:")
     try:
-        conn.execute(_CREATE_LINES)
+        # The table stems exactly as aft.index stems its collections (index.TOKENIZER,
+        # the way aft.dream.decide.related stems its own). The DDL is a literal because
+        # SQLite takes no parameters in CREATE VIRTUAL TABLE; the words and statements
+        # below all travel as bound parameters.
+        conn.execute(
+            "CREATE VIRTUAL TABLE lines USING fts5(statement, tokenize='porter unicode61')"
+        )
         conn.executemany(
             "INSERT INTO lines (rowid, statement) VALUES (?, ?)",
-            list(enumerate(statements)),
+            ((rowid, statement) for rowid, statement in enumerate(statements)),
         )
         match = " OR ".join(f'"{word}"' for word in words)
         ranked = conn.execute(
@@ -1109,17 +1116,23 @@ def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
     (a) ``digests``: the digest rows only, attributed by digest file name. (b)
     ``coverage``: the fraction of answer sessions any page line's source cites, an upper
     bound for curated memory rather than a ranking. (c) ``full``: the production search
-    over everything, with a page hit credited to the sessions its matched line cites,
-    each ranked session carrying the hit that credited it (BUILD-PLAN F72).
+    from the sandbox project (``project=`` the sandbox slug, BUILD-PLAN F74), so the tier
+    order matches production - project rows first, global pages next - with a page hit
+    credited to the sessions its matched line cites, each ranked session carrying the hit
+    that credited it (BUILD-PLAN F72).
     """
     cfg = sandbox.config
-    # Search deep enough to rank the whole haystack: search has no collection filter, so
-    # a shallow limit would let evidence and page rows crowd digest rows out of the
+    # The search pins the sandbox project (BUILD-PLAN F74): a session in the project
+    # searches project-first, global pages next, the tier order production has. With no
+    # project pinned the global pages keep tier 1 and every project row tier 2, so a
+    # global page outranks the project's answer however much better it matches. Search
+    # deep enough to rank the whole haystack: search has no collection filter, so a
+    # shallow limit would let evidence and page rows crowd digest rows out of the
     # digest-only ranking. The full ranking keeps hit order, so its top ten is unchanged.
     hits = search.search(
         cfg,
         case.question,
-        all_projects=True,
+        project=sandbox.slug,
         limit=max(SESSION_K, len(case.session_ids)) * (HITS_PER_SESSION + 1),
         now=case.question_date,
     )
@@ -1549,7 +1562,13 @@ def _rescore_sandbox(root: Path) -> Iterator[Sandbox]:
     try:
         os.environ[configmod.HOME_ENV] = str(home)
         cfg = configmod.load()
-        yield Sandbox(root=root, home=home, vault=cfg.vault, repo=root / "project", config=cfg)
+        repo = root / "project"
+        resolution = keys.resolve(repo, registrymod.Registry.load(cfg.registry_path), cfg.host)
+        if resolution.slug is None:
+            raise PipelineError(f"the sandbox project resolved to no slug: {repo}")
+        yield Sandbox(
+            root=root, home=home, vault=cfg.vault, repo=repo, config=cfg, slug=resolution.slug
+        )
     finally:
         if old_home is not None:
             os.environ[configmod.HOME_ENV] = old_home

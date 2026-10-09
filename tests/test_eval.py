@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+from aft import config as configmod
 from aft import eval as evalmod
 from aft import index, inject, keys, model, search
 from aft.cli import main
@@ -1182,6 +1183,96 @@ def test_line_ranking_orders_by_stemmed_bm25():
     assert longmemeval._ranked_lines(["cache"], []) == []
 
 
+# The two pages a pinning test reads: the project page answers the question and cites the
+# answer session; the global page matches just as well and cites another session. Which
+# page ranks first is decided by the tier alone, not by the text.
+PIN_PROJECT_PAGE = """\
+---
+type: Project
+title: Sandbox project
+description: The one project the sandbox registers.
+sources:
+  - id: s1
+    resource: aft://session/claude/answer_1#u1
+    quote: the daemon listens on 8123
+aft:
+  project: {project_id}
+---
+
+## Facts
+
+- The daemon listens on 8123. [observed] 2026-09-30 [^s1]
+"""
+
+PIN_GLOBAL_PAGE = """\
+---
+type: Preferences
+title: Preferences
+description: Global preferences.
+sources:
+  - id: s1
+    resource: aft://session/claude/global_1#u1
+    quote: the daemon listens on 8123
+---
+
+## Preferences
+
+- The daemon listens on 8123. [stated] 2026-09-30 [^s1]
+"""
+
+
+def pin_case() -> longmemeval.QuestionCase:
+    """A question both pages answer, whose answer session only the project page cites."""
+    return longmemeval.QuestionCase(
+        question="What port does the daemon listen on?",
+        question_type="single-session-user",
+        question_date=datetime(2023, 5, 20, 2, 21, tzinfo=UTC),
+        session_ids=("answer_1", "global_1"),
+        sessions=((), ()),
+        answer_session_ids=("answer_1",),
+    )
+
+
+def test_pipeline_scoring_searches_from_the_sandbox_project(home, tmp_path, monkeypatch):
+    """Scoring searches with the sandbox project pinned (BUILD-PLAN F74).
+
+    A session in the project searches project-first, the global pages next - the tier
+    order production has. With nothing pinned, the global pages keep tier 1 and every
+    project row tier 2, so the global page would outrank the project's answer however
+    much better the project line matches.
+    """
+    caller = configmod.load()
+    with longmemeval.pipeline_sandbox(
+        tmp_path / "work" / "q-pin", caller, {"keep": False}
+    ) as sandbox:
+        project = Registry.load(sandbox.config.registry_path).projects[0]
+        write(
+            sandbox.vault / "projects" / sandbox.slug / "overview.md",
+            PIN_PROJECT_PAGE.format(project_id=project.id),
+        )
+        write(sandbox.vault / "global" / "preferences.md", PIN_GLOBAL_PAGE)
+        captured: dict[str, Any] = {}
+        real_search = search.search
+
+        def spy(config: Any, query: str, **kwargs: Any) -> list[search.Hit]:
+            captured.update(kwargs)
+            return real_search(config, query, **kwargs)
+
+        monkeypatch.setattr(search, "search", spy)
+        scoring = longmemeval.score_question(sandbox, pin_case())
+
+    assert captured.get("project") == sandbox.slug
+    assert not captured.get("all_projects", False)
+    full = scoring["full"]
+    # The project page's row is tier 0, so its session ranks first; the global page's row
+    # is tier 1 and still answers, behind it.
+    assert full["ranked_sessions"] == ["answer_1", "global_1"]
+    first = full["ranked_hits"][0]
+    assert first["collection"] == index.PAGES
+    assert first["path"] == f"projects/{sandbox.slug}/overview.md"
+    assert first["statement"] == "The daemon listens on 8123."
+
+
 def test_pipeline_runs_a_two_session_haystack_end_to_end(home, tmp_path):
     """The answer session's fact reaches a page line, and every ranking credits its session."""
     dataset = write_dataset(tmp_path / "longmemeval_s.json", HASH_QUESTION)
@@ -1388,6 +1479,9 @@ def test_rescore_reranks_a_kept_sandbox_without_the_model(home, tmp_path, monkey
     (fresh,) = longmemeval._read_records(rescored_path)
     assert fresh["id"] == "q-hash"
     assert fresh["rankings"] == original["rankings"]
+    # A rescore that could not read the sandbox back would keep the old rankings and say
+    # why in rescore_error; this one re-scored the sandbox whole.
+    assert "rescore_error" not in fresh
     assert fresh["session_outcomes"] == {"answer_1": "digested", "distractor_1": "digested"}
 
 
