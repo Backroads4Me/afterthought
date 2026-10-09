@@ -1,0 +1,48 @@
+{
+  "session_id": "synthetic-profile-personal",
+  "agent": "claude",
+  "case": "user personal profile facts across core categories",
+  "notes": "The user shares facts covering their name, language fluency, partner, hobby, account used, and lasting fitness goal. All are asserted directly in the user's own words. The key holds all six profile facts with scope global, and holds no unstated inferences.",
+  "facts": [
+    {
+      "statement": "The user's name is Marcus and they like to be addressed as Marcus.",
+      "quote": "My name is Marcus and please call me Marcus",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user speaks English and conversational German.",
+      "quote": "I speak English and conversational German",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user and their partner Elena build wooden sea kayaks.",
+      "quote": "My partner Elena and I build wooden sea kayaks in our garage workshop",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user tracks training metrics on Strava.",
+      "quote": "I track training metrics on Strava using an open-source sync tool",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user's lasting goal is to complete an Olympic-distance triathlon by next autumn.",
+      "quote": "My lasting goal is to complete an Olympic-distance triathlon by next autumn",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    }
+  ]
+}

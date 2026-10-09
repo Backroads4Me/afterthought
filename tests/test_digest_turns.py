@@ -1243,14 +1243,19 @@ def test_skip_marker_is_never_removed_from_compacted_blocks():
 
 
 def test_the_turns_prompt_includes_the_users_own_life():
-    """BUILD-PLAN F73: a turn's fact covers what the user states about themselves, a
+    """BUILD-PLAN F73, F76: a turn's fact covers what the user states about themselves, a
     preference covers personal tastes, and a fact about the user's own life is global."""
     words = " ".join(digest.turns_prompt_text().split())
     assert (
-        "or about themselves: interests, hobbies and skills they are learning, activities "
-        "and events they took part in, things they own or bought, plans, people in their "
-        "life, places, and quantities and dates (\"I've restored three vintage radios since "
-        'I started the hobby")' in words
+        "or about themselves: name and how they like to be addressed; where they live "
+        "and their time zone; work, role and expertise; languages they speak; family, "
+        "partner and pets; health conditions they mention as affecting their work or plans; "
+        "main hobbies and interests; tools, devices and accounts they use; lasting goals; "
+        "activities and events they took part in; things they own or bought; and quantities "
+        'and dates ("I\'ve restored three vintage radios since I started the hobby"). '
+        "A detail in doubt about the user's own life is kept when the user stated it in "
+        "their own words; nothing is inferred into the profile (no guessing income, age "
+        "or personality from style)." in words
     )
     assert 'including personal tastes ("I prefer matinee showings")' in words
     assert (

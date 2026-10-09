@@ -263,3 +263,15 @@ def test_git_accepts_custom_timeout(initialized, monkeypatch):
     monkeypatch.setattr(subprocess, "run", intercept_run)
     git(["status"], cwd=initialized.vault, timeout=45.0)
     assert recorded_timeouts[-1] == 45.0
+
+
+def test_init_creates_global_profile(cfg):
+    """vault.init creates global/profile.md with the profile template."""
+    created = vault.init(cfg)
+    assert "global/profile.md" in created
+
+    profile_path = cfg.vault / "global" / "profile.md"
+    assert profile_path.is_file()
+    content = profile_path.read_text(encoding="utf-8")
+    assert "type: Profile" in content
+    assert "## Facts" in content

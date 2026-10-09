@@ -1661,3 +1661,75 @@ def test_two_directories_of_one_name_record_two_names(widget, tmp_path, capsys, 
     second_record = queue.recorded_project(widget, "claude", "s-foo-2")
     assert (first_record.slug, str(first_record.path)) == ("foo", str(first))
     assert (second_record.slug, str(second_record.path)) == ("yard-foo", str(second))
+
+
+def test_inject_places_profile_after_project_sections(widget, tmp_path):
+    """BUILD-PLAN F76: profile facts land under ## Profile, placed after project sections
+    and before global preferences."""
+    profile_text = """---
+type: Profile
+title: Profile
+description: Who you are, your background and lasting context.
+sources:
+  - id: s1
+    resource: aft://session/c/1#e1
+    title: Profile note
+    quote: "I live in Halifax"
+---
+
+## Facts
+
+- The user lives in Halifax in Atlantic time. [stated] 2026-10-06 [^s1]
+"""
+    write(widget.vault / "global/profile.md", profile_text)
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "## Profile\n\n- The user lives in Halifax in Atlantic time." in block
+
+    # Verify order: project sections before Profile, Profile before Preferences
+    decisions_idx = block.find("## Decisions")
+    profile_idx = block.find("## Profile")
+    last_prefs_idx = block.rfind("## Preferences")
+    assert decisions_idx != -1
+    assert profile_idx != -1
+    assert last_prefs_idx != -1
+    assert decisions_idx < profile_idx < last_prefs_idx
+
+
+def test_profile_is_the_first_layer_cut_under_budget(widget, tmp_path):
+    """BUILD-PLAN F76: profile is the first layer cut under budget, and coding memory is
+    never cut for profile lines."""
+    profile_text = """---
+type: Profile
+title: Profile
+description: Who you are.
+sources:
+  - id: s1
+    resource: aft://session/c/1#e1
+    title: Profile note
+    quote: "I live in Halifax"
+---
+
+## Facts
+
+- The user lives in Halifax in Atlantic time. [stated] 2026-10-06 [^s1]
+- The user works as a data platform engineer. [stated] 2026-10-06 [^s1]
+"""
+    write(widget.vault / "global/profile.md", profile_text)
+    full_block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    assert "## Profile" in full_block
+
+    (widget.vault / "global/profile.md").unlink()
+    no_profile_block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    write(widget.vault / "global/profile.md", profile_text)
+
+    # Set budget tight enough that coding memory fits but full profile does not
+    cap = dataclasses.replace(widget.settings.inject, max_chars=len(no_profile_block) + 20)
+    tight_settings = dataclasses.replace(widget.settings, inject=cap)
+    tight_cfg = dataclasses.replace(widget, settings=tight_settings)
+    tight_block = inject.build(tight_cfg, resolve(tight_cfg, tmp_path / "widget"))
+
+    # Coding memory retains its lines
+    assert "## Decisions" in tight_block
+    assert "- Storage is SQLite." in tight_block
+    # Profile was cut first and cut notice appears
+    assert "## Cut" in tight_block

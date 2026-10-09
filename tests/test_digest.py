@@ -3776,14 +3776,20 @@ def test_the_digest_prompt_gives_every_fact_one_value_test():
 
 
 def test_the_digest_prompt_includes_the_users_own_life():
-    """F73: what the user states about themselves is fact material, a personal taste is
+    """F73, F76: what the user states about themselves is fact material, a personal taste is
     a preference, and a fact about the user's own life is global scope."""
     words = prompt_words()
     assert (
-        "A fact includes what the user states about themselves: interests, hobbies and "
-        "skills they are learning, activities and events they took part in, things they "
-        "own or bought, plans, people in their life, places, and quantities and dates "
-        '("I\'ve restored three vintage radios since I started the hobby").' in words
+        "A fact includes what the user states about themselves: name and how they like to be "
+        "addressed; where they live and their time zone; work, role and expertise; languages "
+        "they speak; family, partner and pets; health conditions they mention as affecting "
+        "their work or plans; main hobbies and interests; tools, devices and accounts they "
+        "use; lasting goals; activities and events they took part in; things they own or bought; "
+        "and quantities and dates (\"I've restored three vintage radios since I started "
+        'the hobby"). '
+        "A detail in doubt about the user's own life is kept when the user stated it in their "
+        "own words; nothing is inferred into the profile (no guessing income, age or personality "
+        "from style)." in words
     )
     assert 'A preference includes personal tastes ("I prefer matinee showings").' in words
     assert "A fact about the user's own life is global scope." in words

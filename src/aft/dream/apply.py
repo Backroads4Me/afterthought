@@ -585,17 +585,20 @@ def run_project(
                         target_file, _recent_text(page_slug, project, run_project_id)
                     )
             elif new_fact.scope == "global":
-                g_file = "preferences.md" if new_fact.kind == "preference" else "environment.md"
+                if new_fact.kind == "preference":
+                    g_file = "preferences.md"
+                    default_content = vaultmod.PREFERENCES
+                elif new_fact.kind == "state":
+                    g_file = "environment.md"
+                    default_content = vaultmod.ENVIRONMENT
+                else:
+                    g_file = "profile.md"
+                    default_content = vaultmod.PROFILE
                 target_file = vault_path / "global" / g_file
                 if not target_file.exists():
                     target_file.parent.mkdir(parents=True, exist_ok=True)
-                    content = (
-                        vaultmod.PREFERENCES
-                        if new_fact.kind == "preference"
-                        else vaultmod.ENVIRONMENT
-                    )
                     record_write(target_file)
-                    pagewrite.atomic_write_text(target_file, content)
+                    pagewrite.atomic_write_text(target_file, default_content)
                 else:
                     record_write(target_file)
             else:

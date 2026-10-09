@@ -63,6 +63,17 @@ sources: []
 ## Facts
 """
 
+PROFILE = """\
+---
+type: Profile
+title: Profile
+description: Who you are, your background and lasting context.
+sources: []
+---
+
+## Facts
+"""
+
 NEEDS_YOU = """\
 ---
 type: Needs You
@@ -166,6 +177,7 @@ def initial_files(config: Config) -> dict[str, str]:
         "registry.yaml": f"version: {REGISTRY_VERSION}\nprojects: []\n",
         "global/preferences.md": PREFERENCES,
         "global/environment.md": ENVIRONMENT,
+        "global/profile.md": PROFILE,
         "reports/needs-you.md": NEEDS_YOU,
         ".obsidian/app.json": json.dumps(OBSIDIAN_APP, indent=2) + "\n",
         ".obsidian/graph.json": json.dumps(OBSIDIAN_GRAPH, indent=2) + "\n",
