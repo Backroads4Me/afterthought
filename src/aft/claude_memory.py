@@ -283,9 +283,9 @@ def render(candidate: Candidate, stamp: str) -> tuple[str, str]:
     for statement, quote in candidate.lines:
         parsed = evidence.parse_resource(candidate.resource)
         c_hash = (
-            evidence.quote_check(parsed[0], parsed[1], quote)
+            evidence.library_quote_check(parsed[0], parsed[1], quote)
             if parsed
-            else evidence.quote_check(
+            else evidence.library_quote_check(
                 RESOURCE_ROOT, f"{candidate.project.slug}/{candidate.path.name}", quote
             )
         )

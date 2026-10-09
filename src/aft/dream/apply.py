@@ -632,19 +632,75 @@ def run_project(
                 s_said = str(src_entry.get("said", ""))
                 s_role = str(src_entry.get("role", ""))
                 c_hash = str(src_entry.get("check", ""))
-                if not c_hash and res:
+                if res:
                     parsed = evidence.parse_resource(res)
                     if parsed:
                         if res.startswith("aft://session/"):
+                            sess_id, entry_id = parsed
                             if not s_role:
-                                s_role = "user"
-                            if not s_said:
-                                s_said = new_fact.date or today
-                            c_hash = evidence.quote_check(parsed[0], parsed[1], s_role, s_said, q)
-                        else:
-                            c_hash = evidence.quote_check(parsed[0], parsed[1], q)
-                        if not v_date:
-                            v_date = today
+                                db_path = config.home / "evidence.sqlite"
+                                row = None
+                                if db_path.exists():
+                                    try:
+                                        with evidence._reading(config) as conn:
+                                            row = conn.execute(
+                                                "SELECT role, time FROM evidence"
+                                                " WHERE session_id = ? AND entry_id = ?",
+                                                (sess_id, entry_id),
+                                            ).fetchone()
+                                    except Exception:
+                                        row = None
+                                if row is not None:
+                                    s_role = str(row[0]) if row[0] else ""
+                                    if row[1]:
+                                        try:
+                                            dt = datetime.fromisoformat(str(row[1]))
+                                            if dt.tzinfo is None:
+                                                dt = dt.replace(tzinfo=UTC)
+                                            s_said = dt.astimezone(UTC).date().isoformat()
+                                        except Exception:
+                                            s_said = str(row[1])[:10]
+                                else:
+                                    s_role = ""
+                                    s_said = ""
+                                    c_hash = ""
+                            elif not s_said:
+                                db_path = config.home / "evidence.sqlite"
+                                if db_path.exists():
+                                    try:
+                                        with evidence._reading(config) as conn:
+                                            row = conn.execute(
+                                                "SELECT time FROM evidence"
+                                                " WHERE session_id = ? AND entry_id = ?",
+                                                (sess_id, entry_id),
+                                            ).fetchone()
+                                            if row is not None and row[0]:
+                                                try:
+                                                    dt = datetime.fromisoformat(str(row[0]))
+                                                    if dt.tzinfo is None:
+                                                        dt = dt.replace(tzinfo=UTC)
+                                                    s_said = dt.astimezone(UTC).date().isoformat()
+                                                except Exception:
+                                                    s_said = str(row[0])[:10]
+                                    except Exception:
+                                        pass
+                            if s_role and s_said:
+                                if not c_hash:
+                                    c_hash = evidence.quote_check(
+                                        sess_id, entry_id, s_role, s_said, q
+                                    )
+                                if not v_date:
+                                    v_date = today
+                            else:
+                                s_role = ""
+                                s_said = ""
+                                c_hash = ""
+                        elif evidence.is_library_resource(res):
+                            collection, within = parsed
+                            if not c_hash:
+                                c_hash = evidence.library_quote_check(collection, within, q)
+                            if not v_date:
+                                v_date = today
 
                 sid: str | None = None
                 for existing_id, existing_s in doc.sources.items():
@@ -1393,7 +1449,11 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
 
 
 def _lookup_library_evidence(
-    config: Config, resource: str, quote: str, fallback_date: str
+    config: Config,
+    resource: str,
+    quote: str,
+    fallback_date: str = "",
+    source_entry: dict | None = None,
 ) -> tuple[bool, str, str, bool]:
     """Whether a collection quote stands, and what it is worth.
 
@@ -1408,15 +1468,6 @@ def _lookup_library_evidence(
     the home directory is gone. What a person excluded keeps no copy at all, so its proof is the
     record `aft library propose` left, which holds the quote as it was checked.
     """
-
-
-def _lookup_library_evidence(
-    config: Config,
-    resource: str,
-    quote: str,
-    fallback_date: str = "",
-    source_entry: dict | None = None,
-) -> tuple[bool, str, str, bool]:
     from aft.library import importing
     from aft.library.propose import is_verified_import_quote
     from aft.library.survey import file_sha256
@@ -1434,7 +1485,7 @@ def _lookup_library_evidence(
     # F75: Verify digest-time check record if present
     recorded_check = source_entry.get("check") if source_entry else None
     if recorded_check:
-        expected_check = evidence.quote_check(collection, within, quote)
+        expected_check = evidence.library_quote_check(collection, within, quote)
         if recorded_check == expected_check:
             return stands
 

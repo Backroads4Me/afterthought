@@ -2262,7 +2262,7 @@ def _add(
     """
     v_date = datetime.now(UTC).date().isoformat()
     fact_said = fact.date or v_date
-    fact_role = USER
+    fact_role = ""
     prop_said = fact.date or v_date
     if config is not None:
         try:
@@ -2298,9 +2298,15 @@ def _add(
         except Exception:
             pass
 
-    check_hash = evidence.quote_check(
-        session.session_id, fact.entry, fact_role, fact_said, fact.quote
-    )
+    if fact_role and fact_said:
+        check_hash = evidence.quote_check(
+            session.session_id, fact.entry, fact_role, fact_said, fact.quote
+        )
+    else:
+        check_hash = ""
+        fact_said = ""
+        fact_role = ""
+
     source = doc.add_source(
         f"aft://session/{session.agent}/{session.session_id}#{fact.entry}",
         title=f"{session.agent} session {session.session_id}",
@@ -2315,6 +2321,11 @@ def _add(
         entry = fact.proposal[0]
         quote = fact.proposal[1]
         prop_role = "assistant"
+        prop_check = (
+            evidence.quote_check(session.session_id, entry, prop_role, prop_said, quote)
+            if prop_said
+            else ""
+        )
         sources.append(
             doc.add_source(
                 f"aft://session/{session.agent}/{session.session_id}#{entry}",
@@ -2323,7 +2334,7 @@ def _add(
                 verified=v_date,
                 said=prop_said,
                 role=prop_role,
-                check=evidence.quote_check(session.session_id, entry, prop_role, prop_said, quote),
+                check=prop_check,
             )
         )
     doc.add_fact(fact.kind, fact.statement, fact.source, fact.date, sources)

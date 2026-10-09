@@ -741,7 +741,9 @@ def propose_facts(
                         "quote": vf.fact.quote,
                         "verified": today_str,
                         "said": today_str,
-                        "check": evidence.quote_check(manifest.name, vf.fact.file, vf.fact.quote),
+                        "check": evidence.library_quote_check(
+                            manifest.name, vf.fact.file, vf.fact.quote
+                        ),
                     }
                 )
                 aft_facts_list.append(

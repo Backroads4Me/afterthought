@@ -161,7 +161,7 @@ def write_digest(
                 if "check" not in cs and res:
                     parsed = evidence.parse_resource(res)
                     if parsed:
-                        cs["check"] = evidence.quote_check(parsed[0], parsed[1], q)
+                        cs["check"] = evidence.library_quote_check(parsed[0], parsed[1], q)
         else:
             if "check" not in s:
                 cs.pop("role", None)
@@ -4352,3 +4352,132 @@ def test_f75_r4_compares_said_not_verified_with_digest_made_days_after_turn(
     rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
     assert len(rep.superseded) == 0
     assert len(rep.conflicts) == 1
+
+
+def test_f75_pre_f75_assistant_source_carried_onto_page_gets_assistant_role_and_purged_not_yours(
+    initialized, home, fake
+):
+    """A pre-F75 assistant source carried onto a page gets role assistant from the archive,
+    and after a purge does not count as the user's (F75)."""
+    from aft.readers import Entry
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "The migration was completed in background."
+    statement = "The migration was completed in background."
+
+    # Archive row has role assistant
+    evidence.store(
+        cfg,
+        agent="claude",
+        session_id="sess1",
+        project_id="p_widget",
+        entries=[
+            Entry(
+                id="e1",
+                time=NOW,
+                role="assistant",
+                text=quote,
+                is_error=False,
+            )
+        ],
+    )
+
+    # Pre-F75 digest: no role, no said, no check
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-pre-f75",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    assert len(rep.added) == 1
+    assert rep.added[0].statement == statement
+
+    # The source carried onto the page gets role assistant from the archive
+    overview_path = cfg.vault / "projects" / "widget" / "overview.md"
+    ov_doc = pagewrite.PageDoc.read(overview_path)
+    page_sources = list(ov_doc.sources.values())
+    assert len(page_sources) == 1
+    src = page_sources[0]
+    assert src["role"] == "assistant"
+    assert src["said"] == TODAY
+    assert src["check"] == evidence.quote_check("sess1", "e1", "assistant", TODAY, quote)
+
+    # Purge the archive
+    evidence.purge(cfg, NOW + timedelta(days=95))
+    with evidence._reading(cfg) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 0
+
+    # After a purge, it does not count as the user's
+    v, origin, ev_date, is_yours = apply._lookup_evidence(
+        cfg,
+        src["resource"],
+        src["quote"],
+        source_entry=src,
+    )
+    assert v is True
+    assert is_yours is False
+    assert apply._is_quote_yours(cfg, src["resource"], recorded_role=src["role"]) is False
+
+
+def test_f75_source_with_purged_archive_and_no_recorded_role_writes_no_role_said_check(
+    initialized, home, fake
+):
+    """If the archive row is gone and nothing is recorded, write no role, said or check (F75)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    register(cfg, "widget")
+
+    quote = "Background task ran."
+    statement = "Background task ran."
+
+    # A digest whose archive row is missing and has no check
+    dpath = write_digest(
+        cfg,
+        "widget",
+        "d-missing-row",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": quote,
+            }
+        ],
+        store_evidence=False,
+        with_check=False,
+    )
+
+    fake.script = [reply("add")]
+    rep = apply.run_project(cfg, "widget", [dpath], now=NOW)
+    # Since evidence is not verified without archive row or check hash, it is rejected at R1
+    assert len(rep.rejected) == 1
+    assert rep.rejected[0].rule == "R1"

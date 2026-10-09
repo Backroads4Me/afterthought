@@ -160,7 +160,7 @@ def test_propose_facts_from_notes(library_env):
     assert source["quote"] == "Always connect ground before positive terminal."
     assert "verified" in source
     assert "said" in source
-    assert source["check"] == evidence.quote_check("rvc", "notes.md", source["quote"])
+    assert source["check"] == evidence.library_quote_check("rvc", "notes.md", source["quote"])
 
     assert "## Lessons" in body
     assert lint.lint_vault(cfg.vault) == []

@@ -395,18 +395,14 @@ def quote_check(
     session_id: str,
     entry_id: str,
     role: str,
-    said: str = "",
-    quote: str = "",
+    said: str,
+    quote: str,
 ) -> str:
-    """The digest-time verification hash (BUILD-PLAN F75).
+    """The digest-time verification hash for session sources (BUILD-PLAN F75).
 
-    For session sources: sha256 of (session id, entry id, role, said, quote).
-    For library resources: sha256 of (collection, within, quote).
+    sha256 of (session id, entry id, role, said, quote).
     """
-    if not said and not quote:
-        raw = f"{session_id}:{entry_id}:{role.strip()}"
-    else:
-        raw = f"{session_id}:{entry_id}:{role}:{said}:{quote.strip()}"
+    raw = f"{session_id}:{entry_id}:{role}:{said}:{quote.strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
