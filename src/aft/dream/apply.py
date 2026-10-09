@@ -629,13 +629,22 @@ def run_project(
                 q = str(src_entry.get("quote", ""))
                 title = str(src_entry.get("title", ""))
                 v_date = str(src_entry.get("verified", ""))
+                s_said = str(src_entry.get("said", ""))
+                s_role = str(src_entry.get("role", ""))
                 c_hash = str(src_entry.get("check", ""))
                 if not c_hash and res:
                     parsed = evidence.parse_resource(res)
                     if parsed:
-                        c_hash = evidence.quote_check(parsed[0], parsed[1], q)
+                        if res.startswith("aft://session/"):
+                            if not s_role:
+                                s_role = "user"
+                            if not s_said:
+                                s_said = new_fact.date or today
+                            c_hash = evidence.quote_check(parsed[0], parsed[1], s_role, s_said, q)
+                        else:
+                            c_hash = evidence.quote_check(parsed[0], parsed[1], q)
                         if not v_date:
-                            v_date = new_fact.date or today
+                            v_date = today
 
                 sid: str | None = None
                 for existing_id, existing_s in doc.sources.items():
@@ -644,7 +653,13 @@ def run_project(
                         break
                 if sid is None and res and q:
                     sid = doc.add_source(
-                        resource=res, title=title, quote=q, verified=v_date, check=c_hash
+                        resource=res,
+                        title=title,
+                        quote=q,
+                        verified=v_date,
+                        said=s_said,
+                        role=s_role,
+                        check=c_hash,
                     )
                 if sid:
                     refs_to_use.append(sid)
@@ -1411,8 +1426,8 @@ def _lookup_library_evidence(
     if not collection or not within:
         return False, rules.LIBRARY, fallback_date, False
 
-    recorded_date = str(source_entry.get("verified", "")) if source_entry else ""
-    ev_date = recorded_date or fallback_date
+    recorded_said = str(source_entry.get("said", "")) if source_entry else ""
+    ev_date = recorded_said or fallback_date
     stands = True, rules.LIBRARY, ev_date, False
     refused = False, rules.LIBRARY, ev_date, False
 
@@ -1472,17 +1487,32 @@ def _lookup_evidence(
             # F75: Check digest-time verification record
             recorded_check = source_entry.get("check") if source_entry else None
             if recorded_check:
-                expected_check = evidence.quote_check(sess_id, entry_id, quote)
+                recorded_role = str(source_entry.get("role", "")) if source_entry else ""
+                recorded_said = str(source_entry.get("said", "")) if source_entry else ""
+                expected_check = evidence.quote_check(
+                    sess_id, entry_id, recorded_role, recorded_said, quote
+                )
                 if recorded_check == expected_check:
-                    recorded_date = str(source_entry.get("verified", "")) if source_entry else ""
-                    ev_date = recorded_date or fallback_date
                     is_worker = _worker_digest_names(config, agent, sess_id)
                     origin = rules.WORKER if is_worker else rules.PRIMARY
-                    title = str(source_entry.get("title", "")) if source_entry else ""
-                    if "(the proposal approved)" in title:
-                        is_yours = False
+                    db_path = config.home / "evidence.sqlite"
+                    row = None
+                    if db_path.exists():
+                        try:
+                            with evidence._reading(config) as conn:
+                                query = (
+                                    "SELECT time, role FROM evidence "
+                                    "WHERE session_id = ? AND entry_id = ?"
+                                )
+                                row = conn.execute(query, (sess_id, entry_id)).fetchone()
+                        except Exception:
+                            row = None
+                    if row is not None:
+                        ev_date = str(row[0])[:10]
+                        is_yours = str(row[1]) == "user"
                     else:
-                        is_yours = _is_quote_yours(config, resource, default=True)
+                        ev_date = recorded_said or fallback_date
+                        is_yours = recorded_role == "user" if recorded_role else False
                     return True, origin, ev_date, is_yours
 
             # Pre-F75 or hash mismatch: verify against archive
@@ -1557,7 +1587,7 @@ def _is_quote_verified(config: Config, resource: str, quote: str) -> bool:
     return v
 
 
-def _is_quote_yours(config: Config, resource: str, default: bool = False) -> bool:
+def _is_quote_yours(config: Config, resource: str, recorded_role: str = "") -> bool:
     if evidence.is_library_resource(resource):
         return False
     if resource.startswith("aft://edit/"):
@@ -1580,8 +1610,10 @@ def _is_quote_yours(config: Config, resource: str, default: bool = False) -> boo
                     if row is not None:
                         return str(row[0]) == "user"
                 except Exception:
-                    return False
-    return default
+                    pass
+            if recorded_role:
+                return recorded_role == "user"
+    return False
 
 
 def _turn_text(config: Config, resource: str) -> str | None:

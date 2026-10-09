@@ -303,6 +303,8 @@ def archive_superseded(
                             title=title,
                             quote=q,
                             verified=str(src_entry.get("verified", "")),
+                            said=str(src_entry.get("said", "")),
+                            role=str(src_entry.get("role", "")),
                             check=str(src_entry.get("check", "")),
                         )
                     ref_mapping[ref] = target_id

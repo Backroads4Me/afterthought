@@ -490,7 +490,7 @@ search and `aft trace` one uniform record of both agents' sessions, independent 
 agent's own cleanup (Claude Code on this host keeps 90 days; pi sets no limit), and it lets
 `aft redigest` regenerate recent digests when the prompts improve. Its job is short-term: the memories themselves are the digests and curated
 pages, which keep their verbatim quotes permanently. Each source records its verification
-date and check hash when verified at digest time, so waiting digests and recurrence aging
+date, said date, role, and check hash (sha256 of session id, entry id, role, said, quote) when verified at digest time, so waiting digests and recurrence aging
 survive purge and vault cloning. Filtered conversation is therefore
 purged after 90 days by default, configurable in `config.toml`. The archive is evidence,
 never memory: nothing in it is injected.

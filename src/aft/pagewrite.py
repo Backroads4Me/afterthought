@@ -290,6 +290,8 @@ class PageDoc:
         title: str = "",
         quote: str = "",
         verified: str = "",
+        said: str = "",
+        role: str = "",
         check: str = "",
     ) -> str:
         """Add a source to the frontmatter and return its id (design 6, sources).
@@ -315,6 +317,10 @@ class PageDoc:
         entry.append(f"  quote: {_scalar(quote)}")
         if verified:
             entry.append(f"  verified: {_scalar(verified)}")
+        if said:
+            entry.append(f"  said: {_scalar(said)}")
+        if role:
+            entry.append(f"  role: {_scalar(role)}")
         if check:
             entry.append(f"  check: {_scalar(check)}")
         key = self._key_line("sources", bounds)

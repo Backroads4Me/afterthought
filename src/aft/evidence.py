@@ -391,9 +391,28 @@ verifies a fact and carries no recurrence: the gate counts it nothing, and so do
 person reads on a candidate."""
 
 
-def quote_check(session_id: str, entry_id: str, quote: str) -> str:
-    """The digest-time verification hash of (session id, entry id, quote) (BUILD-PLAN F75)."""
-    raw = f"{session_id}:{entry_id}:{quote.strip()}"
+def quote_check(
+    session_id: str,
+    entry_id: str,
+    role: str,
+    said: str = "",
+    quote: str = "",
+) -> str:
+    """The digest-time verification hash (BUILD-PLAN F75).
+
+    For session sources: sha256 of (session id, entry id, role, said, quote).
+    For library resources: sha256 of (collection, within, quote).
+    """
+    if not said and not quote:
+        raw = f"{session_id}:{entry_id}:{role.strip()}"
+    else:
+        raw = f"{session_id}:{entry_id}:{role}:{said}:{quote.strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def library_quote_check(collection: str, within: str, quote: str) -> str:
+    """The verification hash of (collection, within, quote) for library resources."""
+    raw = f"{collection}:{within}:{quote.strip()}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

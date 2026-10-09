@@ -294,6 +294,7 @@ def render(candidate: Candidate, stamp: str) -> tuple[str, str]:
             title=candidate.path.name,
             quote=quote,
             verified=candidate.body_date,
+            said=candidate.body_date,
             check=c_hash,
         )
         doc.add_fact("fact", statement, "inferred", candidate.body_date, [source_id])
