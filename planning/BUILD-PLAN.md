@@ -1525,8 +1525,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   report to `[inferred]` (coding key: 4 observed facts against 172 before M2), and
   `[inferred]` lines never pass R3 in practice (real vault: 552 candidates, none promoted).
   - **Key tokens:** the statement's checkable tokens: a word holding a digit or one of
-    `_/.:-` or an internal capital (the R2 definition), a backticked span, a host, port,
-    path, version, flag or config key. Plain words are not checked.
+    `_/.:-` or a capital past its first letter (`GitHub`, `SessionStart`), and a
+    backticked span with no whitespace. A word whose only capital is its first letter
+    (`Claude`, `Groq`) is a plain word here, and a backticked span holding whitespace (a
+    command such as `aft project add`) is checked word by word under the same rule. Hosts,
+    ports, paths, versions, flags and config keys hold a digit or one of `_/.:-`, so they
+    are tokens. Plain words are not checked.
   - **Rule:** a quote from an assistant entry is `[observed]` when the same part holds at
     least one tool result or error, and every key token of the statement appears verbatim
     in that part's tool results or errors (case-sensitive; a backticked span counts as one
