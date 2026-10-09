@@ -1483,6 +1483,30 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     counts a signal older than retention at half weight. Review checkpoint: yes (trust
     rule; lead reviews in full).
 
+- **F76 A basic user profile, coding memory first** (ruling 2026-10-09; roadmap 9.3; builds
+  on F73). Memory keeps a short profile of who the user is, without lowering what coding
+  memory keeps or admitting noise from coding sessions.
+  - **Profile categories:** `turns.md` and `digest.md` name what a fact about the user
+    covers: name and how they like to be addressed; where they live and their time zone;
+    work, role and expertise; languages they speak; family, partner and pets; health
+    conditions they mention as affecting their work or plans; main hobbies and interests;
+    tools, devices and accounts they use; and lasting goals. A detail in doubt about the
+    user's own life is kept when the user stated it in their own words; nothing is
+    inferred into the profile (no guessing income, age or personality from style).
+  - **Placement:** profile facts are `global` scope and land on a global profile page
+    (`global/profile.md`, sections by kind as other pages), injected with the global
+    preferences under the existing `inject.max_chars` budget, after the project's own
+    sections so coding memory is never cut for profile lines.
+  - **Test set:** add synthetic sessions under `eval/digest/synthetic/` written fresh (never
+    copied from LongMemEval or another benchmark): mixed coding and personal sessions with
+    expected profile facts and expected non-facts. Examples are neutral and invented.
+  - **Measure, before merging:** profile recall on the synthetic set rises; coding precision
+    and recall on the existing `eval_digest.py` key (`score`, `score-turns`) do not fall
+    beyond run-to-run noise; LongMemEval-S diagnostic six and the 60-question sample are
+    confirmation only, never tuned against.
+  - Tests: prompt-shape tests updated; inject places the profile after project sections and
+    is the first layer cut under budget. Review checkpoint: yes (prompt change).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
