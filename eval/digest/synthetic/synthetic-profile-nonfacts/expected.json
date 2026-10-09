@@ -1,0 +1,16 @@
+{
+  "session_id": "synthetic-profile-nonfacts",
+  "agent": "claude",
+  "case": "hypothetical topics and stylistic cues that are not user profile facts",
+  "notes": "The user discusses an article about junior developer salaries and Seattle rents, writes with energetic exclamation, and asks a hypothetical question. None of this is stated about the user's own life. A digest that infers the user is junior, earns under 60k, lives in Seattle, or has an extroverted personality has guessed from style and topic. The key holds only the project CLI flag decision and holds no profile facts.",
+  "facts": [
+    {
+      "statement": "The export command supports the format flag.",
+      "quote": "add the --format=json flag to the export command",
+      "source": "stated",
+      "kind": "decision",
+      "term": "long",
+      "scope": "project"
+    }
+  ]
+}

@@ -2453,6 +2453,102 @@ def test_global_confirm_writes_to_the_targets_page(initialized, home, fake):
     assert environment.read_text() == environment_before
 
 
+def test_global_fact_writes_to_profile_md(initialized, home, fake):
+    """A new global fact of kind 'fact' routes to global/profile.md."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    profile = cfg.vault / "global" / "profile.md"
+    environment = cfg.vault / "global" / "environment.md"
+    environment_before = environment.read_text()
+    prefs = cfg.vault / "global" / "preferences.md"
+    prefs_before = prefs.read_text()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-profile",
+        facts=[
+            {
+                "statement": "Lives in Seattle, WA.",
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": "I live in Seattle, WA.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "profile location fact")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].path == "global/profile.md"
+
+    profile_text = profile.read_text()
+    assert "Lives in Seattle, WA." in profile_text
+    assert environment.read_text() == environment_before
+    assert prefs.read_text() == prefs_before
+
+
+def test_global_fact_creates_profile_md_when_missing(initialized, home, fake):
+    """When global/profile.md is absent, adding a global fact creates it."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    profile = cfg.vault / "global" / "profile.md"
+    if profile.exists():
+        profile.unlink()
+        vault.commit(cfg.vault, ["global/profile.md"], "remove profile.md for test")
+
+    assert not profile.exists()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-profile-create",
+        facts=[
+            {
+                "statement": "Works as a senior platform engineer.",
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "scope": "global",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": "I work as a senior platform engineer.",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "profile work fact")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].path == "global/profile.md"
+    assert profile.exists()
+    profile_text = profile.read_text()
+    assert "type: Profile" in profile_text
+    assert "Works as a senior platform engineer." in profile_text
+
+
 def test_edit_quote_matches_only_added_lines(initialized, home):
     cfg = config_with_fake(home, initialized.vault, FakeEndpoint())
     test_file = cfg.vault / "test.txt"

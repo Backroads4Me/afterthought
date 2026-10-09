@@ -63,6 +63,7 @@ LISTING = "index.md"
 RECENT = pagemod.RECENT_PAGE
 COLLECTION = "collection.md"
 PREFERENCES = Path("global/preferences.md")
+PROFILE = Path("global/profile.md")
 MAX_RECENT_LINES = 10
 
 # One part of the block: the heading its lines sit under, "" when it has none, and
@@ -106,12 +107,22 @@ def build(config: Config, resolution: Resolution, waiting: int | None = None) ->
         recent = [_recent_part(_read_page(directory / RECENT), config)]
         page_map = [_part("Pages", _pointers(config, project, directory))]
     preferences = _section_parts(_read_page(config.vault / PREFERENCES), None)
+    profile = [_profile_part(_read_page(config.vault / PROFILE))]
     slug = project.slug if project else None
     if waiting is None:
         from aft import notes
 
         waiting = notes.count(config, slug)
-    return _block(title, own, preferences, page_map, max_chars, recent, notes_part(waiting))
+    return _block(
+        title,
+        own,
+        preferences,
+        page_map,
+        max_chars,
+        recent,
+        notes_part(waiting),
+        profile,
+    )
 
 
 def notes_part(waiting: int) -> list[Part]:
@@ -130,6 +141,16 @@ def notes_line(waiting: int) -> str:
         ' that replying "settle" goes through them now and any other reply skips them. When'
         ' the user replies "settle", follow the aft skill.'
     )
+
+
+def _profile_part(page: pagemod.Page | None) -> Part:
+    """The active lines of ``global/profile.md`` under a Profile heading (BUILD-PLAN F76)."""
+    if page is None:
+        return ("", [])
+    facts = [f for f in page.facts if f.state in INJECTED and not f.struck]
+    if not facts:
+        return ("", [])
+    return _part("Profile", [f"- {_shown(fact)}" for fact in facts])
 
 
 def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
@@ -450,6 +471,7 @@ def _block(
     max_chars: int,
     recent: Iterable[Part] = (),
     waiting: Iterable[Part] = (),
+    profile: Iterable[Part] = (),
 ) -> str:
     """The layers in the design's order, under one stated allocation of ``max_chars``.
 
@@ -468,6 +490,7 @@ def _block(
     full_closing: list[Part] = [("", [PRECEDENCE, HOW_TO, RECORD_MARKERS])]
     recent_list = list(recent)
     waiting_list = list(waiting)
+    profile_list = list(profile)
     head = _trim(title, max_chars)
 
     # Reserve the closing lines' full width before any layer whenever max_chars can hold
@@ -484,6 +507,7 @@ def _block(
     has_prefs = any(lines for _, lines in preferences)
     has_recent = any(lines for _, lines in recent_list)
     has_map = any(lines for _, lines in page_map)
+    has_profile = any(lines for _, lines in profile_list)
 
     own_floor = _floors(own)
     preferences_floor = _floors(preferences)
@@ -512,7 +536,15 @@ def _block(
         room = max_chars - _width([*prefix, *recent_layer, *closing]) - 2
         pages = _trim(page_map, min(_width(map_floor) + max(0, room), max_chars // 2))
 
-        body = [*project_layer, *pref_layer, *recent_layer, *pages]
+        # Profile is placed after project sections and is the first layer cut under budget (F76).
+        # Coding memory is never cut for profile lines, so profile takes only what the
+        # other layers leave.
+        non_profile = [*project_layer, *pref_layer, *recent_layer, *pages]
+        used = _width([*head, *cut, *waiting_layer, *non_profile, *closing])
+        profile_room = max(0, max_chars - used - (2 if non_profile else 0))
+        profile_layer = _trim(profile_list, profile_room) if profile_list else []
+
+        body = [*project_layer, *profile_layer, *pref_layer, *recent_layer, *pages]
         body = _trim(body, body_room)
         return waiting_layer, body, [*head, *waiting_layer, *cut, *body, *closing]
 
@@ -523,6 +555,8 @@ def _block(
             for heading, _ in own_sections_with_lines:
                 if not any(lines for h, lines in body_parts if h == heading and lines):
                     return True
+        if has_profile and not any(lines for h, lines in body_parts if h == "Profile" and lines):
+            return True
         pref_headings = {h for h, _ in preferences}
         if has_prefs and not any(lines for h, lines in body_parts if h in pref_headings and lines):
             return True

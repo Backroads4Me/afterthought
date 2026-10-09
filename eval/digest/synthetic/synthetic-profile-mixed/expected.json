@@ -1,0 +1,56 @@
+{
+  "session_id": "synthetic-profile-mixed",
+  "agent": "claude",
+  "case": "mixed coding and user profile facts",
+  "notes": "The user states several durable facts about their profile (location, time zone, work role, pet, health condition affecting schedule, editor/terminal tools) alongside a coding decision. The key holds the profile facts with scope global and the project decision with scope project, and holds no temporary task requests or unstated inferences.",
+  "facts": [
+    {
+      "statement": "The user is based in Halifax in Atlantic time.",
+      "quote": "I'm based in Halifax, in Atlantic time",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user is recovering from knee surgery and working half days.",
+      "quote": "Recovering from knee surgery, so I am on half days this week",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user works as a data platform engineer at a renewable energy consultancy.",
+      "quote": "I work as a data platform engineer at a renewable energy consultancy",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user edits with Neovim in the kitty terminal.",
+      "quote": "I edit with Neovim in the kitty terminal",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The user has a rescue dog named Barnaby.",
+      "quote": "my rescue dog Barnaby has a vet appointment",
+      "source": "stated",
+      "kind": "fact",
+      "term": "long",
+      "scope": "global"
+    },
+    {
+      "statement": "The SQLite busy timeout is set to 5000 milliseconds.",
+      "quote": "set the SQLite busy_timeout to 5000 milliseconds",
+      "source": "stated",
+      "kind": "decision",
+      "term": "long",
+      "scope": "project"
+    }
+  ]
+}
