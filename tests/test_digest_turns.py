@@ -32,6 +32,7 @@ from test_digest import (
     rows,
     serve,
     session,  # noqa: F401 - the fixture the tests below take
+    tool_record,
     watermark,
     write_records,
 )
@@ -125,6 +126,41 @@ def test_an_observed_item_is_kept_as_observed(session: Session):
         {"items": [seen("The file was written.", "written", "e3#t1")]},
     )
     assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e3#t1")]
+
+
+def test_an_observed_item_the_successful_output_backs_stays_observed(session: Session):
+    """F78: the turns pipeline's observed check reads the part's raw entries too, so a
+    report of what a successful command printed stays [observed] though the filter kept
+    none of that output."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        tool_record("e2", "t1", "release 2.4.1 built against vllm 0.6.3", is_error=False),
+        record(
+            "e3",
+            "assistant",
+            "The release is 2.4.1, built against vllm 0.6.3.",
+            model="claude-real",
+        ),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+    wrote = run(
+        session,
+        summary(),
+        settled(),
+        {
+            "items": [
+                seen(
+                    "The release is 2.4.1, built against vllm 0.6.3.",
+                    "The release is 2.4.1",
+                    "e3",
+                )
+            ]
+        },
+    )
+    assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e3")]
 
 
 def test_an_assistant_claim_without_tool_backing_becomes_inferred(session: Session):

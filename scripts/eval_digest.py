@@ -191,6 +191,9 @@ class SessionInput:
     cwd: str | None
     project_id: str | None
     entries: tuple[readers.Entry, ...]
+    # The unfiltered read, for the digest's observed check alone (BUILD-PLAN F78): it is
+    # never archived or sent to a model. None when the raw transcript cannot be read.
+    raw: tuple[readers.Entry, ...] | None = None
 
 
 def real_sessions(data: Path) -> list[SessionInput]:
@@ -212,6 +215,7 @@ def real_sessions(data: Path) -> list[SessionInput]:
             raise EvalError(f"{where}: agent must be a non-empty string")
         path = data / "sessions" / session_id / "evidence.jsonl"
         entries = _export_entries(path)
+        raw = _raw_read(agent, data / "sessions" / session_id / "transcript.jsonl")
         sessions.append(
             SessionInput(
                 session_id=session_id,
@@ -221,9 +225,21 @@ def real_sessions(data: Path) -> list[SessionInput]:
                 cwd=_optional(record.get("cwd"), where),
                 project_id=_optional(record.get("project_id"), where),
                 entries=entries,
+                raw=raw,
             )
         )
     return sessions
+
+
+def _raw_read(agent: str, path: Path) -> tuple[readers.Entry, ...] | None:
+    """The session's unfiltered entries, as digest_job reads them, or None when the raw
+    transcript is missing or the reader refuses it (BUILD-PLAN F78)."""
+    if not path.is_file():
+        return None
+    try:
+        return tuple(readers.read(agent, path))
+    except Exception:
+        return None
 
 
 def _export_entries(path: Path) -> tuple[readers.Entry, ...]:
@@ -283,7 +299,7 @@ def synthetic_sessions(directory: Path, cfg: Config) -> list[SessionInput]:
         if agent not in (readers.CLAUDE, readers.PI):
             raise EvalError(f"{path}: agent must be {readers.CLAUDE!r} or {readers.PI!r}")
         try:
-            read = readers.read(agent, path / "transcript.jsonl")
+            read = tuple(readers.read(agent, path / "transcript.jsonl"))
             kept, _ = filtermod.filter_entries(read, cfg, False)
         except readers.ReaderError as exc:
             raise EvalError(f"{path}: {exc}") from exc
@@ -296,6 +312,7 @@ def synthetic_sessions(directory: Path, cfg: Config) -> list[SessionInput]:
                 cwd=None,
                 project_id=None,
                 entries=tuple(kept),
+                raw=read,
             )
         )
     return sessions
@@ -671,7 +688,8 @@ def run_session(
     model.complete_json = recorder
     digested: digestmod.Digested | None = None
     try:
-        digested = digestmod._digest_parts(cfg, session.session_id, chunks, rules.PRIMARY)
+        raws = digestmod._raw_spans(session.raw, chunks) if session.raw else None
+        digested = digestmod._digest_parts(cfg, session.session_id, chunks, rules.PRIMARY, raws)
     except digestmod.AnswerRefused as exc:
         # Every part of the session was refused; the calls were recorded, and the
         # summary holds the refusals the pipeline reported.

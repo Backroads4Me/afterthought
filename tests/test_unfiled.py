@@ -519,10 +519,10 @@ def test_the_backfill_names_a_session_the_model_fails_and_the_rest_go_on(
 
     real_parts = digest._digest_parts
 
-    def parts(config, session_id, chunks, role):
+    def parts(config, session_id, chunks, role, raws=None):
         if session_id == "u1":
             raise ModelError("the model endpoint said no")
-        return real_parts(config, session_id, chunks, role)
+        return real_parts(config, session_id, chunks, role, raws)
 
     monkeypatch.setattr(digest, "_digest_parts", parts)
     fake.script = [Reply(content=EMPTY_ANSWER)]
