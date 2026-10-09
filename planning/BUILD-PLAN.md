@@ -1517,6 +1517,35 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - Tests: prompt-shape tests updated; inject places the profile after project sections and
     is the first layer cut under budget. Review checkpoint: yes (prompt change).
 
+- **F77 Observed by key tokens, not verbatim quotes** (ruling 2026-10-09; amends the M2
+  gate in `digest.py`). An agent's statement quoted from its own message is `[observed]`
+  when what it reports is backed by a tool result in the same part, judged by the tokens
+  that can be checked, not by finding the agent's whole sentence verbatim in tool output.
+  Agents paraphrase what a command showed, so the verbatim test downgraded nearly every
+  report to `[inferred]` (coding key: 4 observed facts against 172 before M2), and
+  `[inferred]` lines never pass R3 in practice (real vault: 552 candidates, none promoted).
+  - **Key tokens:** the statement's checkable tokens: a word holding a digit or one of
+    `_/.:-` or an internal capital (the R2 definition), a backticked span, a host, port,
+    path, version, flag or config key. Plain words are not checked.
+  - **Rule:** a quote from an assistant entry is `[observed]` when the same part holds at
+    least one tool result or error, and every key token of the statement appears verbatim
+    in that part's tool results or errors (case-sensitive; a backticked span counts as one
+    token). A quote from a tool or error entry stays `[observed]` as today. A statement with
+    no key token, or with any key token absent from the tool output, is `[inferred]` as
+    today.
+  - **Unchanged:** `observed.md`'s exclusion of plans, intentions, guesses and
+    explanations; the decide prompt's never-a-fact list, which handles work-status noise.
+  - **DESIGN:** the source-tag paragraph (section 6) says when an agent's report counts as
+    seen in a tool result, in the present tense.
+  - **Measure, before merging:** lead reruns `eval_digest.py run` on the coding key and
+    compares `[observed]` counts and `score`/`score-turns` with the 2026-10-09 runs, and
+    hand-checks 30 newly observed facts for guesses.
+  - **Tests:** a paraphrased report whose tokens all appear in the tool output is
+    observed; one with a token missing (a wrong port) is inferred; one with no key token is
+    inferred; a quote from a tool entry stays observed; a part with no tool result yields
+    no observed assistant fact. Review checkpoint: yes (authority rule; lead reviews in
+    full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
