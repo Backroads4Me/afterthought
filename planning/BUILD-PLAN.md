@@ -1452,6 +1452,37 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   pages next. With no project pinned, global pages outrank every project row whatever their
   relevance. Baseline mode is unchanged. Tests in `tests/test_eval.py`. Review checkpoint: no.
 
+- **F75 Trust the digest-time quote check** (ruling 2026-10-09; roadmap M6; changes R1 and
+  DESIGN 8). Today the dream re-verifies every quote against the evidence archive, which
+  `aft run` purges after `evidence.retention_days`, and quotes from excluded instruction
+  files and imported Claude memory are proven only by `~/.afterthought/library/verified_quotes.json`,
+  outside the vault. So R3 signals past retention count zero, a digest waiting past
+  retention loses every fact to R1, and a cloned vault rejects its waiting digests.
+  - **Record at digest time:** when a source's quote verifies against the archive, the
+    digest's frontmatter source records `verified: <UTC date>` and `check:` a hash of
+    (session id, entry id, quote). Library-proposal and Claude-memory imports write the
+    same record into their vault files, and `verified_quotes.json` stops being a source of
+    truth (kept only as a cache, or removed).
+  - **R1 at dream time:** a source whose record is present and whose hash matches its
+    session, entry and quote passes R1 without reading the archive. A source with no
+    record (a digest written before F75) or a mismatched hash (an edited quote) is
+    verified against the archive as today, and rejected if that fails.
+  - **Other dream-time archive reads:** list every place the dream reads the archive (R2's
+    approval and name checks, R4's newer-evidence date, R10's done check, decide's quote
+    rendering). Each either uses what the digest already recorded, or records what it
+    needs at digest time; none may fail only because evidence expired. Put the list in
+    the PR body.
+  - **R3 aging** uses the source's recorded date, not archive presence.
+  - **Purge:** unchanged; it no longer affects R1 for recorded sources.
+  - **DESIGN:** rewrite R1 ("at least one source whose quote was verified against the
+    archive when the digest was made, or is verified now") and the DESIGN 8 and 14 text on
+    expired evidence to match, in the present tense.
+  - **Tests:** purge then dream still applies a waiting digest; a vault with an empty
+    archive (a clone) applies its waiting digests; an edited quote with a stale hash is
+    rejected once its evidence is gone; a pre-F75 digest falls back to the archive; R3
+    counts a signal older than retention at half weight. Review checkpoint: yes (trust
+    rule; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
