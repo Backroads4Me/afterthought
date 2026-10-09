@@ -1550,6 +1550,35 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     no observed assistant fact. Review checkpoint: yes (authority rule; lead reviews in
     full).
 
+- **F78 Check observed reports against the raw transcript** (ruling 2026-10-09; amends F77
+  and DESIGN 8). The filter keeps only error and failure lines and `path:line` references
+  from tool output, so a version, port or test count an agent reports from a command that
+  succeeded never reaches the digest's tool entries, and F77's check can back only reports
+  drawn from errors (coding key: 15 observed facts against 172 before M2).
+  - **Check:** at digest time, the F77 key-token check for an assistant report runs against
+    the unfiltered tool results of the same part's span, read from the transcript the
+    digest already reads (the raw entries between the part's first and last entry), instead
+    of the filtered tool entries. The rule is otherwise F77's, unchanged.
+  - **Nothing new is stored or sent:** raw tool output never enters the archive, the
+    vault, an index or a model call; it is held in memory for the check and dropped. The
+    model's input is unchanged.
+  - **Record:** a report that passes is written to the digest as `[observed]` as today.
+    Every later stage (dream, reconcile, settle) takes the digest's tag and never reruns
+    the tool-backing check against the archive; list each place the M2/F77 gate runs today
+    and how it is handled in the PR body.
+  - **Missing transcript:** when the raw entries cannot be read (a transcript moved or
+    rotated), the check falls back to the filtered tool entries, as F77 does.
+  - **DESIGN 8:** say that the filter decides what is kept, and that the digest's
+    observed check reads the unfiltered tool output in memory without keeping it; DESIGN 6's
+    F77 sentence says the check reads the session's tool output.
+  - **Measure, before merging:** lead reruns `eval_digest.py run` on the coding key and
+    compares observed counts and `score-turns` with F77's run (15 observed, 42 of 76
+    found), and hand-checks 30 newly observed facts for guesses.
+  - **Tests:** a report whose tokens appear only in successful (filtered-out) tool output
+    is observed; the same report with the transcript unreadable is inferred; raw tool text
+    appears in no archive row, digest or model request (assert on the fake endpoint's
+    requests). Review checkpoint: yes (authority and privacy; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
