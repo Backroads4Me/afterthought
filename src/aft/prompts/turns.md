@@ -20,15 +20,10 @@ item labelled question, proposal, request or none.
   including personal tastes ("I prefer matinee showings").
 - rule: a standing instruction for agents from now on ("never push to main").
 - fact: the user states something true about their system, setup or environment that is
-  not obvious from code ("vLLM runs on 192.168.100.133"), or about themselves: name and how
-  they like to be addressed; where they live and their time zone; work, role and expertise;
-  languages they speak; family, partner and pets; health conditions they mention as affecting
-  their work or plans; main hobbies and interests; tools, devices and accounts they use;
-  lasting goals; activities and events they took part in; things they own or bought; and
-  quantities and dates ("I've restored three vintage radios since I started the hobby"). A
-  detail in doubt about the user's own life is kept when the user stated it in their own
-  words; nothing is inferred into the profile (no guessing income, age or personality from
-  style).
+  not obvious from code ("vLLM runs on 192.168.100.133"), or about themselves: interests,
+  hobbies and skills they are learning, activities and events they took part in, things
+  they own or bought, plans, people in their life, places, and quantities and dates
+  ("I've restored three vintage radios since I started the hobby").
 
 - question: the user asks something, including "should we...?" and "is it...?", even when
   it hints at what they want. A question is never a decision.

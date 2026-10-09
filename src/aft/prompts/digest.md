@@ -13,16 +13,11 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
-A fact includes what the user states about themselves: name and how they like to be
-addressed; where they live and their time zone; work, role and expertise; languages they
-speak; family, partner and pets; health conditions they mention as affecting their work
-or plans; main hobbies and interests; tools, devices and accounts they use; lasting
-goals; activities and events they took part in; things they own or bought; and quantities
-and dates ("I've restored three vintage radios since I started the hobby"). A detail in
-doubt about the user's own life is kept when the user stated it in their own words; nothing
-is inferred into the profile (no guessing income, age or personality from style). A preference
-includes personal tastes ("I prefer matinee showings"). A fact about the user's own life is
-global scope.
+A fact includes what the user states about themselves: interests, hobbies and skills they
+are learning, activities and events they took part in, things they own or bought, plans,
+people in their life, places, and quantities and dates ("I've restored three vintage
+radios since I started the hobby"). A preference includes personal tastes ("I prefer
+matinee showings"). A fact about the user's own life is global scope.
 
 Every fact passes one test: a future session would make a mistake, ask the user again,
 or give less fitting help without it. Never a fact, long or short term: the status of a

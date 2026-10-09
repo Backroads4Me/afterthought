@@ -396,16 +396,11 @@ learned the hard way, procedures, and where authoritative information lives. Kee
 was surprising or decided. Skip routine steps, file listings, code, and anything already
 recorded in git.
 
-A fact includes what the user states about themselves: name and how they like to be
-addressed; where they live and their time zone; work, role and expertise; languages they
-speak; family, partner and pets; health conditions they mention as affecting their work
-or plans; main hobbies and interests; tools, devices and accounts they use; lasting
-goals; activities and events they took part in; things they own or bought; and quantities
-and dates ("I've restored three vintage radios since I started the hobby"). A detail in
-doubt about the user's own life is kept when the user stated it in their own words; nothing
-is inferred into the profile (no guessing income, age or personality from style). A preference
-includes personal tastes ("I prefer matinee showings"). A fact about the user's own life is
-global scope.
+A fact includes what the user states about themselves: interests, hobbies and skills they
+are learning, activities and events they took part in, things they own or bought, plans,
+people in their life, places, and quantities and dates ("I've restored three vintage
+radios since I started the hobby"). A preference includes personal tastes ("I prefer
+matinee showings"). A fact about the user's own life is global scope.
 
 Every fact passes one test: a future session would make a mistake, ask the user again,
 or give less fitting help without it. Never a fact, long or short term: the status of a
@@ -1501,13 +1496,10 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
 - **F76 A basic user profile, coding memory first** (ruling 2026-10-09; roadmap 9.3; builds
   on F73). Memory keeps a short profile of who the user is, without lowering what coding
   memory keeps or admitting noise from coding sessions.
-  - **Profile categories:** `turns.md` and `digest.md` name what a fact about the user
-    covers: name and how they like to be addressed; where they live and their time zone;
-    work, role and expertise; languages they speak; family, partner and pets; health
-    conditions they mention as affecting their work or plans; main hobbies and interests;
-    tools, devices and accounts they use; and lasting goals. A detail in doubt about the
-    user's own life is kept when the user stated it in their own words; nothing is
-    inferred into the profile (no guessing income, age or personality from style).
+  - **Profile categories:** `turns.md` and `digest.md` keep F73's wording for what a
+    fact about the user covers; the named category list lowered coding recall in
+    measurement (2026-10-09), and the profile is filled by F73's definition of a fact
+    about the user.
   - **Placement:** profile facts are `global` scope and land on a global profile page
     (`global/profile.md`, sections by kind as other pages), injected with the global
     preferences under the existing `inject.max_chars` budget, after the project's own
