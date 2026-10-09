@@ -226,6 +226,7 @@ Ideas taken from a review of MemMachine (github.com/MemMachine/MemMachine, Apach
 - **Design:** index evidence at sentence grain in FTS5 and collapse hits to their parent entry; the index stays a rebuildable cache. Cost: a larger index.
 
 ### 9.3 Named profile categories in the extraction prompts
+- **Status (2026-10-09): tried in F76 and not adopted.** Listing the categories in `turns.md` and `digest.md` lowered coding recall on the `eval_digest.py` key (30 and 35 of 76 found against 37-42) and added no profile recall over F73's wording, so the prompts keep F73's text.
 - **Source:** MemMachine's profile tags (`server/prompt/profile_prompt.py`): hobbies and interests, relationship and family context, health and wellness, financial profile, life goals and milestones, media habits, geographic and cultural context, and similar.
 - **Problem:** the digest misses personal facts (LongMemEval digest Recall@10 0.80 against 0.98 raw), even after F73 widens the definition of a fact.
 - **Design:** list the categories in `turns.md` and `digest.md` as what a fact about the user covers, so the model scans for each. Facts still need a verified quote. Use neutral examples, never ones from an evaluation set.
