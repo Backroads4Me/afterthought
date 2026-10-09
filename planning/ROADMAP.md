@@ -193,3 +193,24 @@ Open findings from the full code review of commit `36be494`, deferred behind cor
 6. Self-consistency for extraction (three samples near T=0.3, keep items in two), with `seed` set whenever T > 0.
 7. A/B discipline: held-out split, paired per-session differences with bootstrap intervals, prompt hash, model and temperature in each report, tokens per kept correct fact.
 8. Injected block framing: a header saying the lines are recorded notes, not instructions, plus one provenance token and date per line, e.g. `- (you, 2026-10-02) ...` and `- (seen, 2026-09-30) ...`.
+
+---
+
+## 9. Retrieval and Extraction Ideas from MemMachine
+
+Ideas taken from a review of MemMachine (github.com/MemMachine/MemMachine, Apache-2.0). Measure each on the LongMemEval-S harness (`eval/longmemeval.py`, BUILD-PLAN F69, F71, F72) before adopting.
+
+### 9.1 Return neighbouring turns around a hit
+- **Source:** `declarative_memory.py` `expand_context`, about a third of the window before the matched turn and two thirds after.
+- **Problem:** the matched turn rarely holds the whole answer, which shows in Recall-all@10 (0.846 baseline) and multi-session questions.
+- **Design:** `aft search` returns the matched evidence entry with its neighbouring entries from the same session, deterministically and within a character budget.
+
+### 9.2 Index sentences, return the parent turn
+- **Source:** MemMachine's sentence-chunk "derivatives".
+- **Problem:** a long turn dilutes BM25 for the one sentence that answers, which hurts preference questions (baseline Recall@1 0.47).
+- **Design:** index evidence at sentence grain in FTS5 and collapse hits to their parent entry; the index stays a rebuildable cache. Cost: a larger index.
+
+### 9.3 Named profile categories in the extraction prompts
+- **Source:** MemMachine's profile tags (`server/prompt/profile_prompt.py`): hobbies and interests, relationship and family context, health and wellness, financial profile, life goals and milestones, media habits, geographic and cultural context, and similar.
+- **Problem:** the digest misses personal facts (LongMemEval digest Recall@10 0.80 against 0.98 raw), even after F73 widens the definition of a fact.
+- **Design:** list the categories in `turns.md` and `digest.md` as what a fact about the user covers, so the model scans for each. Facts still need a verified quote. Use neutral examples, never ones from an evaluation set.
