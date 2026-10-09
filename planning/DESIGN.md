@@ -296,6 +296,11 @@ aft:
   about the machine or the code (a log, an error, a command's output) is `[observed]`, and any
   other claim in it (a prompt, a document, another agent's message) is `[inferred]`, so it
   must recur before it is trusted.
+  An agent's report of what a tool showed is `[observed]` when the part of the session
+  that holds the tool result also holds, verbatim, every key token of the report's
+  statement: a word with a digit, one of `_/.:-`, or a capital past its first letter, and
+  a backticked span with no whitespace (a span with whitespace is checked word by word). A
+  report whose tokens the output does not hold, or that has none, is `[inferred]`.
 - **Sources** use OKF's `sources` list, with an extra `quote` field holding the verbatim
   evidence and a `resource` URI naming the session and entry.
 - **Anchors** tie a fact about code to a file, words that must appear in it, and the commit
