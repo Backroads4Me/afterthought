@@ -1212,12 +1212,25 @@ def _key_word(word: str, first: bool) -> bool:
     )
 
 
+def _token_word(word: str) -> bool:
+    """Whether ``word`` is one the F77 check can hold (BUILD-PLAN F77): it holds a digit
+    or one of ``_/.:-``, or a capital past its first letter, and a leading capital never
+    counts, so a word whose only capital is its first letter (``Claude``, ``Groq``) is a
+    plain word here."""
+    name = word.strip(".,;:!?\"'()")
+    return bool(name) and (
+        any(c.isdigit() or c in "_/.:-" for c in name) or any(c.isupper() for c in name[1:])
+    )
+
+
 def key_tokens(text: str) -> list[str]:
-    """The tokens of ``text`` a check can hold against what was seen (BUILD-PLAN F77):
-    each backticked span counts as one token, and so does any other word holding a
-    digit, one of ``_/.:-``, or a capital past its first letter - the R2 definition
-    (DESIGN 9). A host, port, path, version, flag or config key holds one of these, so
-    it is one token; plain words are not checked."""
+    """The tokens of ``text`` a check can hold against what was seen (BUILD-PLAN F77): a
+    backticked span with no whitespace counts as one token, and a backticked span with
+    whitespace is split into words judged by the same rule as any other word: a word
+    holding a digit, one of ``_/.:-``, or a capital past its first letter counts, and a
+    leading capital never counts (``Claude``, ``Groq`` are plain words). A host, port,
+    path, version, flag or config key holds one of these, so it is one token; plain
+    words are not checked."""
     spans = list(re.finditer(r"`[^`\n]+`", text))
     chars = list(text)
     for span in spans:
@@ -1226,10 +1239,15 @@ def key_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     for span in spans:
         inner = span.group()[1:-1].strip()
-        if inner:
+        if not inner:
+            continue
+        words = inner.split()
+        if len(words) == 1:
             tokens.append(inner)
-    for number, word in enumerate(_WORDS.findall("".join(chars))):
-        if _key_word(word, number == 0):
+        else:
+            tokens.extend(word.strip(".,;:!?\"'()") for word in words if _token_word(word))
+    for word in _WORDS.findall("".join(chars)):
+        if _token_word(word):
             tokens.append(word.strip(".,;:!?\"'()"))
     return tokens
 

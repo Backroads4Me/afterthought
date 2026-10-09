@@ -4190,15 +4190,24 @@ def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
     assert digest.enclosing_sentence(turn, "what about poetry") == "what about poetry?"
 
 
-def test_key_tokens_are_the_checkable_words_and_whole_backticked_spans():
+def test_key_tokens_are_the_checkable_words_and_unspaced_backticked_spans():
     """BUILD-PLAN F77: a key token is a word holding a digit, one of ``_/.:-`` or a
-    capital past its first letter - the R2 definition - and a backticked span counts as
-    one token; plain words are not checked."""
+    capital past its first letter - F77's own rule, with no first-word exemption - a
+    backticked span with no whitespace counts as one token, and a backticked span with
+    whitespace is split into words judged by the same rule; plain words are not checked."""
     assert digest.key_tokens("The endpoint on port 8080 refused.") == ["8080"]
     assert digest.key_tokens("We use PostgreSQL 16 here.") == ["PostgreSQL", "16"]
-    assert digest.key_tokens("Run `pytest -q tests/test_page.py` now.") == [
-        "pytest -q tests/test_page.py"
+    assert digest.key_tokens("Claude and Groq answered.") == []
+    assert digest.key_tokens("GitHub serves the SessionStart hook.") == [
+        "GitHub",
+        "SessionStart",
     ]
+    assert digest.key_tokens("Run `pytest -q tests/test_page.py` now.") == [
+        "-q",
+        "tests/test_page.py",
+    ]
+    assert digest.key_tokens("Set `backend=auto` there.") == ["backend=auto"]
+    assert digest.key_tokens("Then `aft project add` registers it.") == []
     assert digest.key_tokens("The retry is read from config.") == []
 
 
