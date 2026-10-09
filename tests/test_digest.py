@@ -3750,9 +3750,45 @@ def test_the_digest_prompt_sends_session_progress_to_the_handoff():
 
 
 def test_the_digest_prompt_gives_every_fact_one_value_test():
-    """F46: a fact earns memory only when a future session would stumble or re-ask."""
-    assert "a future session would make a mistake, or ask the user again, without it" in (
-        prompt_words()
+    """F73: a fact earns memory when a future session would stumble, re-ask, or help
+    less fittingly without it (F46's one test, widened)."""
+    assert (
+        "a future session would make a mistake, ask the user again, or give less "
+        "fitting help without it" in prompt_words()
+    )
+
+
+def test_the_digest_prompt_includes_the_users_own_life():
+    """F73: what the user states about themselves is fact material, a personal taste is
+    a preference, and a fact about the user's own life is global scope."""
+    words = prompt_words()
+    assert (
+        "A fact includes what the user states about themselves: interests, hobbies and "
+        "skills they are learning, activities and events they took part in, things they "
+        "own or bought, plans, people in their life, places, and quantities and dates "
+        '("I\'ve restored three vintage radios since I started the hobby").' in words
+    )
+    assert 'A preference includes personal tastes ("I prefer matinee showings").' in words
+    assert "A fact about the user's own life is global scope." in words
+
+
+def test_the_digest_prompt_reads_an_assistant_session():
+    """F73: the session is between the user and an AI assistant, often a coding agent."""
+    assert "between the user and an AI assistant, often a coding agent" in prompt_words()
+
+
+def test_the_summary_prompt_reads_an_assistant_session():
+    """F73: the summary stage names the same session shape."""
+    words = " ".join(digest.summary_prompt_text().split())
+    assert "between the user and an AI assistant, often a coding agent" in words
+
+
+def test_the_digest_prompt_scopes_the_users_own_life_global():
+    """F73: the scope rule covers the user's own life, not only preferences and
+    environment."""
+    assert (
+        "scope: global for the user's preferences and environment that apply to every "
+        "project, and for a fact about the user's own life; otherwise project." in prompt_words()
     )
 
 

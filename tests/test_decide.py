@@ -612,7 +612,10 @@ def test_the_decide_prompt_says_new_fact_changing_how_something_is_done_supersed
 def test_the_decide_prompt_skips_by_the_value_test_and_the_never_a_fact_list():
     """F46: skip applies the digest's one test and never-a-fact list to the fact."""
     words = " ".join(decide.prompt().split())
-    assert "a future session would make a mistake, or ask the user again, without it" in words
+    assert (
+        "a future session would make a mistake, ask the user again, or give less "
+        "fitting help without it" in words
+    )
     assert "Never a fact, long or short term" in words
     for item in (
         "the status of a pull request, task, branch or commit",
@@ -624,6 +627,18 @@ def test_the_decide_prompt_skips_by_the_value_test_and_the_never_a_fact_list():
     ):
         assert item in words
     assert "it fails that test, is on the never-a-fact list above" in words
+
+
+def test_the_decide_prompt_keeps_facts_about_the_users_life():
+    """F73: a fact about the user's life, interests, tastes or plans passes the test, and
+    a dated event is a durable record kept long-term with its date in the statement."""
+    words = " ".join(decide.prompt().split())
+    assert "A fact about the user's life, interests, tastes or plans passes it." in words
+    assert (
+        'A dated event is a durable record ("On 2024-03-02 the user adopted a dog"), '
+        "not a fact that stops being true, so it is kept long-term with its date in the "
+        "statement." in words
+    )
 
 
 def test_the_decide_prompt_defines_short_term_as_a_temporary_condition():
