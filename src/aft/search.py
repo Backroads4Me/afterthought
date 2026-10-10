@@ -11,12 +11,14 @@ it holds, so the path printed by a search is the path `aft trace` takes to open 
 entry's context - otherwise a hit from the archive of conversation leads nowhere, since no
 page holds it.
 
-The default search reaches every project that is not archived (DESIGN 10): the current
-directory's project ranks first, the global pages next, then the other projects' memory
-and the unfiled text, each tier fixed ahead of the BM25 order inside it. A project named
-with --project narrows the query to that project and the global pages. Memory that names
-no project is named rather than hidden: the global pages, a digest or an archived entry
-whose session resolved to no project, and the library each answer under their own name.
+The default search reaches every project that is not archived (DESIGN 10) and ranks in two
+tiers: the current project's rows and the global pages first, then everything else. Inside a
+tier the BM25 score orders rows across collections, and curated memory (pages, digests) wins
+near-ties: its score is multiplied by 1.10 before the sort, which puts it ahead of a raw row
+whose score is within 10% of its own. A project named with --project narrows the query to
+that project and the global pages, one tier. Memory that names no project is named rather
+than hidden: the global pages, a digest or an archived entry whose session resolved to no
+project, and the library each answer under their own name.
 """
 
 from __future__ import annotations
@@ -70,13 +72,19 @@ class Hit:
         }
 
 
-#: The rank tier of a row that names the project the query is pinned to, and of a row that
-#: names no project in a collection a page can be shared through (DESIGN 10): the current
-#: directory's project first, the global pages next, everything else last, each tier fixed
-#: ahead of the BM25 order inside it. A query with no project to pin passes the empty string,
-#: which no row's project answers, so tier 0 stays empty and the global pages keep tier 1.
-_TIER_SHARED = "CASE WHEN project_id IS ? THEN 0 WHEN project_id IS NULL THEN 1 ELSE 2 END"
-_TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 2 END"
+#: The rank tier of a row (DESIGN 10): the project the query is pinned to, and every row that
+#: names no project in a collection a page can be shared through (the global pages), are tier
+#: 0; every other row is tier 1. A query with no project to pin passes the empty string, which
+#: no row's project answers, so the shared NULL rows still take tier 0 and the other projects'
+#: rows keep tier 1 behind them.
+_TIER_SHARED = "CASE WHEN project_id IS NULL OR project_id IS ? THEN 0 ELSE 1 END"
+_TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 1 END"
+
+#: The factor a curated row's BM25 score is multiplied by before the merge sorts (DESIGN 10).
+#: BM25 scores are negative (lower is better), so multiplying moves a curated row (pages,
+#: digests) ahead of a raw row (evidence) whose score is within 10% of its own. A module
+#: constant, not a setting.
+CURATED_BOOST = 1.10
 
 #: The collections whose rows carry an explicit timestamp in the identity time column.
 COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
@@ -85,11 +93,6 @@ COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
 def _is_raw_evidence(collection: str, path: str) -> bool:
     """Check whether a row is raw evidence rather than curated memory."""
     return collection == index.EVIDENCE or path.startswith(index.SESSION_RESOURCE)
-
-
-def _curated_priority(collection: str, path: str) -> int:
-    """Priority within a tier: curated memory (pages, digests) ranks ahead of raw evidence."""
-    return 1 if _is_raw_evidence(collection, path) else 0
 
 
 def _query_collections(
@@ -118,8 +121,8 @@ def _query_collections(
         else:
             tier = _TIER_SHARED if shared else _TIER_OWNED
             # A pinned project id goes in the tier; the empty string goes when nothing is
-            # pinned, which no row answers, so tier 0 stays empty and the ranking is tier 1
-            # and tier 2.
+            # pinned, which no row's project answers, so the shared NULL rows still take
+            # tier 0 and the other projects' rows keep tier 1 behind them.
             tier_args = [tier0_id if tier0_id is not None else ""]
 
         if col in COLLECTIONS_WITH_TIMESTAMPS and time_clauses:
@@ -178,13 +181,18 @@ def _query_collections(
             for row in keep
         )
 
-    rows.sort(
-        key=lambda row: (
-            row["tier"],
-            _curated_priority(row["collection"], row["path"]),
-            row["rank"],
+    for row in rows:
+        # The merge sorts on the adjusted score (DESIGN 10): a curated row's BM25 score is
+        # multiplied by CURATED_BOOST, which puts it ahead of a raw row whose score is within
+        # 10% of its own, and a raw row keeps its score. `rank` stays the raw score the Hit
+        # carries.
+        row["key"] = (
+            row["rank"]
+            if _is_raw_evidence(row["collection"], row["path"])
+            else row["rank"] * CURATED_BOOST
         )
-    )
+
+    rows.sort(key=lambda row: (row["tier"], row["key"]))
     return rows
 
 
@@ -200,10 +208,11 @@ def _ask(
 ) -> list[dict[str, Any]]:
     """Ask each collection for its limit best-ranked documents, best tier and row first.
 
-    Curated memory (pages, digests) ranks ahead of raw evidence within each tier.
-    Evidence entries are collapsed per session so a session returns at most its best-ranked hit.
-    Conjunction (AND) of query terms is tried first, falling back to disjunction (OR) if
-    conjunction yields no matches.
+    The BM25 score orders rows across collections inside a tier, and curated memory (pages,
+    digests) wins near-ties: its score is multiplied by 1.10, which puts it ahead of a raw
+    row whose score is within 10% of its own. Evidence entries are collapsed per session so a
+    session returns at most its best-ranked hit. Conjunction (AND) of query terms is tried
+    first, falling back to disjunction (OR) if conjunction yields no matches.
     """
     tc = parse_temporal(query, now=now)
     terms = _to_fts5_terms(tc.stripped_query) if tc.stripped_query else []
@@ -256,14 +265,15 @@ def search(
 ) -> list[Hit]:
     """Query the search index with BM25 ranking across active collections.
 
-    The query reaches every project that is not archived (DESIGN 10): the current
-    directory's project ranks first, the global pages next, then the other projects and the
-    unfiled text, a fixed tier ahead of the BM25 order inside each. ``project`` names one
-    project to narrow the query to, with the global pages. ``current`` names the project
-    that ranks first without narrowing the query, exactly as the working directory's
-    project does for a session; ``project`` and ``current`` cannot be given together, and
-    an unknown slug in either is an error. ``all_projects`` is accepted and
-    changes nothing, since the default already reaches every project.
+    The query reaches every project that is not archived (DESIGN 10) and ranks in two tiers:
+    the current project's rows and the global pages first, then everything else, with the
+    BM25 score ordering rows across collections inside a tier and curated memory (pages,
+    digests) winning near-ties (within 10%). ``project`` names one project to narrow the
+    query to, with the global pages, all one tier. ``current`` names the project that ranks
+    first without narrowing the query, exactly as the working directory's project does for a
+    session; ``project`` and ``current`` cannot be given together, and an unknown slug in
+    either is an error. ``all_projects`` is accepted and changes nothing, since the default
+    already reaches every project.
     """
     vault.require(config)
     index.update(config)
