@@ -245,6 +245,7 @@ def search(
     query: str = "",
     *,
     project: str | None = None,
+    current: str | None = None,
     all_projects: bool = False,
     archive: bool = False,
     reports: bool = False,
@@ -258,7 +259,10 @@ def search(
     The query reaches every project that is not archived (DESIGN 10): the current
     directory's project ranks first, the global pages next, then the other projects and the
     unfiled text, a fixed tier ahead of the BM25 order inside each. ``project`` names one
-    project to narrow the query to, with the global pages. ``all_projects`` is accepted and
+    project to narrow the query to, with the global pages. ``current`` names the project
+    that ranks first without narrowing the query, exactly as the working directory's
+    project does for a session; ``project`` and ``current`` cannot be given together, and
+    an unknown slug in either is an error. ``all_projects`` is accepted and
     changes nothing, since the default already reaches every project.
     """
     vault.require(config)
@@ -333,11 +337,20 @@ def search(
     narrow_id: str | None = None
     tier0_id: str | None = None
 
+    if project is not None and current is not None:
+        raise SearchError(
+            "project and current cannot both be given: project narrows, current only ranks"
+        )
     if project is not None:
         proj = registry.by_slug(project)
         if proj is None:
             raise SearchError(f"unknown project {project!r}")
         narrow_id = proj.id
+        tier0_id = proj.id
+    elif current is not None:
+        proj = registry.by_slug(current)
+        if proj is None:
+            raise SearchError(f"unknown project {current!r}")
         tier0_id = proj.id
     else:
         resolution = keys.resolve(Path.cwd(), registry, config.host)
