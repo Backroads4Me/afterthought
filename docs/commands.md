@@ -39,6 +39,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | `aft lint` | Checks every page against the page format: OKF fields, the fact-line grammar, citations that resolve. |
 | `aft reindex` | Rebuilds the search index from the vault's files and the evidence archive. |
 | `aft eval [GOLDEN] [--limit N]` | Checks memory against a golden set of known answers you write, by default `<vault>/golden.yaml`; a line passes when it is found in the top `N` search results (default 8). |
+| `aft eval [GOLDEN] --ranks [--limit N] [--json FILE]` | Measures where each golden entry's answer first ranks in search alone, searching as a session in the entry's project would, and prints recall@1/3/5/10 and MRR, split by collection (default depth 10). `--json` writes the per-entry records. Exits 0. |
 
 ## Background work
 
