@@ -20,9 +20,10 @@ import pytest
 
 from aft import config as configmod
 from aft import eval as evalmod
-from aft import index, inject, keys, model, search
+from aft import evidence, index, inject, keys, model, search
 from aft.cli import main
 from aft.config import Config
+from aft.readers import Entry
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
 from fakes.model_server import MODEL_NAME, FakeEndpoint, Reply
@@ -35,6 +36,13 @@ longmemeval = importlib.util.module_from_spec(_spec)
 # annotations through sys.modules.
 sys.modules["longmemeval"] = longmemeval
 _spec.loader.exec_module(longmemeval)
+
+_ESEARCH_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "eval_search.py"
+_search_spec = importlib.util.spec_from_file_location("eval_search_script", _ESEARCH_SCRIPT)
+assert _search_spec is not None and _search_spec.loader is not None
+eval_search = importlib.util.module_from_spec(_search_spec)
+sys.modules["eval_search_script"] = eval_search
+_search_spec.loader.exec_module(eval_search)
 
 HOST = "testhost"
 
@@ -1565,3 +1573,285 @@ def test_the_rescore_command_requires_an_output(tmp_path):
                 str(tmp_path / "r.jsonl"),
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# F80: the rank measure over search alone
+
+HARBOR = """\
+---
+type: Project
+description: A harbor that keeps lanterns lit.
+sources: []
+aft:
+  project: {project_id}
+---
+
+## State
+
+- The harbor keeps the north pier this season. [observed] 2026-09-30 [^s1]
+
+## Facts
+
+- The lighthouse keeps a whale oil reserve. [observed] 2026-09-14 [^s1]
+- The chimney nests a heron sculpture. [observed] 2026-09-15 [^s1]
+"""
+
+HARBOR_TIDE = """\
+---
+type: Project
+title: Harbor tides
+description: How the harbor keeps its beacon trimmed.
+sources: []
+aft:
+  project: {project_id}
+---
+
+## Facts
+
+- The beacon is trimmed every full moon. [observed] 2026-09-12 [^s1]
+"""
+
+MEADOW = """\
+---
+type: Project
+title: Meadow
+description: A meadow that feeds the bees.
+sources: []
+aft:
+  project: {project_id}
+---
+
+## Facts
+
+- The beacon is trimmed every full moon. [observed] 2026-09-12 [^s1]
+- The meadow hive sleeps through winter. [observed] 2026-09-13 [^s1]
+- The heron nests on the chimney. [observed] 2026-09-13 [^s1]
+"""
+
+PREFERENCES = """\
+---
+type: Preferences
+title: Preferences
+sources: []
+---
+
+## Ledger
+
+Provisions are tallied in the winter ledger.
+"""
+
+DIGEST = """\
+---
+type: Session Digest
+title: Digest harbor session
+description: What the harbor session settled.
+generated:
+  by: aft
+  at: "2026-10-02"
+sources: []
+aft:
+  role: user
+  project: {project_id}
+  facts: []
+---
+
+## Findings
+
+- The harbor census counts 214 boats this fall.
+"""
+
+RANK_GOLDEN = """\
+- question: beacon trimmed full moon
+  project: harbor
+  expect:
+    - "The beacon is trimmed every full moon."
+- question: harbor census counts boats
+  project: harbor
+  expect:
+    - "The harbor census counts 214 boats this fall."
+  expect_not:
+    - "The meadow hive sleeps through winter."
+- question: orchard quince ripens
+  project: harbor
+  expect:
+    - "The orchard quince ripens in October."
+- question: heron nests chimney
+  project: harbor
+  expect:
+    - "The heron nests on the chimney."
+- question: lighthouse whale oil reserve
+  project: harbor
+  expect:
+    - "Quaymaster"
+"""
+
+PASS_GOLDEN = """\
+- question: beacon trimmed full moon
+  project: harbor
+  expect:
+    - "The beacon is trimmed every full moon."
+- question: lighthouse whale oil reserve
+  project: harbor
+  expect:
+    - "Quaymaster"
+"""
+
+
+@pytest.fixture
+def rank_vault(initialized: Config, tmp_path: Path) -> Config:
+    """Two projects whose answers sit in different collections, and block-only text."""
+    registry = Registry.load(initialized.registry_path)
+    # The registry title reaches the block and nothing else: the overview carries no
+    # title of its own, so the block opens with the registry's name for the project.
+    harbor = registry.add("harbor", "Quaymaster")
+    meadow = registry.add("meadow", "Meadow")
+    registry.add_path(harbor, path_key(HOST, make_repo(tmp_path / "harbor").resolve()))
+    registry.add_path(meadow, path_key(HOST, make_repo(tmp_path / "meadow").resolve()))
+    registry.save()
+    root = initialized.vault
+    write(root / "projects/harbor/overview.md", HARBOR.format(project_id=harbor.id))
+    write(root / "projects/harbor/tide.md", HARBOR_TIDE.format(project_id=harbor.id))
+    write(root / "projects/meadow/overview.md", MEADOW.format(project_id=meadow.id))
+    write(root / "global/preferences.md", PREFERENCES)
+    write(
+        root / "digests/harbor/2026/10/2026-10-02-pi-session.md",
+        DIGEST.format(project_id=harbor.id),
+    )
+    evidence.store(
+        initialized,
+        agent="pi",
+        session_id="s-rank1",
+        project_id=harbor.id,
+        entries=(
+            Entry(
+                id="e1",
+                time=datetime(2026, 10, 1, tzinfo=UTC),
+                role="user",
+                text="The orchard quince ripens in October.",
+                is_error=False,
+            ),
+        ),
+    )
+    return initialized
+
+
+def test_rank_finds_the_answer_in_each_collection(rank_vault: Config, tmp_path: Path):
+    """A page, a digest and an archived entry each put their answer at rank 1."""
+    cases = evalmod.load_golden(golden(tmp_path, RANK_GOLDEN))
+    results = {result.case.question: result for result in evalmod.rank(rank_vault, cases)}
+    beacon = results["beacon trimmed full moon"]
+    assert (beacon.rank, beacon.collection, beacon.project) == (1, "pages", "harbor")
+    census = results["harbor census counts boats"]
+    assert (census.rank, census.collection, census.project) == (1, "digests", "harbor")
+    quince = results["orchard quince ripens"]
+    assert (quince.rank, quince.collection, quince.project) == (1, "evidence", "harbor")
+
+
+def test_another_projects_row_is_reached_but_ranked_behind(rank_vault: Config):
+    """The entry's project holds tier 0; another project's matching row comes after it."""
+    hits = search.search(rank_vault, "beacon trimmed full moon", current="harbor", limit=10)
+    assert [hit.project for hit in hits[:2]] == ["harbor", "meadow"]
+
+
+def test_an_answer_past_the_limit_is_not_found(rank_vault: Config, tmp_path: Path):
+    """The heron answer sits at rank 2, behind a harbor row that answers nothing."""
+    cases = evalmod.load_golden(golden(tmp_path, RANK_GOLDEN))
+    heron = next(case for case in cases if case.question == "heron nests chimney")
+    assert evalmod.rank(rank_vault, [heron], limit=1)[0].rank is None
+    found = evalmod.rank(rank_vault, [heron], limit=5)[0]
+    assert (found.rank, found.collection, found.project) == (2, "pages", "meadow")
+
+
+def test_the_injection_block_is_not_counted(rank_vault: Config, tmp_path: Path):
+    """Text only the block carries ranks nowhere, though the pass/fail mode reads it."""
+    cases = evalmod.load_golden(golden(tmp_path, RANK_GOLDEN))
+    quaymaster = next(case for case in cases if case.question == "lighthouse whale oil reserve")
+    assert evalmod.rank(rank_vault, [quaymaster])[0].rank is None
+    registry = Registry.load(rank_vault.registry_path)
+    block = inject.build(rank_vault, evalmod._resolution(registry.by_slug("harbor")))
+    assert evalmod._found("Quaymaster", [block])
+
+
+def test_search_current_with_an_unknown_slug_raises(rank_vault: Config):
+    """An unknown slug is an error, alone or beside project=."""
+    with pytest.raises(search.SearchError):
+        search.search(rank_vault, "beacon trimmed full moon", current="nonesuch")
+    with pytest.raises(search.SearchError):
+        search.search(rank_vault, "beacon trimmed full moon", project="harbor", current="harbor")
+
+
+def test_the_rank_command_prints_and_writes_json(rank_vault: Config, tmp_path: Path, capsys):
+    """`aft eval --ranks` exits 0, prints one line per entry, and writes the records."""
+    set_path = golden(tmp_path, RANK_GOLDEN)
+    out = tmp_path / "ranks.json"
+    assert main(["eval", str(set_path), "--ranks", "--json", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "1\tpages\tharbor\tbeacon trimmed full moon" in printed
+    record = json.loads(out.read_text())
+    assert len(record["entries"]) == 5
+    census = next(e for e in record["entries"] if e["question"] == "harbor census counts boats")
+    assert census["expect_not"] == [
+        {"item": "The meadow hive sleeps through winter.", "rank": None}
+    ]
+    summary = record["summary"]
+    assert summary["cases"] == 5
+    assert summary["recall@1"] == pytest.approx(0.6)
+    assert summary["recall@10"] == pytest.approx(0.8)
+    assert summary["mrr"] == pytest.approx(0.7)
+    assert summary["by_collection"]["pages"] == {
+        "cases": 2,
+        "found@1": 1,
+        "found@3": 2,
+        "found@5": 2,
+        "found@10": 2,
+        "mrr": 0.75,
+    }
+    assert set(summary["by_collection"]) == {"pages", "digests", "evidence"}
+
+
+def test_the_pass_fail_mode_still_reads_the_block(rank_vault: Config, tmp_path: Path):
+    """Without --ranks the command passes over block and results together, as before."""
+    set_path = golden(tmp_path, PASS_GOLDEN)
+    assert main(["eval", str(set_path)]) == 0
+    assert main(["eval", str(set_path), "--json", str(tmp_path / "ranks.json")]) == 2
+
+
+def test_eval_search_snapshot_refuses_the_real_home(home, tmp_path, monkeypatch):
+    """The snapshot refuses the real home and vault, with a fake HOME naming neither."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv(configmod.HOME_ENV, str(home))
+    real_home = tmp_path / ".afterthought"
+    assert eval_search.main(["snapshot", str(real_home)]) == 2
+    assert eval_search.main(["snapshot", str(tmp_path / "afterthought" / "nested")]) == 2
+    assert eval_search.main(["run", str(real_home), "key.yaml"]) == 2
+    crowded = tmp_path / "crowded"
+    crowded.mkdir()
+    (crowded / "keep").write_text("x")
+    assert eval_search.main(["snapshot", str(crowded)]) == 2
+    assert not real_home.exists()
+
+
+def test_eval_search_snapshot_freezes_a_vault(rank_vault: Config, tmp_path: Path):
+    """A snapshot clones the vault, copies the archive, and ranks the same on the copy."""
+    set_path = golden(tmp_path, RANK_GOLDEN)
+    run_git(["add", "-A"], rank_vault.vault)
+    run_git(["commit", "-q", "--allow-empty", "-m", "freeze"], rank_vault.vault)
+    snap = tmp_path / "snap"
+    assert eval_search.main(["snapshot", str(snap)]) == 0
+    record = json.loads((snap / "snapshot.json").read_text())
+    assert record["archive_rows"] == 1
+    assert record["vault_commit"] == run_git(["rev-parse", "HEAD"], rank_vault.vault)
+    config_text = (snap / "config.toml").read_text()
+    assert f'vault = "{snap}/vault"' in config_text
+    assert "[model]" in config_text
+    out = tmp_path / "ranks.json"
+    code = eval_search.main(["run", str(snap), str(set_path), "--json", str(out)])
+    assert code == 0
+    entries = json.loads(out.read_text())["entries"]
+    beacon = next(e for e in entries if e["question"] == "beacon trimmed full moon")
+    assert (beacon["rank"], beacon["collection"], beacon["hit_project"]) == (
+        1,
+        "pages",
+        "harbor",
+    )
