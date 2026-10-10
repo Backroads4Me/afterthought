@@ -1663,7 +1663,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     needs. Review checkpoint: yes (search order; lead reviews in full).
 
 - **F81 Query words: any word, without question filler** (ruling 2026-10-10; amends H5's
-  conjunction-before-disjunction; builds after F79 merges). `aft search` first asks for rows
+  conjunction-before-disjunction; builds after F82 merges). `aft search` first asks for rows
   holding every query word and falls back to any word only when nothing holds them all. An
   agent's question carries filler ("where does the switchboard project live"), so the
   all-words query either matches nothing useful or matches a few rows that happen to hold
@@ -1687,7 +1687,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Present tense:** DESIGN 10's search paragraph, the `search.py` module docstring, and
     the `_ask` and `_to_fts5_terms` docstrings.
   - **Measure, before merging (decision rule set now):** F80's coding key on the
-    2026-10-10 snapshot, against the F79 merge's run on the same snapshot and key, entry by
+    2026-10-10 snapshot, against the F82 merge's run on the same snapshot and key, entry by
     entry; and the LongMemEval-S `--rescore` pair over F79's sandboxes. F81 merges when the
     coding key's recall@5 and MRR do not fall and no entry found in the top 3 before drops
     out of the top 5. LongMemEval is confirmation only. If the coding key falls, F81 does
@@ -1696,6 +1696,44 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     only its content words; a row holding more content words outranks one holding fewer; a
     query of filler words only still searches them; a quoted phrase holding a filler word
     is matched as a phrase; a negation word is kept. Review checkpoint: yes (search order;
+    lead reviews in full).
+
+- **F82 One index row per page line** (ruling 2026-10-10; follows F79; DESIGN 10, `index.py`
+  row table). A `pages` or `archive` row today holds a whole `##` section, and a project's
+  Facts section runs to about a hundred lines, so BM25's length normalization scores a
+  page's best match near -3 against -9 for a short evidence entry that says the same thing;
+  F79's 10% near-tie rule cannot close that gap. On F80's coding key, "where is firstmate
+  cloned" fell from rank 2 to 7 under F79 for this reason.
+  - **Rows:** each live curated line of a `pages` section is its own row, and each resting
+    line of an `archive` section likewise. A row keeps the page's title and description
+    and the section's heading in their columns, and its body is the one line (statement,
+    tag, date and footnote references as the page holds them). The row key adds the line's
+    position in its section, so two lines under one heading are two rows. Prose that is not
+    a fact line (a page's text outside its fact sections that is indexed today) stays one row
+    per heading. `digests` and `reports` keep one row per heading section.
+  - **Search:** unchanged in its rules. A page answers once per query at its best line
+    (the existing per-path de-duplication), and its snippet is drawn from that line.
+  - **Rebuild:** the index records a format version (SQLite `user_version`); `index.update`
+    rebuilds from files when the recorded version differs from the code's, so an existing
+    index is never left holding section rows beside line rows. The version is a module
+    constant raised whenever what a row holds changes.
+  - **Unchanged:** the BM25 column weights, F79's tiers and near-tie factor, `aft inject`,
+    `aft eval`'s pass/fail mode, and LongMemEval's F72 line matching (a page hit still names
+    its section by heading, and the matching picks the line inside it).
+  - **Present tense:** `index.py`'s module docstring and row table, and DESIGN 10's
+    collection table where it says what a pages row holds.
+  - **Measure, before merging (decision rule set now):** F80's coding key on the
+    2026-10-10 snapshot, reindexed, against F79's run (`f79-f216b1e.json`), entry by entry;
+    and the LongMemEval-S `--rescore` pair over F79's 41 sandboxes. F82 merges when the
+    coding key's recall@5 and MRR do not fall, no entry found in the top 5 under F79 drops
+    out of it, and "where is firstmate cloned" returns to the top 5. LongMemEval is
+    confirmation only. If the coding key falls, F82 does not merge and the results go to
+    Ted. F81 builds after F82, so each is measured alone.
+  - **Tests** in `tests/test_index.py` and `tests/test_search.py`: a two-line section
+    gives two rows with distinct keys; a struck line rests in `archive` as its own row; a
+    page's matching line outranks a long section's weaker match from another page; one
+    page still answers once; an index at an older format version is rebuilt on update; the
+    rebuild-equals-update test still holds. Review checkpoint: yes (index and search order;
     lead reviews in full).
 
 ## 6. Ted's checklists at milestone ends

@@ -721,10 +721,13 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 
 ### Search
 
-`aft search` queries a SQLite FTS5 index with BM25 ranking. It searches every project: the
-current directory's project first, then the global pages, then other projects, so what one
-project learned answers a question asked in another. `--project P` narrows it to one
-project and the global pages. The memory block stays the current project's and the global
+`aft search` queries a SQLite FTS5 index with BM25 ranking. It searches every project in two
+tiers: the current directory's project and the global pages first, then other projects and
+unfiled text, so what one project learned answers a question asked in another. Inside a
+tier, the BM25 score orders pages, digests and evidence together, and curated memory (pages
+and digests) wins near-ties: its score counts 10% stronger, which puts it ahead of raw
+evidence scoring within 10% of it. `--project P` narrows it to one project and the global
+pages, one tier. The memory block stays the current project's and the global
 pages' alone (section 10). Words are stemmed by FTS5's Porter tokenizer, so "pause" finds
 "paused". The default collections are:
 
