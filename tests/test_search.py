@@ -1620,43 +1620,211 @@ def test_multi_term_query_matches_all_terms_before_or_fallback(populated_vault: 
     assert "projects/widget/fasteners.md" in fallback_paths
 
 
-def test_curated_memory_ranks_before_raw_evidence(populated_vault: Config) -> None:
-    """Within a tier, curated memory collections (pages, digests) rank ahead of raw evidence."""
+def test_a_strong_evidence_match_outranks_a_weak_page_match(populated_vault: Config) -> None:
+    """F79: inside a tier the BM25 score decides across collections, so an evidence entry
+    that matches strongly outranks a page whose match is weak, curated or not."""
     cfg = populated_vault
-    # Query "plain SQLite storage" matches:
-    # - Curated page: projects/widget/overview.md (tier 0, curated)
-    # - Raw evidence: aft://session/claude/s-widget-1#... (tier 0, raw evidence)
-    hits = search.search(cfg, "plain SQLite storage", project="widget", limit=10)
-    page_indices = [i for i, h in enumerate(hits) if h.collection == index.PAGES]
-    evidence_indices = [i for i, h in enumerate(hits) if h.collection == index.EVIDENCE]
-
-    assert page_indices, "must find matching pages"
-    assert evidence_indices, "must find matching evidence"
-    assert min(page_indices) < min(evidence_indices), (
-        "curated page must rank before raw evidence within the same tier"
-    )
-
-    # Also test digest ranks ahead of raw evidence
-    (cfg.vault / "digests/widget/2026/09/2026-09-29-claude-s-widget-2.md").write_text(
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    entry = Entry("e-0", now, "user", "verdigris verdigris patina", False)
+    evidence.store(cfg, "claude", "s-verd-1", "p_widget", [entry])
+    (cfg.vault / "projects/widget/verdigris-notes.md").write_text(
         "---\n"
-        "type: Session Digest\n"
-        "title: Widget SQLite digest\n"
-        "description: SQLite storage notes.\n"
+        "title: Stone Notes\n"
+        "description: A page about the stone.\n"
         "aft:\n  project: p_widget\n"
-        "---\n\n"
-        "# Storage review\n\n"
-        "## Summary\n\n"
-        "Decided on plain SQLite storage for local memory.\n",
+        "---\n"
+        "# Stone Notes\n"
+        "## State\n"
+        "- The verdigris line sits in a long body of filler words here to stretch the "
+        "document length well past the average row so the term frequency part shrinks and "
+        "the score magnitude falls with it. [observed] 2026-09-28 [^s1]\n",
         encoding="utf-8",
     )
     index.update(cfg)
-    hits2 = search.search(cfg, "plain SQLite storage", project="widget", limit=10)
-    digest_indices = [i for i, h in enumerate(hits2) if h.collection == index.DIGESTS]
-    evidence_indices2 = [i for i, h in enumerate(hits2) if h.collection == index.EVIDENCE]
-    assert digest_indices, "must find matching digest"
-    assert min(digest_indices) < min(evidence_indices2), (
-        "curated digest must rank before raw evidence within the same tier"
+
+    hits = search.search(cfg, "verdigris", current="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert paths == [
+        "aft://session/claude/s-verd-1#e-0",
+        "projects/widget/verdigris-notes.md",
+    ], f"the strong evidence match answers first: {paths}"
+    page_hit = next(hit for hit in hits if hit.collection == index.PAGES)
+    evidence_hit = next(hit for hit in hits if hit.collection == index.EVIDENCE)
+    # The page's raw score sits outside the near-tie range, so the curated boost cannot
+    # flip the order: |page| < |evidence| / CURATED_BOOST.
+    assert abs(page_hit.rank) < abs(evidence_hit.rank) / search.CURATED_BOOST, (
+        "the weak page match must sit outside the near-tie range"
     )
+
+
+def test_a_page_within_ten_percent_of_evidence_outranks_it(populated_vault: Config) -> None:
+    """F79: a curated row wins near-ties: its score is multiplied by CURATED_BOOST, which
+    puts it ahead of a raw row whose score is within 10% of its own."""
+    cfg = populated_vault
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    entry = Entry("e-0", now, "user", "malachite malachite patina", False)
+    evidence.store(cfg, "claude", "s-mal-1", "p_widget", [entry])
+    (cfg.vault / "projects/widget/malachite-notes.md").write_text(
+        "---\n"
+        "title: Stone Notes\n"
+        "description: A page about the stone.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n"
+        "# Stone Notes\n"
+        "## State\n"
+        "- The malachite line sits here on the bench. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "malachite", current="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert paths == [
+        "projects/widget/malachite-notes.md",
+        "aft://session/claude/s-mal-1#e-0",
+    ], f"the page in the near-tie range answers first: {paths}"
+    page_hit = next(hit for hit in hits if hit.collection == index.PAGES)
+    evidence_hit = next(hit for hit in hits if hit.collection == index.EVIDENCE)
+    # The near-tie holds: the raw evidence row still scores ahead, by less than the boost
+    # widens the page's score, so the boosted page answers first.
+    assert abs(page_hit.rank) < abs(evidence_hit.rank), (
+        "the raw evidence row must still score ahead before the boost"
+    )
+    assert abs(page_hit.rank) > abs(evidence_hit.rank) / search.CURATED_BOOST, (
+        "the page's raw score must sit inside the near-tie range"
+    )
+
+
+def test_current_project_row_and_global_page_interleave_by_score(
+    populated_vault: Config,
+) -> None:
+    """F79: the current project's rows and the global pages share tier 0, so the BM25 score
+    decides between them whichever way it falls."""
+    cfg = populated_vault
+    (cfg.vault / "global/amazonite.md").write_text(
+        "---\n"
+        "title: Amazonite\n"
+        "description: The stone shelf.\n"
+        "---\n"
+        "# Amazonite\n"
+        "## State\n"
+        "- The amazonite shelf holds the amazonite tiles. [observed] 2026-09-28 [^s1]\n"
+        "- The beryl shelf holds one row of tiles. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    (cfg.vault / "projects/widget/amazonite.md").write_text(
+        "---\n"
+        "title: Amazonite\n"
+        "description: The stone shelf.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n"
+        "# Amazonite\n"
+        "## State\n"
+        "- The amazonite line sits in a longer body of filler words here to stretch the row "
+        "and lower its score. [observed] 2026-09-28 [^s1]\n"
+        "- The beryl beryl shelf holds its tiles. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    # The global page carries "amazonite" twice and the project's row once, so the global
+    # page answers first on the score.
+    hits = search.search(cfg, "amazonite", current="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert paths == ["global/amazonite.md", "projects/widget/amazonite.md"], paths
+    assert abs(hits[0].rank) > abs(hits[1].rank), "the global row outscores the project's"
+
+    # The project's row carries "beryl" twice and the global page once, so it answers
+    # first on the score the other way.
+    hits = search.search(cfg, "beryl", current="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert paths == ["projects/widget/amazonite.md", "global/amazonite.md"], paths
+    assert abs(hits[0].rank) > abs(hits[1].rank), "the project's row outscores the global"
+
+
+def test_another_projects_row_ranks_after_every_tier0_row(populated_vault: Config) -> None:
+    """F79: tier 1 still ranks after all of tier 0: another project's row that outscores
+    every tier-0 row answers behind them whatever its score."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/sodalite.md").write_text(
+        "---\n"
+        "title: Stone Bin\n"
+        "description: The stone bin.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n"
+        "# Sodalite\n"
+        "## State\n"
+        "- The sodalite bin holds one tray. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    (cfg.vault / "global/sodalite.md").write_text(
+        "---\n"
+        "title: Stone Bin\n"
+        "description: The stone bin.\n"
+        "---\n"
+        "# Sodalite\n"
+        "## State\n"
+        "- The sodalite bin holds one tray as well. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    (cfg.vault / "projects/gadget/sodalite.md").write_text(
+        "---\n"
+        "title: Stone Bin\n"
+        "description: The stone bin.\n"
+        "aft:\n  project: p_gadget\n"
+        "---\n"
+        "# Sodalite\n"
+        "## State\n"
+        "- The sodalite sodalite sodalite bin holds every tray the workshop has."
+        " [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "sodalite", current="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert set(paths[:2]) == {"projects/widget/sodalite.md", "global/sodalite.md"}, paths
+    assert paths[-1] == "projects/gadget/sodalite.md", paths
+    gadget_hit = next(hit for hit in hits if hit.project == "gadget")
+    for other in hits[:2]:
+        assert abs(gadget_hit.rank) > abs(other.rank), (
+            "the other project's row outscores the tier-0 rows it answers behind"
+        )
+
+
+def test_narrowed_search_puts_global_and_project_rows_on_one_tier(
+    populated_vault: Config,
+) -> None:
+    """F79: with --project the narrowed query takes the project's rows and the global pages
+    as one tier, so a global page that outscores the project's row answers first."""
+    cfg = populated_vault
+    (cfg.vault / "global/lapis.md").write_text(
+        "---\n"
+        "title: Lapis\n"
+        "description: The stone drawer.\n"
+        "---\n"
+        "# Lapis\n"
+        "## State\n"
+        "- The lapis drawer holds the lapis tiles. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    (cfg.vault / "projects/widget/lapis.md").write_text(
+        "---\n"
+        "title: Lapis\n"
+        "description: The stone drawer.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n"
+        "# Lapis\n"
+        "## State\n"
+        "- The lapis drawer holds one tray of tiles. [observed] 2026-09-28 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "lapis", project="widget", limit=10)
+    paths = [hit.path for hit in hits]
+    assert paths == ["global/lapis.md", "projects/widget/lapis.md"], paths
+    assert abs(hits[0].rank) > abs(hits[1].rank), "the global row outscores the project's"
 
 
 def test_raw_evidence_results_collapsed_per_session(populated_vault: Config) -> None:
