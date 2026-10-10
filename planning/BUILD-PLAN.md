@@ -1583,6 +1583,85 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   delete the inline queries and their duplicated date parsing. Behavior is unchanged; the
   existing F75 tests must pass untouched. Review checkpoint: no.
 
+- **F80 Coding-search eval: where the answer ranks** (ruling 2026-10-10; lands before F79).
+  `aft eval` passes an entry when its answer is in the memory block or anywhere in the
+  results, so a ranking change cannot move it. This adds a rank measure over search alone,
+  and a frozen copy of the real vault to run it on.
+  - **`aft eval --ranks`:** for each entry, runs search as a session in the entry's project
+    would (every project that is not archived, the entry's project first; not narrowed with
+    `--project`), with the injection block left out. A hit holds an expected item when the
+    text the hit leads to holds it: a page or digest hit's section under its heading, an
+    evidence hit's archived entry. Every collection counts the same way, so the measure does
+    not favour curated rows. The entry's rank is the 1-based position of the first hit
+    holding any expected item, or none within `--limit` (default 10 here). An `expect_not`
+    item is reported with the rank it surfaced at.
+  - **Output:** one line per entry (rank, the matching hit's collection and project), then
+    recall@1/3/5/10 and MRR over the set, each also split by the matching hit's collection.
+    `--json FILE` writes the per-entry records so two runs can be compared entry by entry.
+    The existing pass/fail mode is unchanged. No model is called.
+  - **`search()`:** gains a keyword naming the project that ranks first without narrowing
+    the query, which is how a session's search behaves from its working directory.
+  - **Snapshot:** `scripts/eval_search.py snapshot DIR` copies the vault (a clone at its
+    current commit), `registry` and config, and the evidence archive
+    (`~/.afterthought/evidence.sqlite`, which is outside the vault and purged after
+    `evidence.retention_days`) into `DIR` as a home of its own, and rebuilds the index there
+    with `aft reindex`. `scripts/eval_search.py run DIR KEY` runs `aft eval --ranks` with
+    `AFT_HOME` set to `DIR`. It refuses to run against the real home, like
+    `eval_digest.py`. The snapshot's vault commit and archive row count are recorded in
+    `DIR/snapshot.json`.
+  - **The key (lead, not in git):** about 40 entries in
+    `~/src/aft-eval-data/search/coding.yaml`, over a snapshot in
+    `~/src/aft-eval-data/search/snapshot-<date>/`. Questions are taken from what was
+    actually asked in the exported coding sessions (`~/src/aft-eval-data/sessions/`), worded
+    as an agent would search, never rephrased from the answer line. Each expected item is
+    checked present in the snapshot. The set covers answers that live only on a page, only
+    in a digest, and only in evidence, with at least 5 entries whose words also match
+    another project's memory, so other projects ranking last stays tested.
+  - **Baseline:** before F79's PR is reviewed, the lead runs the key on today's ranking and
+    keeps the JSON beside the key.
+  - **Tests** in `tests/test_eval.py` over a fixture vault with invented text: rank found
+    in each collection, not found past the limit, the injection block not counted, another
+    project's row reached but ranked after the entry's project, the snapshot refusing the
+    real home. Review checkpoint: no.
+
+- **F79 Rank current memory by BM25 across collections** (ruling 2026-10-10; amends H5's
+  curated-first order and F74's project-before-global tier, DESIGN 10). On the 60-question
+  LongMemEval-S sample, raw dumps reach recall_any@1 0.833 and production search over the
+  pipeline's memory 0.600: within a tier every page and digest row outranks every evidence
+  row, so a weak page match buries the evidence entry that holds the answer.
+  - **Tiers:** two. The current project's rows and the global pages are tier 0; other
+    projects' rows and unfiled text are tier 1. Tier 1 still ranks after all of tier 0.
+    With `--project P` the query is narrowed as today, and its rows are all tier 0.
+  - **Order inside a tier:** by BM25 score (`index.rank_expression`) across pages, digests
+    and evidence (and library and archive when they are searched). Curated rows (pages,
+    digests) win near-ties only: a curated row's score is multiplied by 1.10 before the
+    sort (scores are negative, so this moves it up), which puts it ahead of a raw row whose
+    score is within 10% of its own. The factor is a module constant, not a setting.
+  - **One key:** the SQL `ORDER BY` in each collection's query and its per-session
+    partition, and the Python merge across collections, sort on the same (tier, adjusted
+    score) key, so no collection's `LIMIT` drops a row the merge would have kept. The
+    per-session evidence collapse is unchanged.
+  - **Scale:** each FTS5 table computes BM25 over its own rows, so scores from different
+    collections are compared as they come, without normalizing. Whether that order is good
+    is what the measure below decides; the builder does not add normalization or rank
+    fusion.
+  - **Present tense:** DESIGN 10's search paragraph, the `search.py` module docstring, the
+    `_TIER_*` comment, and the `search()` and `_ask` docstrings describe the two tiers and
+    the near-tie rule. `_curated_priority` and H5's strict order are removed.
+  - **Measure, before merging (decision rule set now):** (1) F80's coding key on the same
+    snapshot, compared with F80's baseline entry by entry; (2) LongMemEval-S pipeline
+    `--rescore` of the kept sandboxes (`sample60-rerun.jsonl`, 37 questions, and
+    `diag6-f73.jsonl`, 6, two of them shared), run before and after on the same sandboxes,
+    with no model calls. F79 merges when the coding
+    key's recall@5 and MRR do not fall and no entry whose answer is on a page drops out of
+    the top 5. LongMemEval is confirmation only and is never tuned against. If the coding
+    key falls, F79 does not merge and the results go to Ted.
+  - **Tests** in `tests/test_search.py`: a strong evidence match outranks a weak page
+    match in the same tier; a page within 10% of an evidence row outranks it; the current
+    project's row and a global page interleave by score; another project's row ranks after
+    every tier-0 row whatever its score; a collection's `LIMIT` keeps the rows the merge
+    needs. Review checkpoint: yes (search order; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
