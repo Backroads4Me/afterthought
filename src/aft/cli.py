@@ -260,8 +260,19 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--limit",
         type=int,
-        default=8,
-        help="how many search results a line must be found in",
+        default=None,
+        help="how deep to look; 8 in the pass/fail mode, 10 with --ranks",
+    )
+    p.add_argument(
+        "--ranks",
+        action="store_true",
+        help="measure where each answer ranks in search alone instead of passing or failing",
+    )
+    p.add_argument(
+        "--json",
+        dest="json_out",
+        metavar="FILE",
+        help="with --ranks, write the per-entry records and the summary as JSON",
     )
     p.set_defaults(handler=cmd_eval)
 
@@ -907,7 +918,14 @@ def cmd_eval(args) -> int:
 
     config = load()
     vault.require(config)
-    return evalmod.run(config, args.golden, limit=args.limit)
+    if args.ranks:
+        limit = args.limit if args.limit is not None else evalmod.RANK_LIMIT
+        return evalmod.run_ranks(config, args.golden, limit=limit, json_out=args.json_out)
+    if args.json_out is not None:
+        print("--json belongs to --ranks", file=sys.stderr)
+        return 2
+    limit = args.limit if args.limit is not None else evalmod.DEFAULT_LIMIT
+    return evalmod.run(config, args.golden, limit=limit)
 
 
 def cmd_import_claude_memory(args) -> int:
