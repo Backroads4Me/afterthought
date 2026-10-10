@@ -1662,6 +1662,42 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     every tier-0 row whatever its score; a collection's `LIMIT` keeps the rows the merge
     needs. Review checkpoint: yes (search order; lead reviews in full).
 
+- **F81 Query words: any word, without question filler** (ruling 2026-10-10; amends H5's
+  conjunction-before-disjunction; builds after F79 merges). `aft search` first asks for rows
+  holding every query word and falls back to any word only when nothing holds them all. An
+  agent's question carries filler ("where does the switchboard project live"), so the
+  all-words query either matches nothing useful or matches a few rows that happen to hold
+  every filler word, and the fallback never runs. On F80's coding key (2026-10-10 baseline,
+  recall@10 0.33), removing filler words and asking for any word reached 0.40 in an
+  in-memory trial.
+  - **Filler words:** a fixed module constant in `search.py`, dropped from the query's bare
+    words before the match: a, an, and, are, as, at, be, by, can, could, did, do, does, for,
+    from, how, i, in, is, it, its, me, my, of, on, or, our, should, that, the, there, this,
+    to, was, we, were, what, when, where, which, who, why, will, with, would, you, your.
+    Matching is case-insensitive. Negations (no, not, never) are kept. A quoted phrase is
+    kept whole. When every bare word is filler, the words are kept as typed. The list is
+    set here and is not tuned against the key.
+  - **Any word:** the remaining words are joined with OR and ranked by BM25 (with F79's
+    tiers and near-tie rule); a row holding more of the words scores higher by BM25's own
+    sum. The all-words first pass and its fallback are removed. Temporal parsing, the
+    per-session evidence collapse and `--archive`/`--reports` are unchanged.
+  - **Scope:** the query side only. The index, its tokenizer and `aft inject` are
+    unchanged. Questions that share no word with their answer ("budgeting app" against
+    "Actual budget") stay out of reach; that is a separate question for Ted, not this task.
+  - **Present tense:** DESIGN 10's search paragraph, the `search.py` module docstring, and
+    the `_ask` and `_to_fts5_terms` docstrings.
+  - **Measure, before merging (decision rule set now):** F80's coding key on the
+    2026-10-10 snapshot, against the F79 merge's run on the same snapshot and key, entry by
+    entry; and the LongMemEval-S `--rescore` pair over F79's sandboxes. F81 merges when the
+    coding key's recall@5 and MRR do not fall and no entry found in the top 3 before drops
+    out of the top 5. LongMemEval is confirmation only. If the coding key falls, F81 does
+    not merge and the results go to Ted.
+  - **Tests** in `tests/test_search.py`: a question with filler words finds a row holding
+    only its content words; a row holding more content words outranks one holding fewer; a
+    query of filler words only still searches them; a quoted phrase holding a filler word
+    is matched as a phrase; a negation word is kept. Review checkpoint: yes (search order;
+    lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
