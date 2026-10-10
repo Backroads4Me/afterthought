@@ -14,10 +14,15 @@ while a fact deeper in the project is a search hit or a line of the block's page
 forbidden line must not surface at all, so it is checked against the block and the results
 together. The limit is how many results count as found, which is the width `aft search`
 holds itself to by default.
+Rank mode answers the question the pass or fail verdict cannot: not whether the answer
+is in memory, but where it ranks. Each entry's question runs through search alone, as a
+session in the entry's project would see it, and the summary reports recall and MRR over
+where the answer first surfaces.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sys
@@ -27,7 +32,7 @@ from typing import Any
 
 import yaml
 
-from aft import inject, keys, search
+from aft import evidence, index, inject, keys, search
 from aft.config import Config
 from aft.keys import Resolution
 from aft.library.manifest import UniqueKeyLoader
@@ -233,6 +238,232 @@ def run(config: Config, path: str | Path | None = None, *, limit: int = DEFAULT_
     passed = len(results) - failed
     print(f"{passed} of {len(results)} golden entries passed", file=sys.stderr)
     return 1 if failed else 0
+
+
+# How deep the rank measure looks by default: the pass/fail width would cut off answers
+# that rank just past it, so the measure looks a page deeper.
+RANK_LIMIT = 10
+
+# The depths the rank summary reports recall at.
+RECALL_KS = (1, 3, 5, 10)
+
+
+@dataclass(frozen=True)
+class RankResult:
+    """Where one entry's answer ranked in search alone, and what surfaced around it."""
+
+    case: Case
+    rank: int | None
+    collection: str | None
+    project: str | None
+    expect_not: tuple[tuple[str, int | None], ...] = ()
+    notes: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        rank = self.rank if self.rank is not None else "-"
+        collection = self.collection or "-"
+        project = self.project or "-"
+        line = f"{rank}\t{collection}\t{project}\t{self.case.question}"
+        extras = [
+            f"forbidden {item!r} surfaced at rank {at}"
+            for item, at in self.expect_not
+            if at is not None
+        ]
+        extras += list(self.notes)
+        if extras:
+            line += "\t" + "; ".join(extras)
+        return line
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "question": self.case.question,
+            "project": self.case.project,
+            "rank": self.rank,
+            "collection": self.collection,
+            "hit_project": self.project,
+            "expect_not": [{"item": item, "rank": at} for item, at in self.expect_not],
+            "notes": list(self.notes),
+        }
+
+
+def rank(config: Config, cases: list[Case], *, limit: int = RANK_LIMIT) -> list[RankResult]:
+    """Rank every entry's answer in search alone, with no block and no model.
+
+    Each search runs as a session in the entry's project would: the entry's project ranks
+    first and the query is not narrowed, so another project's row is still reached, ranked
+    behind the entry's own. An entry naming a project that is not in the registry is
+    reported rather than raised, for the same reason `evaluate` reports it.
+    """
+    registry = Registry.load(config.registry_path)
+    return [_rank(config, registry, case, limit) for case in cases]
+
+
+def _rank(config: Config, registry: Registry, case: Case, limit: int) -> RankResult:
+    project = registry.by_slug(case.project)
+    if project is None:
+        slugs = ", ".join(sorted(p.slug for p in registry.projects)) or "no projects"
+        note = f"no project {case.project!r} in the registry; it has {slugs}"
+        return RankResult(case, None, None, None, notes=(note,))
+    hits = search.search(config, case.question, current=case.project, limit=limit)
+    texts = [_hit_text(config, hit) for hit in hits]
+    expect_not = tuple((banned, _first_rank(banned, texts)) for banned in case.expect_not)
+    position = next(
+        (
+            number
+            for number, text in enumerate(texts, start=1)
+            if any(_found(want, [text]) for want in case.expect)
+        ),
+        None,
+    )
+    if position is None:
+        return RankResult(case, None, None, None, expect_not)
+    hit = hits[position - 1]
+    return RankResult(case, position, hit.collection, hit.project, expect_not)
+
+
+def _first_rank(needle: str, texts: list[str]) -> int | None:
+    for number, text in enumerate(texts, start=1):
+        if _found(needle, [text]):
+            return number
+    return None
+
+
+def _hit_text(config: Config, hit: search.Hit) -> str:
+    """The text one hit leads to, which is what the rank measure judges the hit by.
+
+    An evidence hit names an archived entry rather than a file, so its text is the entry's
+    own. A page or digest hit answers from its section under the heading the index
+    recorded, or from the whole file when the heading names nothing in it. A hit whose
+    file cannot be read still counts with the path, description and snippet it carries.
+    """
+    fallback = "\n".join(part for part in (hit.path, hit.description, hit.snippet) if part)
+    if hit.path.startswith(index.SESSION_RESOURCE):
+        parsed = evidence.parse_resource(hit.path)
+        if parsed is None:
+            return fallback
+        session_id, entry_id = parsed
+        text = evidence.entry_text(config, session_id, entry_id)
+        return text if text is not None else fallback
+    return _section_text(config, hit) or fallback
+
+
+def _section_text(config: Config, hit: search.Hit) -> str:
+    """The section of the hit's file under its heading, or the whole file without one."""
+    try:
+        text = (config.vault / hit.path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if not hit.heading:
+        return text
+    return _under_heading(text, hit.heading) or text
+
+
+def _under_heading(text: str, heading: str) -> str:
+    """The lines from ``heading`` to the next heading of the same or higher level."""
+    lines = text.splitlines()
+    for start, line in enumerate(lines):
+        level = _heading_level(line)
+        if level and _heading_name(line) == heading:
+            for end in range(start + 1, len(lines)):
+                other = _heading_level(lines[end])
+                if other and other <= level:
+                    return "\n".join(lines[start:end])
+            return "\n".join(lines[start:])
+    return ""
+
+
+def _heading_level(line: str) -> int:
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        return 0
+    return len(stripped) - len(stripped.lstrip("#"))
+
+
+def _heading_name(line: str) -> str:
+    stripped = line.lstrip().lstrip("#")
+    return stripped.strip().strip("#").strip()
+
+
+def summarize(results: list[RankResult]) -> dict[str, Any]:
+    """Recall and MRR over the entries that expect something, split by collection.
+
+    An entry carrying only ``expect_not`` items measures nothing here: it names no answer
+    to rank, only text that must stay out. An entry whose answer did not surface within
+    the limit counts as not found, and its reciprocal rank is 0 in the MRR. The split by
+    collection covers the entries that were found, grouped by the collection their
+    matching hit came from; an entry nothing reached belongs to no collection.
+    """
+    scored = [result for result in results if result.case.expect]
+    summary: dict[str, Any] = {"cases": len(scored)}
+    for k in RECALL_KS:
+        summary[f"recall@{k}"] = _recall(scored, k)
+    summary["mrr"] = _mean_reciprocal(scored)
+    split: dict[str, dict[str, Any]] = {}
+    for result in scored:
+        if result.rank is None or result.collection is None:
+            continue
+        bucket = split.setdefault(
+            result.collection, {"cases": 0, **{f"found@{k}": 0 for k in RECALL_KS}}
+        )
+        bucket["cases"] += 1
+        for k in RECALL_KS:
+            if result.rank <= k:
+                bucket[f"found@{k}"] += 1
+        rrs: list[float] = bucket.setdefault("rrs", [])
+        rrs.append(1.0 / result.rank)
+    for bucket in split.values():
+        rrs: list[float] = bucket.pop("rrs")
+        bucket["mrr"] = sum(rrs) / len(rrs) if rrs else 0.0
+    summary["by_collection"] = split
+    return summary
+
+
+def _recall(results: list[RankResult], k: int) -> float:
+    if not results:
+        return 0.0
+    found = sum(1 for result in results if result.rank is not None and result.rank <= k)
+    return found / len(results)
+
+
+def _mean_reciprocal(results: list[RankResult]) -> float:
+    if not results:
+        return 0.0
+    return sum(1.0 / result.rank for result in results if result.rank is not None) / len(results)
+
+
+def run_ranks(
+    config: Config,
+    path: str | Path | None = None,
+    *,
+    limit: int = RANK_LIMIT,
+    json_out: str | Path | None = None,
+) -> int:
+    """Print each entry's rank and the summary, and exit 0.
+
+    Rank mode measures rather than passes or fails: a low rank is a fact about memory to
+    compare across runs, not a regression to exit over, so the command exits 0 however the
+    entries ranked. ``json_out`` writes the per-entry records and the summary, so two runs
+    can be compared entry by entry.
+    """
+    cases = load_golden(Path(path) if path is not None else golden_path(config))
+    results = rank(config, cases, limit=limit)
+    for result in results:
+        print(result)
+    summary = summarize(results)
+    _print_summary(summary)
+    if json_out is not None:
+        record = {"entries": [result.to_dict() for result in results], "summary": summary}
+        Path(json_out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return 0
+
+
+def _print_summary(summary: dict[str, Any]) -> None:
+    parts = [f"recall@{k} {summary[f'recall@{k}']:.2f}" for k in RECALL_KS]
+    parts.append(f"mrr {summary['mrr']:.2f}")
+    print(f"{summary['cases']} entries with expect items: " + "  ".join(parts))
+    for collection, bucket in summary["by_collection"].items():
+        found = "  ".join(f"found@{k} {bucket[f'found@{k}']}" for k in RECALL_KS)
+        print(f"  {collection}: {bucket['cases']} found  {found}  mrr {bucket['mrr']:.2f}")
 
 
 def _shape(value: object) -> str:
