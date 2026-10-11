@@ -1842,7 +1842,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **What:** for each active line of a `pages` row and each section of a `digests` row,
     up to 8 short phrases a person might search with (synonyms, the question it answers),
     written by the configured model from `src/aft/prompts/phrases.md` (schema-constrained,
-    R9), several rows per call where they fit.
+    R9), one row per call: asked for twenty rows at once the model restated each row's own
+    words, and paraphrase recall@5 stayed at 0.25 against 0.38 at one row a call.
   - **Where they live:** `phrases/<the page's or digest's own path>.json` in the vault,
     mapping a key to its phrases. A page line's key is a hash of its statement text, so an
     edited line has no phrases until new ones are written; a digest section's key is a hash
@@ -1850,7 +1851,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **When:** a step of `aft run` writes phrases for every indexed row that has none, under
     the daily token budget and the endpoint's cooldown like other background work, and
     removes entries whose key no longer matches an indexed row (a withdrawn, superseded or
-    edited line). The first run backfills the current vault (about 800 rows, 240k tokens).
+    edited line). The first run backfills the current vault (about 800 rows, 320k tokens).
   - **Index:** a `phrases` column on `pages` and `digests` rows, weighted as body text, filled
     from the phrase files; `BUILD_STAMP` rises. A hit's snippet is drawn from the row's own
     text, never from its phrases.
