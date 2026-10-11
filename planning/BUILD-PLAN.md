@@ -1874,6 +1874,27 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     forget session and forget pattern remove or redact them; a spent budget stops the step.
     Review checkpoint: yes (privacy: forget and redaction; lead reviews in full).
 
+- **F86 Search has its own token budget** (ruling 2026-10-11; follows F84). `aft search`'s
+  rerank (about 4,000 tokens a search) draws on `work.daily_token_budget`, the same budget
+  the digests, dream and phrases use, so a day of heavy searching can stop the digests, and
+  a day of heavy digesting turns reranking off.
+  - **Ledger:** each line `aft.model` appends to `usage.jsonl` names its purpose: `search`
+    for the rerank call, `work` for everything else. A line written before F86, with no
+    purpose, counts as `work`.
+  - **Budgets:** `search.daily_token_budget` caps the day's `search` tokens and
+    `work.daily_token_budget` caps the day's `work` tokens; neither counts the other's. The
+    rerank checks the search budget, and digests, dream and phrases check the work budget,
+    each through `tokens_used_today(config, purpose=...)`. Default for the new setting:
+    200,000.
+  - **Reset and report:** `aft budget` prints both counts against both caps; `aft budget
+    reset` resets both, as one reset does today.
+  - **Present tense:** DESIGN 10's search paragraph (the search budget), DESIGN 13's budget
+    text, `docs/configuration.md`, `docs/commands.md`, and `aft init`'s template.
+  - **Tests:** search tokens leave the work budget untouched and the reverse; a spent search
+    budget turns reranking off while digests continue; a spent work budget stops digests
+    while reranking continues; a pre-F86 ledger line counts as work; `aft budget` shows both;
+    a reset resets both. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1

@@ -737,7 +737,18 @@ model when it can: the model ranks them by how well each answers the question, i
 comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
 (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer late or
 unusable, or the day's token budget spent), the search keeps the BM25 order. Every other
-caller, the memory block included, uses the BM25 order alone. The default collections are:
+caller, the memory block included, uses the BM25 order alone.
+
+Page lines and digest sections are also matched through search phrases: up to eight short
+wordings a person might search with (synonyms, the question the text answers), which the
+model writes one row per call in a step of `aft run`, under the same budget and cooldown as
+the digests. They are vault files, `phrases/<the page's or digest's path>.json`, keyed by a
+hash of a line's statement or a digest section's heading and text, so an edited line has no
+phrases until new ones are written, and the run prunes entries whose text the vault no longer
+holds. The index reads them as files, in a `phrases` column weighted like the body, so a
+rebuild needs no model. A hit's snippet comes from the row itself, never its phrases. Phrases
+are search aids only: never injected, never shown as a fact, never read by the digest, dream,
+review or reports, and not shown by `aft read`. The default collections are:
 
 | Collection | Contents |
 |---|---|
@@ -927,12 +938,14 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
 - **`aft forget session <id>`** removes the session from the evidence archive, the capture
   queue, the index and the digests, withdraws curated lines that rested only on it, and
   scrubs its quotes wherever afterthought copied them: page sources, reports and
-  `needs-you.md`.
+  `needs-you.md`. The search phrases of the lines it withdraws and the digests it removes go
+  with them, and so do all the phrases of a page whose parse fails.
 - **`aft review <project|global>`** asks the model which active lines fail the test of what
   memory keeps, saves the numbered list to `reports/review-<scope>.md` and changes nothing;
   `--withdraw <numbers|all>` strikes the lines you choose, each with its reason recorded.
 - **`aft forget pattern <regex>`** replaces matching text with `[redacted]` in the archive
-  and everywhere afterthought copied it (digest quotes, page sources and statements, reports),
+  and everywhere afterthought copied it (digest quotes, page sources and statements, reports,
+  search phrases),
   updates the index to match, and prints the line that adds the pattern to future redaction.
   Quotes stay verifiable because the archive holds the same redaction.
 
