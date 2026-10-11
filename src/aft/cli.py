@@ -279,6 +279,13 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="search variant with --ranks: rerank, expand, lsa, expand+rerank, lsa+rerank",
     )
+    p.add_argument(
+        "--no-rerank",
+        dest="rerank",
+        action="store_false",
+        default=None,
+        help="with --ranks, measure without the model's reordering (default: follow search.rerank)",
+    )
     p.set_defaults(handler=cmd_eval)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
@@ -917,7 +924,9 @@ def cmd_lint(args) -> int:
 
 
 def cmd_eval(args) -> int:
-    """Run the golden set. No vault lock and no model: eval only ever reads."""
+    """Run the golden set. No vault lock, and no model in the pass/fail mode: eval only
+    ever reads. The --ranks measure follows [search] like `aft search` does; --no-rerank
+    measures the bare index order."""
     from aft import eval as evalmod
     from aft import vault
 
@@ -931,6 +940,7 @@ def cmd_eval(args) -> int:
             limit=limit,
             json_out=args.json_out,
             variant=args.variant,
+            rerank=args.rerank,
         )
     if args.variant is not None:
         print("--variant belongs to --ranks", file=sys.stderr)

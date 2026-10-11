@@ -23,9 +23,8 @@ from aft import config as configmod
 from aft import index, model, vault
 from aft import search as search_mod
 from aft.config import Config
-from aft.search import hit_text
 from aft.registry import Registry
-from aft.search import Hit, SearchError
+from aft.search import Hit, SearchError, hit_text
 
 RERANK_SYSTEM = (
     "You are a relevance ranker. Given a user question and a numbered list of candidate "

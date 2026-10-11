@@ -106,6 +106,16 @@ class WorkConfig:
 
 
 @dataclass(frozen=True)
+class SearchConfig:
+    """How ``aft search`` orders what the index finds (BUILD-PLAN F84). The model
+    reorders the search's top candidates when it can, and the search keeps the index's
+    own order whenever it cannot."""
+
+    rerank: bool = True
+    rerank_timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
 class InjectConfig:
     max_chars: int = 8000
 
@@ -126,6 +136,7 @@ class Settings:
     evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     dream: DreamConfig = field(default_factory=DreamConfig)
     work: WorkConfig = field(default_factory=WorkConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
@@ -391,6 +402,16 @@ short_term_days = 7
 # tomorrow. An ordinary day of digests is about 55,000, so this is about four times
 # that: enough for a heavy day, short enough to bound a run that has gone wrong.
 daily_token_budget = 200000
+
+[search]
+# How "aft search" orders what the index finds. When the model can answer, it
+# reorders the search's top candidates by how well each answers the question; when
+# it cannot - the setting off, the endpoint cooling down or unreachable, the answer
+# late or unusable, or today's token budget spent - the search keeps the index's own
+# order and says nothing about it.
+rerank = true
+# How long the reorder call may take before the search keeps the index's own order.
+rerank_timeout_seconds = 5
 
 [inject]
 max_chars = 8000

@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "ranking": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "The number of one candidate shown in the prompt."
+      },
+      "description": "Candidate numbers ordered from the one that answers the question best to the one that answers it least. A candidate that does not answer it is left out."
+    }
+  },
+  "required": ["ranking"],
+  "additionalProperties": false
+}

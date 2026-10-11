@@ -5,6 +5,13 @@ evidence) by default. The archive is searched only with --archive, and dream rep
 with --reports. Reading opens pages at outline, abstract, or full depth. Tracing links a
 curated fact's source quote to its session context in the evidence archive.
 
+The model can reorder a search's top candidates by how well each answers the question
+(BUILD-PLAN F84). ``search()`` takes ``rerank``: the `aft search` command passes the
+``[search]`` setting and `aft eval --ranks` follows it, with ``--no-rerank`` to refuse
+it; every other caller keeps the index's own order. The reorder call is one attempt with
+no repair turn, never sets or clears the endpoint's cooldown, and any failure keeps the
+index's own order, logged and never printed.
+
 A hit says where it came from as well as what matched: its document, its collection, its
 section and its project (`search_command`). An evidence hit names the one archived entry
 it holds, so the path printed by a search is the path `aft trace` takes to open that
@@ -26,6 +33,7 @@ each answer under their own name.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -33,11 +41,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from aft import evidence, index, inject, keys, page, vault
+from aft import evidence, index, inject, keys, model, page, vault
 from aft.config import Config
 from aft.registry import Registry, path_key
 from aft.temporal import TemporalConstraint, parse_temporal
 
+
+LOGGER = logging.getLogger(__name__)
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
 _HEADING = re.compile(r"^#{1,6}\s")
 _FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
@@ -260,6 +270,7 @@ def search(
     links: str | None = None,
     now: datetime | None = None,
     tc: TemporalConstraint | None = None,
+    rerank: bool = False,
 ) -> list[Hit]:
     """Query the search index with BM25 ranking across active collections.
 
@@ -272,6 +283,14 @@ def search(
     session; ``project`` and ``current`` cannot be given together, and an unknown slug in
     either is an error. ``all_projects`` is accepted and changes nothing, since the default
     already reaches every project.
+
+    With ``rerank`` the candidate pool is fetched wider (30 when the limit is smaller)
+    and the configured model orders it by how well each candidate answers the question;
+    its order comes first and the candidates it left out follow in the index's own
+    order, cut to ``limit``. The call checks an existing cooldown first and skips when
+    one stands, never sets or clears one, is one attempt with no repair turn, and every
+    failure keeps the index's own order: the fallback is logged, never printed. The
+    backlink path (``links``) is never reranked.
     """
     vault.require(config)
     index.update(config)
@@ -389,7 +408,8 @@ def search(
         if not active_collections:
             return []
 
-        rows = _ask(conn, active_collections, query, narrow_id, tier0_id, limit, now=now)
+        pool = max(limit, RERANK_CANDIDATES) if rerank else limit
+        rows = _ask(conn, active_collections, query, narrow_id, tier0_id, pool, now=now)
 
         slugs = {proj.id: proj.slug for proj in registry.projects}
         seen_paths: set[str] = set()
@@ -429,9 +449,11 @@ def search(
                     rank=float(row["rank"]),
                 )
             )
-            if len(hits) >= limit:
+            if len(hits) >= pool:
                 break
 
+        if rerank:
+            return _rerank_hits(config, query, hits, limit)
         return hits
     except sqlite3.OperationalError as exc:
         raise SearchError(f"search failed: {exc}") from exc
@@ -567,6 +589,7 @@ def search_command(
         links=links,
         now=now,
         tc=tc,
+        rerank=config.settings.search.rerank,
     )
     if as_json:
         print(json.dumps([h.to_dict() for h in hits], indent=2))
@@ -921,3 +944,106 @@ def _heading_level(line: str) -> int:
 def _heading_name(line: str) -> str:
     stripped = line.lstrip().lstrip("#")
     return stripped.strip().strip("#").strip()
+
+
+
+#: How wide the candidate pool a reranked search fetches is, whatever the caller's limit
+#: (BUILD-PLAN F84): the index's own order still decides what the pool holds, the model
+#: only orders it, and the order is cut back to the caller's limit afterwards.
+RERANK_CANDIDATES = 30
+
+#: How many characters of one candidate's text the rerank prompt shows.
+RERANK_TEXT_CHARS = 600
+
+#: The rerank answer is short: at most one number per candidate in the pool.
+RERANK_MAX_TOKENS = 256
+
+#: The rerank prompt and its schema, which ship with aft beside the other prompts.
+RERANK_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "rerank.md"
+RERANK_SCHEMA_PATH = Path(__file__).resolve().parent / "prompts" / "rerank.schema.json"
+
+
+def _rerank_prompt() -> str:
+    """The rerank prompt's text."""
+    try:
+        return RERANK_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SearchError(
+            f"cannot read {RERANK_PROMPT_PATH.name}, which ships with aft: {exc}"
+        ) from exc
+
+
+def _rerank_schema() -> dict:
+    """The schema the rerank answer is checked against."""
+    try:
+        parsed = json.loads(RERANK_SCHEMA_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SearchError(
+            f"cannot read {RERANK_SCHEMA_PATH.name}, which ships with aft: {exc}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise SearchError(f"{RERANK_SCHEMA_PATH.name} is not a JSON object")
+    return parsed
+
+
+def _rerank_hits(config: Config, query: str, hits: list[Hit], limit: int) -> list[Hit]:
+    """Order the candidate pool with the model, or keep the index's order when it cannot.
+
+    The model sees the question and each candidate's text and names candidate numbers in
+    order; its order comes first and the candidates it left out follow in the index's
+    own order, cut to ``limit``. The call checks an existing cooldown first and skips
+    when one stands, never sets or clears one of its own (a slow or failing search must
+    not pause background digests), makes one attempt with no repair turn, and counts
+    against today's token budget like every model call. Every failure - cooling down, a
+    spent budget, an unreachable endpoint, a late or invalid answer - keeps the index's
+    order and is logged, never printed.
+    """
+    if len(hits) <= 1:
+        return hits[:limit]
+    cooling, reason = model.is_in_cooldown(config)
+    if cooling:
+        LOGGER.info("search rerank skipped, endpoint cooling down: %s", reason)
+        return hits[:limit]
+    if model.tokens_used_today(config) >= config.settings.work.daily_token_budget:
+        LOGGER.info("search rerank skipped, today's token budget is spent")
+        return hits[:limit]
+    candidates = []
+    for number, hit in enumerate(hits, start=1):
+        text = " ".join(hit_text(config, hit).split())
+        candidates.append(f"[{number}] {text[:RERANK_TEXT_CHARS]}")
+    user = f"Question: {query}\n\nCandidates:\n" + "\n\n".join(candidates)
+    try:
+        answer = model.complete_json(
+            config,
+            system=_rerank_prompt(),
+            user=user,
+            schema=_rerank_schema(),
+            max_tokens=RERANK_MAX_TOKENS,
+            timeout=config.settings.search.rerank_timeout_seconds,
+            record_cooldown=False,
+            repair=False,
+        )
+    except Exception as exc:
+        LOGGER.info("search rerank fell back to the index order: %s", exc)
+        return hits[:limit]
+    ranking = answer.get("ranking") if isinstance(answer, dict) else None
+    if not isinstance(ranking, list):
+        LOGGER.info("search rerank fell back to the index order: the answer holds no ranking")
+        return hits[:limit]
+    chosen: list[int] = []
+    seen: set[int] = set()
+    for number in ranking:
+        if (
+            isinstance(number, int)
+            and not isinstance(number, bool)
+            and 1 <= number <= len(hits)
+            and number not in seen
+        ):
+            chosen.append(number)
+            seen.add(number)
+    if not chosen:
+        LOGGER.info("search rerank fell back to the index order: the answer names no candidate")
+        return hits[:limit]
+    reordered = [hits[number - 1] for number in chosen]
+    reordered.extend(hit for number, hit in enumerate(hits, start=1) if number not in seen)
+    return reordered[:limit]
