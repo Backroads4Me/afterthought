@@ -1796,6 +1796,83 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     skipped when numpy is absent. Review checkpoint: no (evaluation tooling; the adoption
     task that may follow gets a full review).
 
+- **F84 `aft search` orders its candidates with the model** (ruling 2026-10-11; adopts F83's
+  `rerank`, report `.board/f83-report.md`; DESIGN 10). On T38's key, reranking raised
+  recall@5 from 0.48 to 0.62 and MRR from 0.41 to 0.53, with p90 search time 1.83 s and about
+  3,900 tokens a search.
+  - **Where:** the `aft search` command only (`search_command`, and so the agents' own
+    searches). `aft.search.search()` gains `rerank: bool = False`; every other caller,
+    `aft inject`, the memory block, the dream and `aft eval`'s pass/fail mode, stays
+    model-free. `aft eval --ranks` follows the setting, with `--no-rerank` to measure
+    without it.
+  - **How:** today's search fetches its top 30; the configured model gets the question and
+    each candidate's text (the section a page or digest hit names, an evidence hit's archived
+    entry, cut to 600 characters; the text F80's `_hit_text` reads, moved into `search.py`
+    so production does not import from `eval`) and answers schema-constrained JSON naming
+    candidate numbers in order (R9). The result is that order, then any candidates it left
+    out in today's order, cut to `--limit`. The prompt is `src/aft/prompts/rerank.md` with
+    `rerank.schema.json`, worded from F83's.
+  - **Fallback, never an error:** when the setting is off, the endpoint is in cooldown or
+    unreachable, the call exceeds `search.rerank_timeout_seconds`, the answer is invalid or
+    names no candidate, or today's tokens have reached `work.daily_token_budget`, the
+    command prints today's order exactly as it does now. Nothing is printed about the
+    fallback on stdout; a failure is logged as other model failures are.
+  - **Settings:** `[search]` with `rerank = true` and `rerank_timeout_seconds = 5`
+    (`config.py`, `aft init`'s template, `docs/configuration.md`).
+  - **Tokens:** the call goes through `aft.model` like every other, so it is recorded in
+    `usage.jsonl` and counts against the daily budget.
+  - **Present tense:** DESIGN 10's search paragraph (search orders its top candidates with
+    the model when it can, and falls back to BM25 order), `docs/commands.md`,
+    `docs/configuration.md`, the `search.py` docstrings.
+  - **Measure, before merging (decision rule set now):** T38's key on its snapshot through
+    the production path: recall@5 at least 0.60 and MRR at least 0.50 (F83's `rerank`: 0.62,
+    0.53), p90 search time under 3 s; with `--no-rerank` the results equal F81's run
+    entry by entry. If it falls short, F84 does not merge and the results go to Ted.
+  - **Tests** (`tests/test_search.py`, fake endpoint): the model's order is applied and
+    omitted candidates follow in today's order; an invalid answer, an unreachable endpoint, a
+    timeout, a spent budget and the setting off each give today's order; `search()` without
+    `rerank=True` makes no model call; `aft inject` makes none; the prompt-shape test pins
+    the prompt. Review checkpoint: yes (search order and a new model call; lead reviews in
+    full).
+
+- **F85 Search phrases, kept as vault files** (ruling 2026-10-11; adopts F83's `expand`;
+  after F84; DESIGN 10 and 8). On T38's key, phrases with reranking raised paraphrase
+  recall@5 from 0.25 (rerank alone) to 0.38. Phrases are model output, so they are files in
+  the vault, never index-only: the index stays a cache rebuilt from files with no model.
+  - **What:** for each active line of a `pages` row and each section of a `digests` row,
+    up to 8 short phrases a person might search with (synonyms, the question it answers),
+    written by the configured model from `src/aft/prompts/phrases.md` (schema-constrained,
+    R9), several rows per call where they fit.
+  - **Where they live:** `phrases/<the page's or digest's own path>.json` in the vault,
+    mapping a key to its phrases. A page line's key is a hash of its statement text, so an
+    edited line has no phrases until new ones are written; a digest section's key is a hash
+    of its heading and text. The files are committed with the run that writes them.
+  - **When:** a step of `aft run` writes phrases for every indexed row that has none, under
+    the daily token budget and the endpoint's cooldown like other background work, and
+    removes entries whose key no longer matches an indexed row (a withdrawn, superseded or
+    edited line). The first run backfills the current vault (about 800 rows, 240k tokens).
+  - **Index:** a `phrases` column on `pages` and `digests` rows, weighted as body text, filled
+    from the phrase files; `BUILD_STAMP` rises. A hit's snippet is drawn from the row's own
+    text, never from its phrases.
+  - **Never memory:** phrases are never injected, never shown as a fact, never read by the
+    digest, dream, review or reports, and never a source. `aft read` does not show them.
+  - **Forget and redaction:** `aft forget session` removes the phrases of every line and
+    digest section it removes or rewrites; `aft forget pattern` and `capture.redact_patterns`
+    apply to phrase files as to every other vault file (DESIGN 8: forgetting reaches
+    everything afterthought controls). List each forget and redaction path and how it
+    reaches phrase files in the PR body.
+  - **Present tense:** DESIGN 10 (the phrases column and where phrases come from), DESIGN 8
+    (forget reaches phrase files), `docs/vault.md` (the `phrases/` directory).
+  - **Measure, before merging (decision rule set now):** T38's key on a snapshot taken after
+    the backfill, with F84's reranking: paraphrase recall@5 at least 0.31 and overall recall@5
+    and MRR not below F84's run. If it falls short, F85 does not merge and the results go to
+    Ted.
+  - **Tests:** phrases are written for rows that lack them and removed for rows that left;
+    an edited line loses its stale phrases; a rebuild from files reproduces the phrases column
+    with no model call; snippets never show phrases; inject and `aft read` never show them;
+    forget session and forget pattern remove or redact them; a spent budget stops the step.
+    Review checkpoint: yes (privacy: forget and redaction; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
