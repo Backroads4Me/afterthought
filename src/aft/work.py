@@ -86,6 +86,7 @@ class Report:
     purged: int = 0
     phrases_written: int = 0
     phrases_pruned: int = 0
+    phrases_stopped: str = ""
     stopped: str = ""
 
     def line(self) -> str:
@@ -101,6 +102,8 @@ class Report:
             said.append(f"{self.phrases_written} phrases written")
         if self.phrases_pruned:
             said.append(f"{self.phrases_pruned} phrases pruned")
+        if self.phrases_stopped:
+            said.append(f"phrases stopped: {self.phrases_stopped}")
         if self.failures:
             said.append(f"{len(self.failures)} failed")
         if self.stopped:
@@ -174,6 +177,7 @@ def run(config: Config, now: datetime | None = None) -> Report:
     vault.require(config)
     moment = now or datetime.now(UTC)
     swept = digested = empty = purged = phrases_written = phrases_pruned = 0
+    phrases_stopped = ""
     failures: list[str] = []
     stopped = ""
     budget = config.settings.work.daily_token_budget
@@ -313,16 +317,15 @@ def run(config: Config, now: datetime | None = None) -> Report:
         # cooldown, and the files they change are committed here like the digests' pages
         # are. What the step could not finish is said out loud and does not undo the
         # digests, which are already committed.
-        if stopped != STOP_QUEUE:
+        if stopped != STOP_QUEUE and config.settings.work.phrases:
             try:
                 phrased = phrases.update(config, moment)
-            except (SearchIndexError, VaultError, GitError) as exc:
+            except (SearchIndexError, VaultError, GitError, OSError) as exc:
                 failures.append(f"the phrases step: {exc}")
             else:
                 phrases_written += phrased.written
                 phrases_pruned += phrased.pruned
-                if phrased.stopped:
-                    failures.append(f"the phrases step: {phrased.stopped}")
+                phrases_stopped = phrased.stopped
         # What this run committed is indexed here, and what the index could not read is said
         # out loud rather than dropped: the digest step's own update runs before its commit,
         # so the page just written is only searchable after this one, and a report line that
@@ -345,5 +348,6 @@ def run(config: Config, now: datetime | None = None) -> Report:
         purged=purged,
         phrases_written=phrases_written,
         phrases_pruned=phrases_pruned,
+        phrases_stopped=phrases_stopped,
         stopped=stopped,
     )

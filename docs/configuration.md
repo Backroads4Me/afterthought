@@ -68,6 +68,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 | Setting | Default | What it does |
 |---|---|---|
 | `work.daily_token_budget` | `200000` | Tokens one day of background work, digests and dreaming alike, may spend, counted from midnight UTC in `~/.afterthought/usage.jsonl`. When it is spent, the rest of the queue waits for the next day, or for `aft budget reset`. `aft redigest` counts against it too. |
+| `work.phrases` | `true` | Whether `aft run` runs the search-phrase step (BUILD-PLAN F85): the model writes short search phrases for the indexed lines and digest sections into `phrases/` vault files, under the same budget and cooldown as the digests. Turn it off to run digests without that extra spend, the way the eval harness does. |
 
 ## `[search]`
 

@@ -172,6 +172,9 @@ def with_model(cfg: Config, endpoint: str, name: str, extra_body: str) -> Config
     settings = replace(
         cfg.settings,
         model=replace(cfg.settings.model, endpoint=endpoint, name=name, extra_body=extra),
+        # The scenario runs measure digests against scripted answers; the phrases step's
+        # own calls would consume the script (BUILD-PLAN F85).
+        work=replace(cfg.settings.work, phrases=False),
     )
     return replace(cfg, settings=settings)
 
@@ -1617,6 +1620,11 @@ def run_scenario(
             "",
             "[digest]",
             f'pipeline = "{pipeline_name}"',
+            "",
+            # The scenario runs measure digests against scripted answers; the phrases
+            # step's own calls would consume the script (BUILD-PLAN F85).
+            "[work]",
+            "phrases = false",
             "",
             "[dream]",
             "quiet_minutes = 0",

@@ -354,9 +354,7 @@ def _file_keys(config: Config, rel: str) -> set[str] | None:
     parsed = page.parse(text, config.vault / rel)
     if parsed.errors:
         return None
-    return {
-        line_key(fact.statement) for fact in parsed.facts if fact.state in inject.INJECTED
-    }
+    return {line_key(fact.statement) for fact in parsed.facts if fact.state in inject.INJECTED}
 
 
 @dataclass(frozen=True)
@@ -414,5 +412,23 @@ def update(config: Config, now: datetime | None = None) -> Report:
                     break
                 written += _store(config, batch, answered, changed)
         if changed:
-            vault.commit(config.vault, changed, "aft: phrases")
+            committable = _committable(config.vault, changed)
+            if committable:
+                vault.commit(config.vault, committable, "aft: phrases")
     return Report(written=written, pruned=pruned, stopped=stopped)
+
+
+def _committable(vault_root: Path, rels: list[str]) -> list[str]:
+    """The changed phrase paths git can stage: present on disk, or already tracked.
+
+    A file the step deleted can still need staging (its removal is the change), but only
+    if an earlier commit recorded it; a path that is neither on disk nor tracked has
+    nothing for git to act on. If git cannot answer, the step still commits what exists.
+    """
+    from aft.gitutil import GitError, git
+
+    try:
+        tracked = set(git(["ls-files", "--", *rels], cwd=vault_root).stdout.split())
+    except GitError:
+        tracked = set()
+    return [rel for rel in rels if (vault_root / rel).exists() or rel in tracked]
