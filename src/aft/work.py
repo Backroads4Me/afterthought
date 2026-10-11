@@ -27,7 +27,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from aft import capture, digest, evidence, index, model, queue, vault
+from aft import capture, digest, evidence, index, model, phrases, queue, vault
 from aft.config import Config
 from aft.evidence import EvidenceError
 from aft.gitutil import GitError
@@ -84,6 +84,8 @@ class Report:
     empty: int = 0
     failures: tuple[str, ...] = ()
     purged: int = 0
+    phrases_written: int = 0
+    phrases_pruned: int = 0
     stopped: str = ""
 
     def line(self) -> str:
@@ -95,6 +97,10 @@ class Report:
         ]
         if self.purged:
             said.append(f"{self.purged} purged")
+        if self.phrases_written:
+            said.append(f"{self.phrases_written} phrases written")
+        if self.phrases_pruned:
+            said.append(f"{self.phrases_pruned} phrases pruned")
         if self.failures:
             said.append(f"{len(self.failures)} failed")
         if self.stopped:
@@ -167,7 +173,7 @@ def run(config: Config, now: datetime | None = None) -> Report:
         return Report(stopped=f"the model endpoint is in cooldown until {until:%H:%M}Z: {reason}")
     vault.require(config)
     moment = now or datetime.now(UTC)
-    swept = digested = empty = purged = 0
+    swept = digested = empty = purged = phrases_written = phrases_pruned = 0
     failures: list[str] = []
     stopped = ""
     budget = config.settings.work.daily_token_budget
@@ -301,6 +307,22 @@ def run(config: Config, now: datetime | None = None) -> Report:
                             stopped = STOP_QUEUE
                             break
 
+        # Phrases (BUILD-PLAN F85): the model's own short wordings of what the rows say,
+        # written to the vault's phrase files for the rows that lack them. They run after
+        # the digests had their share of the day, under the same budget and the same
+        # cooldown, and the files they change are committed here like the digests' pages
+        # are. What the step could not finish is said out loud and does not undo the
+        # digests, which are already committed.
+        if stopped != STOP_QUEUE:
+            try:
+                phrased = phrases.update(config, moment)
+            except (SearchIndexError, VaultError, GitError) as exc:
+                failures.append(f"the phrases step: {exc}")
+            else:
+                phrases_written += phrased.written
+                phrases_pruned += phrased.pruned
+                if phrased.stopped:
+                    failures.append(f"the phrases step: {phrased.stopped}")
         # What this run committed is indexed here, and what the index could not read is said
         # out loud rather than dropped: the digest step's own update runs before its commit,
         # so the page just written is only searchable after this one, and a report line that
@@ -321,5 +343,7 @@ def run(config: Config, now: datetime | None = None) -> Report:
         empty=empty,
         failures=tuple(failures),
         purged=purged,
+        phrases_written=phrases_written,
+        phrases_pruned=phrases_pruned,
         stopped=stopped,
     )
