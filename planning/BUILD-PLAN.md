@@ -1706,17 +1706,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   cloned" fell from rank 2 to 7 under F79 for this reason.
   - **Rows:** each live curated line of a `pages` section is its own row, and each resting
     line of an `archive` section likewise. A row keeps the page's title and description
-    and the section's heading in their columns, and its body is the one line (statement,
-    tag, date and footnote references as the page holds them). The row key adds the line's
+    and the section's heading in their columns, and its body is the line's statement alone
+    (the tag, date and footnotes stay out, as they do today). The row key adds the line's
     position in its section, so two lines under one heading are two rows. Prose that is not
     a fact line (a page's text outside its fact sections that is indexed today) stays one row
     per heading. `digests` and `reports` keep one row per heading section.
   - **Search:** unchanged in its rules. A page answers once per query at its best line
     (the existing per-path de-duplication), and its snippet is drawn from that line.
-  - **Rebuild:** the index records a format version (SQLite `user_version`); `index.update`
-    rebuilds from files when the recorded version differs from the code's, so an existing
-    index is never left holding section rows beside line rows. The version is a module
-    constant raised whenever what a row holds changes.
+  - **Rebuild:** `index.BUILD_STAMP` rises to `rows-7`; `index.update` already rebuilds
+    from files when the recorded stamp differs, so an existing index is never left holding
+    section rows beside line rows.
   - **Unchanged:** the BM25 column weights, F79's tiers and near-tie factor, `aft inject`,
     `aft eval`'s pass/fail mode, and LongMemEval's F72 line matching (a page hit still names
     its section by heading, and the matching picks the line inside it).
@@ -1732,7 +1731,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Tests** in `tests/test_index.py` and `tests/test_search.py`: a two-line section
     gives two rows with distinct keys; a struck line rests in `archive` as its own row; a
     page's matching line outranks a long section's weaker match from another page; one
-    page still answers once; an index at an older format version is rebuilt on update; the
+    page still answers once; an index from the `rows-6` build is rebuilt on update; the
     rebuild-equals-update test still holds. Review checkpoint: yes (index and search order;
     lead reviews in full).
 
