@@ -115,12 +115,14 @@ def widget(initialized: Config, tmp_path) -> Config:
 
 def test_phrases_are_written_for_rows_that_lack_them_and_filled_into_the_index(widget):
     fake, cfg = serve(
-        widget, answer({1: ["backoff tuning"], 2: ["how long until it retries", "retry delay"]})
+        widget,
+        answer({1: ["backoff tuning"]}),
+        answer({1: ["how long until it retries", "retry delay"]}),
     )
     report = phrases.update(cfg, NOW)
 
     assert report.written == 2
-    assert len(fake.requests) == 1, "the step batches the rows into one call"
+    assert len(fake.requests) == 2, "the step asks for one row per call"
     path = cfg.vault / phrases.file_rel(PAGE_REL)
     held = phrases.read_file(path)
     assert held == {phrases.line_key(STATEMENT): ["how long until it retries", "retry delay"]}
@@ -138,7 +140,7 @@ def test_phrases_are_written_for_rows_that_lack_them_and_filled_into_the_index(w
 
 
 def test_phrases_are_removed_for_rows_that_left(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.update(cfg, NOW)
     calls = len(fake.requests)
     (cfg.vault / DIGEST_REL).unlink()
@@ -152,7 +154,7 @@ def test_phrases_are_removed_for_rows_that_left(widget):
 
 
 def test_an_edited_line_loses_its_stale_phrases(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.update(cfg, NOW)
     old_key = phrases.line_key(STATEMENT)
     edited = PAGE.format(session=SESSION, statement="The retry waits three seconds exactly.")
@@ -168,7 +170,7 @@ def test_an_edited_line_loses_its_stale_phrases(widget):
 
 
 def test_a_rebuild_reproduces_the_phrases_column_without_a_model_call(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.update(cfg, NOW)
     calls = len(fake.requests)
 
@@ -182,7 +184,9 @@ def test_a_rebuild_reproduces_the_phrases_column_without_a_model_call(widget):
 
 
 def test_a_hit_is_found_by_its_phrases_and_snippet_shows_the_row_not_the_phrases(widget):
-    fake, cfg = serve(widget, answer({1: ["retry backoff"], 2: ["delay before retrying"]}))
+    fake, cfg = serve(
+        widget, answer({1: ["retry backoff"]}), answer({1: ["delay before retrying"]})
+    )
     phrases.update(cfg, NOW)
 
     hits = search.search(cfg, "delay before retrying")
@@ -195,7 +199,9 @@ def test_a_hit_is_found_by_its_phrases_and_snippet_shows_the_row_not_the_phrases
 
 
 def test_inject_and_aft_read_never_show_phrases(widget, tmp_path):
-    fake, cfg = serve(widget, answer({1: ["retry backoff"], 2: ["delay before retrying"]}))
+    fake, cfg = serve(
+        widget, answer({1: ["retry backoff"]}), answer({1: ["delay before retrying"]})
+    )
     phrases.update(cfg, NOW)
     index.update(cfg)
     calls = len(fake.requests)
@@ -213,7 +219,7 @@ def test_inject_and_aft_read_never_show_phrases(widget, tmp_path):
 
 
 def test_forget_session_takes_the_phrases_of_what_it_removes(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.update(cfg, NOW)
     calls = len(fake.requests)
     project = registry.Registry.load(cfg.registry_path).by_slug("widget")
@@ -239,7 +245,7 @@ def test_a_forget_drops_every_phrase_of_a_page_it_cannot_parse(widget):
     """Which lines of a page that fails to parse are still active cannot be read, so the
     forget's prune errs toward removing: the page's phrase file goes, and a later run writes
     phrases again for the rows the index holds."""
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.update(cfg, NOW)
     assert (cfg.vault / phrases.file_rel(PAGE_REL)).exists()
     calls = len(fake.requests)
@@ -256,7 +262,9 @@ def test_a_forget_drops_every_phrase_of_a_page_it_cannot_parse(widget):
 
 def test_forget_pattern_redacts_the_phrase_files_too(widget):
     secret = "deploy-token-9f2-for-tests"
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: [f"the deploy key {secret}"]}))
+    fake, cfg = serve(
+        widget, answer({1: ["backoff tuning"]}), answer({1: [f"the deploy key {secret}"]})
+    )
     phrases.update(cfg, NOW)
     calls = len(fake.requests)
 
@@ -278,7 +286,7 @@ def spend(cfg: Config, at: datetime, tokens: int) -> None:
 
 
 def test_a_spent_budget_stops_the_phrases_step(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     phrases.write_file(
         phrases.file_path(cfg, PAGE_REL),
         {phrases.line_key("A line the page no longer holds."): ["stale phrase"]},
@@ -293,7 +301,7 @@ def test_a_spent_budget_stops_the_phrases_step(widget):
 
 
 def test_a_cooling_endpoint_gets_no_calls_from_the_phrases_step(widget):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     model.set_cooldown(cfg, "the endpoint answered 500")
 
     report = phrases.update(cfg, NOW)
@@ -304,7 +312,7 @@ def test_a_cooling_endpoint_gets_no_calls_from_the_phrases_step(widget):
 
 
 def test_the_run_writes_phrases_after_the_digests_and_reports_the_counts(widget, monkeypatch):
-    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"]}), answer({1: ["retry delay"]}))
     monkeypatch.setattr(work.capture, "sweep", lambda config, moment: [])
 
     report = work.run(cfg, NOW)
@@ -314,4 +322,4 @@ def test_the_run_writes_phrases_after_the_digests_and_reports_the_counts(widget,
     assert (cfg.vault / phrases.file_rel(PAGE_REL)).is_file()
     assert (cfg.vault / phrases.file_rel(DIGEST_REL)).is_file()
     assert fake.requests, "the run's phrases step reaches the endpoint"
-    assert len(fake.requests) == 1
+    assert len(fake.requests) == 2

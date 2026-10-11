@@ -42,10 +42,11 @@ PHRASES_DIR = "phrases"
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
 
-#: Rows per model call. A phrase is short and the answers come back as one JSON object, so
-#: twenty rows fit one response with room to spare for the schema around them (BUILD-PLAN
-#: F85: "several rows per call where they fit").
-BATCH = 20
+#: Rows per model call. One row at a time: asked for many rows at once, the model restates
+#: each row's own words, while asked for one it writes the synonyms and questions a search
+#: needs (measured on the coding key, BUILD-PLAN F85: paraphrase recall@5 0.25 at twenty
+#: rows a call, 0.38 at one).
+BATCH = 1
 
 #: The most phrases one row gets (BUILD-PLAN F85).
 MAX_PHRASES = 8
