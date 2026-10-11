@@ -728,8 +728,11 @@ tier, the BM25 score orders pages, digests and evidence together, and curated me
 and digests) wins near-ties: its score counts 10% stronger, which puts it ahead of raw
 evidence scoring within 10% of it. `--project P` narrows it to one project and the global
 pages, one tier. The memory block stays the current project's and the global
-pages' alone (section 10). Words are stemmed by FTS5's Porter tokenizer, so "pause" finds
-"paused". The default collections are:
+pages' alone (section 10). A query's bare words drop question filler ("a", "the", "where",
+"does" and their kind) and the rest join with OR, so a row holding more of the words scores
+higher; a quoted phrase is kept whole, a query of filler words alone keeps its words as typed,
+and negations (no, not, never) are kept. Words are stemmed by FTS5's Porter tokenizer, so
+"pause" finds "paused". The default collections are:
 
 | Collection | Contents |
 |---|---|
