@@ -111,6 +111,11 @@ FILLER_WORDS = frozenset(
 #: The collections whose rows carry an explicit timestamp in the identity time column.
 COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
 
+#: The column a hit's snippet is drawn from: the row's own body text, never the phrases
+#: column (BUILD-PLAN F85) - a phrase is another wording of the row, and the snippet shows
+#: the row, not its wordings.
+BODY_COLUMN = index.INDEXED_COLUMNS.index("body")
+
 
 def _is_raw_evidence(collection: str, path: str) -> bool:
     """Check whether a row is raw evidence rather than curated memory."""
@@ -183,7 +188,7 @@ def _query_collections(
         rowids = ", ".join("?" for _ in keep)
         snippets = dict(
             conn.execute(
-                f"SELECT rowid, snippet({col}, -1, '', '', '...', 16) FROM {col}"
+                f"SELECT rowid, snippet({col}, {BODY_COLUMN}, '', '', '...', 16) FROM {col}"
                 f" WHERE {where_cond} AND rowid IN ({rowids})",
                 (*where_args, *(row["rid"] for row in keep)),
             ).fetchall()

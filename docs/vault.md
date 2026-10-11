@@ -24,6 +24,9 @@ code never touches memory.
   digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md
                            one page per digested part of a session
   digests/_unfiled/...     digests of sessions that belong to no project
+  phrases/<page or digest path>.json
+                           the search phrases the model wrote for that page's lines
+                           and that digest's sections; generated, never edited by hand
   archive/<page path>      resolved notes, and superseded lines older than 90 days
   references/<name>/       reference pages for an imported library collection
   library/<name>/          the collection's files

@@ -717,6 +717,9 @@ def _sandbox_config_text(vault_dir: Path, caller: Config) -> str:
         f"{_model_table(caller)}\n"
         "[work]\n"
         f"daily_token_budget = {SANDBOX_BUDGET}\n"
+        # The pipeline measures digests against a scripted endpoint; the phrases step's
+        # own calls would consume the script (BUILD-PLAN F85).
+        "phrases = false\n"
         "\n"
         "[evidence]\n"
         f"retention_days = {SANDBOX_RETENTION_DAYS}\n"

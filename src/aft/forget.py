@@ -10,9 +10,14 @@ A line already superseded is withdrawn too when nothing else evidences it, becau
 keeps superseded lines searchable under ``--archive`` and a forgotten session's sentence has no
 business being found there.
 
+Its phrase files go with it: the phrases of every line it
+withdrew or rewrote and of every digest it deleted are pruned, and a deleted digest's phrase
+file is deleted with the digest (BUILD-PLAN F85).
+
 ``aft forget pattern <regex>`` replaces matching text with [redacted] in the evidence archive
 and in every copy the vault holds - digest and page source quotes, fact statements and notes,
-superseded lines and reports - then rebuilds the search index to match. The vault's half of
+superseded lines and reports, and the vault's phrase files - then rebuilds the search index
+to match. The vault's half of
 that runs under the vault's lock, as every other writer of those pages does.
 
 The vault's git history still holds older commits; removing them requires rewriting history.
@@ -20,12 +25,13 @@ The vault's git history still holds older commits; removing them requires rewrit
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import evidence, index, lint, page, pagewrite, queue, redact, vault
+from aft import evidence, index, lint, page, pagewrite, phrases, queue, redact, vault
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
 from aft.library import propose
@@ -62,6 +68,7 @@ class SessionForgetReport:
     candidates_removed: tuple[str, ...] = ()
     jobs_removed: int = 0
     reports_scrubbed: tuple[str, ...] = ()
+    phrases_pruned: int = 0
 
     @property
     def unwithdrawn_lines(self) -> tuple[str, ...]:
@@ -92,7 +99,10 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
     lines resting only on that session as withdrawn with PageDoc.withdraw, scrubs
     quotes of sources citing that session, and removes candidate lines resting only on it.
     It clears the session's job rows, watermark and digest debt from the queue, and scrubs
-    the session's words out of every page under ``reports/``, needs-you included.
+    the session's words out of every page under ``reports/``, needs-you included. The phrase
+    files go with it: the phrases of every line it withdrew or rewrote and of every digest
+    it deleted are pruned, and a deleted digest's phrase file is deleted with the digest
+    (BUILD-PLAN F85).
     """
     evidence._require_name(session_id, "session id")
     vault.require(config)
@@ -262,7 +272,16 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
 
         reports_scrubbed = _scrub_report_pages(config, words)
 
-        to_commit = sorted(dict.fromkeys([*digests_removed, *pages_modified, *reports_scrubbed]))
+        # The phrase files go with the forget: the lines this session's withdrawal rewrote
+        # and the digests this session's deletion removed have keys no current row answers
+        # any more, so their entries are pruned and the changed files are committed with
+        # the rest (BUILD-PLAN F85).
+        phrases_pruned, phrase_files = phrases.prune_paths(
+            config, [*pages_modified, *digests_removed]
+        )
+        to_commit = sorted(
+            dict.fromkeys([*digests_removed, *pages_modified, *reports_scrubbed, *phrase_files])
+        )
         committed = False
         if to_commit:
             committed = vault.commit(config.vault, to_commit, f"aft: forget session {session_id}")
@@ -279,6 +298,7 @@ def forget_session(config: Config, session_id: str) -> SessionForgetReport:
         candidates_removed=tuple(candidates_removed),
         jobs_removed=jobs_removed,
         reports_scrubbed=tuple(reports_scrubbed),
+        phrases_pruned=phrases_pruned,
     )
 
 
@@ -433,8 +453,9 @@ def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
     archived entry behind it (DESIGN 8), and the same replacement applied to both leaves the
     quote verifiable while leaving neither of them searchable. The copies are the digest's
     source quotes, the memory pages' sources, statements and notes, the superseded lines
-    under ``archive/`` and the dream reports, so a redaction that stopped at the archive
-    would leave the words sitting in every page the digest wrote them into, and ``aft search``
+    under ``archive/``, the dream reports and the phrase files, so a redaction that stopped
+    at the archive would leave the words sitting in every page the digest wrote them into,
+    and ``aft search``
     would keep answering to them.
 
     The archive's own rewrite cleans its freed pages and log; the vault's pages are committed
@@ -472,11 +493,15 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
     the guard against a regex that would swallow a fact line's citation or a page's
     frontmatter, which would otherwise leave the person with a lint failure they cannot read
     back to the pattern they typed. A refused page is named on the command's report and left
-    exactly as it stands.
+    exactly as it stands. The vault's phrase files are redacted with the same replacement;
+    their guard is the JSON parse a reader would run, since a rewrite that broke the file
+    would leave it read as no phrases at all.
     """
     changed: list[str] = []
     refused: list[str] = []
-    for path in sorted(config.vault.rglob("*.md")):
+    phrase_dir = config.vault / phrases.PHRASES_DIR
+    phrase_files = sorted(phrase_dir.rglob("*.json")) if phrase_dir.is_dir() else []
+    for path in sorted((*config.vault.rglob("*.md"), *phrase_files)):
         if ".git" in path.parts:
             continue
         try:
@@ -487,7 +512,16 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
         if redacted == text:
             continue
         rel = path.relative_to(config.vault).as_posix()
-        if len(page.parse(redacted, path).errors) > len(page.parse(text, path).errors):
+        if path.suffix == ".json":
+            # A phrase file is JSON, so its guard is the parse a reader would run: a
+            # redaction that matched the JSON's own marks would leave a file the index
+            # reads as no phrases at all, and the words would stay.
+            try:
+                json.loads(redacted)
+            except json.JSONDecodeError:
+                refused.append(rel)
+                continue
+        elif len(page.parse(redacted, path).errors) > len(page.parse(text, path).errors):
             refused.append(rel)
             continue
         pagewrite.atomic_write_text(path, redacted)

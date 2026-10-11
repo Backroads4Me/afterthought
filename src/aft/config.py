@@ -103,6 +103,10 @@ class WorkConfig:
     has gone wrong without ever parking an ordinary day's work."""
 
     daily_token_budget: int = 200_000
+    # The run's search-phrase step (BUILD-PLAN F85). It spends a model call per batch of
+    # rows on top of the digests, so a vault that drives the run against a scripted
+    # endpoint - the eval harness - can leave it off.
+    phrases: bool = True
 
 
 @dataclass(frozen=True)

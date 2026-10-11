@@ -33,6 +33,12 @@ section" and DESIGN 10 returns "the matching snippet" with the section on it, so
 travel on the row: ``path`` and ``heading``, joined in ``row_key``. A ``pages`` row holds one
 live curated line and nothing else.
 
+Most rows carry a fifth indexed column, ``phrases``: the model's own short wordings of what
+the row says (BUILD-PLAN F85), written to ``phrases/<the row's file>.json`` in the vault and
+read from there the way the pages are, so the index stays a cache rebuilt from files with no
+model call in it. Only ``pages`` and ``digests`` rows carry phrases, and a phrase file whose
+hash moved re-derives the rows of the file it phrases.
+
 The heading is an indexed column beside the title and the description, so the page title, the
 description and the section's own heading all outrank the line text: BUILD-PLAN M3.1's "BM25
 weights title and description above body" holds with the heading on the near side of that
@@ -133,7 +139,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from aft import db, inject, lint, page, vault
+from aft import db, inject, lint, page, phrases, vault
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError, path_key
@@ -219,17 +225,25 @@ FACT_STATES: dict[str, tuple[str, ...]] = {
 #: hit names where the line still is and `aft read` opens the page that holds it.
 RESTING_PLACE: dict[str, str] = {PAGES: ARCHIVE}
 
+#: The collections whose rows carry the phrases the vault's phrase files hold (BUILD-PLAN
+#: F85). The archive's rows come from the same files a page's do, but phrases are written
+#: for the lines memory serves, so a resting line carries none.
+_PHRASED_COLLECTIONS = (PAGES, DIGESTS)
+
 # BM25 weights (BUILD-PLAN M3.1: "BM25 weights title and description above body", with the
 # section's own heading belonging with the columns above that divide). The plan fixes the
 # order only; these ratios make a match in the title, the description or the heading beat the
 # same word in body text by a clear margin. Unindexed columns cannot match, so they get 0.
+# Phrases (BUILD-PLAN F85) rank as body text: they are another wording of the row's own
+# text, so a phrase hit lands where a body hit does, neither above nor below it.
 TITLE_WEIGHT = 10.0
 DESCRIPTION_WEIGHT = 5.0
 HEADING_WEIGHT = 5.0
 BODY_WEIGHT = 1.0
 
-#: The columns a query can match, in the order ``bm25`` takes its weights.
-INDEXED_COLUMNS = ("title", "description", "heading", "body")
+#: The columns a query can match, in the order ``bm25`` takes its weights. ``phrases`` is
+#: the model's own wording of the row's text (BUILD-PLAN F85), so it ranks as body text.
+INDEXED_COLUMNS = ("title", "description", "heading", "body", "phrases")
 
 #: The identifiers a row carries: path, project id, agent, session, time and a heading or
 #: entry id (BUILD-PLAN M3.1), stored so a hit reads back without opening its file again,
@@ -248,9 +262,13 @@ IDENTITY_COLUMNS = (
 #: Every column of every collection, in table order.
 COLUMNS = INDEXED_COLUMNS + IDENTITY_COLUMNS
 
-WEIGHTS = (TITLE_WEIGHT, DESCRIPTION_WEIGHT, HEADING_WEIGHT, BODY_WEIGHT) + (0.0,) * len(
-    IDENTITY_COLUMNS
-)
+WEIGHTS = (
+    TITLE_WEIGHT,
+    DESCRIPTION_WEIGHT,
+    HEADING_WEIGHT,
+    BODY_WEIGHT,
+    BODY_WEIGHT,
+) + (0.0,) * len(IDENTITY_COLUMNS)
 
 FILES_TABLE = "files"
 
@@ -289,8 +307,11 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: ``rows-4`` holds whole words only, so a query for "pause" would miss "paused" there.
 #: ``rows-6`` introduces ``page_links`` for wikilink resolution and backlink tracking.
 #: ``rows-7`` indexes each page and archive fact line as its own row (BUILD-PLAN F82): an
-#: index from ``rows-6`` holds a whole section per row.
-BUILD_STAMP = "rows-7"
+#: index from ``rows-6`` holds a whole section per row. ``rows-8`` adds the ``phrases``
+#: column (BUILD-PLAN F85): model-written search phrases kept in the vault's ``phrases/``
+#: files, filled for ``pages`` and ``digests`` rows and empty for every other collection.
+#: An index from ``rows-7`` has no phrases column, so its rows are rebuilt.
+BUILD_STAMP = "rows-8"
 BUILD_TABLE = "build"
 LINKS_TABLE = "page_links"
 
@@ -473,6 +494,7 @@ class Row:
     description: str = ""
     heading: str = ""
     body: str = ""
+    phrases: str = ""
     path: str = ""
     project_id: str | None = None
     agent: str | None = None
@@ -618,13 +640,22 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
     file in the walked directories: treating one as a file that went missing drops its hash
     every run, and a run that drops the hash re-reads the cache and rewrites every row of that
     document - every row of every library document - to write down what it already held.
+
+    The phrase files are read like the markdown is (BUILD-PLAN F85): ``phrases/<rel>.json``
+    holds the phrases of the file at ``<rel>``, its hash is recorded beside the rest, and a
+    hash that moved re-derives the rows of the file the phrases belong to, so a run that
+    rewrote phrases leaves the index holding them and a run that finds them unchanged
+    touches nothing.
     """
     recorded = {rel: (digest, state) for rel, digest, state in conn.execute(_SELECT_STATE)}
     found, report = _vault_files(config)
+    phrased = {rel for rel in found if _phrased_file(rel) is not None}
+    gone = {rel for rel in recorded if _phrased_file(rel) is not None and rel not in found}
     filed_by = conn.execute(_SELECT_ORIGIN, (PROJECTS_ORIGIN,)).fetchone()
     if filed_by is None or filed_by[0] != projects.digest:
         _reset_files(conn)
-        rebuild = sorted(found)
+        rebuild = sorted(rel for rel in found if _collection_of(rel) is not None)
+        phrase_recorded = phrased
     else:
         walked = {rel for rel in recorded if _collection_of(rel) is not None}
         changed = {
@@ -632,14 +663,23 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
             for rel, current in found.items()
             if recorded.get(rel, ("", ""))[0] != current.digest
         }
-        rebuild = sorted((walked - set(found)) | changed)
+        # A phrase file's bytes are part of what its page's rows say (BUILD-PLAN F85): a
+        # changed or vanished one re-derives the rows of the file it phrases, the way a
+        # changed page does. The file holds no rows of its own, so its record is refreshed
+        # rather than dropped.
+        phrase_changed = changed & phrased
+        changed -= phrase_changed
+        rebuild = sorted(
+            (walked - set(found)) | changed | {_phrased_file(rel) for rel in phrase_changed | gone}
+        )
         _drop_paths(conn, rebuild)
+        phrase_recorded = phrase_changed
     for rel in rebuild:
         current = found.get(rel)
         if current is None:
             continue  # gone from the vault: the drop above was the whole job
         try:
-            rows = _file_rows(rel, current, projects.registry, config.host)
+            rows = _file_rows(rel, current, projects.registry, config.host, config.vault)
         except _Unreadable as exc:
             report.append(f"{rel}: {exc}")
             continue  # its rows and hash went with the drop, so a repaired page reads again
@@ -648,6 +688,9 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
                 _insert(conn, collection, row)
         _sync_page_links(conn, config, rel, current.text)
         conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
+    _record_phrase_hashes(conn, found, phrase_recorded)
+    for rel in sorted(gone):
+        conn.execute(_DROP_HASH, (rel,))
     conn.execute(_RECORD_ORIGIN, (PROJECTS_ORIGIN, projects.digest))
     return report
 
@@ -699,7 +742,9 @@ def _vault_paths(config: Config) -> list[tuple[str, str, Path]]:
     ``.git``, ``.obsidian`` or the library's files. This is the walk both halves of a run share:
     the one that asks what moved (`_moved`, which stats these paths and reads none of them) and
     the one that reads them (`_vault_files`), so the two cannot disagree about which files the
-    index is built from.
+    index is built from. The vault's phrase files (``phrases/``, BUILD-PLAN F85) are walked
+    beside the markdown: they are read as files the way the pages are, and a phrase file
+    whose hash moved re-derives the rows of the file it phrases.
     """
     found: list[tuple[str, str, Path]] = []
     for collection, directories in FILE_COLLECTIONS.items():
@@ -712,7 +757,51 @@ def _vault_paths(config: Config) -> list[tuple[str, str, Path]]:
                 if lint.SKIP_DIRS.intersection(rel.parts[:-1]):
                     continue
                 found.append((rel.as_posix(), collection, path))
+    found.extend((rel, phrases.PHRASES_DIR, path) for rel, path in _phrase_paths(config))
     return sorted(found)
+
+
+def _phrase_paths(config: Config) -> list[tuple[str, Path]]:
+    """Every phrase file the vault holds, as vault-relative path and the file itself.
+
+    Phrase files are read as files (BUILD-PLAN F85): a phrase file whose hash moved
+    re-derives the rows of the page it phrases, the way a moved page does, and its hash is
+    recorded beside the file hashes, so `_moved` can ask whether anything moved without
+    reading a file.
+    """
+    root = config.vault / phrases.PHRASES_DIR
+    if not root.is_dir():
+        return []
+    return [
+        (path.relative_to(config.vault).as_posix(), path) for path in sorted(root.rglob("*.json"))
+    ]
+
+
+def _phrased_file(phrase_rel: str) -> str | None:
+    """The vault file a phrase file phrases, or None when this path is not one.
+
+    ``phrases/<rel>.json`` phrases the file at ``<rel>`` (BUILD-PLAN F85), so the mapping
+    back is the name with its directory and suffix taken off.
+    """
+    prefix = f"{phrases.PHRASES_DIR}/"
+    if not phrase_rel.startswith(prefix) or not phrase_rel.endswith(".json"):
+        return None
+    return phrase_rel[len(prefix) : -len(".json")]
+
+
+def _record_phrase_hashes(
+    conn: sqlite3.Connection, found: dict[str, _File], rels: set[str]
+) -> None:
+    """Record the phrase files this run read, the way it records the files it indexed.
+
+    A phrase file holds no rows of its own, but its hash is what says whether the rows of
+    the file it phrases are current (BUILD-PLAN F85), so it is recorded beside the file
+    hashes with the modification the hash was taken beside, which is what `_moved` reads.
+    """
+    for rel in sorted(rels):
+        current = found.get(rel)
+        if current is not None:
+            conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
 
 
 def _vault_files(config: Config) -> tuple[dict[str, _File], list[str]]:
@@ -860,7 +949,9 @@ def _collection_of(rel: str) -> str | None:
     return None
 
 
-def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[str, list[Row]]:
+def _file_rows(
+    rel: str, current: _File, registry: Registry, host: str, vault_root: Path
+) -> dict[str, list[Row]]:
     """The rows one file contributes, under each collection they belong to.
 
     Usually one collection, the one named by the directory the file sits in. A live fact page is
@@ -883,6 +974,11 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
     A page scoped to several projects contributes a row per project and a heading that
     repeats in one file contributes a row per occurrence, so every section of the file
     reaches search as a row of its own (`_row_key`).
+
+    A file whose collection takes phrases (BUILD-PLAN F85) has its phrase file read here,
+    and `_section_rows` matches its entries to the rows by their keys: a page line's key is
+    the hash of the statement the row holds, a digest section's the hash of its heading and
+    its text.
     """
     frontmatter, body, _, error = page.split_frontmatter(current.text)
     if error:
@@ -892,6 +988,9 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
     scopes = _project_scopes(rel, frontmatter, registry, host)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
+    phrase_map: dict[str, list[str]] = {}
+    if current.collection in _PHRASED_COLLECTIONS:
+        phrase_map = phrases.read_file(vault_root / phrases.file_rel(rel))
     sections: dict[str, list[tuple[str, str] | tuple[str, str, int, int]]] = {}
     # its pages and digests are read into the archive collection instead of their own,
     # exactly as a page's resting lines are, until the person unarchives the project.
@@ -931,7 +1030,17 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
         if resting is not None:
             sections[resting] = _fact_chunks(parsed, FACT_STATES[resting])
     return {
-        collection: _section_rows(rel, title, description, scopes, agent, session_id, chunks)
+        collection: _section_rows(
+            rel,
+            title,
+            description,
+            scopes,
+            agent,
+            session_id,
+            chunks,
+            collection,
+            phrase_map=phrase_map if collection in _PHRASED_COLLECTIONS else {},
+        )
         for collection, chunks in sections.items()
     }
 
@@ -981,13 +1090,21 @@ def _section_rows(
     agent: str | None,
     session_id: str | None,
     chunks: list[tuple[str, str] | tuple[str, str, int, int]],
+    collection: str,
+    phrase_map: dict[str, list[str]] | None = None,
 ) -> list[Row]:
     """The rows one collection takes from one file's sections.
 
     The occurrence count that keeps a repeated heading's rows apart (`_row_key`) is counted here,
     per collection: two collections built from the same file keep their own numbering, since a
     row's id is only ever compared inside the table that holds it.
+
+    ``phrase_map`` is the file's phrase mapping (BUILD-PLAN F85), keyed as the rows are
+    keyed: a page line's key is the hash of its statement, a digest section's the hash of
+    its heading and text. A row whose key the mapping holds carries the phrases in its
+    ``phrases`` column; every other row of every other collection carries an empty one.
     """
+    held = phrase_map or {}
     rows: list[Row] = []
     occurrences: dict[str, int] = {}
     for chunk in chunks:
@@ -999,12 +1116,14 @@ def _section_rows(
             position = None
         if not text:
             continue
+        row_phrases = _row_phrases(held, collection, heading, text)
         for project_id, key_part in scopes:
             rows.append(
                 Row(
                     title=title,
                     description=description,
                     body=text,
+                    phrases=row_phrases,
                     path=rel,
                     project_id=project_id,
                     agent=agent,
@@ -1014,6 +1133,14 @@ def _section_rows(
                 )
             )
     return rows
+
+
+def _row_phrases(held: dict[str, list[str]], collection: str, heading: str, text: str) -> str:
+    """The phrases one row carries, or "" when its file holds none for its key."""
+    if not held:
+        return ""
+    key = phrases.section_key(heading, text) if collection == DIGESTS else phrases.line_key(text)
+    return " ".join(held.get(key, ()))
 
 
 def _row_key(

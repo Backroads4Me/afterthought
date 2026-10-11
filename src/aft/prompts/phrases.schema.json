@@ -1,0 +1,19 @@
+{
+  "type": "object",
+  "properties": {
+    "phrases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "One short search phrase for the row the number names."
+        },
+        "maxItems": 8
+      },
+      "description": "Each row's number mapped to that row's search phrases."
+    }
+  },
+  "required": ["phrases"],
+  "additionalProperties": false
+}

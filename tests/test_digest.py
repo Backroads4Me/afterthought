@@ -225,6 +225,28 @@ def serve(cfg: Config, *answers: object) -> tuple[FakeEndpoint, Config]:
     return fake, configmod.load()
 
 
+def with_phrases(cfg: Config, on: bool) -> Config:
+    """The same config.toml with the run's phrases step on or off, re-read from disk.
+
+    A run whose phrases step is on makes model calls of its own (BUILD-PLAN F85); a test
+    that counts digest calls or index walks turns the step off the way a person does, with
+    a config.toml setting. The rest of the ``[work]`` table is kept.
+    """
+    path = cfg.home / configmod.CONFIG_NAME
+    text = path.read_text(encoding="utf-8")
+    setting = f"phrases = {str(on).lower()}"
+    if "phrases = " in text:
+        lines = [
+            setting if line.strip().startswith("phrases =") else line for line in text.splitlines()
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    elif "[work]" in text:
+        path.write_text(text.rstrip("\n") + f"\n{setting}\n", encoding="utf-8")
+    else:
+        path.write_text(f"{text}[work]\n{setting}\n", encoding="utf-8")
+    return configmod.load()
+
+
 def with_budget(cfg: Config, tokens: int) -> Config:
     """The same config.toml with the day's token budget set, re-read from disk.
 
@@ -1907,6 +1929,7 @@ def test_a_transcript_that_vanished_closes_its_job_and_the_run_moves_on(session:
     shutil.copy(session.transcript, good)
     fake, cfg = serve(session.cfg, answer(said()))
     try:
+        cfg = with_phrases(cfg, False)
         queue.enqueue(cfg, event(vanished, session.cwd, session_id="gone-1"))
         vanished.unlink()
         queue.enqueue(cfg, event(good, session.cwd, session_id="here-1"))
@@ -3169,7 +3192,7 @@ def test_an_excluded_session_is_refused_a_rebuild(session: Session):
     fake, cfg = serve(session.cfg, answer(said()))
     try:
         queue.enqueue(cfg, event(session.transcript, session.cwd))
-        assert work.run(with_budget(cfg, 100_000)).digested == 1
+        assert work.run(with_phrases(with_budget(cfg, 100_000), False)).digested == 1
         assert pages(cfg) != [], "the session was never archived, so nothing is at stake"
 
         cfg = with_capture(cfg, exclude_paths=[str(session.cwd)])
@@ -3339,6 +3362,7 @@ def test_a_stored_worker_makes_the_next_run_walk_the_vault_once(
     is the run's own: a closed row leaves the archive nothing to do.
     """
     cfg, fake = _one_waiting_worker(session, tmp_path)
+    cfg = with_phrases(cfg, False)
     walks: list[int] = []
     real = digest.index.update
 
