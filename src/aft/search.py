@@ -16,6 +16,8 @@ tiers: the current project's rows and the global pages first, then everything el
 tier the BM25 score orders rows across collections, and curated memory (pages, digests) wins
 near-ties: its score is multiplied by 1.10 before the sort, which puts it ahead of a raw row
 whose score is within 10% of its own. A project named with --project narrows the query to
+A query's bare words drop question filler (FILLER_WORDS) and the rest join with OR, so a
+row holding more of the words scores higher by BM25's own sum.
 that project and the global pages, one tier. Memory that names no project is named rather
 than hidden: the global pages, a digest or an archived entry whose session resolved to no
 project, and the library each answer under their own name.
@@ -85,6 +87,17 @@ _TIER_OWNED = "CASE WHEN project_id IS ? THEN 0 ELSE 1 END"
 #: digests) ahead of a raw row (evidence) whose score is within 10% of its own. A module
 #: constant, not a setting.
 CURATED_BOOST = 1.10
+
+#: Question filler dropped from a query's bare words before the match (F81): matching is
+#: case-insensitive, negations (no, not, never) are absent here and so stay, and a quoted
+#: phrase is kept whole. When every bare word is filler, the words are kept as typed.
+FILLER_WORDS = frozenset(
+    (
+        "a an and are as at be by can could did do does for from how i in is it its me my of "
+        "on or our should that the there this to was we were what when where which who why "
+        "will with would you your"
+    ).split()
+)
 
 #: The collections whose rows carry an explicit timestamp in the identity time column.
 COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
@@ -211,8 +224,8 @@ def _ask(
     The BM25 score orders rows across collections inside a tier, and curated memory (pages,
     digests) wins near-ties: its score is multiplied by 1.10, which puts it ahead of a raw
     row whose score is within 10% of its own. Evidence entries are collapsed per session so a
-    session returns at most its best-ranked hit. Conjunction (AND) of query terms is tried
-    first, falling back to disjunction (OR) if conjunction yields no matches.
+    session returns at most its best-ranked hit. The query's surviving words join with OR, so
+    a row holding more of the words scores higher by BM25's own sum.
     """
     tc = parse_temporal(query, now=now)
     terms = _to_fts5_terms(tc.stripped_query) if tc.stripped_query else []
@@ -228,25 +241,10 @@ def _ask(
         time_clauses.append("time <= ?")
         time_params.append(tc.end.isoformat())
 
-    if len(terms) > 1:
-        fts5_and = " AND ".join(terms)
-        rows = _query_collections(
-            conn, collections, fts5_and, time_clauses, time_params, narrow_id, tier0_id, limit
-        )
-        if rows:
-            return rows
-        fts5_or = " OR ".join(terms)
-        return _query_collections(
-            conn, collections, fts5_or, time_clauses, time_params, narrow_id, tier0_id, limit
-        )
-    elif len(terms) == 1:
-        return _query_collections(
-            conn, collections, terms[0], time_clauses, time_params, narrow_id, tier0_id, limit
-        )
-    else:
-        return _query_collections(
-            conn, collections, None, time_clauses, time_params, narrow_id, tier0_id, limit
-        )
+    fts5_query = " OR ".join(terms) if terms else None
+    return _query_collections(
+        conn, collections, fts5_query, time_clauses, time_params, narrow_id, tier0_id, limit
+    )
 
 
 def search(
@@ -339,8 +337,8 @@ def search(
 
     if tc is None:
         tc = parse_temporal(query, now=now)
-    fts5_query = _to_fts5_query(tc.stripped_query) if tc.stripped_query else None
-    if not fts5_query and not (tc.start or tc.end):
+    terms = _to_fts5_terms(tc.stripped_query) if tc.stripped_query else []
+    if not terms and not (tc.start or tc.end):
         return []
 
     registry = Registry.load(config.registry_path)
@@ -698,30 +696,38 @@ def trace_command(config: Config, page: str, source_id: str | None = None) -> in
     return 0
 
 
+def _fts5_phrase(text: str) -> str:
+    """Quote one search term as an FTS5 phrase, doubling any embedded double quote."""
+    escaped = text.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _to_fts5_terms(query: str) -> list[str]:
-    """Extract and quote search terms for an FTS5 MATCH expression."""
-    terms: list[str] = []
+    """Extract and quote search terms for an FTS5 MATCH expression.
+
+    A quoted phrase is kept whole, filler words and all. A bare word whose lowercase form is
+    in FILLER_WORDS is dropped, so a question searches on its content words; negations are
+    not filler and stay. When every bare word is filler and the query holds no quoted phrase,
+    the bare words are kept as typed, so they are still searched.
+    """
+    phrases: list[str] = []
+    bare_words: list[str] = []
     for match in re.finditer(r'"([^"]*)"|(\S+)', query):
         quoted, bare = match.groups()
         if quoted:
             s = quoted.strip()
             if s:
-                escaped = s.replace('"', '""')
-                terms.append(f'"{escaped}"')
+                phrases.append(_fts5_phrase(s))
         elif bare:
             s = bare.strip()
             if s:
-                escaped = s.replace('"', '""')
-                terms.append(f'"{escaped}"')
-    return terms
-
-
-def _to_fts5_query(query: str, op: str = "AND") -> str | None:
-    """Extract and quote search terms for an FTS5 MATCH expression."""
-    terms = _to_fts5_terms(query)
-    if not terms:
-        return None
-    return f" {op} ".join(terms)
+                bare_words.append(s)
+    kept = [w for w in bare_words if w.lower() not in FILLER_WORDS]
+    if not kept and bare_words and not phrases:
+        # Every bare word is filler and no phrase holds the query, so the words stay as
+        # typed: dropping them all would leave nothing to search.
+        kept = bare_words
+    return phrases + [_fts5_phrase(w) for w in kept]
 
 
 def _resolve_page_path(config: Config, path_str: str) -> Path:
