@@ -23,9 +23,8 @@ from aft import config as configmod
 from aft import index, model, vault
 from aft import search as search_mod
 from aft.config import Config
-from aft.eval import _hit_text
 from aft.registry import Registry
-from aft.search import Hit, SearchError
+from aft.search import Hit, SearchError, hit_text
 
 RERANK_SYSTEM = (
     "You are a relevance ranker. Given a user question and a numbered list of candidate "
@@ -179,7 +178,7 @@ def _search_rerank(
 
     candidates_text = []
     for idx, hit in enumerate(base_hits, start=1):
-        text = _hit_text(config, hit)[:600]
+        text = hit_text(config, hit)[:600]
         clean_text = " ".join(text.split())
         candidates_text.append(f"[{idx}] {clean_text}")
 

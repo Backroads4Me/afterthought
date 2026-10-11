@@ -17,7 +17,9 @@ holds itself to by default.
 Rank mode answers the question the pass or fail verdict cannot: not whether the answer
 is in memory, but where it ranks. Each entry's question runs through search alone, as a
 session in the entry's project would see it, and the summary reports recall and MRR over
-where the answer first surfaces.
+where the answer first surfaces. The rank search follows the ``[search]`` settings the
+way `aft search` does, so a reorder the search command would make it makes too, and
+``--no-rerank`` measures the bare index order.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from typing import Any
 
 import yaml
 
-from aft import evidence, index, inject, keys, search
+from aft import inject, keys, search
 from aft.config import Config
 from aft.keys import Resolution
 from aft.library.manifest import UniqueKeyLoader
@@ -313,9 +315,12 @@ def _search_hits(
     current: str | None = None,
     limit: int = RANK_LIMIT,
     variant: str | None = None,
+    rerank: bool | None = None,
 ) -> list[search.Hit]:
     if variant is None or variant.strip().lower() in ("today", "default"):
-        return search.search(config, query, current=current, limit=limit)
+        if rerank is None:
+            rerank = config.settings.search.rerank
+        return search.search(config, query, current=current, limit=limit, rerank=rerank)
     return _load_spike().search(config, query, current=current, limit=limit, variant=variant)
 
 
@@ -332,16 +337,19 @@ def rank(
     *,
     limit: int = RANK_LIMIT,
     variant: str | None = None,
+    rerank: bool | None = None,
 ) -> list[RankResult]:
-    """Rank every entry's answer in search alone, with no block and no model.
+    """Rank every entry's answer in search alone, with no block.
 
     Each search runs as a session in the entry's project would: the entry's project ranks
     first and the query is not narrowed, so another project's row is still reached, ranked
-    behind the entry's own. An entry naming a project that is not in the registry is
-    reported rather than raised, for the same reason `evaluate` reports it.
+    behind the entry's own. The search follows ``[search]`` like `aft search` itself:
+    ``rerank=None`` (the default) follows the setting, and a ``rerank`` given is obeyed.
+    An entry naming a project that is not in the registry is reported rather than raised,
+    for the same reason `evaluate` reports it.
     """
     registry = Registry.load(config.registry_path)
-    return [_rank(config, registry, case, limit, variant=variant) for case in cases]
+    return [_rank(config, registry, case, limit, variant=variant, rerank=rerank) for case in cases]
 
 
 def _rank(
@@ -350,14 +358,22 @@ def _rank(
     case: Case,
     limit: int,
     variant: str | None = None,
+    rerank: bool | None = None,
 ) -> RankResult:
     project = registry.by_slug(case.project)
     if project is None:
         slugs = ", ".join(sorted(p.slug for p in registry.projects)) or "no projects"
         note = f"no project {case.project!r} in the registry; it has {slugs}"
         return RankResult(case, None, None, None, notes=(note,))
-    hits = _search_hits(config, case.question, current=case.project, limit=limit, variant=variant)
-    texts = [_hit_text(config, hit) for hit in hits]
+    hits = _search_hits(
+        config,
+        case.question,
+        current=case.project,
+        limit=limit,
+        variant=variant,
+        rerank=rerank,
+    )
+    texts = [search.hit_text(config, hit) for hit in hits]
     expect_not = tuple((banned, _first_rank(banned, texts)) for banned in case.expect_not)
     position = next(
         (
@@ -378,62 +394,6 @@ def _first_rank(needle: str, texts: list[str]) -> int | None:
         if _found(needle, [text]):
             return number
     return None
-
-
-def _hit_text(config: Config, hit: search.Hit) -> str:
-    """The text one hit leads to, which is what the rank measure judges the hit by.
-
-    An evidence hit names an archived entry rather than a file, so its text is the entry's
-    own. A page or digest hit answers from its section under the heading the index
-    recorded, or from the whole file when the heading names nothing in it. A hit whose
-    file cannot be read still counts with the path, description and snippet it carries.
-    """
-    fallback = "\n".join(part for part in (hit.path, hit.description, hit.snippet) if part)
-    if hit.path.startswith(index.SESSION_RESOURCE):
-        parsed = evidence.parse_resource(hit.path)
-        if parsed is None:
-            return fallback
-        session_id, entry_id = parsed
-        text = evidence.entry_text(config, session_id, entry_id)
-        return text if text is not None else fallback
-    return _section_text(config, hit) or fallback
-
-
-def _section_text(config: Config, hit: search.Hit) -> str:
-    """The section of the hit's file under its heading, or the whole file without one."""
-    try:
-        text = (config.vault / hit.path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
-    if not hit.heading:
-        return text
-    return _under_heading(text, hit.heading) or text
-
-
-def _under_heading(text: str, heading: str) -> str:
-    """The lines from ``heading`` to the next heading of the same or higher level."""
-    lines = text.splitlines()
-    for start, line in enumerate(lines):
-        level = _heading_level(line)
-        if level and _heading_name(line) == heading:
-            for end in range(start + 1, len(lines)):
-                other = _heading_level(lines[end])
-                if other and other <= level:
-                    return "\n".join(lines[start:end])
-            return "\n".join(lines[start:])
-    return ""
-
-
-def _heading_level(line: str) -> int:
-    stripped = line.lstrip()
-    if not stripped.startswith("#"):
-        return 0
-    return len(stripped) - len(stripped.lstrip("#"))
-
-
-def _heading_name(line: str) -> str:
-    stripped = line.lstrip().lstrip("#")
-    return stripped.strip().strip("#").strip()
 
 
 def summarize(results: list[RankResult]) -> dict[str, Any]:
@@ -490,16 +450,19 @@ def run_ranks(
     limit: int = RANK_LIMIT,
     json_out: str | Path | None = None,
     variant: str | None = None,
+    rerank: bool | None = None,
 ) -> int:
     """Print each entry's rank and the summary, and exit 0.
 
     Rank mode measures rather than passes or fails: a low rank is a fact about memory to
     compare across runs, not a regression to exit over, so the command exits 0 however the
     entries ranked. ``json_out`` writes the per-entry records and the summary, so two runs
-    can be compared entry by entry.
+    can be compared entry by entry. The rank search follows ``[search]`` like `aft
+    search` itself: ``rerank=None`` (the default) follows the setting, and a ``rerank``
+    given is obeyed.
     """
     cases = load_golden(Path(path) if path is not None else golden_path(config))
-    results = rank(config, cases, limit=limit, variant=variant)
+    results = rank(config, cases, limit=limit, variant=variant, rerank=rerank)
     for result in results:
         print(result)
     summary = summarize(results)

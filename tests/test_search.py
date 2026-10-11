@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from aft import evidence, forget, index, search
+from aft import config as configmod
+from aft import eval as evalmod
+from aft import evidence, forget, index, inject, keys, model, search
+from aft import schema as schemamod
 from aft.cli import main
 from aft.config import Config
 from aft.readers import Entry
 from aft.registry import Project, Registry
 from conftest import run_git
+from fakes.model_server import MODEL_NAME, FakeEndpoint, Reply
 
 WIDGET_OVERVIEW = """---
 type: Project
@@ -2095,3 +2101,264 @@ aft:
     multi_hit = next(h for h in hits if h.path == "projects/widget/multi.md")
     assert multi_hit.heading == "Decisions"
     assert "brackets" in multi_hit.snippet.lower()
+
+
+# ------------------------------------------------------------- F84: rerank with the model
+
+
+def _model_config(cfg: Config, endpoint: str, extra: str = "") -> Config:
+    """The fixture's config, pointed at a fake endpoint, with extra tables appended."""
+    (cfg.home / "config.toml").write_text(
+        f'vault = "{cfg.vault}"\nhost = "testhost"\n'
+        f'[model]\nendpoint = "{endpoint}"\nname = "{MODEL_NAME}"\n{extra}',
+        encoding="utf-8",
+    )
+    return configmod.load()
+
+
+def _paths(hits: list[search.Hit]) -> list[str]:
+    return [hit.path for hit in hits]
+
+
+def test_rerank_applies_the_model_order_and_keeps_the_rest(populated_vault: Config):
+    """The model's order comes first and the candidates it left out follow in the
+    index's own order, cut to the limit (BUILD-PLAN F84)."""
+    with FakeEndpoint([{"ranking": [2, 1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        baseline = search.search(cfg, "widget", rerank=False)
+        assert len(baseline) >= 2
+        hits = search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert _paths(hits[:2]) == [baseline[1].path, baseline[0].path]
+    assert _paths(hits[2:]) == _paths(baseline[2:])
+
+
+def test_the_rerank_prompt_carries_the_question_and_each_candidates_text(
+    populated_vault: Config,
+):
+    """The model sees the rerank prompt, the question and one numbered text per
+    candidate, and is asked once with no repair turn."""
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        search.search(cfg, "widget", rerank=True)
+    body = fake.requests[0]
+    system, user = body["messages"][0]["content"], body["messages"][1]["content"]
+    assert system == search.RERANK_PROMPT_PATH.read_text(encoding="utf-8")
+    assert user.startswith("Question: widget\n\nCandidates:\n")
+    assert "[1] " in user
+    assert body["max_tokens"] == search.RERANK_MAX_TOKENS
+    assert body["response_format"]["json_schema"]["schema"] == search._rerank_schema()
+    assert len(body["messages"]) == 2
+
+
+def test_a_reranked_search_fetches_a_wider_pool_than_the_limit(populated_vault: Config):
+    """The pool holds more candidates than the limit asks for, and the model's order is
+    cut back to the limit (BUILD-PLAN F84)."""
+    with FakeEndpoint([{"ranking": [3, 1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        hits = search.search(cfg, "widget", rerank=True, limit=2)
+    user = fake.requests[0]["messages"][1]["content"]
+    listed = len([line for line in user.splitlines() if line.startswith("[")])
+    assert listed >= 3
+    assert len(hits) == 2
+
+
+def test_an_unreachable_endpoint_keeps_todays_order_and_sets_no_cooldown(
+    populated_vault: Config,
+):
+    cfg = _model_config(populated_vault, "http://127.0.0.1:9/v1")
+    baseline = _paths(search.search(cfg, "widget", rerank=False))
+    hits = search.search(cfg, "widget", rerank=True)
+    assert _paths(hits) == baseline
+    assert not model.cooldown_path(cfg).exists()
+
+
+def test_an_invalid_answer_keeps_todays_order_and_makes_no_repair_turn(
+    populated_vault: Config,
+):
+    with FakeEndpoint([{"ranking": "the titanium one"}, {"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        baseline = _paths(search.search(cfg, "widget", rerank=False))
+        hits = search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert _paths(hits) == baseline
+
+
+def test_an_answer_that_names_no_candidate_keeps_todays_order(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [99, 0, -1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        baseline = _paths(search.search(cfg, "widget", rerank=False))
+        hits = search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert _paths(hits) == baseline
+
+
+def test_a_timeout_keeps_todays_order(populated_vault: Config):
+    with FakeEndpoint([Reply(delay=1.5, content={"ranking": [1]})]) as fake:
+        cfg = _model_config(
+            populated_vault, fake.endpoint, "[search]\nrerank_timeout_seconds = 0.2\n"
+        )
+        baseline = _paths(search.search(cfg, "widget", rerank=False))
+        hits = search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert _paths(hits) == baseline
+
+
+def test_a_spent_budget_skips_the_call(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint, "[work]\ndaily_token_budget = 100\n")
+        (cfg.home / model.usage_path(cfg).name).write_text(
+            json.dumps(
+                {
+                    "at": datetime.now(UTC).isoformat(),
+                    "prompt_tokens": 500,
+                    "completion_tokens": 0,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        search.search(cfg, "widget", rerank=True)
+    assert fake.requests == []
+
+
+def test_a_standing_cooldown_skips_the_call(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        model.set_cooldown(cfg, "down", duration_seconds=900)
+        search.search(cfg, "widget", rerank=True)
+    assert fake.requests == []
+
+
+def test_a_rerank_call_never_clears_a_cooldown_record(populated_vault: Config):
+    """A rerank neither sets nor clears the endpoint's cooldown (F84 ruling 1): a
+    successful call leaves a record that is already over exactly where it was."""
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        model.set_cooldown(cfg, "down", duration_seconds=-1)
+        search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert model.cooldown_path(cfg).exists()
+
+
+def test_search_without_rerank_makes_no_model_call(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        search.search(cfg, "widget")
+    assert fake.requests == []
+
+
+def test_inject_makes_no_model_call(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        project = Registry.load(cfg.registry_path).by_slug("widget")
+        resolution = keys.Resolution(
+            kind=keys.PATH,
+            cwd=Path("."),
+            project=project,
+            slug=project.slug,
+            root=None,
+            alias_added=False,
+        )
+        inject.build(cfg, resolution)
+    assert fake.requests == []
+
+
+def test_the_setting_off_makes_no_model_call(populated_vault: Config):
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        _model_config(populated_vault, fake.endpoint, "[search]\nrerank = false\n")
+        assert main(["search", "widget", "--all"]) == 0
+    assert fake.requests == []
+
+
+def test_a_rerank_failure_is_logged_and_prints_nothing_extra(
+    populated_vault: Config,
+    capsys,
+    caplog,
+):
+    cfg = _model_config(populated_vault, "http://127.0.0.1:9/v1")
+    baseline = _paths(search.search(cfg, "widget", rerank=False))
+    with caplog.at_level(logging.INFO, logger="aft.search"):
+        assert main(["search", "widget", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert [line.split("\t")[0] for line in out.splitlines() if line.strip()] == baseline
+    assert "search rerank" in caplog.text
+
+
+def test_eval_ranks_follows_the_setting_and_no_rerank_refuses_it(populated_vault: Config):
+    cases = [evalmod.Case(question="widget", project="widget", expect=("titanium",))]
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        evalmod.rank(cfg, cases, rerank=False)
+        assert fake.requests == []
+    with FakeEndpoint([{"ranking": [2, 1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        results = evalmod.rank(cfg, cases)
+    assert len(fake.requests) == 1
+    assert results
+
+
+def test_eval_ranks_no_rerank_flag_refuses_the_model(populated_vault: Config):
+    golden = populated_vault.vault / "golden.yaml"
+    golden.write_text("- question: widget\n  project: widget\n  expect: [titanium]\n")
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        _model_config(populated_vault, fake.endpoint)
+        assert main(["eval", "--ranks", "--no-rerank"]) == 0
+    assert fake.requests == []
+
+
+def test_the_rerank_prompt_and_schema_are_pinned():
+    """The prompt is neutral, names no person or project, and the schema is the shape
+    the model answers (BUILD-PLAN F84)."""
+    words = " ".join(search.RERANK_PROMPT_PATH.read_text(encoding="utf-8").split())
+    assert "You rank search hits by how well they answer a question." in words
+    assert (
+        '"ranking" array: the candidate numbers ordered from the one that answers the '
+        "question best to the one that answers it least" in words
+    )
+    assert "Name only candidates you were shown, and name each at most once." in words
+    schema = search._rerank_schema()
+    assert schema["required"] == ["ranking"]
+    assert schema["properties"]["ranking"]["items"]["type"] == "integer"
+    assert schema["additionalProperties"] is False
+    schemamod.check(schema)
+    schemamod.validate({"ranking": [2, 1]}, schema)
+    with pytest.raises(schemamod.SchemaError):
+        schemamod.validate({"ranking": ["first"]}, schema)
+
+
+def test_hit_text_reads_the_section_a_page_hit_names(populated_vault: Config):
+    section = search.hit_text(
+        populated_vault,
+        search.Hit(
+            path="projects/widget/assembly.md",
+            description="",
+            snippet="",
+            collection=index.PAGES,
+            heading="State",
+        ),
+    )
+    assert "Fastening requires titanium bolt tightening" in section
+    assert "wire harness routing" not in section
+    whole = search.hit_text(
+        populated_vault,
+        search.Hit(path="projects/widget/assembly.md", description="", snippet=""),
+    )
+    assert "wire harness routing" in whole
+
+
+def test_hit_text_reads_an_evidence_entry_and_falls_back_when_the_file_is_gone(
+    populated_vault: Config,
+):
+    entry = search.hit_text(
+        populated_vault,
+        search.Hit(
+            path="aft://session/claude/s-widget-1#e-1",
+            description="",
+            snippet="",
+            collection=index.EVIDENCE,
+        ),
+    )
+    assert "we will use plain SQLite storage" in entry
+    gone = search.Hit(path="projects/widget/vanished.md", description="d", snippet="s")
+    assert search.hit_text(populated_vault, gone) == "projects/widget/vanished.md\nd\ns"

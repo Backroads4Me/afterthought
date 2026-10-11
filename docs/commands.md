@@ -30,7 +30,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | Command | What it does |
 |---|---|
 | `aft inject [path]` | Prints the memory block a session in `path` starts with. Reads files only and calls no model. |
-| `aft search "WORDS" [--project P] [--archive] [--reports] [--limit N] [--json]` | Searches every project that is not archived, with BM25 ranking inside a fixed order: the current directory's project first, the global pages next, the other projects and the unfiled text last; each hit names its project. `--project P` narrows to P and the global pages; `--all` is accepted and changes nothing; `--archive` adds every project's superseded and stale lines and resolved notes; `--reports` adds dream reports. |
+| `aft search "WORDS" [--project P] [--archive] [--reports] [--limit N] [--json]` | Searches every project that is not archived, with BM25 ranking inside a fixed order: the current directory's project first, the global pages next, the other projects and the unfiled text last; each hit names its project. With `search.rerank` on (the default), the configured model reorders the top candidates by how well each answers the question, and its order comes first; the candidates it leaves out follow in the index's own order, cut to `--limit`, and any failure keeps the index's own order. `--project P` narrows to P and the global pages; `--all` is accepted and changes nothing; `--archive` adds every project's superseded and stale lines and resolved notes; `--reports` adds dream reports. |
 | `aft read PATH [--level outline\|abstract\|full]` | Prints a page at the depth a task needs. |
 | `aft trace PAGE SOURCE` | Prints a fact's quote and the session entries around it. With an evidence hit's `aft://session/<agent>/<id>#<entry>` path, it opens that entry. |
 | `aft notes [path] [--all] [--json]` | Lists the notes waiting on your decision for `path`'s project and the global and reference pages: each line, its note, the quotes behind both with their dates, and the `aft settle` command for it. `--all` lists every project's. Reads files only. |
@@ -39,7 +39,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | `aft lint` | Checks every page against the page format: OKF fields, the fact-line grammar, citations that resolve. |
 | `aft reindex` | Rebuilds the search index from the vault's files and the evidence archive. |
 | `aft eval [GOLDEN] [--limit N]` | Checks memory against a golden set of known answers you write, by default `<vault>/golden.yaml`; a line passes when it is found in the top `N` search results (default 8). |
-| `aft eval [GOLDEN] --ranks [--limit N] [--json FILE]` | Measures where each golden entry's answer first ranks in search alone, searching as a session in the entry's project would, and prints recall@1/3/5/10 and MRR, split by collection (default depth 10). `--json` writes the per-entry records. Exits 0. |
+| `aft eval [GOLDEN] --ranks [--limit N] [--json FILE] [--no-rerank]` | Measures where each golden entry's answer first ranks in search alone, searching as a session in the entry's project would, and prints recall@1/3/5/10 and MRR, split by collection (default depth 10). The rank search follows `search.rerank` like `aft search` does; `--no-rerank` measures the bare index order. `--json` writes the per-entry records. Exits 0. |
 
 ## Background work
 

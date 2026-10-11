@@ -98,6 +98,9 @@ def complete_json(
     schema: dict,
     max_tokens: int,
     endpoint: str | None = None,
+    timeout: float | None = None,
+    record_cooldown: bool = True,
+    repair: bool = True,
 ) -> dict:
     """Ask the model for one JSON object that satisfies ``schema``.
 
@@ -108,7 +111,11 @@ def complete_json(
 
     A retry is not the same ask again: a schema failure sends the model its own invalid
     answer beside the validator's reason as a repair turn, and every attempt after the
-    first is asked at ``retry_temperature``.
+    first is asked at ``retry_temperature``. With ``repair=False`` there is one attempt
+    and no repair turn, for a caller that falls back on its own when the model fails.
+    ``timeout=None`` keeps TIMEOUT_SECONDS. With ``record_cooldown=False`` the call
+    leaves the endpoint's cooldown alone on both sides: it sets none when the endpoint
+    fails and clears none when it answers, so one failed call never pauses the others.
     """
 
     # A cooldown an earlier failure left is answered before anything is sent: the point
@@ -141,12 +148,19 @@ def complete_json(
     }
 
     problems: list[str] = []
-    for attempt in range(ATTEMPTS):
+    attempts = ATTEMPTS if repair else 1
+    for attempt in range(attempts):
         # A retry is a different ask: the temperature rises off the first attempt's, so
         # a model that answered twice alike at one temperature is given room not to.
         body["temperature"] = retry_temperature(config.settings.model.temperature, attempt)
         try:
-            content = _chat(config, body, endpoint=target_endpoint)
+            content = _chat(
+                config,
+                body,
+                endpoint=target_endpoint,
+                timeout=timeout,
+                record_cooldown=record_cooldown,
+            )
         except _Retryable as exc:
             problems.append(str(exc))
             continue
@@ -455,8 +469,19 @@ def usage_path(config: Config) -> Path:
     return config.home / USAGE_LOG
 
 
-def _chat(config: Config, body: dict, endpoint: str | None = None) -> str:
-    """One HTTP call. Returns the assistant message content."""
+def _chat(
+    config: Config,
+    body: dict,
+    endpoint: str | None = None,
+    timeout: float | None = None,
+    record_cooldown: bool = True,
+) -> str:
+    """One HTTP call. Returns the assistant message content.
+
+    ``timeout=None`` keeps TIMEOUT_SECONDS. ``record_cooldown=False`` leaves the
+    cooldown file alone: no cooldown is set when the endpoint fails, and none is
+    cleared when it answers.
+    """
     target_endpoint = endpoint or config.settings.model.endpoint
     url = target_endpoint.rstrip("/") + "/chat/completions"
     headers = _headers(config)
@@ -470,11 +495,13 @@ def _chat(config: Config, body: dict, endpoint: str | None = None) -> str:
         )
         # Built here rather than at import, so the proxy environment is read at call time.
         opener = urllib.request.build_opener(_RefuseRedirect())
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+        wait = TIMEOUT_SECONDS if timeout is None else timeout
+        with opener.open(request, timeout=wait) as response:
             raw = response.read().decode(errors="replace")
         # The endpoint answered, so it is up: no cooldown stands any longer, whatever
-        # it went on to say.
-        clear_cooldown(config, endpoint=target_endpoint)
+        # it went on to say. A caller that records no cooldown clears none either.
+        if record_cooldown:
+            clear_cooldown(config, endpoint=target_endpoint)
     except urllib.error.HTTPError as exc:
         target = exc.headers.get("location")
         if 300 <= exc.code < 400 and target:
@@ -495,17 +522,20 @@ def _chat(config: Config, body: dict, endpoint: str | None = None) -> str:
         message = f"{url} returned {exc.code}: {excerpt}"
         # A server error or a rate limit is the endpoint's own state, not a session's:
         # it goes down as a cooldown, so the calls after this one fail fast (F66).
-        if exc.code == 429:
-            retry_after_val = exc.headers.get("Retry-After") if exc.headers else None
-            parsed_wait = parse_retry_after(retry_after_val) if retry_after_val else None
-            set_cooldown(
-                config,
-                message,
-                duration_seconds=parsed_wait,
-                endpoint=target_endpoint,
-            )
-        elif exc.code >= 500:
-            set_cooldown(config, message, endpoint=target_endpoint)
+        # A caller that records no cooldown leaves the file alone: a slow or failing
+        # search must not pause the background work a cooldown would queue behind it.
+        if record_cooldown:
+            if exc.code == 429:
+                retry_after_val = exc.headers.get("Retry-After") if exc.headers else None
+                parsed_wait = parse_retry_after(retry_after_val) if retry_after_val else None
+                set_cooldown(
+                    config,
+                    message,
+                    duration_seconds=parsed_wait,
+                    endpoint=target_endpoint,
+                )
+            elif exc.code >= 500:
+                set_cooldown(config, message, endpoint=target_endpoint)
         if exc.code >= 500:
             raise _Retryable(message) from exc
         raise ModelError(message) from exc
@@ -518,7 +548,8 @@ def _chat(config: Config, body: dict, endpoint: str | None = None) -> str:
             # A socket/read timeout on slow generation is transient, not an outage:
             # retry without immediately declaring a long hard outage cooldown.
             raise _Retryable(message) from exc
-        set_cooldown(config, message, endpoint=target_endpoint)
+        if record_cooldown:
+            set_cooldown(config, message, endpoint=target_endpoint)
         raise ModelError(message) from exc
 
     try:
