@@ -286,6 +286,26 @@ class RankResult:
         }
 
 
+def _load_spike() -> Any:
+    """The search spike module, loaded once so its per-question metrics accumulate."""
+    try:
+        from eval import search_spike
+    except ImportError:
+        cached = sys.modules.get("search_spike")
+        if cached is not None:
+            return cached
+        import importlib.util
+
+        spike_path = Path(__file__).resolve().parents[2] / "eval" / "search_spike.py"
+        spec = importlib.util.spec_from_file_location("search_spike", spike_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load search_spike from {spike_path}") from None
+        search_spike = importlib.util.module_from_spec(spec)
+        sys.modules["search_spike"] = search_spike
+        spec.loader.exec_module(search_spike)
+    return search_spike
+
+
 def _search_hits(
     config: Config,
     query: str,
@@ -296,18 +316,14 @@ def _search_hits(
 ) -> list[search.Hit]:
     if variant is None or variant.strip().lower() in ("today", "default"):
         return search.search(config, query, current=current, limit=limit)
-    try:
-        from eval import search_spike
-    except ImportError:
-        import importlib.util
+    return _load_spike().search(config, query, current=current, limit=limit, variant=variant)
 
-        spike_path = Path(__file__).resolve().parents[2] / "eval" / "search_spike.py"
-        spec = importlib.util.spec_from_file_location("search_spike", spike_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load search_spike from {spike_path}") from None
-        search_spike = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(search_spike)
-    return search_spike.search(config, query, current=current, limit=limit, variant=variant)
+
+def _variant_stats(variant: str | None) -> dict[str, Any] | None:
+    """The spike's recorded tokens and wall time, when a variant that calls the model ran."""
+    if variant is None or variant.strip().lower() in ("today", "default"):
+        return None
+    return _load_spike().get_stats()
 
 
 def rank(
@@ -490,6 +506,9 @@ def run_ranks(
     _print_summary(summary)
     if json_out is not None:
         record = {"entries": [result.to_dict() for result in results], "summary": summary}
+        stats = _variant_stats(variant)
+        if stats is not None:
+            record["variant_stats"] = stats
         Path(json_out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     return 0
 

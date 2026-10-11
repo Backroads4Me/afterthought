@@ -1945,6 +1945,8 @@ def test_expand_variant_end_to_end_and_cache(rank_vault: Config):
         assert cache_file.exists()
         cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
         assert len(cache_data) > 0
+        # One model call per row the cache holds: every row was missing on the first run.
+        assert initial_calls == len(cache_data)
         # The expanded term should retrieve the hit
         assert any("harbor" in h.path for h in hits)
 

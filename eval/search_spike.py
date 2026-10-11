@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from aft import config as configmod
-from aft import index, keys, model, vault
+from aft import index, model, vault
 from aft import search as search_mod
 from aft.config import Config
 from aft.eval import _hit_text
@@ -400,7 +400,9 @@ def _search_lsa(
     try:
         import numpy as np
     except ImportError as exc:
-        raise RuntimeError("lsa variant requires numpy: run with 'uv run --with numpy ...'") from exc
+        raise RuntimeError(
+            "lsa variant requires numpy: run with 'uv run --with numpy ...'"
+        ) from exc
 
     today_hits = search_mod.search(
         config,

@@ -1146,13 +1146,20 @@ def score_question(
         try:
             from eval import search_spike
         except ImportError:
-            import importlib.util
+            # Reuse a module an earlier question loaded, so the spike's per-question
+            # metrics accumulate across the questions one run scores.
+            cached = sys.modules.get("search_spike")
+            if cached is not None:
+                search_spike = cached
+            else:
+                import importlib.util
 
-            spike_path = Path(__file__).resolve().parent / "search_spike.py"
-            spec = importlib.util.spec_from_file_location("search_spike", spike_path)
-            assert spec is not None and spec.loader is not None
-            search_spike = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(search_spike)
+                spike_path = Path(__file__).resolve().parent / "search_spike.py"
+                spec = importlib.util.spec_from_file_location("search_spike", spike_path)
+                assert spec is not None and spec.loader is not None
+                search_spike = importlib.util.module_from_spec(spec)
+                sys.modules["search_spike"] = search_spike
+                spec.loader.exec_module(search_spike)
         hits = search_spike.search(
             cfg,
             case.question,
@@ -1622,7 +1629,11 @@ def _rescored_record(
         return record
     try:
         with _rescore_sandbox(root) as sandbox:
-            scoring = score_question(sandbox, case, variant=variant)
+            # No variant: the plain two-argument call, unchanged by the spike.
+            if variant is None:
+                scoring = score_question(sandbox, case)
+            else:
+                scoring = score_question(sandbox, case, variant=variant)
     except Exception as exc:
         return {**record, "rescore_error": str(exc)}
     return {**record, "rankings": scoring}
@@ -1637,6 +1648,8 @@ def rescore_pipeline(
 ) -> PipelineReport:
     """Re-score the kept sandboxes a records JSONL names, without calling the model.
 
+    With ``variant``, the fresh rankings come from that search variant instead, whose
+    model calls are its own (BUILD-PLAN F83).
     Every record the file holds is written to the new JSONL in file order; a scored
     record whose sandbox still stands gets fresh rankings read from that sandbox, so a
     scoring change can be measured on kept runs (BUILD-PLAN F72). A record whose
@@ -1729,6 +1742,12 @@ def main(args: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--variant",
+        default=None,
+        help="with --rescore, the search variant to re-score with: rerank, expand, lsa, "
+        "expand+rerank, lsa+rerank",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
@@ -1739,9 +1758,13 @@ def main(args: list[str] | None = None) -> int:
         if parsed.rescore is not None:
             if parsed.output is None:
                 parser.error("--mode pipeline --rescore requires --output")
-            report = rescore_pipeline(parsed.rescore, parsed.dataset, parsed.output)
+            report = rescore_pipeline(
+                parsed.rescore, parsed.dataset, parsed.output, variant=parsed.variant
+            )
             print(report.format_table())
             return 0 if report.errors == 0 else 1
+        if parsed.variant is not None:
+            parser.error("--variant belongs to --rescore")
         if parsed.workdir is None:
             parser.error("--mode pipeline requires --workdir")
         report = run_pipeline(
