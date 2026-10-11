@@ -91,7 +91,14 @@ def snapshot(dest: str) -> int:
     return 0
 
 
-def run(home: str, key: str, *, json_out: str | None, limit: int) -> int:
+def run(
+    home: str,
+    key: str,
+    *,
+    json_out: str | None,
+    limit: int,
+    variant: str | None = None,
+) -> int:
     """Run the rank measure against the snapshot ``home`` and pass the exit through.
 
     The child is `aft eval KEY --ranks` with AFT_HOME set to the snapshot, so the measure
@@ -105,6 +112,8 @@ def run(home: str, key: str, *, json_out: str | None, limit: int) -> int:
     args = ["eval", key, "--ranks", "--limit", str(limit)]
     if json_out is not None:
         args += ["--json", json_out]
+    if variant is not None:
+        args += ["--variant", variant]
     env = dict(os.environ)
     env[configmod.HOME_ENV] = str(target)
     completed = subprocess.run([sys.executable, "-m", "aft", *args], env=env)
@@ -231,11 +240,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     q.add_argument(
         "--limit", type=int, default=DEFAULT_LIMIT, help="how deep the rank measure looks"
     )
+    q.add_argument(
+        "--variant",
+        default=None,
+        help="search variant to evaluate (default: today's search)",
+    )
     args = parser.parse_args(argv)
     try:
         if args.command == "snapshot":
             return snapshot(args.dir)
-        return run(args.dir, args.key, json_out=args.json_out, limit=args.limit)
+        return run(
+            args.dir,
+            args.key,
+            json_out=args.json_out,
+            limit=args.limit,
+            variant=args.variant,
+        )
     except EvalError as exc:
         print(f"eval_search: {exc}", file=sys.stderr)
         return 2

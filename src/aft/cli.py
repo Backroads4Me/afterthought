@@ -274,6 +274,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="with --ranks, write the per-entry records and the summary as JSON",
     )
+    p.add_argument(
+        "--variant",
+        default=None,
+        help="search variant with --ranks: rerank, expand, lsa, expand+rerank, lsa+rerank",
+    )
     p.set_defaults(handler=cmd_eval)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
@@ -920,7 +925,16 @@ def cmd_eval(args) -> int:
     vault.require(config)
     if args.ranks:
         limit = args.limit if args.limit is not None else evalmod.RANK_LIMIT
-        return evalmod.run_ranks(config, args.golden, limit=limit, json_out=args.json_out)
+        return evalmod.run_ranks(
+            config,
+            args.golden,
+            limit=limit,
+            json_out=args.json_out,
+            variant=args.variant,
+        )
+    if args.variant is not None:
+        print("--variant belongs to --ranks", file=sys.stderr)
+        return 2
     if args.json_out is not None:
         print("--json belongs to --ranks", file=sys.stderr)
         return 2

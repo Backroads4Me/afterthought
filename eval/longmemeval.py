@@ -1109,7 +1109,12 @@ def _session_metrics(ranked: list[str], answers: list[str]) -> dict[str, float]:
     }
 
 
-def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
+def score_question(
+    sandbox: Sandbox,
+    case: QuestionCase,
+    *,
+    variant: str | None = None,
+) -> dict[str, Any]:
     """The three session rankings of one question, each scored with the session metrics.
 
     (a) ``digests``: the digest rows only, attributed by digest file name. (b)
@@ -1128,13 +1133,41 @@ def score_question(sandbox: Sandbox, case: QuestionCase) -> dict[str, Any]:
     # deep enough to rank the whole haystack: search has no collection filter, so a
     # shallow limit would let evidence and page rows crowd digest rows out of the
     # digest-only ranking. The full ranking keeps hit order, so its top ten is unchanged.
-    hits = search.search(
-        cfg,
-        case.question,
-        project=sandbox.slug,
-        limit=max(SESSION_K, len(case.session_ids)) * (HITS_PER_SESSION + 1),
-        now=case.question_date,
-    )
+    limit = max(SESSION_K, len(case.session_ids)) * (HITS_PER_SESSION + 1)
+    if variant is None or variant.strip().lower() in ("today", "default"):
+        hits = search.search(
+            cfg,
+            case.question,
+            project=sandbox.slug,
+            limit=limit,
+            now=case.question_date,
+        )
+    else:
+        try:
+            from eval import search_spike
+        except ImportError:
+            # Reuse a module an earlier question loaded, so the spike's per-question
+            # metrics accumulate across the questions one run scores.
+            cached = sys.modules.get("search_spike")
+            if cached is not None:
+                search_spike = cached
+            else:
+                import importlib.util
+
+                spike_path = Path(__file__).resolve().parent / "search_spike.py"
+                spec = importlib.util.spec_from_file_location("search_spike", spike_path)
+                assert spec is not None and spec.loader is not None
+                search_spike = importlib.util.module_from_spec(spec)
+                sys.modules["search_spike"] = search_spike
+                spec.loader.exec_module(search_spike)
+        hits = search_spike.search(
+            cfg,
+            case.question,
+            project=sandbox.slug,
+            limit=limit,
+            now=case.question_date,
+            variant=variant,
+        )
     allowed = set(case.session_ids)
     answers = list(case.answer_session_ids)
     digests = ranked_sessions(
@@ -1575,7 +1608,12 @@ def _rescore_sandbox(root: Path) -> Iterator[Sandbox]:
             os.environ.pop(configmod.HOME_ENV, None)
 
 
-def _rescored_record(record: dict[str, Any], cases: dict[str, QuestionCase]) -> dict[str, Any]:
+def _rescored_record(
+    record: dict[str, Any],
+    cases: dict[str, QuestionCase],
+    *,
+    variant: str | None = None,
+) -> dict[str, Any]:
     """One record again, with fresh rankings when its kept sandbox can still be scored.
 
     A record that scored nothing, names no sandbox, or names a sandbox that is gone -
@@ -1591,7 +1629,11 @@ def _rescored_record(record: dict[str, Any], cases: dict[str, QuestionCase]) -> 
         return record
     try:
         with _rescore_sandbox(root) as sandbox:
-            scoring = score_question(sandbox, case)
+            # No variant: the plain two-argument call, unchanged by the spike.
+            if variant is None:
+                scoring = score_question(sandbox, case)
+            else:
+                scoring = score_question(sandbox, case, variant=variant)
     except Exception as exc:
         return {**record, "rescore_error": str(exc)}
     return {**record, "rankings": scoring}
@@ -1601,9 +1643,13 @@ def rescore_pipeline(
     records_path: Path | str,
     dataset_path: Path | str,
     output_path: Path | str,
+    *,
+    variant: str | None = None,
 ) -> PipelineReport:
     """Re-score the kept sandboxes a records JSONL names, without calling the model.
 
+    With ``variant``, the fresh rankings come from that search variant instead, whose
+    model calls are its own (BUILD-PLAN F83).
     Every record the file holds is written to the new JSONL in file order; a scored
     record whose sandbox still stands gets fresh rankings read from that sandbox, so a
     scoring change can be measured on kept runs (BUILD-PLAN F72). A record whose
@@ -1617,7 +1663,7 @@ def rescore_pipeline(
         )
     records = [record for record in _read_records(source) if isinstance(record, dict)]
     cases = {case.question_id: case for case in parse_questions(load_dataset(dataset_path))}
-    rescored = [_rescored_record(record, cases) for record in records]
+    rescored = [_rescored_record(record, cases, variant=variant) for record in records]
     for original, fresh in zip(records, rescored, strict=True):
         _append_record(target, fresh)
         if fresh is not original:
@@ -1696,6 +1742,12 @@ def main(args: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--variant",
+        default=None,
+        help="with --rescore, the search variant to re-score with: rerank, expand, lsa, "
+        "expand+rerank, lsa+rerank",
+    )
+    parser.add_argument(
         "--jobs",
         type=int,
         default=1,
@@ -1706,9 +1758,13 @@ def main(args: list[str] | None = None) -> int:
         if parsed.rescore is not None:
             if parsed.output is None:
                 parser.error("--mode pipeline --rescore requires --output")
-            report = rescore_pipeline(parsed.rescore, parsed.dataset, parsed.output)
+            report = rescore_pipeline(
+                parsed.rescore, parsed.dataset, parsed.output, variant=parsed.variant
+            )
             print(report.format_table())
             return 0 if report.errors == 0 else 1
+        if parsed.variant is not None:
+            parser.error("--variant belongs to --rescore")
         if parsed.workdir is None:
             parser.error("--mode pipeline requires --workdir")
         report = run_pipeline(
