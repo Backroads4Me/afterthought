@@ -310,10 +310,9 @@ def prune_paths(config: Config, rels: Iterable[str]) -> tuple[int, list[str]]:
 
     ``aft forget session`` calls this after it has rewritten or deleted the pages and
     digests of the session it forgets: the kept keys are read from the files as they now
-    stand - a page's active lines, nothing at all for a file that is gone - because the
-    index is brought in step only after the forget's commit. A page whose parse finds
-    problems is left unpruned: the forget has already left the page standing, and a phrase
-    file holding one line's phrases is harmless next to a rewrite that failed.
+    stand - a page's active lines, nothing at all for a file that is gone or a page whose
+    parse finds problems - because the index is brought in step only after the forget's
+    commit.
 
     Returns the entries removed and the phrase files changed or deleted, which the caller
     commits with its own changes.
@@ -326,8 +325,6 @@ def prune_paths(config: Config, rels: Iterable[str]) -> tuple[int, list[str]]:
         if not held:
             continue  # nothing to prune: no file, or one that already holds nothing
         keys = _file_keys(config, rel)
-        if keys is None:
-            continue
         kept = {key: phrases for key, phrases in held.items() if key in keys}
         if len(kept) == len(held):
             continue
@@ -340,12 +337,14 @@ def prune_paths(config: Config, rels: Iterable[str]) -> tuple[int, list[str]]:
     return pruned, changed
 
 
-def _file_keys(config: Config, rel: str) -> set[str] | None:
+def _file_keys(config: Config, rel: str) -> set[str]:
     """The phrase keys the file at ``rel`` still earns, read from the file itself.
 
     A page's kept keys are its active lines' statements - the lines ``pages`` rows are
     built from - so a line a forget withdrew or rewrote earns no phrases any more. A file
-    that cannot be read keeps everything, since nothing says its lines changed.
+    that is gone, or a page whose parse finds problems, earns none: which of its lines are
+    still active cannot be read with certainty, and a forget errs toward removing. The next
+    run writes phrases again for the rows the index holds.
     """
     try:
         text = (config.vault / rel).read_text(encoding="utf-8")
@@ -353,7 +352,7 @@ def _file_keys(config: Config, rel: str) -> set[str] | None:
         return set()
     parsed = page.parse(text, config.vault / rel)
     if parsed.errors:
-        return None
+        return set()
     return {line_key(fact.statement) for fact in parsed.facts if fact.state in inject.INJECTED}
 
 

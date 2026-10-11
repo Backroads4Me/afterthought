@@ -235,6 +235,25 @@ def test_forget_session_takes_the_phrases_of_what_it_removes(widget):
     assert len(fake.requests) == calls, "the forget prunes files and calls no model"
 
 
+def test_a_forget_drops_every_phrase_of_a_page_it_cannot_parse(widget):
+    """Which lines of a page that fails to parse are still active cannot be read, so the
+    forget's prune errs toward removing: the page's phrase file goes, and a later run writes
+    phrases again for the rows the index holds."""
+    fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: ["retry delay"]}))
+    phrases.update(cfg, NOW)
+    assert (cfg.vault / phrases.file_rel(PAGE_REL)).exists()
+    calls = len(fake.requests)
+    path = cfg.vault / PAGE_REL
+    path.write_text(path.read_text(encoding="utf-8").replace("---", "", 2), encoding="utf-8")
+
+    pruned, changed = phrases.prune_paths(cfg, [PAGE_REL])
+
+    assert pruned >= 1
+    assert changed == [phrases.file_rel(PAGE_REL)]
+    assert not (cfg.vault / phrases.file_rel(PAGE_REL)).exists()
+    assert len(fake.requests) == calls, "pruning calls no model"
+
+
 def test_forget_pattern_redacts_the_phrase_files_too(widget):
     secret = "deploy-token-9f2-for-tests"
     fake, cfg = serve(widget, answer({1: ["backoff tuning"], 2: [f"the deploy key {secret}"]}))
