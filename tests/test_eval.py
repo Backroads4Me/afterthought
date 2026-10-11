@@ -1857,3 +1857,132 @@ def test_eval_search_snapshot_freezes_a_vault(rank_vault: Config, tmp_path: Path
         "pages",
         "harbor",
     )
+
+
+def test_search_variant_default_equals_today_search(rank_vault: Config):
+    """The default search variant returns the exact same results as aft.search.search."""
+    _spike_path = Path(__file__).resolve().parent.parent / "eval" / "search_spike.py"
+    _spec = importlib.util.spec_from_file_location("search_spike", _spike_path)
+    assert _spec is not None and _spec.loader is not None
+    search_spike = importlib.util.module_from_spec(_spec)
+    sys.modules["search_spike"] = search_spike
+    _spec.loader.exec_module(search_spike)
+
+    today_hits = search.search(rank_vault, "beacon trimmed full moon", current="harbor", limit=5)
+    default_hits = search_spike.search(
+        rank_vault, "beacon trimmed full moon", current="harbor", limit=5
+    )
+    explicit_today = search_spike.search(
+        rank_vault, "beacon trimmed full moon", variant="today", current="harbor", limit=5
+    )
+    assert [(h.path, h.rank) for h in default_hits] == [(h.path, h.rank) for h in today_hits]
+    assert [(h.path, h.rank) for h in explicit_today] == [(h.path, h.rank) for h in today_hits]
+
+
+def test_rerank_variant_end_to_end_and_candidate_filtering(rank_vault: Config, tmp_path: Path):
+    """rerank orders top hits with the model, keeps only valid candidates, and handles fallbacks."""
+    _spike_path = Path(__file__).resolve().parent.parent / "eval" / "search_spike.py"
+    _spec = importlib.util.spec_from_file_location("search_spike", _spike_path)
+    assert _spec is not None and _spec.loader is not None
+    search_spike = importlib.util.module_from_spec(_spec)
+    sys.modules["search_spike"] = search_spike
+    _spec.loader.exec_module(search_spike)
+
+    today_hits = search.search(rank_vault, "beacon trimmed full moon", current="harbor", limit=10)
+    assert len(today_hits) >= 2
+
+    # Scripted reply: reverse candidate 1 and 2, and include invalid candidate 99
+    with FakeEndpoint([{"ranking": [2, 99, 1]}]) as fake:
+        (rank_vault.home / "config.toml").write_text(
+            f'vault = "{rank_vault.vault}"\nhost = "testhost"\n'
+            f'[model]\nendpoint = "{fake.endpoint}"\nname = "{MODEL_NAME}"\n'
+        )
+        cfg = configmod.load()
+        reranked = search_spike.search(
+            cfg, "beacon trimmed full moon", variant="rerank", current="harbor", limit=10
+        )
+        assert len(reranked) >= 2
+        # Candidate 2 moved ahead of candidate 1; candidate 99 is ignored
+        assert reranked[0].path == today_hits[1].path
+        assert reranked[1].path == today_hits[0].path
+
+    # Fallback: invalid answer from endpoint falls back to today's search order
+    with FakeEndpoint([Reply(status=500)]) as fake:
+        (rank_vault.home / "config.toml").write_text(
+            f'vault = "{rank_vault.vault}"\nhost = "testhost"\n'
+            f'[model]\nendpoint = "{fake.endpoint}"\nname = "{MODEL_NAME}"\n'
+        )
+        cfg = configmod.load()
+        fallback_hits = search_spike.search(
+            cfg, "beacon trimmed full moon", variant="rerank", current="harbor", limit=10
+        )
+        assert [h.path for h in fallback_hits] == [h.path for h in today_hits[:10]]
+
+
+def test_expand_variant_end_to_end_and_cache(rank_vault: Config):
+    """expand writes cache and calls model only for missing rows, indexing expanded terms."""
+    _spike_path = Path(__file__).resolve().parent.parent / "eval" / "search_spike.py"
+    _spec = importlib.util.spec_from_file_location("search_spike", _spike_path)
+    assert _spec is not None and _spec.loader is not None
+    search_spike = importlib.util.module_from_spec(_spec)
+    sys.modules["search_spike"] = search_spike
+    _spec.loader.exec_module(search_spike)
+
+    cache_file = rank_vault.home / "expansions.json"
+    assert not cache_file.exists()
+
+    with FakeEndpoint([{"phrases": ["solitary lantern", "night tower illumination"]}]) as fake:
+        (rank_vault.home / "config.toml").write_text(
+            f'vault = "{rank_vault.vault}"\nhost = "testhost"\n'
+            f'[model]\nendpoint = "{fake.endpoint}"\nname = "{MODEL_NAME}"\n'
+        )
+        cfg = configmod.load()
+        hits = search_spike.search(
+            cfg, "solitary lantern", variant="expand", current="harbor", limit=5
+        )
+        assert len(fake.requests) > 0
+        initial_calls = len(fake.requests)
+        assert cache_file.exists()
+        cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert len(cache_data) > 0
+        # The expanded term should retrieve the hit
+        assert any("harbor" in h.path for h in hits)
+
+    # Second run: cache is read, 0 additional model calls made for existing rows
+    with FakeEndpoint([{"phrases": ["should not be called"]}]) as fake:
+        (rank_vault.home / "config.toml").write_text(
+            f'vault = "{rank_vault.vault}"\nhost = "testhost"\n'
+            f'[model]\nendpoint = "{fake.endpoint}"\nname = "{MODEL_NAME}"\n'
+        )
+        cfg = configmod.load()
+        hits2 = search_spike.search(
+            cfg, "solitary lantern", variant="expand", current="harbor", limit=5
+        )
+        assert len(fake.requests) == 0
+        assert len(hits2) > 0
+
+
+def test_lsa_variant_end_to_end(rank_vault: Config):
+    """lsa variant runs truncated SVD TF-IDF and fuses with BM25 using reciprocal rank fusion."""
+    pytest.importorskip("numpy")
+    _spike_path = Path(__file__).resolve().parent.parent / "eval" / "search_spike.py"
+    _spec = importlib.util.spec_from_file_location("search_spike", _spike_path)
+    assert _spec is not None and _spec.loader is not None
+    search_spike = importlib.util.module_from_spec(_spec)
+    sys.modules["search_spike"] = search_spike
+    _spec.loader.exec_module(search_spike)
+
+    hits = search_spike.search(rank_vault, "beacon trimmed full moon", variant="lsa", limit=5)
+    assert len(hits) > 0
+    assert any("harbor" in h.path for h in hits)
+
+
+def test_eval_ranks_cli_with_variant(rank_vault: Config, tmp_path: Path):
+    """aft eval --ranks accepts --variant, while pass/fail eval refuses --variant."""
+    set_path = golden(tmp_path, RANK_GOLDEN)
+    out = tmp_path / "ranks_variant.json"
+    assert main(["eval", str(set_path), "--ranks", "--variant", "today", "--json", str(out)]) == 0
+    assert out.is_file()
+
+    # Refuse --variant without --ranks
+    assert main(["eval", str(set_path), "--variant", "today"]) == 2

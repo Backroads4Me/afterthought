@@ -286,7 +286,37 @@ class RankResult:
         }
 
 
-def rank(config: Config, cases: list[Case], *, limit: int = RANK_LIMIT) -> list[RankResult]:
+def _search_hits(
+    config: Config,
+    query: str,
+    *,
+    current: str | None = None,
+    limit: int = RANK_LIMIT,
+    variant: str | None = None,
+) -> list[search.Hit]:
+    if variant is None or variant.strip().lower() in ("today", "default"):
+        return search.search(config, query, current=current, limit=limit)
+    try:
+        from eval import search_spike
+    except ImportError:
+        import importlib.util
+
+        spike_path = Path(__file__).resolve().parents[2] / "eval" / "search_spike.py"
+        spec = importlib.util.spec_from_file_location("search_spike", spike_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load search_spike from {spike_path}") from None
+        search_spike = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(search_spike)
+    return search_spike.search(config, query, current=current, limit=limit, variant=variant)
+
+
+def rank(
+    config: Config,
+    cases: list[Case],
+    *,
+    limit: int = RANK_LIMIT,
+    variant: str | None = None,
+) -> list[RankResult]:
     """Rank every entry's answer in search alone, with no block and no model.
 
     Each search runs as a session in the entry's project would: the entry's project ranks
@@ -295,16 +325,22 @@ def rank(config: Config, cases: list[Case], *, limit: int = RANK_LIMIT) -> list[
     reported rather than raised, for the same reason `evaluate` reports it.
     """
     registry = Registry.load(config.registry_path)
-    return [_rank(config, registry, case, limit) for case in cases]
+    return [_rank(config, registry, case, limit, variant=variant) for case in cases]
 
 
-def _rank(config: Config, registry: Registry, case: Case, limit: int) -> RankResult:
+def _rank(
+    config: Config,
+    registry: Registry,
+    case: Case,
+    limit: int,
+    variant: str | None = None,
+) -> RankResult:
     project = registry.by_slug(case.project)
     if project is None:
         slugs = ", ".join(sorted(p.slug for p in registry.projects)) or "no projects"
         note = f"no project {case.project!r} in the registry; it has {slugs}"
         return RankResult(case, None, None, None, notes=(note,))
-    hits = search.search(config, case.question, current=case.project, limit=limit)
+    hits = _search_hits(config, case.question, current=case.project, limit=limit, variant=variant)
     texts = [_hit_text(config, hit) for hit in hits]
     expect_not = tuple((banned, _first_rank(banned, texts)) for banned in case.expect_not)
     position = next(
@@ -437,6 +473,7 @@ def run_ranks(
     *,
     limit: int = RANK_LIMIT,
     json_out: str | Path | None = None,
+    variant: str | None = None,
 ) -> int:
     """Print each entry's rank and the summary, and exit 0.
 
@@ -446,7 +483,7 @@ def run_ranks(
     can be compared entry by entry.
     """
     cases = load_golden(Path(path) if path is not None else golden_path(config))
-    results = rank(config, cases, limit=limit)
+    results = rank(config, cases, limit=limit, variant=variant)
     for result in results:
         print(result)
     summary = summarize(results)
