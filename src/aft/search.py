@@ -15,12 +15,12 @@ The default search reaches every project that is not archived (DESIGN 10) and ra
 tiers: the current project's rows and the global pages first, then everything else. Inside a
 tier the BM25 score orders rows across collections, and curated memory (pages, digests) wins
 near-ties: its score is multiplied by 1.10 before the sort, which puts it ahead of a raw row
-whose score is within 10% of its own. A project named with --project narrows the query to
-A query's bare words drop question filler (FILLER_WORDS) and the rest join with OR, so a
-row holding more of the words scores higher by BM25's own sum.
-that project and the global pages, one tier. Memory that names no project is named rather
-than hidden: the global pages, a digest or an archived entry whose session resolved to no
-project, and the library each answer under their own name.
+whose score is within 10% of its own. A query's bare words drop question filler
+(FILLER_WORDS) and the rest join with OR, so a row holding more of the words scores higher by
+BM25's own sum. A project named with --project narrows the query to that project and the
+global pages, one tier. Memory that names no project is named rather than hidden: the global
+pages, a digest or an archived entry whose session resolved to no project, and the library
+each answer under their own name.
 """
 
 from __future__ import annotations
