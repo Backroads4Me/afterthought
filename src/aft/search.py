@@ -46,7 +46,6 @@ from aft.config import Config
 from aft.registry import Registry, path_key
 from aft.temporal import TemporalConstraint, parse_temporal
 
-
 LOGGER = logging.getLogger(__name__)
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
 _HEADING = re.compile(r"^#{1,6}\s")
@@ -944,7 +943,6 @@ def _heading_level(line: str) -> int:
 def _heading_name(line: str) -> str:
     stripped = line.lstrip().lstrip("#")
     return stripped.strip().strip("#").strip()
-
 
 
 #: How wide the candidate pool a reranked search fetches is, whatever the caller's limit

@@ -69,6 +69,13 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 |---|---|---|
 | `work.daily_token_budget` | `200000` | Tokens one day of background work, digests and dreaming alike, may spend, counted from midnight UTC in `~/.afterthought/usage.jsonl`. When it is spent, the rest of the queue waits for the next day, or for `aft budget reset`. `aft redigest` counts against it too. |
 
+## `[search]`
+
+| Setting | Default | What it does |
+|---|---|---|
+| `search.rerank` | `true` | `aft search` asks the configured model to reorder its top candidates by how well each answers the question, and the model's order comes first; the candidates it leaves out follow in the index's own order, cut to `--limit`. When the model cannot answer - the setting off, the endpoint cooling down or unreachable, the answer late or unusable, or today's token budget spent - the search keeps the index's own order and says nothing about it on stdout. The reorder call is recorded in `usage.jsonl` like every model call, but never sets or clears the endpoint's cooldown, so a slow or failing search never pauses background work. |
+| `search.rerank_timeout_seconds` | `5` | How long the reorder call may take before the search keeps the index's own order. |
+
 ## `[inject]`
 
 | Setting | Default | What it does |
