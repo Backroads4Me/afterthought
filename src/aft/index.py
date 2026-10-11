@@ -25,13 +25,13 @@ The library collection of DESIGN 11 is created by its own task (BUILD-PLAN M7) a
 
 Each live curated line of a ``pages`` section is its own row, and each resting line of an
 ``archive`` section likewise (BUILD-PLAN F82). A row keeps the page's title and description
-and the section's heading in their columns, and its body is the one line (statement, tag, date
-and footnote references as the page holds them). The row key adds the line's position in its
-section, so two lines under one heading are two rows. Prose that is not a fact line stays one
-row per heading, and ``digests`` and ``reports`` keep one row per heading section.
-DESIGN 11 says a search result names "its document and section" and DESIGN 10 returns "the
-matching snippet" with the section on it, so both halves travel on the row: ``path`` and
-``heading``, joined in ``row_key``. A ``pages`` row holds one live curated line and nothing else.
+and the section's heading in their columns, and its body is the line's statement alone. The
+row key adds the line's position in its section, so two lines under one heading are two rows.
+Prose that is not a fact line stays one row per heading, and ``digests`` and ``reports`` keep
+one row per heading section. DESIGN 11 says a search result names "its document and
+section" and DESIGN 10 returns "the matching snippet" with the section on it, so both halves
+travel on the row: ``path`` and ``heading``, joined in ``row_key``. A ``pages`` row holds one
+live curated line and nothing else.
 
 The heading is an indexed column beside the title and the description, so the page title, the
 description and the section's own heading all outrank the line text: BUILD-PLAN M3.1's "BM25
@@ -288,13 +288,9 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: ``rows-5`` is the build whose collections stem their words (``TOKENIZER``): an index from
 #: ``rows-4`` holds whole words only, so a query for "pause" would miss "paused" there.
 #: ``rows-6`` introduces ``page_links`` for wikilink resolution and backlink tracking.
-#: The format version of the search index, recorded in SQLite PRAGMA user_version.
-#: Raised whenever what a row holds changes (BUILD-PLAN F82). A mismatch between the
-#: recorded user_version and this constant causes index.update() to drop and rebuild
-#: the index (the same path aft reindex takes).
-FORMAT_VERSION = 1
-
-BUILD_STAMP = "rows-6"
+#: ``rows-7`` indexes each page and archive fact line as its own row (BUILD-PLAN F82): an
+#: index from ``rows-6`` holds a whole section per row.
+BUILD_STAMP = "rows-7"
 BUILD_TABLE = "build"
 LINKS_TABLE = "page_links"
 
@@ -503,12 +499,7 @@ class _File:
 
 
 def _is_current_build(conn: sqlite3.Connection) -> bool:
-    """Whether the index was written by the current format version and build stamp."""
-    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if user_version != FORMAT_VERSION:
-        if not conn.execute(_HOLDS_ROWS).fetchone()[0]:
-            return True
-        return False
+    """Whether the index was written by the current build stamp."""
     recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
     if recorded is None:
         return not conn.execute(_HOLDS_ROWS).fetchone()[0]
@@ -1049,19 +1040,15 @@ def _row_key(
     return "#".join(parts)
 
 
-def _fact_line_body(fact: page.Fact) -> str:
-    """One fact line: statement, tag, date and footnote references as the page holds them."""
-    refs = "".join(f" [^{ref}]" for ref in fact.refs)
-    return f"{fact.statement} [{fact.source}] {fact.date}{refs}"
-
-
 def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str, str, int, int]]:
     """The admitted lines of each section, each as its own row chunk (BUILD-PLAN F82).
 
     Each live curated line of a pages section is its own row, and each resting line of an
-    archive section likewise. A row's body is the one line (statement, tag, date and
-    footnote references as the page holds them), and position is 1-indexed within the
-    section for the admitted lines.
+    archive section likewise; position is 1-indexed among the section's admitted lines. A
+    line is indexed as what it says: the source tag, the date and the footnotes are the
+    page's grammar rather than its content, and `aft.inject` leaves them out of the block it
+    builds for the same reason. A callout is a note about a line rather than a line of its
+    own, so its text is not indexed either (DESIGN 6, DESIGN 10).
     """
     chunks: list[tuple[str, str, int, int]] = []
     current_section: str | None = None
@@ -1076,7 +1063,7 @@ def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str
             position = 0
         if fact.state in admitted:
             position += 1
-            chunks.append((fact.section, _fact_line_body(fact), current_occurrence, position))
+            chunks.append((fact.section, fact.statement, current_occurrence, position))
     return chunks
 
 
@@ -1569,15 +1556,6 @@ def _require_current_build(conn: sqlite3.Connection, path: Path) -> None:
     what that build meant, and rows carrying no stamp at all came from a build that said nothing
     about itself. A file with no stamp and no rows has nothing for the claim to protect - its
     tables may be there from a run that failed before writing a row - and is written now."""
-    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if user_version != FORMAT_VERSION:
-        if conn.execute(_HOLDS_ROWS).fetchone()[0]:
-            raise SearchIndexError(
-                f"the index at {path} holds rows written with format version {user_version},"
-                f" not {FORMAT_VERSION}: run aft reindex to rebuild it from the vault and the"
-                " archive"
-            )
-        return
     recorded = conn.execute(_SELECT_BUILD, (_BUILD_KEY,)).fetchone()
     if recorded is None:
         if conn.execute(_HOLDS_ROWS).fetchone()[0]:
@@ -1595,8 +1573,7 @@ def _require_current_build(conn: sqlite3.Connection, path: Path) -> None:
 
 
 def _record_build(conn: sqlite3.Connection) -> None:
-    """Say which build and format version wrote these rows, in the same transaction."""
-    conn.execute(f"PRAGMA user_version = {FORMAT_VERSION}")
+    """Say which build wrote these rows, in the same transaction as the rows themselves."""
     conn.execute(_RECORD_BUILD, (_BUILD_KEY, BUILD_STAMP))
 
 

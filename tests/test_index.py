@@ -364,8 +364,8 @@ def test_an_edit_through_the_page_writer_moves_the_row_and_its_hash_together(
 
     after = row_for(initialized, "pages", f"{REL}#Decisions#1")
     after2 = row_for(initialized, "pages", f"{REL}#Decisions#2")
-    assert _column(after, "body") == "The index is plain SQLite. [stated] 2026-09-20 [^s1]"
-    assert _column(after2, "body") == "Flanges are cast, not machined. [stated] 2026-09-28 [^s1]"
+    assert _column(after, "body") == "The index is plain SQLite."
+    assert _column(after2, "body") == "Flanges are cast, not machined."
     assert _column(after2, "body") != _column(before, "body")
     assert _column(after, "time") == _column(before, "time")
     assert hashes(initialized)[REL] != hash_before
@@ -602,7 +602,7 @@ def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     assert keys_of(initialized, "archive") == ["archive/widget.md#Decisions#1"]
     assert (
         _column(row_for(initialized, "archive", "archive/widget.md#Decisions#1"), "body")
-        == "Ship the widget in steel. [stated] 2026-01-01 [^s1]"
+        == "Ship the widget in steel."
     )
 
     index.update(initialized)  # nothing changed, and the archive's own rows have to stay
@@ -625,10 +625,10 @@ def test_a_line_at_rest_on_its_page_is_indexed_in_the_archive(initialized: Confi
     assert keys_of(initialized, "pages") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
     assert keys_of(initialized, "archive") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
     assert _column(row_for(initialized, "archive", f"{REL}#Decisions#1"), "body") == (
-        "Agents write their own summary. [suggested] 2026-09-19 [^s1]"
+        "Agents write their own summary."
     )
     assert _column(row_for(initialized, "archive", f"{REL}#State#1"), "body") == (
-        "Capture takes 12 ms. [observed] 2026-09-22 [^s2]"
+        "Capture takes 12 ms."
     )
     assert (
         _column(row_for(initialized, "archive", f"{REL}#Decisions#1"), "project_id") == "p_widget"
@@ -690,7 +690,7 @@ def test_content_changes_a_row_and_an_mtime_alone_does_not(initialized: Config) 
     pin(path, moment + 3600)
     index.update(initialized)
     assert _column(row_for(initialized, "pages", f"{rel}#Decisions#1"), "body") == (
-        "The index is SQLite FTS5. [stated] 2026-09-20 [^s1]"
+        "The index is SQLite FTS5."
     )
     assert hashes(initialized)[rel] != hash_before
 
@@ -2123,8 +2123,8 @@ aft:
 
     row1 = row_for(initialized, "pages", f"{rel}#Decisions#1")
     row2 = row_for(initialized, "pages", f"{rel}#Decisions#2")
-    assert _column(row1, "body") == "The index is plain SQLite. [stated] 2026-09-20 [^s1]"
-    assert _column(row2, "body") == "Flanges are cast, not machined. [observed] 2026-09-21 [^s2]"
+    assert _column(row1, "body") == "The index is plain SQLite."
+    assert _column(row2, "body") == "Flanges are cast, not machined."
     assert _column(row1, "heading") == "Decisions"
     assert _column(row2, "heading") == "Decisions"
 
@@ -2156,31 +2156,22 @@ aft:
 
     row1 = row_for(initialized, "archive", f"{rel}#Decisions#1")
     row2 = row_for(initialized, "archive", f"{rel}#Decisions#2")
-    assert _column(row1, "body") == "Ship the widget in steel. [stated] 2026-01-01 [^s1]"
-    assert _column(row2, "body") == "Bronze was the original alloy. [observed] 2026-01-02 [^s1]"
+    assert _column(row1, "body") == "Ship the widget in steel."
+    assert _column(row2, "body") == "Bronze was the original alloy."
     assert _column(row1, "heading") == "Decisions"
     assert _column(row2, "heading") == "Decisions"
 
 
-def test_an_index_at_an_older_format_version_is_rebuilt_on_update(
+def test_an_index_from_the_section_row_build_is_rebuilt_on_update(
     initialized: Config, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """F82: an index recorded with an older user_version is rebuilt on update."""
+    """F82: an index recorded by the section-row build (rows-6) is rebuilt into line rows."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
-
     with _open(initialized) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == getattr(
-            index, "FORMAT_VERSION", 1
-        )
-        conn.execute("PRAGMA user_version = 0")
+        conn.execute("UPDATE build SET stamp = 'rows-6'")
 
     with caplog.at_level("INFO"):
         assert index.update(initialized) == []
     assert "rebuilding search index" in caplog.text
-
-    with _open(initialized) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == getattr(
-            index, "FORMAT_VERSION", 1
-        )
     assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
