@@ -1579,12 +1579,14 @@ def test_search_command_temporal_cli(populated_vault: Config, capsys) -> None:
     assert "projects/widget/assembly.md" in out
 
 
-def test_multi_term_query_matches_all_terms_before_or_fallback(populated_vault: Config) -> None:
-    """A multi-term query tries AND first across collections, falling back to OR only if no matches.
+def test_multi_term_query_answers_with_any_word_and_ranks_by_words_held(
+    populated_vault: Config,
+) -> None:
+    """A multi-term query is a disjunction (F81): every row holding any word answers.
 
-    When matching documents contain all query terms, partial matches matching only some terms
-    are not returned. When no document contains all terms, the query falls back to OR so partial
-    matches answer.
+    The query's bare words drop filler and the rest join with OR, so a row holding only
+    some of the words answers alongside rows holding all of them, and BM25 ranks a row
+    holding more of the words ahead of one holding fewer.
     """
     cfg = populated_vault
     # Document 'projects/widget/assembly.md' has both 'titanium' and 'bolt'.
@@ -1603,21 +1605,164 @@ def test_multi_term_query_matches_all_terms_before_or_fallback(populated_vault: 
     )
     index.update(cfg)
 
-    # 1. Multi-term query where conjunction matches:
-    # "titanium bolt" matches assembly.md (which has both words).
-    # fasteners.md only has "titanium", so it is excluded because AND succeeded.
+    # "titanium bolt" matches assembly.md, which holds both words, and fasteners.md, which
+    # holds "titanium" alone; both answer, and assembly.md ranks first on BM25's sum.
     hits = search.search(cfg, "titanium bolt", project="widget")
     hit_paths = [h.path for h in hits]
-    assert "projects/widget/assembly.md" in hit_paths
-    assert "projects/widget/fasteners.md" not in hit_paths
+    assert hit_paths.index("projects/widget/assembly.md") < hit_paths.index(
+        "projects/widget/fasteners.md"
+    )
 
-    # 2. Multi-term query where conjunction fails:
-    # "rivets bolt" has no document matching both words.
-    # Conjunction returns nothing, so it falls back to OR, finding both pages.
-    fallback_hits = search.search(cfg, "rivets bolt", project="widget")
-    fallback_paths = [h.path for h in fallback_hits]
-    assert "projects/widget/assembly.md" in fallback_paths
-    assert "projects/widget/fasteners.md" in fallback_paths
+    # "rivets bolt" has no document matching both words; both pages answer anyway, since
+    # any one of the words is enough.
+    partial_hits = search.search(cfg, "rivets bolt", project="widget")
+    partial_paths = [h.path for h in partial_hits]
+    assert "projects/widget/assembly.md" in partial_paths
+    assert "projects/widget/fasteners.md" in partial_paths
+
+
+def test_a_question_with_filler_words_finds_its_content_words(populated_vault: Config) -> None:
+    """F81: a question's bare words drop filler, so its content words alone find the row."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/switchboard.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Switchboard\n"
+        "description: Panel wiring notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Switchboard\n\n"
+        "## Facts\n\n"
+        "- The switchboard panel lives behind the galley drawer. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "where does the switchboard live", project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/switchboard.md" in hit_paths
+
+
+def test_a_row_holding_more_content_words_outranks_one_holding_fewer(
+    populated_vault: Config,
+) -> None:
+    """F81: the words join with OR, and a row holding more of them scores higher by BM25."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/galley.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Wiring\n"
+        "description: Wiring notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Wiring\n\n"
+        "## Facts\n\n"
+        "- The switchboard feeds the galley outlet. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    (cfg.vault / "projects/widget/cabin.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Wiring\n"
+        "description: Wiring notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Wiring\n\n"
+        "## Facts\n\n"
+        "- The switchboard feeds the cabin lights. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "where is the switchboard in the galley", project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/galley.md" in hit_paths
+    assert "projects/widget/cabin.md" in hit_paths
+    assert hit_paths.index("projects/widget/galley.md") < hit_paths.index(
+        "projects/widget/cabin.md"
+    )
+
+
+def test_a_query_of_filler_words_only_still_searches_them(populated_vault: Config) -> None:
+    """F81: when every bare word is filler and no phrase is present, the words stay as typed."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/ledger.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Ledger\n"
+        "description: Power notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Ledger\n\n"
+        "## Facts\n\n"
+        "- Note what the switchboard draws before the refit. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "what is the", project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/ledger.md" in hit_paths
+
+
+def test_a_quoted_phrase_holding_a_filler_word_matches_as_a_phrase(
+    populated_vault: Config,
+) -> None:
+    """F81: a quoted phrase is kept whole, filler words and all, and matches adjacently."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/artnotes.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Art Notes\n"
+        "description: Supplier notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Art Notes\n\n"
+        "## Facts\n\n"
+        "- The mount is state of the art after the refit. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    # The words of the phrase, spread apart, do not answer a phrase query.
+    (cfg.vault / "projects/widget/scatter.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Scatter\n"
+        "description: Supplier notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Scatter\n\n"
+        "## Facts\n\n"
+        "- The state of our art supplies is ready for the mount. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, '"state of the art"', project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/artnotes.md" in hit_paths
+    assert "projects/widget/scatter.md" not in hit_paths
+
+
+def test_a_negation_word_is_kept(populated_vault: Config) -> None:
+    """F81: no, not and never are not filler, so a row matching only on them answers."""
+    cfg = populated_vault
+    (cfg.vault / "projects/widget/coil.md").write_text(
+        "---\n"
+        "type: Project\n"
+        "title: Coil\n"
+        "description: Coil notes.\n"
+        "aft:\n  project: p_widget\n"
+        "---\n\n"
+        "# Coil\n\n"
+        "## Facts\n\n"
+        "- The coil does not energize at rest. [observed] 2026-09-24 [^s1]\n",
+        encoding="utf-8",
+    )
+    index.update(cfg)
+
+    hits = search.search(cfg, "why is the relay not seated", project="widget")
+    hit_paths = [h.path for h in hits]
+    assert "projects/widget/coil.md" in hit_paths
 
 
 def test_a_strong_evidence_match_outranks_a_weak_page_match(populated_vault: Config) -> None:
