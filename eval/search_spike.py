@@ -11,7 +11,6 @@ Measures three ways to match by meaning without a second model (BUILD-PLAN F83):
 from __future__ import annotations
 
 import json
-import math
 import shutil
 import sqlite3
 import time
@@ -382,6 +381,109 @@ def _search_expand(
     return search_mod.search(var_config, query, limit=limit, **kwargs)
 
 
+#: The row columns LSA reads as a row's text.
+_LSA_FIELDS = ("title", "heading", "description", "body")
+
+#: LSA models built per snapshot index and query scope, so a run builds each one once.
+_LSA_CACHE: dict[tuple[Any, ...], Any] = {}
+
+
+def _lsa_model(np: Any, db_path: Path, collections: list[str], narrow_id: str | None) -> Any:
+    """The rows, vocabulary, IDF and truncated SVD for one index and scope, cached.
+
+    TF-IDF is held as a sparse term list and reduced to 256 dimensions by a randomized
+    truncated SVD (two power iterations), so no dense rows-by-terms matrix is ever built.
+    """
+    if not db_path.is_file():
+        return None
+    key = (str(db_path), db_path.stat().st_mtime_ns, narrow_id, tuple(collections))
+    if key in _LSA_CACHE:
+        return _LSA_CACHE[key]
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        cols = [c for c in [*collections, "library"] if c in tables]
+        rows: list[dict[str, Any]] = []
+        for col in cols:
+            clause, extra = search_mod._scope(col, narrow_id)
+            sql = (
+                "SELECT rowid, path, description, heading, title, body, project_id, session_id"
+                f" FROM {col} WHERE 1=1 {clause}"
+            )
+            for r in conn.execute(sql, extra).fetchall():
+                d = dict(r)
+                d["collection"] = col
+                rows.append(d)
+    finally:
+        conn.close()
+    if not rows:
+        _LSA_CACHE[key] = None
+        return None
+
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize='{index.TOKENIZER}')")
+        mem.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
+        mem.executemany(
+            "INSERT INTO t (rowid, x) VALUES (?, ?)",
+            ((i, " ".join(str(r.get(f) or "") for f in _LSA_FIELDS)) for i, r in enumerate(rows)),
+        )
+        counts = mem.execute("SELECT term, doc, COUNT(*) FROM v GROUP BY term, doc").fetchall()
+    finally:
+        mem.close()
+
+    vocab = sorted({t for t, _, _ in counts})
+    term_to_idx = {t: i for i, t in enumerate(vocab)}
+    n_rows, n_terms = len(rows), len(vocab)
+    if n_terms == 0:
+        _LSA_CACHE[key] = None
+        return None
+    r_idx = np.fromiter((d for _, d, _ in counts), dtype=np.int64, count=len(counts))
+    c_idx = np.fromiter((term_to_idx[t] for t, _, _ in counts), dtype=np.int64, count=len(counts))
+    tf = np.fromiter((c for _, _, c in counts), dtype=float, count=len(counts))
+    df = np.bincount(c_idx, minlength=n_terms)
+    idf_arr = np.log((n_rows + 1.0) / (df + 1.0)) + 1.0
+    vals = tf * idf_arr[c_idx]
+    row_norm = np.sqrt(np.bincount(r_idx, weights=vals * vals, minlength=n_rows))
+    row_norm[row_norm == 0.0] = 1.0
+    vals = vals / row_norm[r_idx]
+
+    chunk = 50_000
+
+    def x_mul(m: Any) -> Any:  # (terms x p) -> (rows x p)
+        out = np.zeros((n_rows, m.shape[1]))
+        for a in range(0, len(vals), chunk):
+            sl = slice(a, a + chunk)
+            np.add.at(out, r_idx[sl], vals[sl, None] * m[c_idx[sl]])
+        return out
+
+    def xt_mul(m: Any) -> Any:  # (rows x p) -> (terms x p)
+        out = np.zeros((n_terms, m.shape[1]))
+        for a in range(0, len(vals), chunk):
+            sl = slice(a, a + chunk)
+            np.add.at(out, c_idx[sl], vals[sl, None] * m[r_idx[sl]])
+        return out
+
+    k = max(1, min(256, n_rows - 1, n_terms - 1))
+    rng = np.random.default_rng(0)
+    q, _ = np.linalg.qr(x_mul(rng.standard_normal((n_terms, k + 10))))
+    for _ in range(2):
+        q, _ = np.linalg.qr(x_mul(xt_mul(q)))
+    b = xt_mul(q).T
+    ub, sv, vt = np.linalg.svd(b, full_matrices=False)
+    d = (q @ ub)[:, :k] * sv[:k]
+    d_norms = np.linalg.norm(d, axis=1, keepdims=True)
+    d_norms[d_norms == 0.0] = 1.0
+    model_ = (rows, term_to_idx, idf_arr, vt[:k].T, np.nan_to_num(d / d_norms))
+    _LSA_CACHE[key] = model_
+    return model_
+
+
 def _search_lsa(
     config: Config,
     query: str,
@@ -430,122 +532,41 @@ def _search_lsa(
     if reports:
         collections.append(index.REPORTS)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        available_tables = {
-            r[0]
-            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }
-        if "library" in available_tables:
-            collections.append("library")
-        active_cols = [c for c in collections if c in available_tables]
-        if not active_cols:
-            return today_hits[:limit]
+    registry = Registry.load(config.registry_path)
+    narrow_id = None
+    if project is not None:
+        proj = registry.by_slug(project)
+        if proj is None:
+            raise SearchError(f"unknown project {project!r}")
+        narrow_id = proj.id
+    elif current is not None and registry.by_slug(current) is None:
+        raise SearchError(f"unknown project {current!r}")
 
-        registry = Registry.load(config.registry_path)
-        narrow_id = None
-        if project is not None:
-            proj = registry.by_slug(project)
-            if proj is None:
-                raise SearchError(f"unknown project {project!r}")
-            narrow_id = proj.id
-        elif current is not None:
-            proj = registry.by_slug(current)
-            if proj is None:
-                raise SearchError(f"unknown project {current!r}")
-
-        rows: list[dict[str, Any]] = []
-        for col in active_cols:
-            clause, extra = search_mod._scope(col, narrow_id)
-            where = f"WHERE 1=1 {clause}"
-            query_sql = (
-                f"SELECT rowid, path, description, heading, title, body, project_id, session_id "
-                f"FROM {col} {where}"
-            )
-            for r in conn.execute(query_sql, extra).fetchall():
-                d = dict(r)
-                d["collection"] = col
-                rows.append(d)
-    finally:
-        conn.close()
-
-    if not rows:
+    model_ = _lsa_model(np, db_path, collections, narrow_id)
+    if model_ is None:
         return today_hits[:limit]
-
-    doc_texts = []
-    for r in rows:
-        parts = [
-            r.get("title") or "",
-            r.get("heading") or "",
-            r.get("description") or "",
-            r.get("body") or "",
-        ]
-        doc_texts.append(" ".join(p for p in parts if p))
+    rows, term_to_idx, idf_arr, v_k, d_norm = model_
+    n_rows = len(rows)
 
     mem = sqlite3.connect(":memory:")
     try:
         mem.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize='{index.TOKENIZER}')")
         mem.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')")
-        for doc_idx, text in enumerate(doc_texts, start=1):
-            mem.execute("INSERT INTO t (rowid, x) VALUES (?, ?)", (doc_idx, text))
-
-        counts = mem.execute("SELECT term, doc, COUNT(*) FROM v GROUP BY term, doc").fetchall()
-        vocab_terms = [
-            r[0] for r in mem.execute("SELECT DISTINCT term FROM v ORDER BY term").fetchall()
-        ]
-        term_to_idx = {term: idx for idx, term in enumerate(vocab_terms)}
-        V = len(vocab_terms)
-        N = len(rows)
-        if V == 0 or N == 0:
-            return today_hits[:limit]
-
-        df_rows = mem.execute("SELECT term, COUNT(DISTINCT doc) FROM v GROUP BY term").fetchall()
-        idf_arr = np.zeros(V, dtype=float)
-        for term, df in df_rows:
-            if term in term_to_idx:
-                idf_arr[term_to_idx[term]] = math.log((N + 1.0) / (df + 1.0)) + 1.0
-
-        X = np.zeros((N, V), dtype=float)
-        for term, doc, cnt in counts:
-            if term in term_to_idx and 1 <= doc <= N:
-                X[doc - 1, term_to_idx[term]] = cnt * idf_arr[term_to_idx[term]]
-
-        norms = np.linalg.norm(X, axis=1, keepdims=True)
-        norms[norms == 0.0] = 1.0
-        X = X / norms
-
-        k = min(256, N, V)
-        U, S, Vt = np.linalg.svd(X, full_matrices=False)
-        V_k = Vt[:k, :].T
-        D = U[:, :k] * S[:k]
-        d_norms = np.linalg.norm(D, axis=1, keepdims=True)
-        d_norms[d_norms == 0.0] = 1.0
-        D_norm = D / d_norms
-        D_norm[np.isnan(D_norm)] = 0.0
-
-        mem.execute("INSERT INTO t (rowid, x) VALUES (0, ?)", (query,))
-        q_counts = mem.execute(
-            "SELECT term, COUNT(*) FROM v WHERE doc = 0 GROUP BY term"
-        ).fetchall()
-        q_vec = np.zeros(V, dtype=float)
-        for term, cnt in q_counts:
-            if term in term_to_idx:
-                q_vec[term_to_idx[term]] = cnt * idf_arr[term_to_idx[term]]
-        q_norm = np.linalg.norm(q_vec)
-        if q_norm > 0:
-            q_vec = q_vec / q_norm
-            q_proj = q_vec @ V_k
-            qp_norm = np.linalg.norm(q_proj)
-            if qp_norm > 0:
-                q_proj = q_proj / qp_norm
-                sims = D_norm @ q_proj
-            else:
-                sims = np.zeros(N, dtype=float)
-        else:
-            sims = np.zeros(N, dtype=float)
+        mem.execute("INSERT INTO t (rowid, x) VALUES (1, ?)", (query,))
+        q_counts = mem.execute("SELECT term, COUNT(*) FROM v GROUP BY term").fetchall()
     finally:
         mem.close()
+    q_vec = np.zeros(len(term_to_idx), dtype=float)
+    for term, cnt in q_counts:
+        if term in term_to_idx:
+            q_vec[term_to_idx[term]] = cnt * idf_arr[term_to_idx[term]]
+    sims = np.zeros(n_rows, dtype=float)
+    q_norm = np.linalg.norm(q_vec)
+    if q_norm > 0:
+        q_proj = (q_vec / q_norm) @ v_k
+        qp_norm = np.linalg.norm(q_proj)
+        if qp_norm > 0:
+            sims = d_norm @ (q_proj / qp_norm)
 
     slugs = {proj.id: proj.slug for proj in registry.projects}
     ranked_indices = np.argsort(-sims)
