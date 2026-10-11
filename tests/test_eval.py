@@ -671,7 +671,9 @@ def test_longmemeval_runner_synthetic(tmp_path: Path):
     assert saved["recall_any@1"] == 1.0
     assert "queries" in saved
     assert len(saved["queries"]) == 2
-    assert saved["queries"][0]["ranked_sessions"] == ["session-crypto"]
+    # F81: the query's words join with OR, so a session holding any word answers, and the
+    # session holding more of the words ranks first.
+    assert saved["queries"][0]["ranked_sessions"] == ["session-crypto", "session-cache"]
     assert saved["queries"][1]["ranked_sessions"] == ["session-cache"]
 
     # Test runner with limit=1
