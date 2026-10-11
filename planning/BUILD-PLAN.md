@@ -1735,6 +1735,67 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     rebuild-equals-update test still holds. Review checkpoint: yes (index and search order;
     lead reviews in full).
 
+- **T38 Coding-search key to about 100 entries** (ruling 2026-10-11; lead's task, lands
+  before F83's measurement). F80's key holds 40 entries, so one entry moves recall by 2.5
+  points, too coarse to choose between F83's variants.
+  - **Where:** `~/src/aft-eval-data/search/coding.yaml`, over a fresh snapshot
+    (`snapshot-<date>/`, taken with `eval_search.py snapshot` after F81), never in git. The
+    40 entries stay; new ones are added.
+  - **Sources:** what a session actually needed and asked: user turns and agent questions in
+    the evidence archive, and the exported coding sessions. A question is worded as an agent
+    would search for the fact, never rephrased from the answer line. Each expected item is
+    checked present in the snapshot.
+  - **Spread, at least:** 25 entries whose answer is on a page, 25 only in a digest, 25 only
+    in evidence; 15 whose words share no content word with the answer (synonym or paraphrase
+    questions, marked `# paraphrase`); 10 whose words also match another project's memory.
+  - **Baseline:** the lead runs today's search over the new key and snapshot and keeps the
+    JSON beside the key.
+
+- **F83 Search by meaning without a second model: a measured spike** (ruling 2026-10-11;
+  after T38). Most coding-key misses share no word, or only a weak one, with their answer.
+  The user rules out running a second model; vectors, graphs and other tools are allowed if
+  they help. This spike measures three ways to match by meaning and changes no production
+  code: what it builds is evaluation tooling, and adopting a variant is a later task Ted
+  rules on.
+  - **Seam:** `eval/search_spike.py` ranks a question through a named variant and returns
+    hits as `aft.search.search` does, so `aft.eval.rank` (F80) and the LongMemEval
+    pipeline `--rescore` (F72) can score any variant. Both gain a `--variant NAME` option;
+    the default is today's search, unchanged.
+  - **Variant `rerank`:** today's search fetches its top 30; the configured model orders them
+    by whether each answers the question, given the question and each hit's text (F80's
+    `_hit_text`, cut to 600 characters), and the top 10 of that order are the result. The
+    answer is schema-constrained JSON naming candidate numbers (R9's form). The prompt lives
+    in `eval/` and ships nowhere. Record tokens and wall time per question.
+  - **Variant `expand` (doc2query):** for each page line and digest section of a snapshot,
+    the configured model writes up to 8 short search phrases a person might use to look for
+    it (synonyms, the question it answers), cached once per snapshot in
+    `<snapshot>/expansions.json` keyed by row. A variant index in a copy of the snapshot
+    appends a row's phrases to its body; search is otherwise today's. Evidence rows get no
+    phrases. Record total tokens and generation time.
+  - **Variant `lsa`:** TF-IDF over every indexed row of the snapshot (Porter-stemmed as the
+    index stems), reduced by truncated SVD to 256 dimensions; a question ranks rows by
+    cosine similarity, and that ranking is fused with today's by reciprocal rank fusion (k
+    = 60). It runs with numpy supplied by `uv run --with numpy`, so afterthought gains no
+    dependency during the spike.
+  - **Combinations:** `expand+rerank`, and `lsa+rerank` if `lsa` alone beats today's search.
+  - **LongMemEval:** `rerank` and `lsa` over the 41 kept sandboxes; `expand` over the six
+    diagnostic sandboxes (`diag6-f73`) first, and over all 41 when its generation time per
+    sandbox, measured on the six, puts the whole run under four hours.
+  - **Report (lead), with the decision rule set now:** a table of every variant on T38's key
+    (recall@1/5/10 and MRR, overall and for the `# paraphrase` entries) and on LongMemEval
+    (recall_any@1/5, recall_all@10), with tokens and time. A variant is proposed to Ted for
+    production when the key's recall@5 rises by at least 5 points over today's search, its
+    MRR and LongMemEval recall_any@5 do not fall, and, for any variant that calls the model
+    at search time, the p90 search time stays under 3 seconds. The proposal names what
+    production would need (where expansions live so files stay the truth, the fallback
+    when the endpoint is down, and any dependency such as numpy).
+  - **Tests** in `tests/test_eval.py` with the fake endpoint: each variant runs end to end
+    on a fixture vault; `rerank` keeps only candidates it was given and falls back to
+    today's order on an invalid answer; `expand` reads its cache and calls the model only for
+    rows missing from it; the default variant equals `aft.search.search`. The `lsa` test is
+    skipped when numpy is absent. Review checkpoint: no (evaluation tooling; the adoption
+    task that may follow gets a full review).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
