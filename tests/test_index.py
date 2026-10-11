@@ -338,7 +338,7 @@ def test_this_sqlite_builds_fts5_tables_and_a_query_reads_them_back(initialized:
         for column in index.INDEXED_COLUMNS:
             assert f"{column}" in schema[collection], f"{column} is not a column of {collection}"
 
-    assert search(initialized, "pages", "SQLite") == [f"{REL}#Decisions"]
+    assert search(initialized, "pages", "SQLite") == [f"{REL}#Decisions#1"]
     assert search(initialized, "pages", "nosuchwordhere") == []
 
 
@@ -352,7 +352,7 @@ def test_an_edit_through_the_page_writer_moves_the_row_and_its_hash_together(
     moment = int(os.stat(initialized.vault / REL).st_mtime)
     pin(initialized.vault / REL, moment)
     index.update(initialized)
-    before = row_for(initialized, "pages", f"{REL}#Decisions")
+    before = row_for(initialized, "pages", f"{REL}#Decisions#1")
     hash_before = hashes(initialized)[REL]
 
     doc = edit(initialized, REL)
@@ -362,9 +362,11 @@ def test_an_edit_through_the_page_writer_moves_the_row_and_its_hash_together(
 
     index.update(initialized)
 
-    after = row_for(initialized, "pages", f"{REL}#Decisions")
-    assert _column(after, "body") == "The index is plain SQLite.\nFlanges are cast, not machined."
-    assert _column(after, "body") != _column(before, "body")
+    after = row_for(initialized, "pages", f"{REL}#Decisions#1")
+    after2 = row_for(initialized, "pages", f"{REL}#Decisions#2")
+    assert _column(after, "body") == "The index is plain SQLite. [stated] 2026-09-20 [^s1]"
+    assert _column(after2, "body") == "Flanges are cast, not machined. [stated] 2026-09-28 [^s1]"
+    assert _column(after2, "body") != _column(before, "body")
     assert _column(after, "time") == _column(before, "time")
     assert hashes(initialized)[REL] != hash_before
 
@@ -397,7 +399,7 @@ def test_a_line_moved_between_sections_moves_between_rows(initialized: Config) -
     moment = int(os.stat(path).st_mtime)
     pin(path, moment)
     index.update(initialized)
-    state_before = row_for(initialized, "pages", f"{REL}#State")
+    state_before = row_for(initialized, "pages", f"{REL}#State#1")
 
     doc = edit(initialized, REL)
     candidate = next(fact for fact in doc.page.facts if fact.state == page.CANDIDATE)
@@ -408,8 +410,8 @@ def test_a_line_moved_between_sections_moves_between_rows(initialized: Config) -
     index.update(initialized)
 
     assert f"{REL}#Candidates" not in keys_of(initialized, "pages")
-    assert CANDIDATE in _column(row_for(initialized, "pages", f"{REL}#Decisions"), "body")
-    assert row_for(initialized, "pages", f"{REL}#State") == state_before
+    assert CANDIDATE in _column(row_for(initialized, "pages", f"{REL}#Decisions#2"), "body")
+    assert row_for(initialized, "pages", f"{REL}#State#1") == state_before
 
 
 def test_dead_lines_are_not_in_pages(initialized: Config) -> None:
@@ -432,7 +434,9 @@ def test_dead_lines_are_not_in_pages(initialized: Config) -> None:
     index.update(initialized)
 
     bodies = {_column(row, "row_key"): _column(row, "body") for row in rows(initialized, "pages")}
-    assert bodies == {f"{REL}#Decisions": LIVE[0], f"{REL}#State": LIVE[1]}
+    assert len(bodies) == 2
+    assert LIVE[0] in bodies[f"{REL}#Decisions#1"]
+    assert LIVE[1] in bodies[f"{REL}#State#1"]
     for _state, statement, _section in HELD + [(page.CANDIDATE, CANDIDATE, "Candidates")]:
         assert all(statement not in body for body in bodies.values()), statement
 
@@ -595,16 +599,16 @@ def test_the_archive_is_a_collection_of_its_own(initialized: Config) -> None:
     write(initialized, "archive/widget.md", ARCHIVE)
     index.update(initialized)
 
-    assert keys_of(initialized, "archive") == ["archive/widget.md#Decisions"]
+    assert keys_of(initialized, "archive") == ["archive/widget.md#Decisions#1"]
     assert (
-        _column(row_for(initialized, "archive", "archive/widget.md#Decisions"), "body")
-        == "Ship the widget in steel."
+        _column(row_for(initialized, "archive", "archive/widget.md#Decisions#1"), "body")
+        == "Ship the widget in steel. [stated] 2026-01-01 [^s1]"
     )
 
     index.update(initialized)  # nothing changed, and the archive's own rows have to stay
 
     assert search(initialized, "pages", "steel OR bronze OR prototype") == []
-    assert search(initialized, "archive", "steel") == ["archive/widget.md#Decisions"]
+    assert search(initialized, "archive", "steel") == ["archive/widget.md#Decisions#1"]
     assert search(initialized, "archive", "bronze OR prototype") == []
 
 
@@ -618,15 +622,21 @@ def test_a_line_at_rest_on_its_page_is_indexed_in_the_archive(initialized: Confi
     write(initialized, REL, PAGE)
     index.update(initialized)
 
-    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
-    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
-    assert _column(row_for(initialized, "archive", f"{REL}#Decisions"), "body") == SUPERSEDED[1]
-    assert _column(row_for(initialized, "archive", f"{REL}#State"), "body") == STALE[1]
-    assert _column(row_for(initialized, "archive", f"{REL}#Decisions"), "project_id") == "p_widget"
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
+    assert _column(row_for(initialized, "archive", f"{REL}#Decisions#1"), "body") == (
+        "Agents write their own summary. [suggested] 2026-09-19 [^s1]"
+    )
+    assert _column(row_for(initialized, "archive", f"{REL}#State#1"), "body") == (
+        "Capture takes 12 ms. [observed] 2026-09-22 [^s2]"
+    )
+    assert (
+        _column(row_for(initialized, "archive", f"{REL}#Decisions#1"), "project_id") == "p_widget"
+    )
 
     assert search(initialized, "pages", "summary") == []
-    assert search(initialized, "archive", "summary") == [f"{REL}#Decisions"]
-    assert search(initialized, "archive", "ms") == [f"{REL}#State"]
+    assert search(initialized, "archive", "summary") == [f"{REL}#Decisions#1"]
+    assert search(initialized, "archive", "ms") == [f"{REL}#State#1"]
     # The withdrawn line's words answer neither collection, which is the point of withdrawing it.
     assert search(initialized, "archive", "directly") == []
     assert search(initialized, "pages", "directly") == []
@@ -634,7 +644,7 @@ def test_a_line_at_rest_on_its_page_is_indexed_in_the_archive(initialized: Confi
     # Nothing moved, and the run that says so must still leave the page's archive rows alone.
     index.update(initialized)
 
-    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
 
 
 def test_a_line_a_page_stops_carrying_leaves_the_archive_too(initialized: Config) -> None:
@@ -643,7 +653,7 @@ def test_a_line_a_page_stops_carrying_leaves_the_archive_too(initialized: Config
     holds any more - the row `aft forget` withdrew and M3 review 3 found still searchable."""
     rel = write(initialized, REL, PAGE)
     index.update(initialized)
-    assert keys_of(initialized, "archive") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert keys_of(initialized, "archive") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
 
     text = (initialized.vault / rel).read_text()
     struck = next(line for line in text.split("\n") if SUPERSEDED[1] in line)
@@ -651,9 +661,12 @@ def test_a_line_a_page_stops_carrying_leaves_the_archive_too(initialized: Config
 
     index.update(initialized)
 
-    assert keys_of(initialized, "archive") == [f"{REL}#State"]
+    assert keys_of(initialized, "archive") == [f"{REL}#State#1"]
     assert search(initialized, "archive", "summary") == []
-    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"], "its live lines"
+    assert keys_of(initialized, "pages") == [
+        f"{REL}#Decisions#1",
+        f"{REL}#State#1",
+    ], "its live lines"
 
 
 def test_content_changes_a_row_and_an_mtime_alone_does_not(initialized: Config) -> None:
@@ -665,19 +678,19 @@ def test_content_changes_a_row_and_an_mtime_alone_does_not(initialized: Config) 
     moment = int(os.stat(path).st_mtime)
     pin(path, moment)
     index.update(initialized)
-    before = row_for(initialized, "pages", f"{rel}#Decisions")
+    before = row_for(initialized, "pages", f"{rel}#Decisions#1")
     hash_before = hashes(initialized)[rel]
 
     pin(path, moment + 3600)
     index.update(initialized)
-    assert row_for(initialized, "pages", f"{rel}#Decisions") == before
+    assert row_for(initialized, "pages", f"{rel}#Decisions#1") == before
     assert hashes(initialized)[rel] == hash_before
 
     path.write_text((initialized.vault / rel).read_text().replace("plain SQLite", "SQLite FTS5"))
     pin(path, moment + 3600)
     index.update(initialized)
-    assert _column(row_for(initialized, "pages", f"{rel}#Decisions"), "body") == (
-        "The index is SQLite FTS5."
+    assert _column(row_for(initialized, "pages", f"{rel}#Decisions#1"), "body") == (
+        "The index is SQLite FTS5. [stated] 2026-09-20 [^s1]"
     )
     assert hashes(initialized)[rel] != hash_before
 
@@ -704,14 +717,14 @@ def test_removing_one_page_leaves_every_row_it_never_named(initialized: Config) 
     gone = write(initialized, "projects/widget/scrapped.md", _a_page(title="scrapped"))
     kept = write(initialized, "projects/widget/decisions.md", _a_page(title="decisions"))
     index.update(initialized)
-    standing = tuple(row_for(initialized, "pages", f"{kept}#Decisions"))
+    standing = tuple(row_for(initialized, "pages", f"{kept}#Decisions#1"))
 
     (initialized.vault / gone).unlink()
     assert index.update(initialized) == []
 
     assert [tuple(row) for row in rows(initialized, "pages")] == [standing]
     assert gone not in hashes(initialized)
-    assert search(initialized, "pages", "schedule") == [f"{kept}#Decisions"]
+    assert search(initialized, "pages", "schedule") == [f"{kept}#Decisions#1"]
 
 
 def test_an_appended_evidence_row_is_indexed_once(initialized: Config) -> None:
@@ -997,7 +1010,7 @@ def test_reindex_drops_what_no_file_or_row_justifies(initialized: Config) -> Non
     index.reindex(initialized)
 
     assert search(initialized, "pages", "invented") == []
-    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
 
 
 def test_an_index_written_by_another_build_is_automatically_rebuilt(
@@ -1012,7 +1025,7 @@ def test_an_index_written_by_another_build_is_automatically_rebuilt(
     with caplog.at_level("INFO"):
         assert index.update(initialized) == []
     assert "rebuilding search index" in caplog.text
-    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
 
 
 def test_search_automatically_rebuilds_on_build_stamp_bump(
@@ -1043,7 +1056,7 @@ def test_an_index_holding_rows_that_never_said_who_wrote_them_is_automatically_r
     with caplog.at_level("INFO"):
         assert index.update(initialized) == []
     assert "rebuilding search index" in caplog.text
-    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
 
 
 def test_an_index_file_holding_nothing_is_written_rather_than_refused(initialized: Config) -> None:
@@ -1053,7 +1066,7 @@ def test_an_index_file_holding_nothing_is_written_rather_than_refused(initialize
     (initialized.home / index.INDEX_NAME).write_bytes(b"")
 
     assert index.update(initialized) == []
-    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
 
 
 def test_an_index_schema_left_by_a_failed_run_is_finished_rather_than_refused(
@@ -1072,7 +1085,7 @@ def test_an_index_schema_left_by_a_failed_run_is_finished_rather_than_refused(
 
     write(initialized, "registry.yaml", "version: 1\nprojects: []\n")
     assert index.update(initialized) == []
-    assert keys_of(initialized, "pages") == [f"{rel}#Decisions", f"{rel}#State"]
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
 
 
 def test_aft_reindex_runs_the_rebuild_from_the_command_line(
@@ -1086,7 +1099,7 @@ def test_aft_reindex_runs_the_rebuild_from_the_command_line(
 
     printed = capsys.readouterr().out
     assert f"rebuilt the search index at {initialized.home / index.INDEX_NAME}" in printed
-    assert keys_of(initialized, "pages") == [f"{REL}#Decisions", f"{REL}#State"]
+    assert keys_of(initialized, "pages") == [f"{REL}#Decisions#1", f"{REL}#State#1"]
 
 
 def test_aft_reindex_refuses_a_vault_that_is_not_there(
@@ -1118,9 +1131,9 @@ def test_title_and_description_outrank_the_line_text(initialized: Config) -> Non
 
     ranked = search(initialized, "pages", "Zebramine")
     assert ranked == [
-        "projects/alpha/overview.md#Decisions",  # the title alone holds the word
-        "projects/beta/overview.md#Decisions",  # the description alone holds it
-        "projects/delta/overview.md#Decisions",  # the line text alone holds it
+        "projects/alpha/overview.md#Decisions#1",  # the title alone holds the word
+        "projects/beta/overview.md#Decisions#1",  # the description alone holds it
+        "projects/delta/overview.md#Decisions#1",  # the line text alone holds it
     ]
 
 
@@ -1309,7 +1322,7 @@ def test_rows_carry_their_identity(initialized: Config) -> None:
     evidence.store(initialized, "claude", "abc-123", "p_widget", entries("a flange"))
     index.update(initialized)
 
-    page_row = row_for(initialized, "pages", f"{REL}#Decisions")
+    page_row = row_for(initialized, "pages", f"{REL}#Decisions#1")
     assert _column(page_row, "path") == REL
     assert _column(page_row, "project_id") == "p_widget"
     assert _column(page_row, "heading") == "Decisions"
@@ -1360,10 +1373,10 @@ def test_a_digest_and_an_archived_page_take_their_project_from_their_path(
     assert index.update(initialized) == []
 
     digest_row = row_for(initialized, "digests", f"{digest}#Summary")
-    rested_row = row_for(initialized, "archive", f"{rested}#Decisions")
-    rested_mirrored_row = row_for(initialized, "archive", f"{rested_mirrored}#Decisions")
+    rested_row = row_for(initialized, "archive", f"{rested}#Decisions#1")
+    rested_mirrored_row = row_for(initialized, "archive", f"{rested_mirrored}#Decisions#1")
     unknown_row = row_for(initialized, "digests", f"{unknown}#Summary")
-    global_row = row_for(initialized, "pages", f"{every_project}#Preferences")
+    global_row = row_for(initialized, "pages", f"{every_project}#Preferences#1")
     assert _column(digest_row, "project_id") == widget.id
     assert _column(rested_row, "project_id") == widget.id
     assert _column(rested_mirrored_row, "project_id") == widget.id
@@ -1442,7 +1455,7 @@ def test_moving_a_slug_in_the_registry_refiles_the_rows_it_derived(initialized: 
     page = write(initialized, "projects/widget/index.md", _a_page())
     digest = write(initialized, "digests/widget/2026/09/2026-09-28-claude-abc.md", DIGEST)
     assert index.update(initialized) == []
-    assert _column(row_for(initialized, "pages", f"{page}#Decisions"), "project_id") == (
+    assert _column(row_for(initialized, "pages", f"{page}#Decisions#1"), "project_id") == (
         forgotten.id
     )
 
@@ -1454,7 +1467,7 @@ def test_moving_a_slug_in_the_registry_refiles_the_rows_it_derived(initialized: 
 
     assert index.update(initialized) == []
 
-    assert _column(row_for(initialized, "pages", f"{page}#Decisions"), "project_id") == (
+    assert _column(row_for(initialized, "pages", f"{page}#Decisions#1"), "project_id") == (
         re_registered.id
     )
     digest_row = row_for(initialized, "digests", f"{digest}#Summary")
@@ -1474,10 +1487,10 @@ def test_a_project_page_takes_its_directory_unless_the_frontmatter_names_another
     named = write(initialized, "projects/widget/decisions.md", _a_page(project="p_other"))
     index.update(initialized)
 
-    assert _column(row_for(initialized, "pages", f"{unnamed}#Decisions"), "project_id") == (
+    assert _column(row_for(initialized, "pages", f"{unnamed}#Decisions#1"), "project_id") == (
         widget.id
     )
-    assert _column(row_for(initialized, "pages", f"{named}#Decisions"), "project_id") == "p_other"
+    assert _column(row_for(initialized, "pages", f"{named}#Decisions#1"), "project_id") == "p_other"
 
 
 def test_a_page_that_covers_several_projects_is_a_row_for_each(initialized: Config) -> None:
@@ -1492,10 +1505,10 @@ def test_a_page_that_covers_several_projects_is_a_row_for_each(initialized: Conf
     found = rows(initialized, "pages")
     assert sorted(_column(row, "project_id") for row in found) == sorted(ids)
     assert sorted(_column(row, "row_key") for row in found) == sorted(
-        f"{rel}#{project_id}#Decisions" for project_id in ids
+        f"{rel}#{project_id}#Decisions#1" for project_id in ids
     )
     assert sorted(search(initialized, "pages", "cast")) == sorted(
-        f"{rel}#{project_id}#Decisions" for project_id in ids
+        f"{rel}#{project_id}#Decisions#1" for project_id in ids
     )
 
 
@@ -1513,7 +1526,7 @@ def test_a_page_that_will_not_parse_is_reported_and_the_rebuild_still_comes(
     assert index.update(initialized) == [
         f"{broken}: cannot be indexed: frontmatter has no closing ---"
     ]
-    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions#1", f"{good}#State#1"]
     assert broken not in hashes(initialized)
 
     assert main(["reindex"]) == 0
@@ -1521,11 +1534,11 @@ def test_a_page_that_will_not_parse_is_reported_and_the_rebuild_still_comes(
     printed = capsys.readouterr().out
     assert f"{broken}: cannot be indexed: frontmatter has no closing ---" in printed
     assert f"rebuilt the search index at {initialized.home / index.INDEX_NAME}" in printed
-    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions#1", f"{good}#State#1"]
 
     write(initialized, broken, _a_page(statement="The gasket is nitrile."))
     assert index.update(initialized) == []
-    assert f"{broken}#Decisions" in keys_of(initialized, "pages")
+    assert f"{broken}#Decisions#1" in keys_of(initialized, "pages")
 
 
 def test_a_page_named_after_a_skipped_directory_is_still_indexed(initialized: Config) -> None:
@@ -1537,7 +1550,7 @@ def test_a_page_named_after_a_skipped_directory_is_still_indexed(initialized: Co
     filed = write(initialized, "references/library/notes.md", _a_page(title="notes"))
 
     assert index.update(initialized) == []
-    assert keys_of(initialized, "pages") == [f"{named}#Decisions"]
+    assert keys_of(initialized, "pages") == [f"{named}#Decisions#1"]
     assert named in hashes(initialized)
     assert filed not in hashes(initialized)
 
@@ -1561,7 +1574,7 @@ def test_unreadable_pages_are_reported_and_the_good_page_still_indexes(
     assert sorted(line.split(":")[0] for line in report) == sorted([dangling, not_text])
     assert any("cannot be read" in line for line in report)
     assert any("not UTF-8" in line for line in report)
-    assert keys_of(initialized, "pages") == [f"{good}#Decisions", f"{good}#State"]
+    assert keys_of(initialized, "pages") == [f"{good}#Decisions#1", f"{good}#State#1"]
     assert dangling not in hashes(initialized) and not_text not in hashes(initialized)
 
     (initialized.vault / dangling).unlink()
@@ -1569,7 +1582,7 @@ def test_unreadable_pages_are_reported_and_the_good_page_still_indexes(
     write(initialized, dangling, _a_page(statement="The gasket is nitrile."))
 
     assert index.update(initialized) == []
-    assert f"{dangling}#Decisions" in keys_of(initialized, "pages")
+    assert f"{dangling}#Decisions#1" in keys_of(initialized, "pages")
 
 
 def test_path_slug_handles_all_vault_layouts():
@@ -1655,11 +1668,11 @@ description: Notes and lines resolved out of widget.
     index.update(initialized)
 
     assert keys_of(initialized, "archive") == [
-        "archive/projects/widget/overview.md#Decisions",
+        "archive/projects/widget/overview.md#Decisions#1",
         "archive/projects/widget/overview.md#Resolved notes",
     ]
     decisions_body = _column(
-        row_for(initialized, "archive", "archive/projects/widget/overview.md#Decisions"), "body"
+        row_for(initialized, "archive", "archive/projects/widget/overview.md#Decisions#1"), "body"
     )
     assert "Ship the widget in steel." in decisions_body
     notes_body = _column(
@@ -1756,7 +1769,7 @@ def test_an_update_that_found_nothing_moved_never_asks_for_the_write_lock(
         held.close()
 
     assert index.update(initialized) == []
-    assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
+    assert "global/preferences.md#Preferences#1" in keys_of(initialized, "pages")
 
 
 def test_a_forget_is_a_change_the_shortcut_cannot_call_unchanged(
@@ -1899,7 +1912,7 @@ def test_index_shared_db_wal_mode_and_lock_serialization(
 
     # After write lock is released, update proceeds cleanly
     assert index.update(initialized) == []
-    assert "global/preferences.md#Preferences" in keys_of(initialized, "pages")
+    assert "global/preferences.md#Preferences#1" in keys_of(initialized, "pages")
 
 
 def test_page_links_population_reindex_and_backlinks(initialized: Config) -> None:
@@ -2081,3 +2094,93 @@ def test_resolve_target_path_precedence(initialized: Config) -> None:
     write(initialized, "projects/other/beta.md", "# beta\n")
     assert index.resolve_target_path(vault, "beta") == "projects/other/beta.md"
     assert index.resolve_target_path(vault, "no-such-target") is None
+
+
+def test_a_two_line_section_gives_two_rows_with_distinct_keys(initialized: Config) -> None:
+    """F82: each live curated line of a pages section is its own row, with its position
+    in the section added to the row key."""
+    page_text = """---
+type: Project
+title: widget
+description: Widget overview.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Widget
+
+## Decisions
+
+- The index is plain SQLite. [stated] 2026-09-20 [^s1]
+- Flanges are cast, not machined. [observed] 2026-09-21 [^s2]
+"""
+    rel = write(initialized, "projects/widget/overview.md", page_text)
+    assert index.update(initialized) == []
+
+    keys = keys_of(initialized, "pages")
+    assert keys == [f"{rel}#Decisions#1", f"{rel}#Decisions#2"]
+
+    row1 = row_for(initialized, "pages", f"{rel}#Decisions#1")
+    row2 = row_for(initialized, "pages", f"{rel}#Decisions#2")
+    assert _column(row1, "body") == "The index is plain SQLite. [stated] 2026-09-20 [^s1]"
+    assert _column(row2, "body") == "Flanges are cast, not machined. [observed] 2026-09-21 [^s2]"
+    assert _column(row1, "heading") == "Decisions"
+    assert _column(row2, "heading") == "Decisions"
+
+
+def test_a_struck_line_rests_in_archive_as_its_own_row(initialized: Config) -> None:
+    """F82: each resting line of an archive section is its own row, with its position
+    in the section added to the row key."""
+    page_text = """---
+type: Project
+title: widget
+description: Widget overview.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Widget
+
+## Decisions
+
+- ~~Ship the widget in steel.~~ [stated] 2026-01-01 [^s1] superseded 2026-02-01 by [^s2]
+- ~~Bronze was the original alloy.~~ [observed] 2026-01-02 [^s1] superseded 2026-02-02 by [^s2]
+"""
+    rel = write(initialized, "projects/widget/overview.md", page_text)
+    assert index.update(initialized) == []
+
+    keys = keys_of(initialized, "archive")
+    assert keys == [f"{rel}#Decisions#1", f"{rel}#Decisions#2"]
+
+    row1 = row_for(initialized, "archive", f"{rel}#Decisions#1")
+    row2 = row_for(initialized, "archive", f"{rel}#Decisions#2")
+    assert _column(row1, "body") == "Ship the widget in steel. [stated] 2026-01-01 [^s1]"
+    assert _column(row2, "body") == "Bronze was the original alloy. [observed] 2026-01-02 [^s1]"
+    assert _column(row1, "heading") == "Decisions"
+    assert _column(row2, "heading") == "Decisions"
+
+
+def test_an_index_at_an_older_format_version_is_rebuilt_on_update(
+    initialized: Config, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F82: an index recorded with an older user_version is rebuilt on update."""
+    rel = write(initialized, REL, PAGE)
+    assert index.update(initialized) == []
+
+    with _open(initialized) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == getattr(
+            index, "FORMAT_VERSION", 1
+        )
+        conn.execute("PRAGMA user_version = 0")
+
+    with caplog.at_level("INFO"):
+        assert index.update(initialized) == []
+    assert "rebuilding search index" in caplog.text
+
+    with _open(initialized) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == getattr(
+            index, "FORMAT_VERSION", 1
+        )
+    assert keys_of(initialized, "pages") == [f"{rel}#Decisions#1", f"{rel}#State#1"]
