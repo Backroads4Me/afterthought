@@ -32,7 +32,7 @@ from typing import Any
 
 import yaml
 
-from aft import evidence, index, inject, keys, search
+from aft import inject, keys, search
 from aft.config import Config
 from aft.keys import Resolution
 from aft.library.manifest import UniqueKeyLoader
@@ -357,7 +357,7 @@ def _rank(
         note = f"no project {case.project!r} in the registry; it has {slugs}"
         return RankResult(case, None, None, None, notes=(note,))
     hits = _search_hits(config, case.question, current=case.project, limit=limit, variant=variant)
-    texts = [_hit_text(config, hit) for hit in hits]
+    texts = [search.hit_text(config, hit) for hit in hits]
     expect_not = tuple((banned, _first_rank(banned, texts)) for banned in case.expect_not)
     position = next(
         (
@@ -380,60 +380,6 @@ def _first_rank(needle: str, texts: list[str]) -> int | None:
     return None
 
 
-def _hit_text(config: Config, hit: search.Hit) -> str:
-    """The text one hit leads to, which is what the rank measure judges the hit by.
-
-    An evidence hit names an archived entry rather than a file, so its text is the entry's
-    own. A page or digest hit answers from its section under the heading the index
-    recorded, or from the whole file when the heading names nothing in it. A hit whose
-    file cannot be read still counts with the path, description and snippet it carries.
-    """
-    fallback = "\n".join(part for part in (hit.path, hit.description, hit.snippet) if part)
-    if hit.path.startswith(index.SESSION_RESOURCE):
-        parsed = evidence.parse_resource(hit.path)
-        if parsed is None:
-            return fallback
-        session_id, entry_id = parsed
-        text = evidence.entry_text(config, session_id, entry_id)
-        return text if text is not None else fallback
-    return _section_text(config, hit) or fallback
-
-
-def _section_text(config: Config, hit: search.Hit) -> str:
-    """The section of the hit's file under its heading, or the whole file without one."""
-    try:
-        text = (config.vault / hit.path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
-    if not hit.heading:
-        return text
-    return _under_heading(text, hit.heading) or text
-
-
-def _under_heading(text: str, heading: str) -> str:
-    """The lines from ``heading`` to the next heading of the same or higher level."""
-    lines = text.splitlines()
-    for start, line in enumerate(lines):
-        level = _heading_level(line)
-        if level and _heading_name(line) == heading:
-            for end in range(start + 1, len(lines)):
-                other = _heading_level(lines[end])
-                if other and other <= level:
-                    return "\n".join(lines[start:end])
-            return "\n".join(lines[start:])
-    return ""
-
-
-def _heading_level(line: str) -> int:
-    stripped = line.lstrip()
-    if not stripped.startswith("#"):
-        return 0
-    return len(stripped) - len(stripped.lstrip("#"))
-
-
-def _heading_name(line: str) -> str:
-    stripped = line.lstrip().lstrip("#")
-    return stripped.strip().strip("#").strip()
 
 
 def summarize(results: list[RankResult]) -> dict[str, Any]:

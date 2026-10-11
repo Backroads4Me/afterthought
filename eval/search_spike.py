@@ -23,7 +23,7 @@ from aft import config as configmod
 from aft import index, model, vault
 from aft import search as search_mod
 from aft.config import Config
-from aft.eval import _hit_text
+from aft.search import hit_text
 from aft.registry import Registry
 from aft.search import Hit, SearchError
 
@@ -179,7 +179,7 @@ def _search_rerank(
 
     candidates_text = []
     for idx, hit in enumerate(base_hits, start=1):
-        text = _hit_text(config, hit)[:600]
+        text = hit_text(config, hit)[:600]
         clean_text = " ".join(text.split())
         candidates_text.append(f"[{idx}] {clean_text}")
 
