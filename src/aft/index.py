@@ -11,10 +11,10 @@ One table per collection (DESIGN 10's collection table, BUILD-PLAN M3.1):
 =========== ====================================================== ==========================
 Table       Built from                                             A row is
 =========== ====================================================== ==========================
-``pages``   fact pages under ``projects/``, ``global/``,            one ``##`` section's live
-            ``references/``                                         curated lines
-``archive`` the pages under ``archive/``, and the struck            one ``##`` section's
-            lines a live page still carries                         resting lines
+``pages``   fact pages under ``projects/``, ``global/``,            one live curated line of a
+            ``references/``                                         ``##`` section
+``archive`` the pages under ``archive/``, and the struck            one resting line of a
+            lines a live page still carries                         ``##`` section
 ``digests`` ``digests/<slug>/<yyyy>/<mm>/*.md``                     one heading section or
                                                                     its frontmatter handoff
 ``reports`` ``reports/**/*.md``                                     one heading section
@@ -23,14 +23,15 @@ Table       Built from                                             A row is
 
 The library collection of DESIGN 11 is created by its own task (BUILD-PLAN M7) and not here.
 
-A row is one heading's worth of text, and it carries its document path and its heading
-together. BUILD-PLAN M3.1 identifies a row by "a heading or entry id", and a curated line has
-no identifier of its own - the bracketed reference at the end of a line names the source entry
-it rests on, not the line - so the section is what a row is about. DESIGN 11 says a search
-result names "its document and section" and DESIGN 10 returns "the matching snippet" with the
-section on it, so both halves travel on the row: ``path`` and ``heading``, joined in
-``row_key``. DESIGN 10's "active curated lines" says what goes into a row rather than how big
-a row is: a ``pages`` row holds that section's live lines and nothing else.
+Each live curated line of a ``pages`` section is its own row, and each resting line of an
+``archive`` section likewise (BUILD-PLAN F82). A row keeps the page's title and description
+and the section's heading in their columns, and its body is the line's statement alone. The
+row key adds the line's position in its section, so two lines under one heading are two rows.
+Prose that is not a fact line stays one row per heading, and ``digests`` and ``reports`` keep
+one row per heading section. DESIGN 11 says a search result names "its document and
+section" and DESIGN 10 returns "the matching snippet" with the section on it, so both halves
+travel on the row: ``path`` and ``heading``, joined in ``row_key``. A ``pages`` row holds one
+live curated line and nothing else.
 
 The heading is an indexed column beside the title and the description, so the page title, the
 description and the section's own heading all outrank the line text: BUILD-PLAN M3.1's "BM25
@@ -287,7 +288,9 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: ``rows-5`` is the build whose collections stem their words (``TOKENIZER``): an index from
 #: ``rows-4`` holds whole words only, so a query for "pause" would miss "paused" there.
 #: ``rows-6`` introduces ``page_links`` for wikilink resolution and backlink tracking.
-BUILD_STAMP = "rows-6"
+#: ``rows-7`` indexes each page and archive fact line as its own row (BUILD-PLAN F82): an
+#: index from ``rows-6`` holds a whole section per row.
+BUILD_STAMP = "rows-7"
 BUILD_TABLE = "build"
 LINKS_TABLE = "page_links"
 
@@ -889,12 +892,12 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
     scopes = _project_scopes(rel, frontmatter, registry, host)
     agent, session_id = _session_of(rel) if current.collection == DIGESTS else (None, None)
     admitted = FACT_STATES.get(current.collection)
-    sections: dict[str, list[tuple[str, str]]] = {}
+    sections: dict[str, list[tuple[str, str] | tuple[str, str, int, int]]] = {}
     # its pages and digests are read into the archive collection instead of their own,
     # exactly as a page's resting lines are, until the person unarchives the project.
     home = _file_home(rel, frontmatter, registry, host)
     if admitted is None:
-        chunks = _prose_chunks(body)
+        chunks: list[tuple[str, str] | tuple[str, str, int, int]] = list(_prose_chunks(body))
         if current.collection == DIGESTS:
             chunks = [*chunks, *_handoff_chunks(frontmatter)]
         sections[home or current.collection] = chunks
@@ -903,7 +906,7 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
         # The whole file reads as archived: every state a page admits beside its resting
         # lines, in one collection - and no resting step, because the rows are already home.
         fact_chunks = _fact_chunks(parsed, inject.INJECTED + FACT_STATES[ARCHIVE])
-        fact_sections = {h for h, _ in fact_chunks}
+        fact_sections = {h for h, _, _, _ in fact_chunks}
         archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
         prose_chunks = [
             (heading, text)
@@ -915,7 +918,7 @@ def _file_rows(rel: str, current: _File, registry: Registry, host: str) -> dict[
         parsed = page.parse(current.text, Path(rel))
         fact_chunks = _fact_chunks(parsed, admitted)
         if current.collection == ARCHIVE:
-            fact_sections = {h for h, _ in fact_chunks}
+            fact_sections = {h for h, _, _, _ in fact_chunks}
             archive_prose = {s for s, types in page.PROSE_SECTIONS.items() if "Archive" in types}
             prose_chunks = [
                 (heading, text)
@@ -977,7 +980,7 @@ def _section_rows(
     scopes: list[tuple[str | None, str | None]],
     agent: str | None,
     session_id: str | None,
-    chunks: list[tuple[str, str]],
+    chunks: list[tuple[str, str] | tuple[str, str, int, int]],
 ) -> list[Row]:
     """The rows one collection takes from one file's sections.
 
@@ -987,10 +990,15 @@ def _section_rows(
     """
     rows: list[Row] = []
     occurrences: dict[str, int] = {}
-    for heading, text in chunks:
+    for chunk in chunks:
+        if len(chunk) == 4:
+            heading, text, occurrence, position = chunk  # type: ignore[misc]
+        else:
+            heading, text = chunk  # type: ignore[misc]
+            occurrences[heading] = occurrence = occurrences.get(heading, 0) + 1
+            position = None
         if not text:
             continue
-        occurrences[heading] = seen = occurrences.get(heading, 0) + 1
         for project_id, key_part in scopes:
             rows.append(
                 Row(
@@ -1002,39 +1010,61 @@ def _section_rows(
                     agent=agent,
                     session_id=session_id,
                     heading=heading,
-                    row_key=_row_key(rel, heading, key_part, seen),
+                    row_key=_row_key(rel, heading, key_part, occurrence, position),
                 )
             )
     return rows
 
 
-def _row_key(rel: str, heading: str, key_part: str | None, occurrence: int) -> str:
-    """A row's id: the file it came from and the section it is about (BUILD-PLAN M3.1).
+def _row_key(
+    rel: str,
+    heading: str,
+    key_part: str | None,
+    occurrence: int,
+    position: int | None = None,
+) -> str:
+    """A row's id: the file it came from, its section, and for a fact line its position.
 
     A page covering several projects gets one row per project, so the project id joins the
     key to keep those rows apart. A heading that occurs more than once in a file numbers its
     second and later occurrences, so two sections under the same heading are two rows rather
     than one replacing the other - which is what a day of reports with one fixed set of
-    section names per run needs (DESIGN 9).
+    section names per run needs (DESIGN 9). A fact line adds its position in its section
+    (BUILD-PLAN F82).
     """
     parts = [rel] if key_part is None else [rel, key_part]
-    parts.append(heading if occurrence == 1 else f"{heading} {occurrence}")
+    heading_part = heading if occurrence == 1 else f"{heading} {occurrence}"
+    parts.append(heading_part)
+    if position is not None:
+        parts.append(str(position))
     return "#".join(parts)
 
 
-def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str, str]]:
-    """The admitted lines of each section, as the section's indexed text.
+def _fact_chunks(parsed: page.Page, admitted: tuple[str, ...]) -> list[tuple[str, str, int, int]]:
+    """The admitted lines of each section, each as its own row chunk (BUILD-PLAN F82).
 
-    A line is indexed as what it says: the source tag, the date and the footnotes are the
+    Each live curated line of a pages section is its own row, and each resting line of an
+    archive section likewise; position is 1-indexed among the section's admitted lines. A
+    line is indexed as what it says: the source tag, the date and the footnotes are the
     page's grammar rather than its content, and `aft.inject` leaves them out of the block it
     builds for the same reason. A callout is a note about a line rather than a line of its
     own, so its text is not indexed either (DESIGN 6, DESIGN 10).
     """
-    grouped: dict[str, list[str]] = {}
+    chunks: list[tuple[str, str, int, int]] = []
+    current_section: str | None = None
+    section_occurrences: dict[str, int] = {}
+    current_occurrence: int = 1
+    position: int = 0
     for fact in parsed.facts:
+        if fact.section != current_section:
+            current_section = fact.section
+            section_occurrences[fact.section] = section_occurrences.get(fact.section, 0) + 1
+            current_occurrence = section_occurrences[fact.section]
+            position = 0
         if fact.state in admitted:
-            grouped.setdefault(fact.section, []).append(fact.statement)
-    return [(section, "\n".join(statements)) for section, statements in grouped.items()]
+            position += 1
+            chunks.append((fact.section, fact.statement, current_occurrence, position))
+    return chunks
 
 
 def _prose_chunks(body: str) -> list[tuple[str, str]]:

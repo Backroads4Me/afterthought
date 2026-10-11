@@ -1857,3 +1857,96 @@ def test_raw_evidence_results_collapsed_per_session(populated_vault: Config) -> 
     assert len(evidence_hits) == 2, f"expected 2 collapsed hits, got {len(evidence_hits)}"
     sessions_found = {h.path.split("#")[0] for h in evidence_hits}
     assert len(sessions_found) == 2, f"each hit must come from a distinct session: {sessions_found}"
+
+
+def test_a_pages_matching_line_outranks_a_long_sections_weaker_match_from_another_page(
+    populated_vault: Config,
+) -> None:
+    """F82: with one index row per page line, a page's matching line is not penalized by
+    section length, outranking a long section's weaker match from another page."""
+    cfg = populated_vault
+
+    page_a = """---
+type: Project
+title: Target Project
+description: Target project facts.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Target
+
+## Facts
+
+- firstmate is cloned under the home directory [observed] 2026-10-01 [^s1]
+"""
+    (cfg.vault / "projects/widget/target.md").write_text(page_a, encoding="utf-8")
+
+    distractor_text = " ".join(
+        f"Unrelated telemetry entry number {i} was recorded during the routine run."
+        for i in range(1, 40)
+    )
+    page_b = f"""---
+type: Session Digest
+title: Distractor Digest
+description: Distractor session.
+aft:
+  project: p_widget
+---
+
+# Distractor
+
+## Summary
+
+{distractor_text}
+A worker repository was cloned for test runs.
+"""
+    digest_dir = cfg.vault / "digests/widget/2026/09"
+    digest_dir.mkdir(parents=True, exist_ok=True)
+    (digest_dir / "2026-09-28-claude-distractor.md").write_text(page_b, encoding="utf-8")
+
+    index.update(cfg)
+
+    hits = search.search(cfg, "cloned", project="widget", limit=5)
+    assert len(hits) >= 2
+    assert hits[0].path == "projects/widget/target.md"
+    assert "firstmate is cloned" in hits[0].snippet
+
+
+def test_one_page_answers_once_per_query_at_its_best_line(
+    populated_vault: Config,
+) -> None:
+    """F82: a page answers once per query at its best line (per-path de-duplication),
+    and its snippet is drawn from that line."""
+    cfg = populated_vault
+
+    page_text = """---
+type: Project
+title: Multi Line Page
+description: Multiple matching lines in one page.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Multi
+
+## Decisions
+
+- Titanium brackets are used for high stress mounts [stated] 2026-09-01 [^s1]
+- Secondary titanium brackets secure the payload [observed] 2026-09-02 [^s2]
+
+## State
+
+- The titanium frame passed stress testing [observed] 2026-09-03 [^s3]
+"""
+    (cfg.vault / "projects/widget/multi.md").write_text(page_text, encoding="utf-8")
+    index.update(cfg)
+
+    hits = search.search(cfg, "brackets", project="widget", limit=10)
+    matching_paths = [h.path for h in hits if h.path == "projects/widget/multi.md"]
+    assert len(matching_paths) == 1, f"expected page to answer once, got {matching_paths}"
+    multi_hit = next(h for h in hits if h.path == "projects/widget/multi.md")
+    assert multi_hit.heading == "Decisions"
+    assert "brackets" in multi_hit.snippet.lower()
