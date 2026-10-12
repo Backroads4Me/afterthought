@@ -2225,6 +2225,39 @@ def test_a_reranked_search_fetches_a_wider_pool_than_the_limit(populated_vault: 
     assert len(hits) == 2
 
 
+def test_a_reranked_search_shows_the_model_sixty_candidates(populated_vault: Config):
+    """When more pages match than the pool holds, the model sees a pool of 60 numbered
+    candidates (BUILD-PLAN T42)."""
+    cfg = populated_vault
+    for i in range(1, 66):
+        page = f"""---
+type: Project
+title: Catalogued sample {i}
+description: Catalogued sample {i}.
+sources: []
+aft:
+  project: p_widget
+---
+
+# Sample {i}
+
+## Facts
+
+- quartzite sample {i} is catalogued for the survey [observed] 2026-10-01 [^s1]
+"""
+        path = cfg.vault / f"projects/widget/sample-{i:02d}.md"
+        path.write_text(page, encoding="utf-8")
+    index.update(cfg)
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint)
+        search.search(cfg, "quartzite", rerank=True)
+    user = fake.requests[0]["messages"][1]["content"]
+    listed = [line for line in user.splitlines() if line.startswith("[")]
+    assert len(listed) == search.RERANK_CANDIDATES
+    assert listed[0].startswith("[1] ")
+    assert listed[-1].startswith(f"[{search.RERANK_CANDIDATES}] ")
+
+
 def test_an_unreachable_endpoint_keeps_todays_order_and_sets_no_cooldown(
     populated_vault: Config,
 ):

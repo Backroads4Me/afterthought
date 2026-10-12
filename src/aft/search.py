@@ -357,7 +357,7 @@ def search(
     are all time words lists the window's digests newest first, then its evidence, cut to
     ``limit``, with no BM25 order and no rerank.
 
-    With ``rerank`` the candidate pool is fetched wider (30 when the limit is smaller)
+    With ``rerank`` the candidate pool is fetched wider (60 when the limit is smaller)
     and the configured model orders it by how well each candidate answers the question;
     its order comes first and the candidates it left out follow in the index's own
     order, cut to ``limit``. The call checks an existing cooldown first and skips when
@@ -1045,7 +1045,7 @@ def _heading_name(line: str) -> str:
 #: How wide the candidate pool a reranked search fetches is, whatever the caller's limit
 #: (BUILD-PLAN F84): the index's own order still decides what the pool holds, the model
 #: only orders it, and the order is cut back to the caller's limit afterwards.
-RERANK_CANDIDATES = 30
+RERANK_CANDIDATES = 60
 
 #: How many characters of one candidate's text the rerank prompt shows.
 RERANK_TEXT_CHARS = 600
