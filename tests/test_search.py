@@ -2204,7 +2204,31 @@ def test_a_timeout_keeps_todays_order(populated_vault: Config):
     assert _paths(hits) == baseline
 
 
-def test_a_spent_budget_skips_the_call(populated_vault: Config):
+def test_a_spent_search_budget_skips_the_call(populated_vault: Config):
+    """The rerank stops at the day's search budget with room left in the work budget the
+    digests spend (BUILD-PLAN F86)."""
+    with FakeEndpoint([{"ranking": [1]}]) as fake:
+        cfg = _model_config(populated_vault, fake.endpoint, "[search]\ndaily_token_budget = 100\n")
+        (cfg.home / model.usage_path(cfg).name).write_text(
+            json.dumps(
+                {
+                    "at": datetime.now(UTC).isoformat(),
+                    "prompt_tokens": 500,
+                    "completion_tokens": 0,
+                    "purpose": "search",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert model.tokens_used_today(cfg, purpose="work") < cfg.settings.work.daily_token_budget
+        search.search(cfg, "widget", rerank=True)
+    assert fake.requests == []
+
+
+def test_a_spent_work_budget_does_not_stop_the_rerank(populated_vault: Config):
+    """The digests' spent work budget leaves the search its own budget to spend
+    (BUILD-PLAN F86)."""
     with FakeEndpoint([{"ranking": [1]}]) as fake:
         cfg = _model_config(populated_vault, fake.endpoint, "[work]\ndaily_token_budget = 100\n")
         (cfg.home / model.usage_path(cfg).name).write_text(
@@ -2218,8 +2242,10 @@ def test_a_spent_budget_skips_the_call(populated_vault: Config):
             + "\n",
             encoding="utf-8",
         )
-        search.search(cfg, "widget", rerank=True)
-    assert fake.requests == []
+        assert model.tokens_used_today(cfg) >= cfg.settings.work.daily_token_budget
+        hits = search.search(cfg, "widget", rerank=True)
+    assert len(fake.requests) == 1
+    assert hits
 
 
 def test_a_standing_cooldown_skips_the_call(populated_vault: Config):

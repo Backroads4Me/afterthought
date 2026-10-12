@@ -70,6 +70,7 @@ def test_digest_verify_settings_read_from_config(home):
         ("[dream]\nshort_term_sessions = 0\n", "dream.short_term_sessions must be at least 1"),
         ("[dream]\nshort_term_days = 0\n", "dream.short_term_days must be at least 1"),
         ("[dream]\nshort_term_days = 'week'\n", "dream.short_term_days must be an integer"),
+        ("[search]\ndaily_token_budget = 'week'\n", "search.daily_token_budget must be an integer"),
         ("[dream]\ninterval_minutes = 0\n", "dream.interval_minutes must be positive"),
         ("[dream]\ninterval_minutes = -5\n", "dream.interval_minutes must be positive"),
         ("[library]\ncommit = 1\n", "library.commit must be true or false"),

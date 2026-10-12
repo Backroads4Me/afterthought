@@ -101,6 +101,7 @@ def complete_json(
     timeout: float | None = None,
     record_cooldown: bool = True,
     repair: bool = True,
+    purpose: str = "work",
 ) -> dict:
     """Ask the model for one JSON object that satisfies ``schema``.
 
@@ -116,6 +117,9 @@ def complete_json(
     ``timeout=None`` keeps TIMEOUT_SECONDS. With ``record_cooldown=False`` the call
     leaves the endpoint's cooldown alone on both sides: it sets none when the endpoint
     fails and clears none when it answers, so one failed call never pauses the others.
+    ``purpose`` is written into the usage ledger line: ``work`` for every call but the
+    search's rerank, which passes ``search``, so each budget counts only the calls
+    named for it (BUILD-PLAN F86).
     """
 
     # A cooldown an earlier failure left is answered before anything is sent: the point
@@ -160,6 +164,7 @@ def complete_json(
                 endpoint=target_endpoint,
                 timeout=timeout,
                 record_cooldown=record_cooldown,
+                purpose=purpose,
             )
         except _Retryable as exc:
             problems.append(str(exc))
@@ -395,11 +400,14 @@ def clear_cooldown(config: Config, endpoint: str | None = None) -> bool:
         return True
 
 
-def tokens_used(config: Config, since: datetime | None = None) -> int:
+def tokens_used(config: Config, since: datetime | None = None, purpose: str | None = None) -> int:
     """Tokens charged to this home since ``since``, or ever when it is None.
 
     A stamp in the ledger or an argument with no offset is read as UTC, so every
     comparison is between like instants.
+    With a ``purpose``, only ledger lines of that purpose count; a line written without
+    one counts as ``work``, the purpose every call had before the ledger named one
+    (BUILD-PLAN F86).
     """
     path = usage_path(config)
     if not path.exists():
@@ -416,6 +424,8 @@ def tokens_used(config: Config, since: datetime | None = None) -> int:
             continue
         if not isinstance(record, dict):
             continue
+        if purpose is not None and record.get("purpose", "work") != purpose:
+            continue
         if start is not None:
             at = _time(record.get("at"))
             if at is None or at < start:
@@ -428,10 +438,12 @@ def tokens_used(config: Config, since: datetime | None = None) -> int:
     return total
 
 
-def tokens_used_today(config: Config, now: datetime | None = None) -> int:
-    """Tokens counted against today's cap: used since midnight UTC, or since the user last
-    reset the budget when that was later (BUILD-PLAN F40)."""
-    return tokens_used(config, since=budget_day_start(config, now))
+def tokens_used_today(config: Config, now: datetime | None = None, purpose: str = "work") -> int:
+    """Tokens of one purpose counted against today's cap: used since midnight UTC, or
+    since the user last reset the budget when that was later (BUILD-PLAN F40). The
+    purpose defaults to ``work``, which is what every line meant before F86 named
+    one, so callers that ask for no purpose keep counting the work budget."""
+    return tokens_used(config, since=budget_day_start(config, now), purpose=purpose)
 
 
 def budget_day_start(config: Config, now: datetime | None = None) -> datetime:
@@ -453,15 +465,15 @@ def budget_reset_at(config: Config) -> datetime | None:
 
 
 def reset_budget(config: Config, now: datetime | None = None) -> datetime:
-    """Start today's count again from now (BUILD-PLAN F40). Midnight UTC still starts the
-    next day as usual."""
+    """Start today's counts again from now (BUILD-PLAN F40, F86). Midnight UTC still
+    starts the next day as usual."""
     moment = _utc(now) if now is not None else datetime.now(UTC)
     config.home.mkdir(parents=True, exist_ok=True)
     (config.home / BUDGET_RESET).write_text(moment.isoformat() + "\n", encoding="utf-8")
     return moment
 
 
-# The marker a budget reset leaves: the moment today's count starts again from.
+# The marker a budget reset leaves: the moment today's counts start again from.
 BUDGET_RESET = "budget-reset"
 
 
@@ -475,12 +487,14 @@ def _chat(
     endpoint: str | None = None,
     timeout: float | None = None,
     record_cooldown: bool = True,
+    purpose: str = "work",
 ) -> str:
     """One HTTP call. Returns the assistant message content.
 
     ``timeout=None`` keeps TIMEOUT_SECONDS. ``record_cooldown=False`` leaves the
     cooldown file alone: no cooldown is set when the endpoint fails, and none is
-    cleared when it answers.
+    cleared when it answers. ``purpose`` is written into the usage ledger line the
+    call's tokens are charged to.
     """
     target_endpoint = endpoint or config.settings.model.endpoint
     url = target_endpoint.rstrip("/") + "/chat/completions"
@@ -561,7 +575,7 @@ def _chat(
         echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} answered with JSON that is not an object: {echo}")
 
-    _record_usage(config, started, reply.get("usage"))
+    _record_usage(config, started, reply.get("usage"), purpose)
     choices = reply.get("choices")
     if not isinstance(choices, list) or not choices:
         echo = _quoted(config, raw)[:200]
@@ -637,7 +651,7 @@ def _checked(content: str, schema: dict) -> dict:
     return answer
 
 
-def _record_usage(config: Config, started: datetime, usage: Any) -> None:
+def _record_usage(config: Config, started: datetime, usage: Any, purpose: str = "work") -> None:
     prompt = _token_count(usage, "prompt_tokens")
     completion = _token_count(usage, "completion_tokens")
     if prompt is None or completion is None or (prompt == 0 and completion == 0):
@@ -650,6 +664,7 @@ def _record_usage(config: Config, started: datetime, usage: Any) -> None:
         "at": started.isoformat(),
         "prompt_tokens": prompt,
         "completion_tokens": completion,
+        "purpose": purpose,
     }
     path = usage_path(config)
     try:
