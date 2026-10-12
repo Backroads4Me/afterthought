@@ -164,6 +164,13 @@ def test_a_short_start_block_line_does_not_hide_a_row_that_contains_it():
     assert recall._held_by_block(hit, ["deploy the release candidate to staging nightly"])
 
 
+def test_the_bar_counts_another_form_of_a_word():
+    """The index stems words, so the bar does too: "deploying" holds "deploy"."""
+    hit = SimpleNamespace(snippet="Deploying releases to staging happens nightly", heading="")
+    assert recall._holds_bar(hit, ["deploy", "release", "staging"])
+    assert not recall._holds_bar(hit, ["deploy", "release", "prod"])
+
+
 # --- the parsers ---------------------------------------------------------------------
 
 

@@ -35,6 +35,10 @@ MAX_QUERY_WORDS = 32
 #: fewer than MIN_QUERY_WORDS words recalls nothing, this is 3 whenever anything is asked.
 BAR_WORDS = 3
 
+#: An alphabetic query word this long or longer matches a row word sharing its first this
+#: many letters, so "deploying" counts for "deploy" as the index's stemmer counts it.
+STEM_CHARS = 5
+
 #: A start-block line shorter than this is not matched inside a longer row: a short line
 #: ("none", a project's one-word title) would otherwise hide any row that contains it.
 MIN_HELD_CHARS = 40
@@ -159,8 +163,20 @@ def _holds_bar(hit: Hit, words: list[str]) -> bool:
     once, however often the row repeats it.
     """
     row = f"{hit.snippet} {hit.heading}".lower()
-    found = sum(1 for word in set(words) if re.search(rf"\b{re.escape(word.lower())}\b", row))
+    tokens = set(re.findall(r"\w+", row))
+    found = sum(1 for word in {word.lower() for word in words} if _in_row(word, row, tokens))
     return found >= min(BAR_WORDS, len(words))
+
+
+def _in_row(word: str, row: str, tokens: set[str]) -> bool:
+    """Whether a row holds one query word. The index stems words (Porter), so an
+    alphabetic word matches another form of itself on their shared first STEM_CHARS
+    letters ("deploys" holds "deploy"), as `digest.ungrounded` matches names; a shorter
+    word or one holding a digit or a symbol must be held exactly."""
+    if word.isalpha() and len(word) >= STEM_CHARS:
+        stem = word[:STEM_CHARS]
+        return any(len(token) >= STEM_CHARS and token[:STEM_CHARS] == stem for token in tokens)
+    return re.search(rf"\b{re.escape(word)}\b", row) is not None
 
 
 def _block_lines(block: str) -> list[str]:
