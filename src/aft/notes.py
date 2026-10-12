@@ -140,8 +140,10 @@ def settle(
     dated by the newest of them. Only a quote that still verifies and does not come from a
     worker session can carry the replacement, as no other quote carries a long-term line
     (R1, DESIGN 8); a note without one cannot be settled by a replacement.
+    A replacement must say only what the quotes cited to it say (R2): one that names a
+    word or number none of them holds is refused, and nothing is written.
     """
-    from aft import pagewrite
+    from aft import digest, pagewrite
     from aft import vault as vaultmod
     from aft.dream import rules
 
@@ -192,6 +194,18 @@ def settle(
                 " or the library, so no replacement can rest on it; settle it with --keep or"
                 " --withdraw, and state the fact in a session instead"
             )
+        if choice == REPLACE:
+            # R2: the replacement says only what the quotes cited to it say, as every
+            # [stated] line must. The check runs before anything is written, so a refused
+            # replacement leaves the page and the vault as they were.
+            missing = digest.ungrounded(
+                " ".join(statement.split()), "\n".join(s.quote for s in evidence)
+            )
+            if missing:
+                raise NoteError(
+                    f"the replacement names {', '.join(missing)} that none of the note's"
+                    " quotes says; reword it or settle with --keep or --withdraw"
+                )
         statement_before = fact.statement
         archive = doc._archive_file()
         archive_before = archive.read_bytes() if archive.is_file() else None

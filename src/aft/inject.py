@@ -154,10 +154,12 @@ def _profile_part(page: pagemod.Page | None) -> Part:
 
 
 def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
-    """Short-term memory: the active lines of ``recent.md``, in the overview's section
-    order, under a heading that says how many sessions short term covers and the date of
-    its newest line, so an agent back after a long while can judge how current it is
-    (design 6, 10)."""
+    """Short-term memory: the active lines of ``recent.md`` under a heading that says how
+    many sessions short term covers and the date of its newest line, so an agent back
+    after a long while can judge how current it is (design 6, 10). The layer keeps the
+    ``MAX_RECENT_LINES`` lines with the newest dates (a line with no date counts as the
+    oldest; ties keep page order) and shows those it kept in the overview's section
+    order."""
     if page is None:
         return ("", [])
     facts = [
@@ -170,7 +172,10 @@ def _recent_part(page: pagemod.Page | None, config: Config) -> Part:
         return ("", [])
     sessions = config.settings.dream.short_term_sessions
     newest = max(fact.date for fact in facts if fact.date)
-    facts = facts[:MAX_RECENT_LINES]
+    # Rank the lines by date, newest first (a line with no date counts as the oldest),
+    # keep the first MAX_RECENT_LINES of the ranking, and put those back in page order.
+    ranked = sorted(range(len(facts)), key=lambda i: facts[i].date or "", reverse=True)
+    facts = [facts[i] for i in sorted(ranked[:MAX_RECENT_LINES])]
     heading = f"Recent (last {sessions} sessions, newest {newest})"
     return _part(heading, [f"- {_shown(fact)}" for fact in facts])
 

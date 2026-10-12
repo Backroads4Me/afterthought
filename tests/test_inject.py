@@ -1381,6 +1381,58 @@ def test_short_term_memory_is_capped_at_ten_lines(widget, tmp_path):
     assert lines[9] == "- Short-term line 9 about the current work."
 
 
+def test_recent_keeps_the_ten_newest_dates_in_section_order(widget, tmp_path):
+    """The layer keeps the ten lines with the newest dates, not the page's first ten, and
+    shows the ones it kept in the overview's section order (T41)."""
+    decisions = [
+        f"- The {word} decision is current. [stated] 2026-09-{day:02d} [^s1]"
+        for day, word in enumerate(["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"], 25)
+    ]
+    state = [
+        f"- The {word} state is current. [observed] 2026-10-{day:02d} [^s1]"
+        for day, word in enumerate(["golf", "hotel", "india", "juliett", "kilo", "lima"], 1)
+    ]
+    body = "## Decisions\n\n" + "\n".join(decisions) + "\n\n## State\n\n" + "\n".join(state) + "\n"
+    write(widget.vault / "projects/widget/recent.md", RECENT_PAGE.split("## Decisions")[0] + body)
+    block = inject.build(widget, resolve(widget, tmp_path / "widget"))
+    lines = parts_of(block)["## Recent (last 5 sessions, newest 2026-10-06)"]
+    assert lines == [
+        "- The golf state is current.",
+        "- The hotel state is current.",
+        "- The india state is current.",
+        "- The juliett state is current.",
+        "- The kilo state is current.",
+        "- The lima state is current.",
+        "- The charlie decision is current.",
+        "- The delta decision is current.",
+        "- The echo decision is current.",
+        "- The foxtrot decision is current.",
+    ]
+
+
+def test_recent_drops_an_undated_line_first(widget):
+    """A line with no date counts as the oldest, so it is the first line the layer drops
+    when the page holds more lines than the layer carries (T41)."""
+    body = (
+        "## State\n\n"
+        + "\n".join(
+            f"- The state line {n} is current. [observed] 2026-10-{n:02d} [^s1]"
+            for n in range(1, 12)
+        )
+        + "\n"
+    )
+    path = widget.vault / "projects/widget/recent.md"
+    write(path, RECENT_PAGE.split("## Decisions")[0] + body)
+    page = inject._read_page(path)
+    assert page is not None
+    page.facts[0] = dataclasses.replace(page.facts[0], date="")
+    heading, lines = inject._recent_part(page, widget)
+    assert heading == "Recent (last 5 sessions, newest 2026-10-11)"
+    assert lines[0] == "- The state line 2 is current."
+    assert len(lines) == 10
+    assert "- The state line 1 is current." not in lines
+
+
 @pytest.mark.parametrize(("name", "agent", "event"), SESSION_STARTS, ids=SESSION_START_IDS)
 def test_notes_waiting_on_the_user_reach_the_user_as_well_as_the_agent(
     name, agent, event, widget, tmp_path, capsys, monkeypatch
