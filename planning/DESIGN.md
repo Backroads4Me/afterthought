@@ -723,25 +723,25 @@ injecting context into every tool turn burned tokens and turned it off by defaul
 
 `aft search` queries a SQLite FTS5 index with BM25 ranking. It searches every project in two
 tiers: the current directory's project and the global pages first, then other projects and
-unfiled text, so what one project learned answers a question asked in another. Inside a
-tier, the BM25 score orders pages, digests and evidence together, and curated memory (pages
-and digests) wins near-ties: its score counts 10% stronger, which puts it ahead of raw
-evidence scoring within 10% of it. `--project P` narrows it to one project and the global
-pages, one tier. The memory block stays the current project's and the global
-pages' alone (section 10). A query's bare words drop question filler ("a", "the", "where",
-"does" and their kind) and the rest join with OR, so a row holding more of the words scores
-higher; a quoted phrase is kept whole, a query of filler words alone keeps its words as typed,
-and negations (no, not, never) are kept. Words are stemmed by FTS5's Porter tokenizer, so
-"pause" finds "paused". A query's time words set a window only when the query says so: a
-weekday dates the query only after a cue (on, last, past, this, since, before, until), and no
-window lands ahead of now. The window filters evidence by each entry's moment and digests by
-the date their file name carries; pages answer whatever the window, and a query left with only
-time words lists the window's digests newest first, then its evidence. The `aft search`
-command then orders its top 30 candidates with the model when it can: the model ranks them
-by how well each answers the question, its order comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
-(the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer late or
-unusable, or the day's search token budget spent), the search keeps the BM25 order. Every other
-caller, the memory block included, uses the BM25 order alone.
+unfiled text, so what one project learned answers a question asked in another. Inside a tier,
+the BM25 score orders pages, digests and evidence together, and curated memory (pages and
+digests) wins near-ties: its score counts 10% stronger, which puts it ahead of raw evidence
+scoring within 10% of it. `--project P` narrows it to one project and the global pages, one
+tier. The memory block stays the current project's and the global pages' alone (section 10). A
+query's bare words drop question filler ("a", "the", "where", "does" and their kind) and the
+rest join with OR, so a row holding more of the words scores higher; a quoted phrase is kept
+whole, a query of filler words alone keeps its words as typed, and negations (no, not, never)
+are kept. Words are stemmed by FTS5's Porter tokenizer, so "pause" finds "paused". A query's
+time words set a window only when the query says so: a weekday dates the query only after a
+cue (on, last, past, this, since, before, until), and no window lands ahead of now. The window
+filters evidence by each entry's moment and digests by the date their file name carries; pages
+answer whatever the window, and a query left with only time words lists the window's digests
+newest first, then its evidence. The `aft search` command then orders its top 30 candidates
+with the model when it can: the model ranks them by how well each answers the question, its
+order comes first, and the candidates it left out follow in BM25 order. When the model cannot
+answer (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer
+late or unusable, or the day's search token budget spent), the search keeps the BM25 order.
+Every other caller, the memory block included, uses the BM25 order alone.
 
 Page lines and digest sections are also matched through search phrases: up to eight short
 wordings a person might search with (synonyms, the question the text answers), which the
