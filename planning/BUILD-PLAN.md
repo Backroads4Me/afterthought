@@ -1975,6 +1975,26 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     whatever the window; a time-only query lists the window's digests newest first. Review
     checkpoint: no.
 
+- **T41 Recent memory shows the newest lines; a settled replacement is grounded** (ruling
+  2026-10-12; ROADMAP findings L1 and L4).
+  - **L1, `inject.py` `_recent_part`:** the short-term layer gathers `recent.md`'s active lines
+    in section order and keeps the first `MAX_RECENT_LINES`, so a page holding more than ten
+    shows its oldest lines and drops the newest. It keeps the ten with the newest dates (a
+    line with no date counts as oldest; ties keep page order), then shows them in the
+    overview's section order as today. The heading's "newest" date is unchanged.
+  - **L4, `notes.settle` with `replace`:** the replacement statement is written as the user
+    typed it and tagged `[stated]` when one of the note's sources is the user's, but nothing
+    checks that it says only what those sources say. It now passes R2's grounding check
+    (`digest.ungrounded`) against the joined text of the quotes it is cited to, as every
+    `[stated]` line does (DESIGN R2: the statement holds no name or number its sources do not
+    say). A statement with an ungrounded name or number is refused with a `NoteError` that
+    lists them and says to reword it or settle with `--keep` or `--withdraw`; nothing is
+    written. Its date rule is unchanged here.
+  - **Tests:** a `recent.md` with twelve dated lines injects the ten newest, in section order;
+    an undated line drops first; a replacement holding a number the quotes do not say is
+    refused and the page is unchanged; a grounded replacement is written as today. Review
+    checkpoint: yes (L4 applies R2 to a new writer; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
