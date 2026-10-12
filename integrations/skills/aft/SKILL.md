@@ -100,8 +100,10 @@ To settle them:
    - Withdraw: the line is struck through, and nothing replaces it.
 3. Run `aft settle <where> --keep`, `aft settle <where> --withdraw`, or
    `aft settle <where> --replace <statement>`, using the `where` field of the note the user
-   decided. Each settle is one commit in the
-   vault, so `git revert` undoes it, and the note itself moves word for word to the page's
+   decided. Keep and withdraw are one commit in the vault, so one `git revert` undoes
+   either. A replacement is two: the settle, then a second commit that cites the settle as
+   the new line's own source and dates the line by the settle's day; undo it by reverting
+   the two commits newest first. The note itself moves word for word to the page's
    archive.
 4. When the user wants to stop partway, stop. The notes left wait for the next session.
 
