@@ -118,6 +118,10 @@ class SearchConfig:
     rerank: bool = True
     rerank_timeout_seconds: float = 5.0
 
+    # The rerank spends about 4,000 tokens a search, so this bounds a day of heavy
+    # searching without touching the work budget the digests spend (BUILD-PLAN F86).
+    daily_token_budget: int = 200_000
+
 
 @dataclass(frozen=True)
 class InjectConfig:
@@ -411,11 +415,13 @@ daily_token_budget = 200000
 # How "aft search" orders what the index finds. When the model can answer, it
 # reorders the search's top candidates by how well each answers the question; when
 # it cannot - the setting off, the endpoint cooling down or unreachable, the answer
-# late or unusable, or today's token budget spent - the search keeps the index's own
-# order and says nothing about it.
+# late or unusable, or the day's search token budget spent - the search keeps the
+# index's own order and says nothing about it.
 rerank = true
 # How long the reorder call may take before the search keeps the index's own order.
 rerank_timeout_seconds = 5
+# Tokens one day of search reranks may spend, apart from the work budget the digests spend.
+daily_token_budget = 200000
 
 [inject]
 max_chars = 8000

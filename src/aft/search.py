@@ -997,9 +997,10 @@ def _rerank_hits(config: Config, query: str, hits: list[Hit], limit: int) -> lis
     own order, cut to ``limit``. The call checks an existing cooldown first and skips
     when one stands, never sets or clears one of its own (a slow or failing search must
     not pause background digests), makes one attempt with no repair turn, and counts
-    against today's token budget like every model call. Every failure - cooling down, a
-    spent budget, an unreachable endpoint, a late or invalid answer - keeps the index's
-    order and is logged, never printed.
+    against the day's search token budget, not the work budget the digests spend
+    (BUILD-PLAN F86). Every failure - cooling down, a spent budget, an unreachable
+    endpoint, a late or invalid answer - keeps the index's order and is logged, never
+    printed.
     """
     if len(hits) <= 1:
         return hits[:limit]
@@ -1007,8 +1008,10 @@ def _rerank_hits(config: Config, query: str, hits: list[Hit], limit: int) -> lis
     if cooling:
         LOGGER.info("search rerank skipped, endpoint cooling down: %s", reason)
         return hits[:limit]
-    if model.tokens_used_today(config) >= config.settings.work.daily_token_budget:
-        LOGGER.info("search rerank skipped, today's token budget is spent")
+    if model.tokens_used_today(config, purpose="search") >= (
+        config.settings.search.daily_token_budget
+    ):
+        LOGGER.info("search rerank skipped, today's search token budget is spent")
         return hits[:limit]
     candidates = []
     for number, hit in enumerate(hits, start=1):
@@ -1025,6 +1028,7 @@ def _rerank_hits(config: Config, query: str, hits: list[Hit], limit: int) -> lis
             timeout=config.settings.search.rerank_timeout_seconds,
             record_cooldown=False,
             repair=False,
+            purpose="search",
         )
     except Exception as exc:
         LOGGER.info("search rerank fell back to the index order: %s", exc)
