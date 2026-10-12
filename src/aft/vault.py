@@ -209,15 +209,20 @@ def init(config: Config) -> list[str]:
 
 
 def commit(vault: Path, paths: list[str], message: str) -> bool:
-    """Stage ``paths`` (which may include removals) and commit them. Returns whether a
-    commit was made."""
+    """Stage ``paths`` (which may include removals) and commit only those paths.
+
+    The commit carries only these paths, whatever else is staged: other staged
+    paths stay staged and out of the commit, and nothing staged within ``paths``
+    makes no commit. Returns whether a commit was made.
+    """
     clear_stale_index_lock(vault)
     _git_write_with_lock_retry(["add", "-A", "--", *paths], vault)
-    staged = git(["diff", "--cached", "--quiet"], cwd=vault, check=False)
+    staged = git(["diff", "--cached", "--quiet", "--", *paths], cwd=vault, check=False)
     if staged.returncode == 0:
         return False
     try:
-        _git_write_with_lock_retry(["commit", "-q", "-m", message], vault)
+        commit_args = ["commit", "-q", "--only", "-m", message, "--", *paths]
+        _git_write_with_lock_retry(commit_args, vault)
     except GitError as exc:
         raise VaultError(f"could not commit to the vault: {exc}") from exc
     return True
