@@ -108,8 +108,11 @@ FILLER_WORDS = frozenset(
     ).split()
 )
 
-#: The collections whose rows carry an explicit timestamp in the identity time column.
-COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
+#: The collections whose rows carry an explicit timestamp in the identity time column:
+#: evidence an entry's own moment, a digest the UTC start of the date its file name carries
+#: (BUILD-PLAN M13). A time window filters these collections and no other; pages and
+#: reports carry no time and answer whatever the window.
+COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE, index.DIGESTS)
 
 #: The column a hit's snippet is drawn from: the row's own body text, never the phrases
 #: column (BUILD-PLAN F85) - a phrase is another wording of the row, and the snippet shows

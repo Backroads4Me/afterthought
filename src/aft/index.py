@@ -136,6 +136,7 @@ import zlib
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -309,9 +310,13 @@ ARCHIVE_ORIGIN = "evidence-archive"
 #: ``rows-7`` indexes each page and archive fact line as its own row (BUILD-PLAN F82): an
 #: index from ``rows-6`` holds a whole section per row. ``rows-8`` adds the ``phrases``
 #: column (BUILD-PLAN F85): model-written search phrases kept in the vault's ``phrases/``
+#: column (BUILD-PLAN F85): model-written search phrases kept in the vault's ``phrases/``
 #: files, filled for ``pages`` and ``digests`` rows and empty for every other collection.
-#: An index from ``rows-7`` has no phrases column, so its rows are rebuilt.
-BUILD_STAMP = "rows-8"
+#: An index from ``rows-7`` has no phrases column, so its rows are rebuilt. ``rows-9`` gives
+#: a digest row the UTC start of the date its file name carries in its ``time`` column
+#: (BUILD-PLAN M13), so a time window filters digests as it filters evidence; an index from
+#: ``rows-8`` holds no digest times, so its rows are rebuilt.
+BUILD_STAMP = "rows-9"
 BUILD_TABLE = "build"
 LINKS_TABLE = "page_links"
 
@@ -485,10 +490,12 @@ class _Unreadable(Exception):
 class Row:
     """One row of one collection, in `COLUMNS` order.
 
-    ``time`` is an archived entry's own moment, and only that. A row built from a file carries
-    no time: when a file was last written is this host's history rather than the text's - a
-    checkout, a sync or a rebuild answers with a different moment - so it is the one field
-    DESIGN 14's rebuild could never reproduce and an index kept up to date never refreshed."""
+    ``time`` is an archived entry's own moment, and a digest row's the UTC start of the date
+    its file name carries (BUILD-PLAN M13), so a time window filters digests as it filters
+    evidence. Every other row built from a file carries no time: when a file was last written
+    is this host's history rather than the text's - a checkout, a sync or a rebuild answers
+    with a different moment - so it is the one field DESIGN 14's rebuild could never
+    reproduce and an index kept up to date never refreshed."""
 
     title: str = ""
     description: str = ""
@@ -1046,6 +1053,7 @@ def _file_rows(
             chunks,
             collection,
             phrase_map=phrase_map if collection in _PHRASED_COLLECTIONS else {},
+            time=_digest_time(rel) if collection == DIGESTS else "",
         )
         for collection, chunks in sections.items()
     }
@@ -1097,6 +1105,7 @@ def _section_rows(
     session_id: str | None,
     chunks: list[tuple[str, str] | tuple[str, str, int, int]],
     collection: str,
+    time: str = "",
     phrase_map: dict[str, list[str]] | None = None,
 ) -> list[Row]:
     """The rows one collection takes from one file's sections.
@@ -1134,6 +1143,7 @@ def _section_rows(
                     project_id=project_id,
                     agent=agent,
                     session_id=session_id,
+                    time=time,
                     heading=heading,
                     row_key=_row_key(rel, heading, key_part, occurrence, position),
                 )
@@ -1345,6 +1355,24 @@ def _session_of(rel: str) -> tuple[str | None, str | None]:
     if match is None:
         return None, None
     return match.group("agent"), match.group("session")
+
+
+#: The date a digest file's name opens with (``2026-09-28-pi-s-gadget-1.md``): the UTC start
+#: of that day is what the digest's rows carry in their ``time`` column (BUILD-PLAN M13), so
+#: a time window filters digests as it filters evidence.
+_DIGEST_FILE_DATE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})")
+
+
+def _digest_time(rel: str) -> str:
+    """The UTC start of the date a digest file's name carries, or "" when it names none."""
+    match = _DIGEST_FILE_DATE.match(Path(rel).stem)
+    if match is None:
+        return ""
+    try:
+        day = datetime.strptime(match.group("date"), "%Y-%m-%d")
+    except ValueError:
+        return ""
+    return day.replace(tzinfo=UTC).isoformat()
 
 
 # Reading the evidence archive
