@@ -237,6 +237,52 @@ def test_vault_commit_retries_and_recovers_from_index_lock_error(initialized, mo
     assert first_add is False
 
 
+def test_vault_commit_only_commits_named_paths(initialized):
+    """vault.commit commits only the named paths; a hand-staged path stays staged."""
+    vault_path = initialized.vault
+    (vault_path / "note.md").write_text("note content\n", encoding="utf-8")
+    (vault_path / "other.md").write_text("other content\n", encoding="utf-8")
+    # Stage other.md by hand, as an Obsidian plugin or a manual git add would.
+    run_git(["add", "--", "other.md"], vault_path)
+
+    committed = vault.commit(vault_path, ["note.md"], "test: only named paths")
+    assert committed is True
+    names = run_git(["show", "--name-only", "--format="], vault_path).splitlines()
+    assert names == ["note.md"]
+    status = run_git(["status", "--porcelain"], vault_path).splitlines()
+    assert "A  other.md" in status
+
+
+def test_vault_commit_commits_removal_within_paths(initialized):
+    """vault.commit commits the removal of a named path."""
+    vault_path = initialized.vault
+    note = vault_path / "note.md"
+    note.write_text("note content\n", encoding="utf-8")
+    assert vault.commit(vault_path, ["note.md"], "test: create note") is True
+    note.unlink()
+
+    committed = vault.commit(vault_path, ["note.md"], "test: remove note")
+    assert committed is True
+    names = run_git(["show", "--name-only", "--format="], vault_path).splitlines()
+    assert names == ["note.md"]
+    assert run_git(["status", "--porcelain"], vault_path).splitlines() == []
+
+
+def test_vault_commit_noop_when_nothing_staged_within_paths(initialized):
+    """vault.commit makes no commit when nothing within paths is staged."""
+    vault_path = initialized.vault
+    (vault_path / "other.md").write_text("other content\n", encoding="utf-8")
+    # Stage a path outside paths, as an outside change would be.
+    run_git(["add", "--", "other.md"], vault_path)
+    head_before = run_git(["rev-parse", "HEAD"], vault_path)
+
+    committed = vault.commit(vault_path, ["index.md"], "test: should not commit")
+    assert committed is False
+    assert run_git(["rev-parse", "HEAD"], vault_path) == head_before
+    status = run_git(["status", "--porcelain"], vault_path).splitlines()
+    assert "A  other.md" in status
+
+
 def test_git_accepts_custom_timeout(initialized, monkeypatch):
     """git() respects custom timeout values and raises GitError on timeout."""
     # Custom float timeout succeeds on fast command
