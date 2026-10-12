@@ -1059,8 +1059,18 @@ def cmd_settle(args) -> int:
 
     config = load()
     choice = notes.KEEP if args.keep else notes.WITHDRAW if args.withdraw else notes.REPLACE
-    message = notes.settle(config, args.where, choice, args.replace)
-    print(f"aft settle: committed {message!r}; the note is in the page's archive")
+    settled = notes.settle(config, args.where, choice, args.replace)
+    print(f"aft settle: committed {settled.message!r}; the note is in the page's archive")
+    if settled.citation is not None:
+        print(
+            f"aft settle: committed {settled.citation!r};"
+            " the replacement cites the settle as its own source"
+        )
+    elif choice == notes.REPLACE:
+        print(
+            "aft settle: the replacement's citation of the settle could not be added;"
+            " the settle commit stands as it is"
+        )
     return 0
 
 
