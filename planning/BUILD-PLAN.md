@@ -1942,6 +1942,35 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     rebuild; a redaction that would break a cache file's JSON is refused and named. Review
     checkpoint: yes (privacy: forget; lead reviews in full).
 
+- **M13 Dates in a query are read only when the query says so** (ruling 2026-10-12; ROADMAP
+  finding M13; DESIGN 10). `aft.temporal` takes a bare weekday or its abbreviation as a date:
+  "sun microsystems", "sat solver" and "wed to the schema" each lose a word to a one-day
+  filter, "rotate key before friday" keeps "before" and loses "friday", and "this friday"
+  resolves to a day still ahead. Only evidence is filtered by time, and a query that is only a
+  time expression returns rows in no useful order.
+  - **Weekdays need a cue:** a weekday, full name or abbreviation, is a date only after `on`,
+    `last`, `past`, `this`, `since`, `before` or `until`; the cue and the weekday are both
+    removed from the words. A bare weekday stays a search word. `before`/`until <weekday>`
+    sets the end of the window as `before`/`until <date>` does today.
+  - **Never ahead:** a resolved day later than today (`this friday` on a Monday) becomes the
+    most recent past occurrence; a window's end is never later than now.
+  - **Digests have dates:** a digest row records the date its file name carries
+    (`<date>-<agent>-<session>.md`) in the `time` column, so a time window filters digests as
+    it filters evidence; pages carry no time and are never filtered. `BUILD_STAMP` rises.
+  - **A query that is only time:** with no words left, the result is the window's digest rows,
+    newest first, then its evidence, newest first, cut to `--limit` (no BM25, no rerank).
+  - **Unchanged:** ISO dates, `today`/`yesterday`, `last|past N days|weeks|months|years`,
+    `since`/`before` with an ISO date or relative day, and ranges keep today's meaning.
+  - **Present tense:** DESIGN 10's sentence on time words in a query, the `temporal.py` and
+    `search.py` docstrings, `docs/commands.md`.
+  - **Tests** (`tests/test_temporal.py`, `tests/test_search.py`): "sun microsystems", "sat
+    solver", "wed to the schema" and "rotate key before friday" set no window and keep every
+    word; "on friday", "last tuesday", "since mon" and "before friday" set one and remove the
+    cue and weekday; "this friday" asked on a Monday resolves to the past Friday; a digest row
+    carries its file's date and a window excludes a digest outside it; a pages row answers
+    whatever the window; a time-only query lists the window's digests newest first. Review
+    checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
