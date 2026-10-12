@@ -2027,6 +2027,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     note; a failed second commit leaves the first commit's line valid. Review checkpoint: yes
     (sources and dates; lead reviews in full).
 
+- **T44 A vault commit carries only its own paths** (ruling 2026-10-12; ROADMAP finding L8).
+  `vault.commit` runs `git add -A -- <paths>` then `git commit`, which commits everything
+  staged in the vault, so a change someone else staged (an Obsidian plugin, a hand `git add`)
+  rides along in afterthought's commit under its message. It commits with `git commit --only
+  -- <paths>` (removals included), and decides whether there is anything to commit by
+  `git diff --cached --quiet -- <paths>`, so another staged path neither rides along nor turns
+  an empty commit into a real one. Tests in `tests/test_vault.py` (or where commit is tested):
+  a file staged by hand outside `paths` stays staged and out of the commit; a removal in
+  `paths` is committed; nothing staged within `paths` makes no commit even when another path
+  is staged. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
