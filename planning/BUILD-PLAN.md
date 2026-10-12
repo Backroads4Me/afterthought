@@ -2082,6 +2082,55 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     `--uninstall` removes it. Review checkpoint: yes (a new path into every session's context;
     privacy of the prompt; lead reviews in full).
 
+- **F88 An order to do work is a request, not memory** (ruling 2026-10-12). Memory holds
+  `[stated]` lines that are task orders the user gave or approved: "Spec L5 and M15 and start
+  them on pi.", "Merge F85 and spec the search token budget as a follow-up task.", "Make the
+  Node-RED change and commit both." `turns.md` labels a yes to a proposal a decision, so "yes,
+  spec L5 and M15 and start them on pi" became a decision line, and the decide call then named
+  a later, unrelated order ("Switch to pool 60 and start it on pi.") a conflict with it, which
+  reached the user as a note to settle. Such a line fails the keep-test: once the work is done,
+  no future session acts differently for knowing it was ordered.
+  - **`turns.md`:** a yes to a proposal is a decision only when what it approves stays true
+    after the turn (a design choice, a setting, a rule, a plan the user adopts); a yes to doing
+    a piece of work now (spec, build, start, merge, run, fix, commit something) is a request,
+    as the same words without the proposal would be. One example of each in the prompt,
+    neutral and invented.
+  - **`decide.md` and `review.md`:** the never-a-fact list gains "an order to do a piece of
+    work, given or approved by the user, whether or not it was carried out"; `decide.md` adds
+    that two orders to do different pieces of work are about different things, never a
+    supersede or a conflict.
+  - **Measure, before merging (decision rule set now):** `scripts/eval_digest.py score-turns`
+    on key-turns.json with the local model, base against this change: `stated_wrong` falls and
+    durable items found do not fall beyond run-to-run noise (two runs of each). The lead also
+    runs `aft review afterthought` on a copy of the vault before and after and reports how many
+    order lines each names. Merge only if the rule holds.
+  - **Not in this change:** withdrawing the order lines memory holds today. After merge the
+    lead offers Ted `aft review <project>` and he chooses what to withdraw.
+  - **Tests:** prompt-shape tests updated for the three prompts. Review checkpoint: yes
+    (prompt change; lead reviews in full).
+
+- **T45 A settled replacement may rest on the line's own quotes** (ruling 2026-10-12; follows
+  T41). `aft settle --replace` grounds the new statement only in the note's quotes, so a
+  replacement that corrects one detail of a line is refused for every name the line's own
+  quotes hold and the note's do not. Settling the note under "The lead must personally read
+  only the trust-rule and privacy parts of PRs (R1-R9, ...)", whose note quote is "None of the
+  trust rules R1 to R10 change.", refused "trust-rule, PRs, R1-R10"; the user had to keep a
+  line they wanted corrected.
+  - **`notes.settle` with `replace`:** the evidence is the note's verified non-worker sources
+    together with the line's own verified non-worker sources (the same `verified` and
+    `origin != WORKER` filter), deduplicated by id. R2's check (`digest.ungrounded`) runs
+    against the joined quotes of that whole set, and the replacement cites the whole set,
+    line sources first. The tag is `[stated]` when any of them is the user's. The refusal
+    when no note source verifies stays: a replacement still needs new evidence from the note.
+    T43's second commit and its date are unchanged.
+  - **The aft skill:** when drafting a replacement, write each name and number as the quotes
+    write it (`R1 to R10`, not `R1-R10`), since R2 matches a token holding a symbol exactly.
+  - **Tests:** a replacement holding a name only the line's quote says is accepted and cites
+    both the line's and the note's sources; a name in neither is still refused; a worker
+    session's line quote does not ground it; a note with no verifying source is still refused
+    whatever the line's quotes say. Review checkpoint: yes (R2 for a writer; lead reviews in
+    full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
