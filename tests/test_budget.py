@@ -84,14 +84,20 @@ def test_work_runs_again_after_a_reset(cfg, monkeypatch, capsys):
 
 def test_budget_reports_use_before_and_after_a_reset(cfg, capsys):
     spend(cfg, datetime.now(UTC) - timedelta(seconds=1), 1_234)
+    spend(cfg, datetime.now(UTC) - timedelta(seconds=1), 120, purpose="search")
     assert cli.main(["budget"]) == 0
     before = capsys.readouterr().out
-    assert "1,234 of" in before and "since 00:00Z" in before
+    work_line, search_line, *_ = before.splitlines()
+    assert work_line.startswith("aft budget: 1,234 of ")
+    assert " work tokens used since 00:00Z;" in work_line
+    assert search_line.startswith("aft budget: 120 of ")
+    assert " search tokens used since 00:00Z;" in search_line
     cli.main(["budget", "reset"])
     capsys.readouterr()
     assert cli.main(["budget"]) == 0
     after = capsys.readouterr().out
     assert "0 of" in after and "since a reset at" in after
+    assert after.count("since a reset at") == 2
 
 
 class _Report:

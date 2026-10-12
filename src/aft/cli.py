@@ -1107,22 +1107,24 @@ def cmd_review(args) -> int:
 
 
 def cmd_budget(args) -> int:
-    """Today's token use against the daily budget (BUILD-PLAN F40)."""
+    """Today's token use against the daily budgets (BUILD-PLAN F40, F86)."""
     from aft import model
 
     config = load()
-    budget = config.settings.work.daily_token_budget
-    used = model.tokens_used_today(config)
     start = model.budget_day_start(config)
     since = f"a reset at {start:%H:%M}Z" if start == model.budget_reset_at(config) else "00:00Z"
-    left = max(0, budget - used)
-    print(f"aft budget: {used:,} of {budget:,} tokens used since {since}; {left:,} left")
-    print("aft budget: the count starts again at 00:00Z, or now with: aft budget reset")
+    for name, budget in (
+        ("work", config.settings.work.daily_token_budget),
+        ("search", config.settings.search.daily_token_budget),
+    ):
+        used = model.tokens_used_today(config, purpose=name)
+        left = max(0, budget - used)
+        print(f"aft budget: {used:,} of {budget:,} {name} tokens used since {since}; {left:,} left")
     return 0
 
 
 def cmd_budget_reset(args) -> int:
-    """Start today's token count again from now (BUILD-PLAN F40)."""
+    """Start today's token counts again from now (BUILD-PLAN F40, F86)."""
     from aft import model
 
     config = load()
@@ -1131,7 +1133,7 @@ def cmd_budget_reset(args) -> int:
     # endpoint's cooldown goes with it: the next call is allowed to try again (F66).
     cleared = model.clear_cooldown(config)
     note = "; the model cooldown was cleared too" if cleared else ""
-    print(f"aft budget: reset at {moment:%H:%M}Z; today's count starts again from 0{note}")
+    print(f"aft budget: reset at {moment:%H:%M}Z; today's counts start again from 0{note}")
     return 0
 
 
