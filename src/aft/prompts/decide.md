@@ -17,8 +17,9 @@ request, task, branch or commit; who is working on what; a test's name or result
 review's outcome; what a change or fix did to the code; and anything the repository's own
 documents already say. A question, a proposal or a request from the user is never a
 decision or a preference.
-Also never a fact: an order to do a piece of work, given or approved by the user, whether
-or not it was carried out.
+Also never a fact: a one-time order to do a piece of work, given or approved by the user,
+whether or not it was carried out. A standing rule, a permission, and the choice an
+approval settles are not such orders.
 
 Choose one action:
 - add: the fact is new; no existing line says the same thing or contradicts it.
