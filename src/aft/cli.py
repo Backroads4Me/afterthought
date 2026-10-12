@@ -1281,6 +1281,20 @@ def cmd_forget_pattern(args) -> int:
             f"redacted {report.verified_quotes_redacted} imported quote(s)"
             " in library/verified_quotes.json"
         )
+    if report.library_redacted:
+        print(
+            f"redacted {len(report.library_redacted)} library extraction cache(s);"
+            " the index rows of listed documents were rebuilt from them:"
+        )
+        for rel in report.library_redacted:
+            print(f"  {rel}")
+    if report.library_sources_matching:
+        print(
+            f"{len(report.library_sources_matching)} library source file(s) still hold the"
+            " text; removing it means deleting or re-importing the file:"
+        )
+        for rel in report.library_sources_matching:
+            print(f"  {rel}")
 
     existing = list(config.settings.capture.redact_patterns)
     if args.pattern not in existing:

@@ -35,6 +35,11 @@ from aft import evidence, index, lint, page, pagewrite, phrases, queue, redact, 
 from aft.config import Config
 from aft.digest import _is_session_digest, _is_session_resource
 from aft.library import propose
+from aft.library.importing import (
+    cache_extracted_text,
+    extract_document_chunks,
+    read_cached_extraction,
+)
 
 FORGOTTEN_MARKER = "[forgotten]"
 _FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
@@ -82,7 +87,11 @@ class PatternForgetReport:
     ``entries_redacted`` counts the archive rows rewritten, ``pages_redacted`` names the vault
     pages that now read ``[redacted]`` where the pattern matched, and ``pages_refused`` names
     the pages left untouched because the redaction would have left them unreadable - a person
-    has to hear about those, because the words in them are still there.
+    has to hear about those, because the words in them are still there. ``library_redacted``
+    names the indexed library documents whose extraction cache was redacted and whose rows the
+    same command's index update rebuilt, and ``library_sources_matching`` names the library
+    sources whose own text, or whose extraction for a PDF, still holds a match: a source is
+    read-only once imported, so removing those words means deleting or re-importing the file.
     """
 
     entries_redacted: int
@@ -90,6 +99,8 @@ class PatternForgetReport:
     pages_refused: tuple[str, ...] = ()
     vault_committed: bool = False
     verified_quotes_redacted: int = 0
+    library_redacted: tuple[str, ...] = ()
+    library_sources_matching: tuple[str, ...] = ()
 
 
 def forget_session(config: Config, session_id: str) -> SessionForgetReport:
@@ -465,6 +476,18 @@ def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
     no page, commit or config file. The record of imported library quotes takes the same
     replacement, because an imported quote is verified against the page citing it and both
     sides have to move together to keep verifying.
+
+    The extracted text of an imported library document lives in the cache keyed by its
+    import-time content hash (DESIGN 11), and the index reads the document's rows from that
+    cache, refreshing them only when the hash moves - which a redaction never does. The
+    command redacts every matching chunk text in the caches of the documents the collection
+    manifests list and drops the rows and recorded hash of each document it rewrote, so the
+    same command's index update rebuilds them from the redacted cache and never from the
+    read-only source; a document with no cache whose extracted text matches gets a redacted
+    cache written first, so the rebuild never extracts the unredacted source. The sources
+    stay as they are: the report names the ones whose own text, or whose extraction for a
+    PDF, still holds a match, since removing those words means deleting or re-importing
+    the file.
     """
     compiled = redact.compile_patterns([pattern])[0]
     count = evidence.redact_pattern(config, compiled)
@@ -475,14 +498,28 @@ def forget_pattern(config: Config, pattern: str) -> PatternForgetReport:
     # pages, so they stay inside the lock with the writes.
     with vault.locked(config):
         pages, refused = _redact_pages(config, compiled)
+        library_redacted, library_refused, sources_matching = _redact_library_cache(
+            config, compiled
+        )
         quotes_redacted = propose.redact_verified_quotes(config.home, compiled)
-        index.update(config)
+        # A redacted cache moved no file `_moved` stats, but the rows it stood behind lost the
+        # recorded hash the rebuild keys on, so this update has to run its write pass however
+        # little else moved.
+        index.update(config, force=bool(library_redacted))
         committed = False
         if pages:
             # A pattern is often the secret itself, so the commit says what happened and names
             # nothing: a forgetting cannot rewrite git history, so it writes none of it either.
             committed = vault.commit(config.vault, pages, "aft: forget pattern")
-    return PatternForgetReport(count, tuple(pages), tuple(refused), committed, quotes_redacted)
+    return PatternForgetReport(
+        count,
+        tuple(pages),
+        tuple([*refused, *library_refused]),
+        committed,
+        quotes_redacted,
+        tuple(library_redacted),
+        tuple(sources_matching),
+    )
 
 
 def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str], list[str]]:
@@ -495,7 +532,9 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
     back to the pattern they typed. A refused page is named on the command's report and left
     exactly as it stands. The vault's phrase files are redacted with the same replacement;
     their guard is the JSON parse a reader would run, since a rewrite that broke the file
-    would leave it read as no phrases at all.
+    would leave it read as no phrases at all. Files under ``library/`` are skipped: a source
+    is read-only once imported (DESIGN 11), and the text the index holds for it lives in its
+    extraction cache, which the library step of the same command redacts.
     """
     changed: list[str] = []
     refused: list[str] = []
@@ -503,6 +542,11 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
     phrase_files = sorted(phrase_dir.rglob("*.json")) if phrase_dir.is_dir() else []
     for path in sorted((*config.vault.rglob("*.md"), *phrase_files)):
         if ".git" in path.parts:
+            continue
+        if path.relative_to(config.vault).parts[0] == "library":
+            # A library source is read-only once imported (DESIGN 11): rewriting one would
+            # break the recorded hash its rows are refreshed against, and the text the index
+            # holds for it lives in the extraction cache the library step redacts.
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -527,3 +571,190 @@ def _redact_pages(config: Config, compiled: re.Pattern[str]) -> tuple[list[str],
         pagewrite.atomic_write_text(path, redacted)
         changed.append(rel)
     return changed, refused
+
+
+def _redact_library_cache(
+    config: Config, compiled: re.Pattern[str]
+) -> tuple[list[str], list[str], list[str]]:
+    """Redact the pattern in the extracted text the library's caches hold; say what moved.
+
+    The index builds a library document's rows from the extraction cache keyed by the
+    document's import-time content hash and refreshes them only when that hash moves, which
+    a redaction never does - so a secret in a cached chunk keeps answering ``aft search``
+    until the cache is redacted and the rows' recorded hash is dropped, which is what makes
+    the same command's index update rebuild them from the cache (DESIGN 11). Every document
+    a collection manifest lists is walked the way ``index._sync_library`` walks them: its
+    chunks are read from the cache, or extracted from the source when nothing is cached for
+    its hash, and a chunk text that matches is rewritten with the same replacement.
+
+    A cached file is rewritten by redacting the file's own text, so everything the rewrite
+    does not touch - the JSON's shape, the record of where the extraction came from - stands
+    exactly as the import left it. When that would break the file's JSON, or a match the
+    JSON holds escaped survives it, the chunks go through the writer an import uses, which
+    always leaves the file parseable. A document with no cache gets a redacted cache written
+    from its extraction before the update rebuilds it, so the rebuild never extracts the
+    unredacted source. A cache no manifest lists any more is redacted as text too; one whose
+    redaction would break its JSON is refused and named.
+
+    The sources themselves are read-only once imported (DESIGN 11) and are not touched. What
+    returns is the indexed paths (and unlisted cache files) redacted, the cache files refused,
+    and the
+    vault paths of the sources whose own text, or whose extraction for a PDF, still holds a
+    match - removing those words means deleting or re-importing the file.
+    """
+    redacted: list[str] = []
+    refused: list[str] = []
+    sources_matching: list[str] = []
+    drops: list[str] = []
+    seen_caches: list[str] = []
+    refs_dir = config.vault / "references"
+
+    for col_dir in sorted(refs_dir.iterdir()) if refs_dir.is_dir() else ():
+        if not col_dir.is_dir():
+            continue
+        col_file = col_dir / "collection.md"
+        if not col_file.is_file():
+            continue
+        try:
+            col_text = col_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        frontmatter, _, _, _ = page.split_frontmatter(col_text)
+        aft = (frontmatter or {}).get("aft")
+        if not isinstance(aft, dict):
+            continue
+        col_name = aft.get("collection") or col_dir.name
+        files_dict = aft.get("files") or {}
+        if not isinstance(files_dict, dict):
+            continue
+
+        # A derived document is indexed in place of its original (DESIGN 11), so the walk
+        # skips the originals the way `index._sync_library` does: their caches hold no text
+        # the index answers from.
+        derived_targets: set[str] = set()
+        for doc_md in col_dir.glob("*.md"):
+            if doc_md.name == "collection.md":
+                continue
+            try:
+                doc_text = doc_md.read_text(encoding="utf-8")
+                doc_fm, _, _, _ = page.split_frontmatter(doc_text)
+                if doc_fm and doc_fm.get("aft", {}).get("role") == "derived":
+                    for line in doc_text.splitlines():
+                        if "derived-from:" in line:
+                            m = re.search(r"\[\[.*?\|(.*?)\]\]", line)
+                            if m:
+                                derived_targets.add(m.group(1).strip())
+            except OSError:
+                pass
+
+        for rel_path, f_hash in files_dict.items():
+            if rel_path in derived_targets:
+                continue
+            src_file = config.vault / "library" / col_name / rel_path
+            if not src_file.is_file():
+                continue
+            indexed_path = f"library/{col_name}/{rel_path}"
+            cache_file = config.home / "library" / f"{f_hash}.json"
+            seen_caches.append(cache_file.name)
+            chunks = read_cached_extraction(config.home, f_hash)
+            if chunks is None:
+                chunks = extract_document_chunks(src_file)
+            holds_match = any(compiled.search(text) for _, text in chunks)
+            if not holds_match and src_file.suffix.lower() != ".pdf":
+                # The source's own text is what a re-import would extract from, and what a
+                # PDF's bytes only hold through their extraction; a file this program cannot
+                # read as text is not read here either.
+                try:
+                    holds_match = bool(compiled.search(src_file.read_text(encoding="utf-8")))
+                except (OSError, UnicodeDecodeError):
+                    holds_match = False
+            if not holds_match:
+                continue
+            _redact_document_cache(config, compiled, cache_file, f_hash, rel_path, chunks)
+            redacted.append(indexed_path)
+            drops.append(indexed_path)
+            sources_matching.append(indexed_path)
+
+    # A cache no manifest lists any more (an older import of a re-imported or removed
+    # document) answers no search, but it is text afterthought holds, and forgetting reaches
+    # everything afterthought controls (DESIGN 8). The imported-quote record shares the
+    # directory and has its own step.
+    listed = {Path(p).name for p in seen_caches}
+    cache_dir = config.home / "library"
+    if cache_dir.is_dir():
+        for orphan in sorted(cache_dir.glob("*.json")):
+            if orphan.name in listed or orphan.name == propose.VERIFIED_QUOTES_FILE:
+                continue
+            try:
+                raw = orphan.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            scrubbed = compiled.sub(redact.REDACTED, raw)
+            if scrubbed == raw:
+                continue
+            try:
+                json.loads(scrubbed)
+            except json.JSONDecodeError:
+                refused.append(orphan.relative_to(config.home).as_posix())
+                continue
+            pagewrite.atomic_write_text(orphan, scrubbed)
+            redacted.append(orphan.relative_to(config.home).as_posix())
+
+    if drops:
+        # The recorded hash is what the update's rebuild keys on (`index._sync_library`), so
+        # the rows and their hash go now: the words leave the index with the cache that held
+        # them, and the write pass the same command runs next builds the rows again from the
+        # redacted cache.
+        with index._writing(config) as conn:
+            for indexed_path in drops:
+                conn.execute(index._DELETE_BY_PATH[index.LIBRARY], (indexed_path,))
+                conn.execute(index._DROP_HASH, (indexed_path,))
+    return redacted, refused, sources_matching
+
+
+def _redact_document_cache(
+    config: Config,
+    compiled: re.Pattern[str],
+    cache_file: Path,
+    f_hash: str,
+    rel_path: str,
+    chunks: list[tuple[str, str]],
+) -> None:
+    """Rewrite one document's extraction cache with the pattern redacted.
+
+    The file's own text is redacted where that leaves it parseable JSON, which keeps every
+    field the import wrote; whatever still matches, or a redaction that would break the
+    file, goes through the writer an import uses, which always leaves it parseable. Every
+    call ends in a written cache the index reads as redacted chunks.
+    """
+    rewritten = False
+    if cache_file.is_file():
+        try:
+            raw = cache_file.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        scrubbed = compiled.sub(redact.REDACTED, raw)
+        if scrubbed != raw:
+            # A redaction that matched the JSON's own marks would leave a file the index reads
+            # as nothing at all; the chunks then go through the import's writer below, which
+            # always leaves the file parseable.
+            try:
+                json.loads(scrubbed)
+            except json.JSONDecodeError:
+                scrubbed = raw
+            else:
+                cache_file.write_text(scrubbed, encoding="utf-8")
+                rewritten = True
+    remaining = chunks
+    if rewritten:
+        remaining = read_cached_extraction(config.home, f_hash) or []
+    if not rewritten or any(compiled.search(text) for _, text in remaining):
+        cache_extracted_text(
+            config.home,
+            f_hash,
+            rel_path,
+            [
+                (compiled.sub(redact.REDACTED, heading), compiled.sub(redact.REDACTED, text))
+                for heading, text in remaining
+            ],
+        )

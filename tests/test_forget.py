@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import yaml
 
 from aft import (
     capture,
@@ -26,6 +27,7 @@ from aft import (
     index,
     lint,
     model,
+    page,
     pagewrite,
     queue,
     registry,
@@ -36,7 +38,7 @@ from aft import config as configmod
 from aft.config import Config
 from aft.events import SESSION_END, SessionEvent
 from aft.forget import FORGOTTEN_MARKER
-from aft.library import propose
+from aft.library import importing, propose
 from aft.readers import CLAUDE, PI, Entry
 from conftest import make_repo, run_git, spend
 from fakes.model_server import FakeEndpoint
@@ -1743,6 +1745,165 @@ def test_forget_pattern_rewrites_the_vault_under_the_vault_lock(
     monkeypatch.setattr(forget, "_redact_pages", probe)
     assert cli.main(["forget", "pattern", SECRET_PATTERN]) == 0
     assert held == [True], "the pattern redaction rewrote the vault's pages without its lock"
+
+
+def library_note(cfg: Config, tmp_path: Path, text: str) -> tuple[Path, Path]:
+    """Import a one-file library collection whose text is ``text``, and return the read-only
+    source in the vault and the extraction cache file the import wrote for it."""
+    col_dir = tmp_path / "widget_collection"
+    col_dir.mkdir(parents=True)
+    (col_dir / "notes.md").write_text(f"# Notes\n\n{text}\n", encoding="utf-8")
+    manifest_file = tmp_path / "manifest.yaml"
+    manifest_file.write_text(
+        yaml.safe_dump(
+            {
+                "name": "widget-docs",
+                "title": "Widget Documentation",
+                "description": "Widget system documentation and notes",
+                "authority": "reference",
+                "projects": ["widget"],
+                "path": str(col_dir),
+                "files": {"notes.md": "notes"},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    importing.import_collection(manifest_file, config=cfg)
+    index.update(cfg)
+    frontmatter, _, _, _ = page.split_frontmatter(
+        (cfg.vault / "references" / "widget-docs" / "collection.md").read_text(encoding="utf-8")
+    )
+    f_hash = frontmatter["aft"]["files"]["notes.md"]
+    return (
+        cfg.vault / "library" / "widget-docs" / "notes.md",
+        cfg.home / "library" / f"{f_hash}.json",
+    )
+
+
+def test_forget_pattern_redacts_the_library_cache_its_rows_came_from(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A library document's rows are built from its extraction cache and refreshed only when
+    the file's hash moves, which a redaction never does, so the cache itself is what has to be
+    rewritten: the secret leaves the cache and the index, the document's other words still
+    answer, and the read-only source keeps its bytes while being named (DESIGN 11, DESIGN 12)."""
+    cfg = initialized
+    widget_project(cfg)
+    source, cache_file = library_note(
+        cfg,
+        tmp_path,
+        f"rotate the vault key {SECRET} before friday.\n\n## Voltage\n\n"
+        "Always verify battery voltage before start.",
+    )
+    assert pattern_hits(cfg, SECRET_WORD) == {"library/widget-docs/notes.md"}
+    source_bytes = source.read_bytes()
+
+    code = cli.main(["forget", "pattern", SECRET_PATTERN])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    assert pattern_hits(cfg, SECRET_WORD) == set(), "the redacted words are still searchable"
+    assert pattern_hits(cfg, "battery voltage") == {"library/widget-docs/notes.md"}, (
+        "the document's clean rows did not come back from the redacted cache"
+    )
+    cache_text = cache_file.read_text(encoding="utf-8")
+    assert SECRET not in cache_text, "the cache still holds the secret"
+    assert "[redacted]" in cache_text
+    assert source.read_bytes() == source_bytes, "the read-only source was rewritten"
+    assert "library/widget-docs/notes.md" in out
+    assert "deleting or re-importing" in out
+    assert run_git(["status", "--porcelain"], cfg.vault) == ""
+    assert lint.lint_vault(cfg.vault) == []
+
+
+def test_forget_pattern_writes_an_uncached_document_a_redacted_cache_first(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A document with no cache whose extracted text matches gets a redacted cache written
+    before the same command's index update rebuilds its rows, so the rebuild reads the cache
+    and never extracts the unredacted source (DESIGN 11)."""
+    cfg = initialized
+    widget_project(cfg)
+    _, cache_file = library_note(cfg, tmp_path, f"rotate the vault key {SECRET} before friday.")
+    assert cache_file.is_file()
+    cache_file.unlink()
+    index.update(cfg)
+    assert pattern_hits(cfg, SECRET_WORD) == {"library/widget-docs/notes.md"}
+
+    code = cli.main(["forget", "pattern", SECRET_PATTERN])
+    assert code == 0
+
+    assert cache_file.is_file(), "the rebuild had no redacted cache to read"
+    cache_text = cache_file.read_text(encoding="utf-8")
+    assert SECRET not in cache_text
+    assert "[redacted]" in cache_text
+    assert pattern_hits(cfg, SECRET_WORD) == set(), "the rebuild extracted the unredacted source"
+
+
+def test_forget_pattern_rewrites_through_the_writer_a_cache_its_text_redaction_would_break(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A pattern that reaches a cache file's own JSON marks cannot be redacted as text, so the
+    chunks go through the writer an import uses: the file stays parseable, its chunks hold
+    no match, and the rows come back from it."""
+    cfg = initialized
+    widget_project(cfg)
+    _, cache_file = library_note(
+        cfg, tmp_path, f'He said "rotate the vault key {SECRET} before friday".'
+    )
+
+    code = cli.main(["forget", "pattern", '"'])
+    assert code == 0
+
+    f_hash = cache_file.stem
+    chunks = importing.read_cached_extraction(cfg.home, f_hash)
+    assert chunks, "the cache no longer parses"
+    assert all('"' not in text for _, text in chunks), "a chunk still holds the match"
+    assert pattern_hits(cfg, "rotate") == {"library/widget-docs/notes.md"}, (
+        "the document's rows did not come back from the rewritten cache"
+    )
+
+
+def test_forget_pattern_redacts_a_cache_no_manifest_lists(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A cache left from an older import answers no search, but forgetting reaches everything
+    afterthought holds (DESIGN 8), so an unlisted cache file is redacted as well."""
+    cfg = initialized
+    widget_project(cfg)
+    library_note(cfg, tmp_path, "Always verify battery voltage before start.")
+    orphan = cfg.home / "library" / ("0" * 64 + ".json")
+    orphan.write_text(
+        json.dumps({"chunks": [{"heading": "", "text": f"old key {SECRET}"}]}), encoding="utf-8"
+    )
+
+    code = cli.main(["forget", "pattern", SECRET_PATTERN])
+    assert code == 0
+
+    held = orphan.read_text(encoding="utf-8")
+    assert SECRET not in held
+    assert "[redacted]" in held
+    json.loads(held)
+
+
+def test_forget_pattern_touches_no_cache_when_nothing_in_the_library_matches(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A pattern nothing in the library holds writes no cache file and drops no rows: the
+    caches stand exactly as the import left them."""
+    cfg = initialized
+    widget_project(cfg)
+    _, cache_file = library_note(cfg, tmp_path, f"rotate the vault key {SECRET} before friday.")
+    before = cache_file.read_bytes()
+
+    code = cli.main(["forget", "pattern", "zzz nothing matches this zzz"])
+    assert code == 0
+    out = capsys.readouterr().out
+
+    assert cache_file.read_bytes() == before
+    assert "library cache file(s)" not in out
+    assert "library source file(s)" not in out
 
 
 def factless_part(vault: Path, rel: str, project_id: str) -> None:
