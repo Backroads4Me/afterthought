@@ -737,8 +737,8 @@ weekday dates the query only after a cue (on, last, past, this, since, before, u
 window lands ahead of now. The window filters evidence by each entry's moment and digests by
 the date their file name carries; pages answer whatever the window, and a query left with only
 time words lists the window's digests newest first, then its evidence. The `aft search`
-command then orders its top 30 candidates with the model when it can: the model ranks them by how well each answers the question, its order
-comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
+command then orders its top 30 candidates with the model when it can: the model ranks them
+by how well each answers the question, its order comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
 (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer late or
 unusable, or the day's search token budget spent), the search keeps the BM25 order. Every other
 caller, the memory block included, uses the BM25 order alone.
