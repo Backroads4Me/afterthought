@@ -1576,6 +1576,66 @@ def test_search_since_temporal_filtering(populated_vault: Config) -> None:
     assert not non_matching
 
 
+def test_digest_rows_carry_their_file_date(populated_vault: Config) -> None:
+    """A digest row's time is the UTC start of the date its file name carries (M13)."""
+    search.search(populated_vault, "SPI baudrate", all_projects=True)
+    conn = sqlite3.connect(populated_vault.home / index.INDEX_NAME)
+    try:
+        times = dict(conn.execute("SELECT path, time FROM digests").fetchall())
+    finally:
+        conn.close()
+    assert times
+    assert set(times.values()) == {"2026-09-28T00:00:00+00:00"}
+
+    # A digest file whose name carries no date keeps no time.
+    (populated_vault.vault / "digests/widget/2026/09/notes.md").write_text(
+        "# Notes\n\nUndated digest prose.\n", encoding="utf-8"
+    )
+    search.search(populated_vault, "undated digest prose", all_projects=True)
+    conn = sqlite3.connect(populated_vault.home / index.INDEX_NAME)
+    try:
+        undated = conn.execute("SELECT time FROM digests WHERE path LIKE '%/notes.md'").fetchone()
+    finally:
+        conn.close()
+    assert undated is not None and undated[0] == ""
+
+
+def test_window_filters_digests_by_their_file_date(populated_vault: Config) -> None:
+    """A time window admits a digest dated inside it and leaves out one outside (M13)."""
+    now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    hits_in = search.search(populated_vault, "SPI baudrate 2026-09-28", all_projects=True, now=now)
+    assert any(hit.collection == "digests" for hit in hits_in)
+
+    hits_out = search.search(
+        populated_vault, "SPI baudrate 2026-09-01 to 2026-09-20", all_projects=True, now=now
+    )
+    assert not any(hit.collection == "digests" for hit in hits_out)
+
+
+def test_pages_answer_whatever_the_window(populated_vault: Config) -> None:
+    """Pages carry no time, so a window leaves a matching page answering (M13)."""
+    now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    hits = search.search(
+        populated_vault, "titanium bolt 2026-09-01 to 2026-09-20", all_projects=True, now=now
+    )
+    assert any(hit.collection == "pages" for hit in hits)
+
+
+def test_time_only_query_lists_window_digests_newest_first(populated_vault: Config) -> None:
+    """A query that is only a time expression lists the window's digests first (M13)."""
+    (populated_vault.vault / "digests/widget/2026/09/2026-09-29-claude-s-widget-2.md").write_text(
+        "# Later\n\nA later digest section.\n", encoding="utf-8"
+    )
+    now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+    hits = search.search(populated_vault, "since 2026-09-28", all_projects=True, now=now)
+    digest_hits = [hit for hit in hits if hit.collection == "digests"]
+    evidence_hits = [hit for hit in hits if hit.collection == "evidence"]
+    assert digest_hits and evidence_hits
+    assert digest_hits[0].path == "digests/widget/2026/09/2026-09-29-claude-s-widget-2.md"
+    assert hits.index(digest_hits[-1]) < hits.index(evidence_hits[0])
+    assert all(hit.rank == 0.0 for hit in hits)
+
+
 def test_search_command_temporal_cli(populated_vault: Config, capsys) -> None:
     """search_command strips temporal expressions and formats results properly."""
     now = datetime(2026, 9, 28, 14, 0, tzinfo=UTC)
