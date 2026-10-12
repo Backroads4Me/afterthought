@@ -1903,6 +1903,45 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `dream.interval_minutes` check. Tests in `tests/test_config.py`: zero and a negative value
   for each key are refused with the key named; the defaults load. Review checkpoint: no.
 
+- **T40 The Claude reader skips sidechain records** (ruling 2026-10-12; ROADMAP finding L5).
+  A Claude Code record marked `"isSidechain": true` is a subagent's conversation, and its
+  `user` messages are the main agent's prompts, not the user's words; read as user turns they
+  could ground a `[stated]` fact the user never said (R2). Today's Claude Code writes
+  subagents to `subagents/agent-*.jsonl`, which capture never reads (the sweep globs
+  `*/*.jsonl`), and none of the user's 1,623 main transcripts holds an inline sidechain
+  record, so this guards against a layout older or future versions use.
+  - **Reader:** `aft.readers.claude` yields no entry for a record whose `isSidechain` is
+    true; every other record reads as today.
+  - **Tests** (`tests/test_readers.py` or the Claude reader's tests): a transcript holding a
+    sidechain `user` and `assistant` record yields neither; the main records around them read
+    unchanged; capture's sweep does not pick up a `subagents/agent-*.jsonl` file. Review
+    checkpoint: no.
+
+- **M15 `aft forget pattern` reaches the library's extracted text** (ruling 2026-10-12;
+  ROADMAP finding M15; DESIGN 8 and 11). Library rows are built from the extraction cache
+  `<home>/library/<hash>.json`, keyed by the import-time hash, and refreshed only when a
+  collection's recorded file hash changes, which a redaction never does; so a redacted secret
+  keeps answering `aft search`. The cache keeps it too, and today's rewrite of library `*.md`
+  sources breaks their recorded hashes although sources are read-only once imported.
+  - **Cache:** `forget pattern` redacts every chunk text in `<home>/library/*.json` with the
+    same replacement; a rewrite that would no longer parse as JSON is refused and named.
+  - **Index:** each library document whose cached text changed has its rows and recorded hash
+    dropped, so the same command's index update rebuilds them from the redacted cache. A
+    document with no cache whose extracted text matches gets a redacted cache written first,
+    so the rebuild never extracts the unredacted source.
+  - **Sources stay read-only:** files under `<vault>/library/` are no longer rewritten. The
+    command's report names each library source whose text (read directly, or through its
+    extraction for a PDF) still holds a match, and says that removing it means deleting or
+    re-importing that file.
+  - **Present tense:** DESIGN 8's `aft forget pattern` bullet (it reaches the library's
+    extracted text and search, and names library sources that still hold a match), DESIGN 11
+    where it describes the cache, `docs/commands.md`.
+  - **Tests:** a pattern found in a cached library chunk no longer answers `aft search` after
+    `forget pattern`; the cache holds `[redacted]`; a library source file is unchanged and
+    named in the report; an uncached PDF or text document gets a redacted cache before the
+    rebuild; a redaction that would break a cache file's JSON is refused and named. Review
+    checkpoint: yes (privacy: forget; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
