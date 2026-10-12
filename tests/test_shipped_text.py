@@ -23,6 +23,10 @@ TEXT_SUFFIXES = {".py", ".md", ".json", ".ts", ".toml"}
 
 NAMES = ("Ted", "firstmate", "Backroads4Me", "RV-C", "Victron")
 
+#: The project's own address, which the README's install commands need. It names where the
+#: code lives, not whose memory it keeps, so it is the one place the account may appear.
+REPOSITORY = "github.com/Backroads4Me/afterthought"
+
 
 def shipped_text() -> list[Path]:
     """Every text file an install carries, and nothing else.
@@ -44,6 +48,7 @@ def test_shipped_text_names_no_one() -> None:
     for path in shipped_text():
         lines = path.read_text(encoding="utf-8").splitlines()
         for number, line in enumerate(lines, start=1):
+            line = line.replace(REPOSITORY, "")
             for name in NAMES:
                 if re.search(rf"\b{re.escape(name)}\b", line):
                     hits.append(f"{path.relative_to(REPO)}:{number} names {name!r}")

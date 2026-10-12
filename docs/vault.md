@@ -129,9 +129,9 @@ digests (`aft redigest` rebuilds one from its evidence), then `aft resume`.
 
 ## Forgetting
 
-- `aft forget session <id>` removes one session from everything afterthought controls and
+- `aft forget session <id>` removes one session from everything Afterthought controls and
   withdraws the memory lines that rested only on it.
-- `aft forget pattern <regex>` redacts text everywhere afterthought copied it.
+- `aft forget pattern <regex>` redacts text everywhere Afterthought copied it.
 - `aft project forget <slug>` removes a project from the registry and leaves its pages for
   you to delete.
 

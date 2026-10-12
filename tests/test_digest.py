@@ -302,7 +302,7 @@ def answer(
     }
 
 
-def invented(statement: str = "Ted prefers rust for every hook.", quote: str = "rust") -> dict:
+def invented(statement: str = "Sam prefers rust for every hook.", quote: str = "rust") -> dict:
     """A fact whose quote is not the words of any entry that could carry it."""
     return said(statement=statement, quote=quote)
 
@@ -474,7 +474,7 @@ def test_a_fabricated_quote_is_dropped_and_the_page_says_why(session: Session):
         "Capture runs at session end, not per turn."
     ]
     refused = frontmatter(session.cfg, wrote.path)["aft"]["dropped"][0]
-    assert refused["statement"] == "Ted prefers rust for every hook."
+    assert refused["statement"] == "Sam prefers rust for every hook."
     assert refused["reason"] == "the quote is not found in entry e1"
     assert "rust" not in body(session.cfg, wrote.path)
 
@@ -1352,7 +1352,7 @@ def test_every_refusal_is_readable_on_the_page(session: Session):
         "the quote is not found in entry e2",
     ]
     assert [fact["statement"] for fact in dropped] == [
-        "Ted prefers rust for every hook.",
+        "Sam prefers rust for every hook.",
         "Capture runs at session end, not per turn.",
     ]
     assert [fact["entry"] for fact in dropped] == ["e1", "e2"]
@@ -1502,7 +1502,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
         session,
         answer(
             said(
-                statement="Ted prefers a plain hyphen.",
+                statement="Sam prefers a plain hyphen.",
                 quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
@@ -1513,7 +1513,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
     kept = frontmatter(session.cfg, wrote.path)["aft"]["facts"]
     assert kept == [
         {
-            "statement": "Ted prefers a plain hyphen.",
+            "statement": "Sam prefers a plain hyphen.",
             "kind": "preference",
             "source": "stated",
             "entry": "e1",
@@ -1521,7 +1521,7 @@ def test_a_global_fact_keeps_its_scope_and_its_place_on_the_page(session: Sessio
             "term": "long",
         }
     ]
-    assert "Ted prefers a plain hyphen. [stated]" in body(session.cfg, wrote.path)
+    assert "Sam prefers a plain hyphen. [stated]" in body(session.cfg, wrote.path)
     dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
     assert [fact["statement"] for fact in dropped] == ["The archive keeps its own words."]
 
@@ -1547,7 +1547,7 @@ def test_a_global_fact_that_is_not_stated_carries_the_rule_it_will_be_skipped_fo
                 scope="global",
             ),
             said(
-                statement="Ted prefers a plain hyphen.",
+                statement="Sam prefers a plain hyphen.",
                 quote="Capture runs at session end.",
                 kind="preference",
                 scope="global",
@@ -3959,7 +3959,7 @@ def test_a_paraphrased_report_whose_tokens_the_output_holds_is_observed(session:
     observed_part(
         session.transcript,
         session.cwd,
-        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "curl: (7) Failed to connect to 10.0.0.5 port 8080: Connection refused",
         "The endpoint on port 8080 refused the connection, so the run stopped.",
     )
     wrote = digest_once(
@@ -3985,7 +3985,7 @@ def test_a_report_with_a_token_the_output_does_not_hold_is_inferred(session: Ses
     observed_part(
         session.transcript,
         session.cwd,
-        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "curl: (7) Failed to connect to 10.0.0.5 port 8080: Connection refused",
         "Connection refused. The config pins port 8081 there.",
     )
     wrote = digest_once(
@@ -4011,7 +4011,7 @@ def test_a_report_without_a_key_token_is_inferred(session: Session):
     observed_part(
         session.transcript,
         session.cwd,
-        "curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused",
+        "curl: (7) Failed to connect to 10.0.0.5 port 8080: Connection refused",
         "Connection refused, so I stopped the run.",
     )
     wrote = digest_once(
@@ -4279,9 +4279,7 @@ def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
     assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-15.") == [
         "2026-10-05"
     ]
-    assert digest.ungrounded("Host is 192.168.100.200.", "Host is 192.168.100.133.") == [
-        "192.168.100.200"
-    ]
+    assert digest.ungrounded("Host is 10.0.0.6.", "Host is 10.0.0.5.") == ["10.0.0.6"]
     assert digest.ungrounded("Now on version 1.26.9.", "Now on version 1.26.4.") == ["1.26.9"]
     assert digest.ungrounded("The limit is 300000.", "The limit is 30000.") == ["300000"]
     # An exact hold still grounds a token, and an all-letter word still matches on its
@@ -4369,7 +4367,7 @@ def test_holds_tokens_demands_a_verbatim_hold_of_every_key_token():
     """BUILD-PLAN F77: a token stands when its exact text, case included, appears in the
     output as a token of its own; a near miss - a wrong port - does not stand, and a
     statement with no key token is held by nothing."""
-    output = ["curl: (7) Failed to connect to 192.168.100.133 port 8080: Connection refused"]
+    output = ["curl: (7) Failed to connect to 10.0.0.5 port 8080: Connection refused"]
     assert digest.holds_tokens("The endpoint on port 8080 refused.", output)
     assert not digest.holds_tokens("The endpoint on port 8081 refused.", output)
     assert not digest.holds_tokens("Paused until 2026-10-05.", ["Paused until 2026-10-15."])

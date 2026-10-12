@@ -29,18 +29,18 @@ NOW = datetime(2026, 6, 30, 14, 22, 8, 517000, tzinfo=UTC)
 # that capture session's id, working directory and transcript path.
 CLAUDE_ID = "39eaeb4c-e03d-4847-b937-ae5e79107d95"
 CLAUDE_CWD = Path(
-    "/tmp/claude-1000/-home-ted-src-afterthought"
+    "/tmp/claude-1000/-home-user-src-afterthought"
     "/75ecdcb9-0baf-4177-85c5-d35ca9eb59b2/scratchpad/hookcap/work"
 )
 CLAUDE_TRANSCRIPT = Path(
-    "/home/ted/.claude/projects"
-    "/-tmp-claude-1000--home-ted-src-afterthought"
+    "/home/user/.claude/projects"
+    "/-tmp-claude-1000--home-user-src-afterthought"
     "-75ecdcb9-0baf-4177-85c5-d35ca9eb59b2-scratchpad-hookcap-work"
     f"/{CLAUDE_ID}.jsonl"
 )
 PI_ID = "019f17a3-2b64-7a1f-9c2e-4f6d8a1b3c5d"
-PI_CWD = Path("/home/ted/src/widget")
-PI_SESSION_DIR = "/home/ted/.pi/agent/sessions/--home-ted-src-widget--"
+PI_CWD = Path("/home/user/src/widget")
+PI_SESSION_DIR = "/home/user/.pi/agent/sessions/--home-user-src-widget--"
 PI_TRANSCRIPT = Path(f"{PI_SESSION_DIR}/2026-06-30T14-22-08-517Z_{PI_ID}.jsonl")
 
 # fixture, agent, the event name that agent fires, the event afterthought must build
