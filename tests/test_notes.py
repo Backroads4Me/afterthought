@@ -215,6 +215,26 @@ def test_replace_rests_on_the_note_s_own_quotes(widget):
     assert lines[new + 1].endswith("superseded 2026-10-05 by [^s2]")
 
 
+@pytest.mark.parametrize(
+    ("statement", "word"),
+    [
+        ("The daemon listens on 4500.", "4500"),
+        ("Per Rando the daemon listens on 9000.", "Rando"),
+    ],
+)
+def test_replace_with_a_word_the_quotes_do_not_say_is_refused(widget, statement, word):
+    """R2 holds for a replacement: a name or number the note's quotes do not say refuses
+    the settle, and nothing is written and nothing is committed (T41)."""
+    note = the_note(widget)
+    before = page_text(widget)
+    head = run_git(["rev-parse", "HEAD"], widget.vault)
+    with pytest.raises(notes.NoteError, match=f"{word} that none of the note's quotes says"):
+        notes.settle(widget, note.where, notes.REPLACE, statement, now=NOW)
+    assert page_text(widget) == before
+    assert not (widget.vault / "archive" / OVERVIEW).exists()
+    assert run_git(["rev-parse", "HEAD"], widget.vault) == head
+
+
 def test_replace_is_observed_when_no_quote_is_the_user_s(widget):
     project = Registry.load(widget.registry_path).by_slug("widget")
     evidence.store(
