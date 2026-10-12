@@ -8,6 +8,9 @@ from aft.temporal import parse_temporal
 
 FIXED_NOW = datetime(2026, 10, 6, 14, 30, 0, tzinfo=UTC)  # Tuesday
 
+#: A window's end never lands ahead of now (BUILD-PLAN M13), so an expression that ends
+#: today ends at FIXED_NOW itself.
+
 
 def test_empty_query():
     tc = parse_temporal("", now=FIXED_NOW)
@@ -34,13 +37,13 @@ def test_plain_query_no_temporal():
 def test_relative_day_today():
     tc = parse_temporal("today", now=FIXED_NOW)
     assert tc.start == datetime(2026, 10, 6, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.end == FIXED_NOW
     assert tc.stripped_query == ""
     assert tc.matched_text == "today"
 
     tc_with_query = parse_temporal("sqlite errors today", now=FIXED_NOW)
     assert tc_with_query.start == datetime(2026, 10, 6, 0, 0, 0, tzinfo=UTC)
-    assert tc_with_query.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_with_query.end == FIXED_NOW
     assert tc_with_query.stripped_query == "sqlite errors"
     assert tc_with_query.matched_text == "today"
 
@@ -60,13 +63,13 @@ def test_relative_day_yesterday():
 def test_relative_modifiers_days():
     tc = parse_temporal("last 3 days", now=FIXED_NOW)
     assert tc.start == datetime(2026, 10, 3, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.end == FIXED_NOW
     assert tc.stripped_query == ""
     assert tc.matched_text == "last 3 days"
 
     tc2 = parse_temporal("disk failure past 3 days in cluster", now=FIXED_NOW)
     assert tc2.start == datetime(2026, 10, 3, 0, 0, 0, tzinfo=UTC)
-    assert tc2.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc2.end == FIXED_NOW
     assert tc2.stripped_query == "disk failure in cluster"
     assert tc2.matched_text == "past 3 days"
 
@@ -74,13 +77,13 @@ def test_relative_modifiers_days():
 def test_relative_modifiers_prepositions():
     tc = parse_temporal("errors in the last 3 days", now=FIXED_NOW)
     assert tc.start == datetime(2026, 10, 3, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.end == FIXED_NOW
     assert tc.stripped_query == "errors"
     assert tc.matched_text == "in the last 3 days"
 
     tc2 = parse_temporal("over the past week metrics", now=FIXED_NOW)
     assert tc2.start == datetime(2026, 9, 29, 0, 0, 0, tzinfo=UTC)
-    assert tc2.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc2.end == FIXED_NOW
     assert tc2.stripped_query == "metrics"
     assert tc2.matched_text == "over the past week"
 
@@ -88,13 +91,13 @@ def test_relative_modifiers_prepositions():
 def test_relative_modifiers_weeks():
     tc = parse_temporal("past week", now=FIXED_NOW)
     assert tc.start == datetime(2026, 9, 29, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.end == FIXED_NOW
     assert tc.stripped_query == ""
     assert tc.matched_text == "past week"
 
     tc2 = parse_temporal("previous 2 weeks", now=FIXED_NOW)
     assert tc2.start == datetime(2026, 9, 22, 0, 0, 0, tzinfo=UTC)
-    assert tc2.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc2.end == FIXED_NOW
     assert tc2.stripped_query == ""
 
 
@@ -102,31 +105,31 @@ def test_relative_modifiers_this_week_month_year():
     # 2026-10-06 is a Tuesday; Monday is 2026-10-05, Sunday is 2026-10-11
     tc_week = parse_temporal("this week", now=FIXED_NOW)
     assert tc_week.start == datetime(2026, 10, 5, 0, 0, 0, tzinfo=UTC)
-    assert tc_week.end == datetime(2026, 10, 11, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_week.end == FIXED_NOW
 
     tc_month = parse_temporal("this month", now=FIXED_NOW)
     assert tc_month.start == datetime(2026, 10, 1, 0, 0, 0, tzinfo=UTC)
-    assert tc_month.end == datetime(2026, 10, 31, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_month.end == FIXED_NOW
 
     tc_year = parse_temporal("this year", now=FIXED_NOW)
     assert tc_year.start == datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
-    assert tc_year.end == datetime(2026, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_year.end == FIXED_NOW
 
 
 def test_relative_modifiers_months_years():
     tc_month = parse_temporal("last 2 months", now=FIXED_NOW)
     assert tc_month.start == datetime(2026, 8, 6, 0, 0, 0, tzinfo=UTC)
-    assert tc_month.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_month.end == FIXED_NOW
 
     tc_year = parse_temporal("past 1 year", now=FIXED_NOW)
     assert tc_year.start == datetime(2025, 10, 6, 0, 0, 0, tzinfo=UTC)
-    assert tc_year.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_year.end == FIXED_NOW
 
 
 def test_word_numbers():
     tc = parse_temporal("last two days", now=FIXED_NOW)
     assert tc.start == datetime(2026, 10, 4, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.end == FIXED_NOW
 
 
 def test_iso_dates_day():
@@ -205,16 +208,76 @@ def test_before_and_until_expressions():
     assert tc_yest.end == datetime(2026, 10, 5, 23, 59, 59, 999999, tzinfo=UTC)
 
 
-def test_standalone_weekday():
-    # 2026-10-06 is Tuesday; "Tuesday" alone refers to 7 days ago
-    tc = parse_temporal("Tuesday", now=FIXED_NOW)
-    assert tc.start == datetime(2026, 9, 29, 0, 0, 0, tzinfo=UTC)
-    assert tc.end == datetime(2026, 9, 29, 23, 59, 59, 999999, tzinfo=UTC)
+def test_bare_weekday_is_a_search_word():
+    """A weekday without a cue stays a search word and sets no window (BUILD-PLAN M13)."""
+    for query in ("Tuesday", "sun microsystems", "sat solver", "wed to the schema"):
+        tc = parse_temporal(query, now=FIXED_NOW)
+        assert tc.start is None
+        assert tc.end is None
+        assert tc.stripped_query == query
+        assert tc.matched_text == ""
 
-    # Monday (yesterday)
-    tc_mon = parse_temporal("Monday", now=FIXED_NOW)
-    assert tc_mon.start == datetime(2026, 10, 5, 0, 0, 0, tzinfo=UTC)
-    assert tc_mon.end == datetime(2026, 10, 5, 23, 59, 59, 999999, tzinfo=UTC)
+
+def test_cued_weekday_sets_one_day():
+    """on/last/this <weekday> set that one day and leave with their words."""
+    # 2026-10-06 is a Tuesday; the most recent past Friday is 2026-10-02.
+    tc = parse_temporal("on friday", now=FIXED_NOW)
+    assert tc.start == datetime(2026, 10, 2, 0, 0, 0, tzinfo=UTC)
+    assert tc.end == datetime(2026, 10, 2, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.stripped_query == ""
+    assert tc.matched_text == "on friday"
+
+    tc_word = parse_temporal("deploy on fri morning", now=FIXED_NOW)
+    assert tc_word.start == datetime(2026, 10, 2, 0, 0, 0, tzinfo=UTC)
+    assert tc_word.stripped_query == "deploy morning"
+    assert tc_word.matched_text == "on fri"
+
+    # "last tuesday" said on a Tuesday is the Tuesday a week ago.
+    tc_last = parse_temporal("last tuesday", now=FIXED_NOW)
+    assert tc_last.start == datetime(2026, 9, 29, 0, 0, 0, tzinfo=UTC)
+    assert tc_last.end == datetime(2026, 9, 29, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_last.stripped_query == ""
+
+    # "this tuesday" said on a Tuesday is today, and its end never lands ahead of now.
+    tc_this = parse_temporal("this tuesday", now=FIXED_NOW)
+    assert tc_this.start == datetime(2026, 10, 6, 0, 0, 0, tzinfo=UTC)
+    assert tc_this.end == FIXED_NOW
+    assert tc_this.stripped_query == ""
+
+
+def test_cued_weekday_before_until_sets_an_end():
+    """before/until <weekday> set the end the way before/until <date> does."""
+    tc = parse_temporal("before friday", now=FIXED_NOW)
+    assert tc.start is None
+    assert tc.end == datetime(2026, 10, 2, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.stripped_query == ""
+    assert tc.matched_text == "before friday"
+
+    tc_words = parse_temporal("rotate key before friday", now=FIXED_NOW)
+    assert tc_words.start is None
+    assert tc_words.end == datetime(2026, 10, 2, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc_words.stripped_query == "rotate key"
+    assert tc_words.matched_text == "before friday"
+
+
+def test_this_weekday_ahead_resolves_to_the_past():
+    # 2026-10-05 is a Monday; "this friday" is that week's Friday, four days ahead, so
+    # the window moves back to the most recent past Friday (BUILD-PLAN M13).
+    monday = datetime(2026, 10, 5, 9, 0, 0, tzinfo=UTC)
+    tc = parse_temporal("this friday", now=monday)
+    assert tc.start == datetime(2026, 10, 2, 0, 0, 0, tzinfo=UTC)
+    assert tc.end == datetime(2026, 10, 2, 23, 59, 59, 999999, tzinfo=UTC)
+    assert tc.stripped_query == ""
+    assert tc.matched_text == "this friday"
+
+
+def test_since_weekday_abbreviation():
+    # 2026-10-06 is a Tuesday; the most recent past Monday is 2026-10-05.
+    tc = parse_temporal("since mon", now=FIXED_NOW)
+    assert tc.start == datetime(2026, 10, 5, 0, 0, 0, tzinfo=UTC)
+    assert tc.end is None
+    assert tc.stripped_query == ""
+    assert tc.matched_text == "since mon"
 
 
 def test_default_now_is_used():

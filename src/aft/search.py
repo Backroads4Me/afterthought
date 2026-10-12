@@ -108,8 +108,11 @@ FILLER_WORDS = frozenset(
     ).split()
 )
 
-#: The collections whose rows carry an explicit timestamp in the identity time column.
-COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE,)
+#: The collections whose rows carry an explicit timestamp in the identity time column:
+#: evidence an entry's own moment, a digest the UTC start of the date its file name carries
+#: (BUILD-PLAN M13). A time window filters these collections and no other; pages and
+#: reports carry no time and answer whatever the window.
+COLLECTIONS_WITH_TIMESTAMPS: tuple[str, ...] = (index.EVIDENCE, index.DIGESTS)
 
 #: The column a hit's snippet is drawn from: the row's own body text, never the phrases
 #: column (BUILD-PLAN F85) - a phrase is another wording of the row, and the snippet shows
@@ -240,6 +243,10 @@ def _ask(
     row whose score is within 10% of its own. Evidence entries are collapsed per session so a
     session returns at most its best-ranked hit. The query's surviving words join with OR, so
     a row holding more of the words scores higher by BM25's own sum.
+
+    A time window filters the collections whose rows carry a time: evidence by its entry's
+    moment, digests by the date their file name carries (BUILD-PLAN M13); the rest answer
+    whatever the window.
     """
     tc = parse_temporal(query, now=now)
     terms = _to_fts5_terms(tc.stripped_query) if tc.stripped_query else []
@@ -259,6 +266,62 @@ def _ask(
     return _query_collections(
         conn, collections, fts5_query, time_clauses, time_params, narrow_id, tier0_id, limit
     )
+
+
+def _body_snippet(body: str) -> str:
+    """A row's opening as its snippet: a windowed listing has no match to center on."""
+    words = body.split()
+    return " ".join(words[:16]) + ("..." if len(words) > 16 else "")
+
+
+def _window_rows(
+    conn: sqlite3.Connection,
+    collections: list[str],
+    tc: TemporalConstraint,
+    narrow_id: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """A time-only query's rows: the window's digests, then its evidence, newest first.
+
+    With no words left there is no BM25 order to rank by (BUILD-PLAN M13), so each
+    timestamped collection answers its window's rows in time order and the merged list
+    keeps that order: digests first, then evidence. A collection whose rows carry no time
+    (pages, reports) cannot answer a window and is absent by construction.
+    """
+    bounds: list[str] = []
+    params: list[str] = []
+    if tc.start is not None:
+        bounds.append("time >= ?")
+        params.append(tc.start.isoformat())
+    if tc.end is not None:
+        bounds.append("time <= ?")
+        params.append(tc.end.isoformat())
+    time_filter = f" AND {' AND '.join(bounds)}" if bounds else ""
+    rows: list[dict[str, Any]] = []
+    for col in collections:
+        if col not in COLLECTIONS_WITH_TIMESTAMPS:
+            continue
+        clause, extra = _scope(col, narrow_id)
+        keep = conn.execute(
+            f"SELECT path, description, heading, body, project_id, session_id FROM {col}"
+            f" WHERE 1=1{clause}{time_filter}"
+            f" ORDER BY time DESC, rowid DESC LIMIT ?",
+            (*extra, *params, limit),
+        ).fetchall()
+        rows.extend(
+            {
+                "collection": col,
+                "path": row["path"],
+                "description": row["description"],
+                "heading": row["heading"],
+                "snippet": _body_snippet(row["body"]),
+                "rank": 0.0,
+                "project_id": row["project_id"],
+                "session_id": row["session_id"],
+            }
+            for row in keep
+        )
+    return rows
 
 
 def search(
@@ -287,6 +350,12 @@ def search(
     session; ``project`` and ``current`` cannot be given together, and an unknown slug in
     either is an error. ``all_projects`` is accepted and changes nothing, since the default
     already reaches every project.
+
+    Time words in the query set a window that filters the collections whose rows carry a
+    time (BUILD-PLAN M13): evidence by its entry's moment, digests by the date their file
+    name carries; pages carry no time and answer whatever the window. A query whose words
+    are all time words lists the window's digests newest first, then its evidence, cut to
+    ``limit``, with no BM25 order and no rerank.
 
     With ``rerank`` the candidate pool is fetched wider (30 when the limit is smaller)
     and the configured model orders it by how well each candidate answers the question;
@@ -412,10 +481,33 @@ def search(
         if not active_collections:
             return []
 
-        pool = max(limit, RERANK_CANDIDATES) if rerank else limit
-        rows = _ask(conn, active_collections, query, narrow_id, tier0_id, pool, now=now)
-
         slugs = {proj.id: proj.slug for proj in registry.projects}
+        if terms:
+            pool = max(limit, RERANK_CANDIDATES) if rerank else limit
+            rows = _ask(conn, active_collections, query, narrow_id, tier0_id, pool, now=now)
+        else:
+            # The query is only a time expression (BUILD-PLAN M13): no words are left to
+            # rank, so the window's digests answer first, then its evidence, each newest
+            # first, with no BM25 order and no rerank call.
+            rows = _window_rows(conn, active_collections, tc, narrow_id, limit * 20)
+            listed: list[Hit] = []
+            seen: set[str] = set()
+            for row in rows:
+                # A digest answers once however many sections it holds, and a session's
+                # evidence once however many entries it holds, as in a ranked search.
+                key = (
+                    f"session:{row['session_id']}"
+                    if _is_raw_evidence(row["collection"], row["path"]) and row["session_id"]
+                    else row["path"]
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                listed.append(_hit_of_row(row, slugs))
+                if len(listed) >= limit:
+                    break
+            return listed
+
         seen_paths: set[str] = set()
         seen_evidence_sessions: set[str] = set()
         hits: list[Hit] = []
@@ -439,20 +531,7 @@ def search(
                     continue
             seen_paths.add(path_val)
 
-            desc = " ".join((row["description"] or "").split())
-            snip = " ".join((row["snippet"] or "").split())
-
-            hits.append(
-                Hit(
-                    path=path_val,
-                    description=desc,
-                    snippet=snip,
-                    collection=row["collection"],
-                    heading=row["heading"] or "",
-                    project=_project_name(row["project_id"], row["collection"], slugs),
-                    rank=float(row["rank"]),
-                )
-            )
+            hits.append(_hit_of_row(row, slugs))
             if len(hits) >= pool:
                 break
 
@@ -490,6 +569,19 @@ def _project_name(project_id: str | None, collection: str, slugs: dict[str, str]
     if project_id:
         return slugs.get(project_id, "")
     return _UNPROJECTED_NAMES.get(collection, "")
+
+
+def _hit_of_row(row: dict[str, Any], slugs: dict[str, str]) -> Hit:
+    """The Hit one index row answers as, its description and snippet collapsed."""
+    return Hit(
+        path=row["path"],
+        description=" ".join((row["description"] or "").split()),
+        snippet=" ".join((row["snippet"] or "").split()),
+        collection=row["collection"],
+        heading=row["heading"] or "",
+        project=_project_name(row["project_id"], row["collection"], slugs),
+        rank=float(row["rank"]),
+    )
 
 
 def _scope(collection: str, narrow_id: str | None) -> tuple[str, list[Any]]:
