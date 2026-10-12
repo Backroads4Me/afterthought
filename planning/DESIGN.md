@@ -732,7 +732,11 @@ pages' alone (section 10). A query's bare words drop question filler ("a", "the"
 "does" and their kind) and the rest join with OR, so a row holding more of the words scores
 higher; a quoted phrase is kept whole, a query of filler words alone keeps its words as typed,
 and negations (no, not, never) are kept. Words are stemmed by FTS5's Porter tokenizer, so
-"pause" finds "paused". The `aft search` command then orders its top 30 candidates with the
+"pause" finds "paused". A query's time words set a window only when the query says so: a
+weekday dates the query only after a cue (on, last, past, this, since, before, until), and no
+window lands ahead of now. The window filters evidence by each entry's moment and digests by
+the date their file name carries; pages answer whatever the window, and a query left with only
+time words lists the window's digests newest first, then its evidence. The `aft search` command then orders its top 30 candidates with the
 model when it can: the model ranks them by how well each answers the question, its order
 comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
 (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer late or
