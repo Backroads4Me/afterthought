@@ -736,7 +736,7 @@ time words set a window only when the query says so: a weekday dates the query o
 cue (on, last, past, this, since, before, until), and no window lands ahead of now. The window
 filters evidence by each entry's moment and digests by the date their file name carries; pages
 answer whatever the window, and a query left with only time words lists the window's digests
-newest first, then its evidence. The `aft search` command then orders its top 30 candidates
+newest first, then its evidence. The `aft search` command then orders its top 60 candidates
 with the model when it can: the model ranks them by how well each answers the question, its
 order comes first, and the candidates it left out follow in BM25 order. When the model cannot
 answer (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer

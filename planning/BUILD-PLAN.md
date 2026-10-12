@@ -1995,6 +1995,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     refused and the page is unchanged; a grounded replacement is written as today. Review
     checkpoint: yes (L4 applies R2 to a new writer; lead reviews in full).
 
+- **T42 `aft search` reranks its top 60** (ruling 2026-10-12; follows F84). Measured on T38's
+  key with the endpoint idle and the 5 s timeout: a pool of 30 reaches recall@5 0.60 and MRR
+  0.53 (p90 1.56 s); a pool of 60 reaches 0.67 and 0.58 (p90 2.68 s, one fallback in 103);
+  100 adds nothing over 60. `search.RERANK_CANDIDATES` becomes 60, at about 7,600 tokens a
+  search. Present tense: the `search()` docstring and DESIGN 10's "top 30". Tests: a reranked
+  search shows the model a pool of 60 when 60 candidates exist. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
