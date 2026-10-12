@@ -329,12 +329,16 @@ markdown:
 | Withdrawn | Struck through, with `withdrawn <date>` after `aft forget`, `aft settle --withdraw` or `aft review --withdraw` | No |
 
 A conflict or a question waits on the user, and the dream never settles one. `aft settle
-<page>:<line>` does, with the user's choice: `--keep` leaves the line standing,
-`--withdraw` strikes it, and `--replace "<statement>"` supersedes it with a line citing the
-note's own sources, tagged `[stated]` when one of them is the user's words and `[observed]`
-otherwise, and refused when none still verifies or the only ones that do come from worker
-sessions (R1, DESIGN 8). Whichever it is, the note moves
-verbatim to the archive, `needs-you.md` is regenerated, and the change is one commit.
+<page>:<line>` does, with the user's choice: `--keep` leaves the line standing, `--withdraw`
+strikes it, and `--replace "<statement>"` supersedes it with a line citing the note's own
+sources, tagged `[stated]` when one of them is the user's words and `[observed]` otherwise,
+refused when none still verifies or the only ones that do come from worker sessions (R1,
+DESIGN 8), and refused when it names a name or number none of those quotes says (R2).
+Whichever it is, the note moves verbatim to the archive and `needs-you.md` is regenerated in
+one commit. A replacement then makes a second commit that cites the first as the new line's
+own source (`aft://edit/<sha>`, quoted with the statement, as a hand edit is cited) and dates
+the line by the day of the settle, so evidence said before the user decided cannot count as
+newer than the decision; undoing a replacement reverts both, newest first.
 `aft notes` lists the open notes with the quotes behind each, for an agent to explain them.
 
 ### Short-term and long-term memory
