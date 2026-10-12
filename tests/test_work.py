@@ -18,14 +18,14 @@ def queue_event(
     session_id: str = "s1",
     agent: str = CLAUDE,
     kind: str = SESSION_END,
-    transcript: str = "/home/ted/.claude/projects/-home-ted/s1.jsonl",
+    transcript: str = "/home/user/.claude/projects/-home-ted/s1.jsonl",
     at: datetime = NOW,
 ) -> SessionEvent:
     return SessionEvent(
         agent=agent,
         kind=kind,
         session_id=session_id,
-        cwd=Path("/home/ted/dev/app"),
+        cwd=Path("/home/user/dev/app"),
         transcript_path=Path(transcript),
         time=at,
         detail=None,

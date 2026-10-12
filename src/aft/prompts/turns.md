@@ -20,7 +20,7 @@ item labelled question, proposal, request or none.
   including personal tastes ("I prefer matinee showings").
 - rule: a standing instruction for agents from now on ("never push to main").
 - fact: the user states something true about their system, setup or environment that is
-  not obvious from code ("vLLM runs on 192.168.100.133"), or about themselves: interests,
+  not obvious from code ("vLLM runs on 10.0.0.5"), or about themselves: interests,
   hobbies and skills they are learning, activities and events they took part in, things
   they own or bought, plans, people in their life, places, and quantities and dates
   ("I've restored three vintage radios since I started the hobby").

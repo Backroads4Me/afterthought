@@ -90,8 +90,9 @@ EXPORT = "export"
 SYNTHETIC = "synthetic"
 KEY_BACKEND = "key"
 
-# The local endpoint, its model, and what tells it not to think, as the task names them.
-LOCAL_ENDPOINT = "http://192.168.100.133:8080/v1"
+# The local endpoint, its model, and what tells it not to think. The endpoint comes from
+# AFT_EVAL_ENDPOINT when set, so a run names its own server without a flag.
+LOCAL_ENDPOINT = os.environ.get("AFT_EVAL_ENDPOINT", "http://localhost:8000/v1")
 LOCAL_MODEL = "GLM-5.3-Flash"
 LOCAL_EXTRA_BODY = '{"chat_template_kwargs": {"enable_thinking": false}}'
 
@@ -1221,7 +1222,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data", help="the eval data directory (default from AFT_EVAL_DATA)")
     p.add_argument("--backend", choices=BACKENDS, default="local")
     p.add_argument("--variant", default=BASE_VARIANT)
-    p.add_argument("--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint")
+    p.add_argument(
+        "--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint ($AFT_EVAL_ENDPOINT)"
+    )
     p.add_argument("--model", dest="model_name", default=LOCAL_MODEL, help="local backend model")
     p.add_argument(
         "--extra-body", default=LOCAL_EXTRA_BODY, help="local backend extra_body, as JSON"
@@ -1255,7 +1258,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data", help="eval data directory for output reports")
     p.add_argument("--backend", choices=BACKENDS, default="local")
     p.add_argument("--variant", default=BASE_VARIANT)
-    p.add_argument("--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint")
+    p.add_argument(
+        "--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint ($AFT_EVAL_ENDPOINT)"
+    )
     p.add_argument("--model", dest="model_name", default=LOCAL_MODEL, help="local backend model")
     p.add_argument(
         "--extra-body", default=LOCAL_EXTRA_BODY, help="local backend extra_body, as JSON"

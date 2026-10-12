@@ -1,7 +1,7 @@
-# afterthought
+# Afterthought
 
-Shared, evidence-backed memory for coding agents. Claude Code and pi read it when a
-session starts and search it when they need more. A model you choose builds it from your
+Shared, evidence-backed memory for coding agents. [Claude Code](https://code.claude.com/docs)
+and pi read it when a session starts and search it when they need more. A model you choose builds it from your
 past sessions in the background, and nothing becomes memory unless a script can find the
 quote it rests on in what was actually said.
 
@@ -9,7 +9,7 @@ quote it rests on in what was actually said.
 
 Coding agents forget everything between sessions, and the memory features they do have
 depend on the agent deciding to use them, which in practice it mostly does not.
-afterthought works from the agent's lifecycle hooks instead:
+Afterthought works from the agent's lifecycle hooks instead:
 
 - **At session start** the agent is handed a short map of the project: what the last
   session left in flight, the decisions and facts that hold, your preferences, and where
@@ -25,18 +25,19 @@ read it, edit it, and revert any change the tool made.
 
 ## Install
 
-afterthought needs Python 3.11 or later, [uv](https://docs.astral.sh/uv/), git, and an
-OpenAI-compatible model endpoint.
+Afterthought needs Linux, Python 3.11 or later, [uv](https://docs.astral.sh/uv/), git, and an
+OpenAI-compatible model endpoint. Background work runs from a systemd user timer
+(`aft install timer`); elsewhere, run `aft run` from a scheduler of your own.
 
 ```bash
-uv tool install git+<repository URL>
+uv tool install git+https://github.com/Backroads4Me/afterthought
 ```
 
-To work on afterthought itself, install from a checkout instead, so the `aft` command runs
+To work on Afterthought itself, install from a checkout instead, so the `aft` command runs
 your working copy:
 
 ```bash
-git clone <repository URL> afterthought && cd afterthought
+git clone https://github.com/Backroads4Me/afterthought && cd afterthought
 uv tool install --editable .
 ```
 
@@ -48,7 +49,7 @@ uv tool install --editable .
    aft init
    ```
 
-2. Point afterthought at your model. In `~/.afterthought/config.toml`, set `[model]`
+2. Point Afterthought at your model. In `~/.afterthought/config.toml`, set `[model]`
    `endpoint` and `name`. See [configuration](docs/configuration.md).
 
 3. Register the projects you work in. Any directory works, git repository or not:
@@ -115,3 +116,7 @@ uv run ruff format --check
 
 Set `AFT_HOME` to point `aft` at a scratch home directory; the test suite does this so it
 never touches real memory.
+
+## License
+
+[MIT](LICENSE)

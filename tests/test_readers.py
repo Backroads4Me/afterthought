@@ -706,8 +706,8 @@ def test_pi_skill_call_renders_without_skill_body(tmp_path):
             "message": {
                 "role": "user",
                 "content": (
-                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
-                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    '<skill name="aft" location="/home/user/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/user/.agents/skills/aft.\n\n"
                     "# aft\nTurn capture on or off.\n"
                     "</skill>\n\n"
                     "off"
@@ -723,8 +723,8 @@ def test_pi_skill_call_renders_without_skill_body(tmp_path):
             "message": {
                 "role": "user",
                 "content": (
-                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
-                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    '<skill name="aft" location="/home/user/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/user/.agents/skills/aft.\n\n"
                     "# aft\nTurn capture on or off.\n"
                     "</skill>\n\n"
                     "on"
@@ -740,8 +740,8 @@ def test_pi_skill_call_renders_without_skill_body(tmp_path):
             "message": {
                 "role": "user",
                 "content": (
-                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
-                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    '<skill name="aft" location="/home/user/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/user/.agents/skills/aft.\n\n"
                     "# aft\nTurn capture on or off.\n"
                     "</skill>"
                 ),
@@ -899,8 +899,8 @@ def test_pi_skill_markers_open_and_close_span(tmp_path, cfg):
             "message": {
                 "role": "user",
                 "content": (
-                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
-                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    '<skill name="aft" location="/home/user/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/user/.agents/skills/aft.\n\n"
                     "# aft\nControl capture.\n"
                     "</skill>\n\n"
                     "off"
@@ -929,8 +929,8 @@ def test_pi_skill_markers_open_and_close_span(tmp_path, cfg):
             "message": {
                 "role": "user",
                 "content": (
-                    '<skill name="aft" location="/home/ted/.agents/skills/aft/SKILL.md">\n'
-                    "References are relative to /home/ted/.agents/skills/aft.\n\n"
+                    '<skill name="aft" location="/home/user/.agents/skills/aft/SKILL.md">\n'
+                    "References are relative to /home/user/.agents/skills/aft.\n\n"
                     "# aft\nControl capture.\n"
                     "</skill>\n\n"
                     "on"

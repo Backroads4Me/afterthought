@@ -8,8 +8,8 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | Command | What it does |
 |---|---|
 | `aft init` | Writes `~/.afterthought/config.toml` with the defaults if there is none, and creates the vault as a git repository. Safe to run again. |
-| `aft install claude [--dry-run] [--uninstall]` | Adds afterthought's `SessionStart`, `PreCompact` and `SessionEnd` hooks to `~/.claude/settings.json`, and installs the `aft` skill, which tells an agent how to use afterthought's commands. A copy of the skill under an earlier name (`library-import`, `aft-library-import`) is removed when it is one afterthought shipped. Leaves every other hook alone. `--dry-run` shows the change; `--uninstall` removes only afterthought's entries. |
-| `aft install pi [--dry-run] [--uninstall]` | Copies afterthought's extension into pi's extensions directory and installs the `aft` skill in pi's skills directory. |
+| `aft install claude [--dry-run] [--uninstall]` | Adds Afterthought's `SessionStart`, `PreCompact` and `SessionEnd` hooks to `~/.claude/settings.json`, and installs the `aft` skill, which tells an agent how to use Afterthought's commands. A copy of the skill under an earlier name (`library-import`, `aft-library-import`) is removed when it is one Afterthought shipped. Leaves every other hook alone. `--dry-run` shows the change; `--uninstall` removes only Afterthought's entries. |
+| `aft install pi [--dry-run] [--uninstall]` | Copies Afterthought's extension into pi's extensions directory and installs the `aft` skill in pi's skills directory. |
 | `aft install timer [--dry-run] [--uninstall]` | Writes the systemd user units that run `aft run` every `dream.interval_minutes`, then enables and starts the timer. `--uninstall` stops and removes them. |
 
 ## Projects

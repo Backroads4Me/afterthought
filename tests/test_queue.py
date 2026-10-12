@@ -54,14 +54,14 @@ def event(
     session_id: str = "s1",
     agent: str = CLAUDE,
     kind: str = SESSION_END,
-    transcript: object = "/home/ted/.claude/projects/-home-ted/s1.jsonl",
+    transcript: object = "/home/user/.claude/projects/-home-ted/s1.jsonl",
     at: datetime = NOW,
 ) -> SessionEvent:
     return SessionEvent(
         agent=agent,
         kind=kind,
         session_id=session_id,
-        cwd=Path("/home/ted/dev/app"),
+        cwd=Path("/home/user/dev/app"),
         transcript_path=None if transcript is None else Path(str(transcript)),
         time=at,
         detail=None,
@@ -81,7 +81,7 @@ def session_file(
     root: Path,
     agent: str,
     session_id: str,
-    cwd: str = "/home/ted/dev/app",
+    cwd: str = "/home/user/dev/app",
     records: list[dict] | None = None,
     touched: datetime | None = None,
 ) -> Path:
@@ -91,9 +91,9 @@ def session_file(
     that is the first record here; the rest is whatever the test needs the file to hold.
     """
     directory, name = (
-        (root / "-home-ted-dev-app", session_id)
+        (root / "-home-user-dev-app", session_id)
         if agent == CLAUDE
-        else (root / "--home-ted-dev-app--", f"2026-10-01T11-59-00-000Z_{session_id}")
+        else (root / "--home-user-dev-app--", f"2026-10-01T11-59-00-000Z_{session_id}")
     )
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.jsonl"
@@ -126,8 +126,8 @@ def fill(config: Config, rows: int) -> None:
                     f"job_{index:06d}",
                     CLAUDE,
                     f"filled-{index}",
-                    "/home/ted/dev/app",
-                    "/home/ted/.claude/projects/-home-ted/x.jsonl",
+                    "/home/user/dev/app",
+                    "/home/user/.claude/projects/-home-ted/x.jsonl",
                     SESSION_END,
                     NOW.isoformat(),
                     queue.PENDING,
@@ -351,7 +351,7 @@ def test_the_queue_is_the_file_and_mode_the_design_names(cfg: Config) -> None:
     assert query(
         cfg,
         "SELECT agent, session_id, cwd, transcript_path, kind, status FROM jobs",
-    ) == [(CLAUDE, "wal", "/home/ted/dev/app", None, SESSION_END, queue.PENDING)]
+    ) == [(CLAUDE, "wal", "/home/user/dev/app", None, SESSION_END, queue.PENDING)]
 
 
 def test_a_watermark_reaches_the_next_job_and_only_complete_moves_it(cfg: Config) -> None:
@@ -437,7 +437,7 @@ def test_the_sweep_finds_a_session_whose_hook_never_fired(
 
     assert [e.agent for e in found] == [CLAUDE]
     assert found[0].session_id == path.stem
-    assert found[0].cwd == Path("/home/ted/dev/app")
+    assert found[0].cwd == Path("/home/user/dev/app")
     assert found[0].transcript_path == path
     assert found[0].kind == SESSION_END, "a session quiet past the bound is over"
     assert found[0].detail == "sweep"
@@ -445,7 +445,7 @@ def test_the_sweep_finds_a_session_whose_hook_never_fired(
     assert query(
         cfg,
         "SELECT agent, session_id, cwd, transcript_path, kind, status FROM jobs",
-    ) == [(CLAUDE, path.stem, "/home/ted/dev/app", str(path), SESSION_END, queue.PENDING)]
+    ) == [(CLAUDE, path.stem, "/home/user/dev/app", str(path), SESSION_END, queue.PENDING)]
     assert query(cfg, "SELECT count(*) FROM sessions") == [(0,)]
 
 
@@ -1106,7 +1106,7 @@ def test_the_sweep_does_not_read_a_subagent_transcript(
     subagents = main.parent / "subagents"
     subagents.mkdir()
     agent = subagents / "agent-x.jsonl"
-    agent.write_text(json.dumps({"cwd": "/home/ted/dev/app"}) + "\n")
+    agent.write_text(json.dumps({"cwd": "/home/user/dev/app"}) + "\n")
     stamp = (NOW - timedelta(minutes=29)).timestamp()
     os.utime(agent, (stamp, stamp))
 
