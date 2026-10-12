@@ -407,6 +407,8 @@ or give less fitting help without it. Never a fact, long or short term: the stat
 pull request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
 documents already say.
+Also never a fact: an order to do a piece of work, given or approved by the user, whether
+or not it was carried out.
 
 What this part of the session did and where the work stood when it ended (the task in
 progress, what was merged or run, what comes next) is not a fact. What was done goes
@@ -2095,7 +2097,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     a piece of work now (spec, build, start, merge, run, fix, commit something) is a request,
     as the same words without the proposal would be. One example of each in the prompt,
     neutral and invented.
-  - **`decide.md` and `review.md`:** the never-a-fact list gains "an order to do a piece of
+  - **`digest.md`, `decide.md` and `review.md`:** the never-a-fact list gains "an order to do a piece of
     work, given or approved by the user, whether or not it was carried out"; `decide.md` adds
     that two orders to do different pieces of work are about different things, never a
     supersede or a conflict.
