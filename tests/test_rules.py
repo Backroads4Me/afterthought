@@ -12,6 +12,7 @@ from the context they are handed."""
 from __future__ import annotations
 
 import builtins
+import dataclasses
 import datetime
 import socket
 from pathlib import Path
@@ -951,6 +952,20 @@ def test_an_unverified_quote_newer_than_the_line_carries_no_replacement():
         new_fact(source="observed", date=NEWER),
         line(VLLM),
         ctx(sig("a", OLDER), sig("b", NEWER, verified=False)),
+    )
+    assert outcome == downgrade("conflict", "R4")
+
+
+def test_a_quote_between_the_lines_quotes_and_its_settle_day_is_not_newer_than_the_line():
+    """T43: a settled replacement carries the settle commit's day as its date, so evidence
+    said after the note's quotes but before the user settled does not outrank the line
+    (R4)."""
+    target = dataclasses.replace(line(RVC), date="2026-10-08")
+    outcome = check(
+        decide("supersede"),
+        new_fact(source="observed", date="2026-10-06"),
+        target,
+        ctx(sig("col1", "2026-10-06", origin=rules.LIBRARY, yours=False)),
     )
     assert outcome == downgrade("conflict", "R4")
 

@@ -2607,6 +2607,32 @@ def test_edit_quote_matches_only_added_lines(initialized, home):
 test_evidence_source_edit_uri = test_edit_quote_matches_only_added_lines
 
 
+def test_a_settled_replacements_statement_verifies_inside_its_fact_line(initialized, home):
+    """T43: the settle cites the replacement's statement as ``aft://edit/<sha>``, which the
+    settle commit added as a whole fact line; the lookup finds the statement in the added
+    line and dates the source by the commit."""
+    cfg = config_with_fake(home, initialized.vault, FakeEndpoint())
+    test_file = cfg.vault / "test.txt"
+    test_file.write_text("before\n")
+    vault.commit(cfg.vault, ["test.txt"], "seed")
+    test_file.write_text(
+        "- The daemon listens on 9000. [stated] 2026-10-06 [^s2] [^s3]\n"
+        "~~The daemon listens on 8123.~~ [observed] 2026-09-20 [^s1]"
+        " superseded 2026-10-06 by [^s2]\n"
+    )
+    vault.commit(
+        cfg.vault,
+        ["test.txt"],
+        "aft: settle projects/widget/overview.md:1 (replace): The daemon listens on 8123.",
+    )
+    sha = run_git(["rev-parse", "HEAD"], cfg.vault)
+    day = run_git(["show", "-s", "--format=%cs", sha], cfg.vault)
+    v, origin, dt, yours = apply._lookup_evidence(
+        cfg, f"aft://edit/{sha}", "The daemon listens on 9000."
+    )
+    assert (v, origin, dt, yours) == (True, rules.PRIMARY, day, False)
+
+
 def test_settle_file_edit_question_note_keep_leaves_stated_active(initialized, home, fake):
     """Settling a file-edit question note via notes.settle(config, rel, line, notes.KEEP)
     clears the question callout and leaves the fact as active [stated]."""
