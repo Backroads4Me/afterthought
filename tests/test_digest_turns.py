@@ -1264,3 +1264,19 @@ def test_the_turns_prompt_reads_an_assistant_session():
     coding agent."""
     words = " ".join(digest.turns_prompt_text().split())
     assert "an AI assistant, often a coding agent" in words
+
+
+def test_the_turns_prompt_labels_a_yes_to_work_a_request():
+    """BUILD-PLAN F88: a yes to a proposal is a decision only when what it approves stays
+    true after the turn; a yes to doing a piece of work now is a request."""
+    words = " ".join(digest.turns_prompt_text().split())
+    assert (
+        "A yes to a specific proposal in BEFORE is a decision too when what it approves stays"
+        " true after the turn: a design choice, a setting, a rule or a plan the user adopts"
+        ' ("yes, keep the cache in memory").' in words
+    )
+    assert (
+        "A yes to doing a piece of work now (spec, build, start, merge, run, fix or commit"
+        " something) is a request, as the same words without the proposal would be." in words
+    )
+    assert '"yes, build the importer and merge it"' in words

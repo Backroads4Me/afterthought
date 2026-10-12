@@ -571,6 +571,19 @@ def test_the_review_prompt_wording_matches_the_digest_and_decide_prompts():
             assert sentence in words, f"{name} drops part of the shared wording"
 
 
+def test_an_order_to_do_work_is_never_a_fact_in_decide_or_review():
+    """BUILD-PLAN F88: an order to do a piece of work fails the keep test, whether or not
+    the work was carried out."""
+    from aft.dream import decide
+
+    order = (
+        "Also never a fact: an order to do a piece of work, given or approved by the user,"
+        " whether or not it was carried out."
+    )
+    for name, text in {"decide.md": decide.prompt(), "review.md": review.prompt()}.items():
+        assert order in " ".join(text.split()), f"{name} drops the order rule"
+
+
 def test_the_review_prompt_keeps_facts_about_the_users_life():
     """F73: the user's life, tastes and plans pass the keep test, and a dated event is a
     durable record kept long-term with its date, so age alone withdraws nothing."""

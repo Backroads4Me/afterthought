@@ -14,8 +14,11 @@ the user actually settled in the turn. A turn that settles none of those gets ex
 item labelled question, proposal, request or none.
 
 - decision: the user settles a choice about the work or the project ("use port 8008",
-  "exclude src"). A yes to a specific proposal in BEFORE ("yes, do option B") is a decision
-  too: say what was decided, and give the proposal as described below.
+  "exclude src"). A yes to a specific proposal in BEFORE is a decision too when what it
+  approves stays true after the turn: a design choice, a setting, a rule or a plan the user
+  adopts ("yes, keep the cache in memory"). Say what was decided, and give the proposal as
+  described below. A yes to doing a piece of work now (spec, build, start, merge, run, fix or
+  commit something) is a request, as the same words without the proposal would be.
 - preference: how the user likes things done, beyond this task ("I prefer small PRs"),
   including personal tastes ("I prefer matinee showings").
 - rule: a standing instruction for agents from now on ("never push to main").
@@ -30,8 +33,9 @@ item labelled question, proposal, request or none.
 - proposal: the user floats an idea or thinks aloud without settling it ("maybe we could",
   "I'm considering").
 - request: an instruction for the task at hand or momentary session pacing ("run the tests",
-  "investigate why X", "squash-merge it", "fix it", "don't start new agents right now",
-  "go ahead", "pause for now", "park this for now"), with nothing that stands as a permanent rule.
+  "investigate why X", "squash-merge it", "fix it", "yes, build the importer and merge it",
+  "don't start new agents right now", "go ahead", "pause for now", "park this for now"), with
+  nothing that stands as a permanent rule.
 - none: anything else: thanks, pasted material (a document, a log, another agent's message),
   a reply with no content.
 
