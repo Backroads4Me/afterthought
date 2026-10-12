@@ -93,7 +93,7 @@ lines, candidate progress, short-term changes, and the command to revert the run
 open conflict and question across all projects. Sessions raise the same notes for their
 project and the global and reference pages, and `aft settle` closes them: the note moves word for word to
 `archive/<page path>`, and the line is kept, withdrawn, or superseded by a statement that
-rests on the note's own quotes.
+rests on the line's own quotes and the note's.
 
 Reports describe memory; they are never memory. Agents are not shown them, default search
 skips them, and the dream never reads them.

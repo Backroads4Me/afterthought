@@ -4,9 +4,9 @@ The dream writes a ``[!conflict]`` or ``[!question]`` note under a line when new
 disagrees with it and has no authority to replace it. Such a note waits for the user. This
 module finds the notes (``open_notes``, ``count``), and settles one the way the user decides
 (``settle``): the line stays, the line is withdrawn, or the line is replaced by a statement
-resting on the note's own evidence. Whichever it is, the note itself moves, word for word, to
-the page's archive, so nothing a note recorded is lost. The script does the bookkeeping; the
-agent only explains each note and asks.
+resting on the note's evidence and the line's own. Whichever it is, the note itself moves,
+word for word, to the page's archive, so nothing a note recorded is lost. The script does
+the bookkeeping; the agent only explains each note and asks.
 """
 
 from __future__ import annotations
@@ -146,15 +146,18 @@ def settle(
     citation commit's message when a replacement gained one.
 
     ``keep`` leaves the line standing. ``withdraw`` strikes it through, dated today.
-    ``replace`` supersedes it with ``statement``, cited to the notes' own sources: tagged
-    ``[stated]`` when one of them is the user's own words and ``[observed]`` otherwise, and
-    dated by the newest of them. The settle commit is itself the user's edit, so a
-    replacement is a second commit: the new line gains a source ``aft://edit/<sha>`` of
-    the settle commit, quoted with the statement, and takes the commit's UTC day as its
-    date (T43); a citation that cannot be made leaves the settle commit standing alone.
+    ``replace`` supersedes it with ``statement``, cited to the line's own sources and the
+    notes' sources, line sources first: tagged ``[stated]`` when one of them is the user's
+    own words and ``[observed]`` otherwise, and dated by the newest of them. The struck
+    line links to the note's first source, the new evidence that replaced it. The settle
+    commit is itself the user's edit, so a replacement is a second commit: the new line
+    gains a source ``aft://edit/<sha>`` of the settle commit, quoted with the statement,
+    and takes the commit's UTC day as its date (T43); a citation that cannot be made leaves
+    the settle commit standing alone.
     Only a quote that still verifies and does not come from a worker session can carry the
     replacement, as no other quote carries a long-term line (R1, DESIGN 8); a note without
-    one cannot be settled by a replacement.
+    one cannot be settled by a replacement, whatever the line's quotes say, since a
+    replacement needs new evidence from the note.
     A replacement must say only what the quotes cited to it say (R2): one that names a
     word or number none of them holds is refused, and nothing is written.
     """
@@ -201,10 +204,8 @@ def settle(
         fact = _fact_at(doc, line)
         if fact is None or not fact.callouts:
             raise NoteError(f"no note under line {line} of {rel}; aft notes lists them")
-        sources = [s for n in _notes_on(config, doc, rel, fact) for s in n.note_sources]
-        evidence = list(
-            {s.id: s for s in sources if s.verified and s.origin != rules.WORKER}.values()
-        )
+        found = _notes_on(config, doc, rel, fact)
+        evidence = _carrying([s for n in found for s in n.note_sources], rules.WORKER)
         if choice == REPLACE and not evidence:
             raise NoteError(
                 "this note cites no quote that still verifies from one of the user's sessions"
@@ -212,14 +213,20 @@ def settle(
                 " --withdraw, and state the fact in a session instead"
             )
         if choice == REPLACE:
+            # A replacement often corrects one detail of the line, so it rests on the
+            # line's own carrying quotes as well as the note's, line sources first (T45).
+            line_sources = found[0].line_sources if found else []
+            by = evidence[0].id
+            evidence = _carrying(line_sources + evidence, rules.WORKER)
             # R2: the replacement says only what the quotes cited to it say, as every
             # [stated] line must. The check runs before anything is written, so a refused
             # replacement leaves the page and the vault as they were.
             missing = digest.ungrounded(statement, "\n".join(s.quote for s in evidence))
             if missing:
                 raise NoteError(
-                    f"the replacement names {', '.join(missing)} that none of the note's"
-                    " quotes says; reword it or settle with --keep or --withdraw"
+                    f"the replacement names {', '.join(missing)} that none of the line's"
+                    " or the note's quotes says; reword it or settle with --keep or"
+                    " --withdraw"
                 )
         statement_before = fact.statement
         archive = doc._archive_file()
@@ -238,6 +245,7 @@ def settle(
                     tag="stated" if any(s.yours for s in evidence) else "observed",
                     date=max(s.date for s in evidence),
                     refs=[s.id for s in evidence],
+                    by=by,
                 )
             rendered = doc.render()
         except pagewrite.WriteError as exc:
@@ -272,7 +280,7 @@ def settle(
 def _cite_settle(config: Config, rel: str, line: int, statement: str) -> str:
     """Cite the settle commit as the replacement line's own newest source (T43).
 
-    A replacement is dated by the note's quotes, so evidence that arrived after those
+    A replacement is dated by its quotes, so evidence that arrived after those
     quotes but before the user settled could reach the dream later and count as newer
     than the user's decision. The settle commit is itself the user's edit, so the line
     gains a source ``aft://edit/<sha>`` of that commit, quoted with the statement, and
@@ -339,6 +347,12 @@ def _cite_settle(config: Config, rel: str, line: int, statement: str) -> str:
             git(["reset", "-q", "--", rel], cwd=config.vault)
         raise
     return message
+
+
+def _carrying(sources: list[Source], worker: str) -> list[Source]:
+    """The sources that can carry a long-term line: verified and not from a worker
+    session (R1, DESIGN 8), deduplicated by id in their first order."""
+    return list({s.id: s for s in sources if s.verified and s.origin != worker}.values())
 
 
 def _fact_at(doc, line: int):

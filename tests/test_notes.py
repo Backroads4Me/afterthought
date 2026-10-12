@@ -207,13 +207,13 @@ def test_withdraw_strikes_the_line_today(widget):
     assert "[!conflict]" not in text
 
 
-def test_replace_rests_on_the_note_s_own_quotes(widget):
+def test_replace_rests_on_the_line_s_and_the_note_s_quotes(widget):
     notes.settle(
         widget, the_note(widget).where, notes.REPLACE, "The daemon  listens on 9000.", now=NOW
     )
     day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
     lines = page_text(widget).splitlines()
-    new = lines.index(f"- The daemon listens on 9000. [stated] {day} [^s2] [^s3]")
+    new = lines.index(f"- The daemon listens on 9000. [stated] {day} [^s1] [^s2] [^s3]")
     assert lines[new + 1].startswith("- ~~The daemon listens on 8123.")
     assert lines[new + 1].endswith("superseded 2026-10-05 by [^s2]")
 
@@ -235,7 +235,7 @@ def test_a_replacement_cites_the_settle_as_its_own_source(widget):
     assert (settled.message, settled.citation) == (subjects[1], subjects[0])
     day = run_git(["show", "-s", "--format=%cs", first], widget.vault).strip()
     text = page_text(widget)
-    assert f"- The daemon listens on 9000. [stated] {day} [^s2] [^s3]" in text
+    assert f"- The daemon listens on 9000. [stated] {day} [^s1] [^s2] [^s3]" in text
     assert "superseded 2026-10-05 by [^s2]" in text
     doc = pagewrite.PageDoc(text, widget.vault / OVERVIEW)
     assert doc.sources["s3"]["resource"] == f"aft://edit/{first}"
@@ -275,7 +275,7 @@ def test_a_failed_citation_leaves_the_settle_commit_standing(widget, monkeypatch
     subjects = run_git(["log", "--format=%s"], widget.vault).splitlines()
     assert subjects[0].startswith(f"aft: settle {note.where} (replace):")
     assert not any(s.startswith("aft: cite settle") for s in subjects)
-    assert "- The daemon listens on 9000. [stated] 2026-10-05 [^s2]" in page_text(widget)
+    assert "- The daemon listens on 9000. [stated] 2026-10-05 [^s1] [^s2]" in page_text(widget)
     assert lint.lint_vault(widget.vault) == []
 
 
@@ -287,12 +287,13 @@ def test_a_failed_citation_leaves_the_settle_commit_standing(widget, monkeypatch
     ],
 )
 def test_replace_with_a_word_the_quotes_do_not_say_is_refused(widget, statement, word):
-    """R2 holds for a replacement: a name or number the note's quotes do not say refuses
-    the settle, and nothing is written and nothing is committed (T41)."""
+    """R2 holds for a replacement: a name or number neither the line's quotes nor the
+    note's say refuses the settle, and nothing is written and nothing is committed (T41,
+    T45)."""
     note = the_note(widget)
     before = page_text(widget)
     head = run_git(["rev-parse", "HEAD"], widget.vault)
-    with pytest.raises(notes.NoteError, match=f"{word} that none of the note's quotes says"):
+    with pytest.raises(notes.NoteError, match=f"{word} that none of the line's or the note's"):
         notes.settle(widget, note.where, notes.REPLACE, statement, now=NOW)
     assert page_text(widget) == before
     assert not (widget.vault / "archive" / OVERVIEW).exists()
@@ -318,7 +319,7 @@ def test_replace_is_observed_when_no_quote_is_the_user_s(widget):
     )
     notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port 9000.", now=NOW)
     day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
-    assert f"- Port 9000. [observed] {day} [^s2] [^s3]" in page_text(widget)
+    assert f"- Port 9000. [observed] {day} [^s1] [^s2] [^s3]" in page_text(widget)
 
 
 def test_replace_without_a_verified_quote_is_refused_and_changes_nothing(widget):
@@ -335,6 +336,78 @@ def test_replace_without_a_verified_quote_is_refused_and_changes_nothing(widget)
     head = run_git(["rev-parse", "HEAD"], widget.vault)
     with pytest.raises(notes.NoteError, match="no quote that still verifies"):
         notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port 9000.", now=NOW)
+    assert page_text(widget) == before
+    assert not (widget.vault / "archive" / OVERVIEW).exists()
+    assert run_git(["rev-parse", "HEAD"], widget.vault) == head
+
+
+def test_a_name_only_the_line_s_quote_says_can_rest_in_a_replacement(widget):
+    """T45: a replacement that corrects one detail of the line may keep a name only the
+    line's own quote holds, and it cites the line's sources and the note's, line first.
+    The struck line links to the note's source, the evidence that replaced it."""
+    note = the_note(widget)
+    notes.settle(
+        widget, note.where, notes.REPLACE, "The daemon listens on 9000, not 8123.", now=NOW
+    )
+    day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
+    lines = page_text(widget).splitlines()
+    new = lines.index(f"- The daemon listens on 9000, not 8123. [stated] {day} [^s1] [^s2] [^s3]")
+    assert lines[new + 1].startswith("- ~~The daemon listens on 8123.")
+    assert lines[new + 1].endswith("superseded 2026-10-05 by [^s2]")
+    assert lint.lint_vault(widget.vault) == []
+
+
+def test_a_worker_session_s_line_quote_does_not_ground_a_replacement(widget):
+    """T45: only a line quote that could carry a long-term line grounds a replacement, so
+    a worker session's quote under the line holds none of its names."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    evidence.store(
+        widget,
+        agent="c",
+        session_id="w",
+        project_id=project.id,
+        entries=[entry("e1", 1, "worker", "it listens on 8123")],
+    )
+    write_overview(
+        widget,
+        project.id,
+        [
+            {"id": "s1", "resource": "aft://session/c/w#e1", "quote": "listens on 8123"},
+            {"id": "s2", "resource": "aft://session/c/2#e1", "quote": "listens on 9000"},
+        ],
+    )
+    [source] = the_note(widget).line_sources
+    assert (source.verified, source.origin) == (True, "worker")
+    before = page_text(widget)
+    head = run_git(["rev-parse", "HEAD"], widget.vault)
+    with pytest.raises(notes.NoteError, match="8123 that none of the line's or the note's"):
+        notes.settle(
+            widget,
+            the_note(widget).where,
+            notes.REPLACE,
+            "The daemon listens on 9000, not 8123.",
+            now=NOW,
+        )
+    assert page_text(widget) == before
+    assert run_git(["rev-parse", "HEAD"], widget.vault) == head
+
+
+def test_a_note_without_a_verified_quote_is_refused_whatever_the_line_s_quotes_say(widget):
+    """T45: a replacement needs new evidence from the note, so a note none of whose quotes
+    verifies is refused even when the line's own quotes hold every name of it."""
+    project = Registry.load(widget.registry_path).by_slug("widget")
+    write_overview(
+        widget,
+        project.id,
+        [
+            {"id": "s1", "resource": "aft://session/c/1#e1", "quote": "listens on 8123"},
+            {"id": "s2", "resource": "aft://session/c/2#e1", "quote": "words never said"},
+        ],
+    )
+    before = page_text(widget)
+    head = run_git(["rev-parse", "HEAD"], widget.vault)
+    with pytest.raises(notes.NoteError, match="no quote that still verifies"):
+        notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port 8123.", now=NOW)
     assert page_text(widget) == before
     assert not (widget.vault / "archive" / OVERVIEW).exists()
     assert run_git(["rev-parse", "HEAD"], widget.vault) == head
