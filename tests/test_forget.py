@@ -1841,29 +1841,50 @@ def test_forget_pattern_writes_an_uncached_document_a_redacted_cache_first(
     assert pattern_hits(cfg, SECRET_WORD) == set(), "the rebuild extracted the unredacted source"
 
 
-def test_forget_pattern_leaves_a_cache_it_would_break_alone_and_says_so(
+def test_forget_pattern_rewrites_through_the_writer_a_cache_its_text_redaction_would_break(
     initialized: Config, tmp_path: Path, capsys
 ):
-    """A pattern that reaches a cache file's own JSON marks would leave a file the index reads
-    as no chunks at all, so the rewrite is refused and named: the cache, the rows and the
-    recorded hash all stand, and the words stay searchable until the person handles the file."""
+    """A pattern that reaches a cache file's own JSON marks cannot be redacted as text, so the
+    chunks go through the writer an import uses: the file stays parseable, its chunks hold
+    no match, and the rows come back from it."""
     cfg = initialized
     widget_project(cfg)
     _, cache_file = library_note(
         cfg, tmp_path, f'He said "rotate the vault key {SECRET} before friday".'
     )
-    assert pattern_hits(cfg, SECRET_WORD) == {"library/widget-docs/notes.md"}
-    cache_bytes = cache_file.read_bytes()
 
     code = cli.main(["forget", "pattern", '"'])
     assert code == 0
-    out = capsys.readouterr().out
 
-    assert cache_file.read_bytes() == cache_bytes, "the cache was rewritten anyway"
-    assert cache_file.relative_to(cfg.home).as_posix() in out
-    assert pattern_hits(cfg, SECRET_WORD) == {"library/widget-docs/notes.md"}, (
-        "the refused cache's rows were dropped anyway"
+    f_hash = cache_file.stem
+    chunks = importing.read_cached_extraction(cfg.home, f_hash)
+    assert chunks, "the cache no longer parses"
+    assert all('"' not in text for _, text in chunks), "a chunk still holds the match"
+    assert pattern_hits(cfg, "rotate") == {"library/widget-docs/notes.md"}, (
+        "the document's rows did not come back from the rewritten cache"
     )
+
+
+def test_forget_pattern_redacts_a_cache_no_manifest_lists(
+    initialized: Config, tmp_path: Path, capsys
+):
+    """A cache left from an older import answers no search, but forgetting reaches everything
+    afterthought holds (DESIGN 8), so an unlisted cache file is redacted as well."""
+    cfg = initialized
+    widget_project(cfg)
+    library_note(cfg, tmp_path, "Always verify battery voltage before start.")
+    orphan = cfg.home / "library" / ("0" * 64 + ".json")
+    orphan.write_text(
+        json.dumps({"chunks": [{"heading": "", "text": f"old key {SECRET}"}]}), encoding="utf-8"
+    )
+
+    code = cli.main(["forget", "pattern", SECRET_PATTERN])
+    assert code == 0
+
+    held = orphan.read_text(encoding="utf-8")
+    assert SECRET not in held
+    assert "[redacted]" in held
+    json.loads(held)
 
 
 def test_forget_pattern_touches_no_cache_when_nothing_in_the_library_matches(

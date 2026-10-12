@@ -1283,8 +1283,8 @@ def cmd_forget_pattern(args) -> int:
         )
     if report.library_redacted:
         print(
-            f"redacted {len(report.library_redacted)} library cache file(s)"
-            " and dropped their index rows for the update to rebuild:"
+            f"redacted {len(report.library_redacted)} library extraction cache(s);"
+            " the index rows of listed documents were rebuilt from them:"
         )
         for rel in report.library_redacted:
             print(f"  {rel}")

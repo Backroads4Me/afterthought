@@ -589,16 +589,16 @@ def _redact_library_cache(
 
     A cached file is rewritten by redacting the file's own text, so everything the rewrite
     does not touch - the JSON's shape, the record of where the extraction came from - stands
-    exactly as the import left it, and the guard is the parse a reader would run: a rewrite
-    that would break it is refused and named, and the cache, the rows and the recorded hash
-    are all left as they stand. A redaction of the file's text cannot see a match the JSON
-    holds escaped (a quote inside a chunk's text, say), so whatever still matches after it
-    goes back through the writer an import uses, which always leaves the file parseable. A
-    document with no cache gets a redacted cache written from its extraction before the
-    update rebuilds it, so the rebuild never extracts the unredacted source.
+    exactly as the import left it. When that would break the file's JSON, or a match the
+    JSON holds escaped survives it, the chunks go through the writer an import uses, which
+    always leaves the file parseable. A document with no cache gets a redacted cache written
+    from its extraction before the update rebuilds it, so the rebuild never extracts the
+    unredacted source. A cache no manifest lists any more is redacted as text too; one whose
+    redaction would break its JSON is refused and named.
 
     The sources themselves are read-only once imported (DESIGN 11) and are not touched. What
-    returns is the indexed paths whose cache was redacted, the cache files refused, and the
+    returns is the indexed paths (and unlisted cache files) redacted, the cache files refused,
+    and the
     vault paths of the sources whose own text, or whose extraction for a PDF, still holds a
     match - removing those words means deleting or re-importing the file.
     """
@@ -606,11 +606,10 @@ def _redact_library_cache(
     refused: list[str] = []
     sources_matching: list[str] = []
     drops: list[str] = []
+    seen_caches: list[str] = []
     refs_dir = config.vault / "references"
-    if not refs_dir.is_dir():
-        return redacted, refused, sources_matching
 
-    for col_dir in sorted(refs_dir.iterdir()):
+    for col_dir in sorted(refs_dir.iterdir()) if refs_dir.is_dir() else ():
         if not col_dir.is_dir():
             continue
         col_file = col_dir / "collection.md"
@@ -656,6 +655,7 @@ def _redact_library_cache(
                 continue
             indexed_path = f"library/{col_name}/{rel_path}"
             cache_file = config.home / "library" / f"{f_hash}.json"
+            seen_caches.append(cache_file.name)
             chunks = read_cached_extraction(config.home, f_hash)
             if chunks is None:
                 chunks = extract_document_chunks(src_file)
@@ -670,12 +670,35 @@ def _redact_library_cache(
                     holds_match = False
             if not holds_match:
                 continue
-            if _redact_document_cache(config, compiled, cache_file, f_hash, rel_path, chunks):
-                redacted.append(indexed_path)
-                drops.append(indexed_path)
-            else:
-                refused.append(cache_file.relative_to(config.home).as_posix())
+            _redact_document_cache(config, compiled, cache_file, f_hash, rel_path, chunks)
+            redacted.append(indexed_path)
+            drops.append(indexed_path)
             sources_matching.append(indexed_path)
+
+    # A cache no manifest lists any more (an older import of a re-imported or removed
+    # document) answers no search, but it is text afterthought holds, and forgetting reaches
+    # everything afterthought controls (DESIGN 8). The imported-quote record shares the
+    # directory and has its own step.
+    listed = {Path(p).name for p in seen_caches}
+    cache_dir = config.home / "library"
+    if cache_dir.is_dir():
+        for orphan in sorted(cache_dir.glob("*.json")):
+            if orphan.name in listed or orphan.name == propose.VERIFIED_QUOTES_FILE:
+                continue
+            try:
+                raw = orphan.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            scrubbed = compiled.sub(redact.REDACTED, raw)
+            if scrubbed == raw:
+                continue
+            try:
+                json.loads(scrubbed)
+            except json.JSONDecodeError:
+                refused.append(orphan.relative_to(config.home).as_posix())
+                continue
+            pagewrite.atomic_write_text(orphan, scrubbed)
+            redacted.append(orphan.relative_to(config.home).as_posix())
 
     if drops:
         # The recorded hash is what the update's rebuild keys on (`index._sync_library`), so
@@ -696,14 +719,13 @@ def _redact_document_cache(
     f_hash: str,
     rel_path: str,
     chunks: list[tuple[str, str]],
-) -> bool:
-    """Rewrite one document's extraction cache with the pattern redacted; refuse what breaks.
+) -> None:
+    """Rewrite one document's extraction cache with the pattern redacted.
 
-    Returns False only when a redaction of the file's own text would leave it unparseable as
-    JSON: the pattern reaches the file's marks, the words stay, and the person is named the
-    file on the report. Everything else ends in a written cache the index reads as redacted
-    chunks, by the file's own redaction where that reaches every match and otherwise through
-    the writer an import uses.
+    The file's own text is redacted where that leaves it parseable JSON, which keeps every
+    field the import wrote; whatever still matches, or a redaction that would break the
+    file, goes through the writer an import uses, which always leaves it parseable. Every
+    call ends in a written cache the index reads as redacted chunks.
     """
     rewritten = False
     if cache_file.is_file():
@@ -713,14 +735,16 @@ def _redact_document_cache(
             raw = ""
         scrubbed = compiled.sub(redact.REDACTED, raw)
         if scrubbed != raw:
-            # The same guard a phrase file's rewrite takes: a redaction that matched the
-            # JSON's own marks would leave a file the index reads as nothing at all.
+            # A redaction that matched the JSON's own marks would leave a file the index reads
+            # as nothing at all; the chunks then go through the import's writer below, which
+            # always leaves the file parseable.
             try:
                 json.loads(scrubbed)
             except json.JSONDecodeError:
-                return False
-            cache_file.write_text(scrubbed, encoding="utf-8")
-            rewritten = True
+                scrubbed = raw
+            else:
+                cache_file.write_text(scrubbed, encoding="utf-8")
+                rewritten = True
     remaining = chunks
     if rewritten:
         remaining = read_cached_extraction(config.home, f_hash) or []
@@ -734,4 +758,3 @@ def _redact_document_cache(
                 for heading, text in remaining
             ],
         )
-    return True
