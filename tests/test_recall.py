@@ -7,6 +7,7 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -143,6 +144,24 @@ def test_query_words_cut_to_the_first_32():
     words = recall.query_words(" ".join(f"w{number}" for number in range(40)))
     assert len(words) == 32
     assert words[0] == "w0" and words[-1] == "w31"
+
+
+def test_query_words_lose_the_punctuation_around_them():
+    """A word with punctuation around it is the word itself, so the bar can count it."""
+    words = recall.query_words('how do we "deploy" the release, to staging?')
+    assert words == QUERY_WORDS
+
+
+def test_a_prompt_ending_in_punctuation_still_recalls(workspace, cfg):
+    cwd, _ = workspace
+    assert "release candidate" in recall.recall(f"{PROMPT_TEXT}?", cwd, cfg)
+
+
+def test_a_short_start_block_line_does_not_hide_a_row_that_contains_it():
+    """A one-word block line ("none", a title) is not matched inside a longer row."""
+    hit = SimpleNamespace(snippet="Deploy the release candidate to staging nightly", description="")
+    assert not recall._held_by_block(hit, ["staging"])
+    assert recall._held_by_block(hit, ["deploy the release candidate to staging nightly"])
 
 
 # --- the parsers ---------------------------------------------------------------------

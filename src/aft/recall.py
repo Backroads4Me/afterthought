@@ -35,6 +35,10 @@ MAX_QUERY_WORDS = 32
 #: fewer than MIN_QUERY_WORDS words recalls nothing, this is 3 whenever anything is asked.
 BAR_WORDS = 3
 
+#: A start-block line shorter than this is not matched inside a longer row: a short line
+#: ("none", a project's one-word title) would otherwise hide any row that contains it.
+MIN_HELD_CHARS = 40
+
 #: How wide a candidate pool recall asks the search for, as a multiple of max_hits: the
 #: bar and the start-block dedupe both drop hits, so the search is asked for more than
 #: the block will show.
@@ -67,9 +71,9 @@ def query_words(prompt: str) -> list[str]:
     """The query recall searches for: the prompt's first 32 content words.
 
     A ``<pasted_content>`` block, fenced code and the capture markers say nothing about
-    what the prompt asks, so they leave first. F81's filler list then drops the question
-    words, and the first MAX_QUERY_WORDS of what is left are the query. A quoted phrase
-    contributes its own words, so it can be counted and matched like any other word.
+    what the prompt asks, so they leave first. Each word loses the punctuation around it
+    ("search?" is "search"), so the bar can find it in a row; F81's filler list then drops
+    the question words, and the first MAX_QUERY_WORDS of what is left are the query.
     """
     text = _PASTED.sub(" ", prompt)
     text = _MARKERS.sub(" ", text)
@@ -87,19 +91,8 @@ def query_words(prompt: str) -> list[str]:
                 continue
         if fence:
             continue
-        for token in line.split():
-            if len(token) > 2 and token.startswith('"') and token.endswith('"'):
-                words.extend(token[1:-1].split())
-            else:
-                words.append(token)
-    return [word for word in words if _is_content(word)][:MAX_QUERY_WORDS]
-
-
-def _is_content(word: str) -> bool:
-    """Whether one token is a content word: not empty once its punctuation is gone, and
-    not on F81's filler list."""
-    core = word.lower().strip(string.punctuation)
-    return bool(core) and core not in FILLER_WORDS
+        words.extend(token.strip(string.punctuation) for token in line.split())
+    return [word for word in words if word and word.lower() not in FILLER_WORDS][:MAX_QUERY_WORDS]
 
 
 def recall(prompt: str | None, cwd, config: Config) -> str:
@@ -201,7 +194,9 @@ def _held_by_block(hit: Hit, held: list[str]) -> bool:
     snippet's window markers are not words, so they leave before the comparison.
     """
     text = " ".join((hit.snippet or hit.description).replace("...", " ").split()).lower()
-    return bool(text) and any(text == other or text in other or other in text for other in held)
+    return bool(text) and any(
+        text in other or (len(other) >= MIN_HELD_CHARS and other in text) for other in held
+    )
 
 
 def _hit_line(hit: Hit) -> str:

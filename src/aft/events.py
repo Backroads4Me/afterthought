@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-# The three kinds every agent's lifecycle events normalize into.
 # The four kinds every agent's lifecycle events normalize into.
 SESSION_START = "session_start"
 COMPACTION = "compaction"
