@@ -1895,6 +1895,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     while reranking continues; a pre-F86 ledger line counts as work; `aft budget` shows both;
     a reset resets both. Review checkpoint: no.
 
+- **T39 Budgets and the rerank timeout must be positive** (ruling 2026-10-12; follows F86).
+  `config.load` accepts `work.daily_token_budget = -5`, and a zero or negative budget stops
+  that work every day without saying why. `config.load` raises `ConfigError` naming the key
+  when `work.daily_token_budget` or `search.daily_token_budget` is not a positive integer, or
+  `search.rerank_timeout_seconds` is not a positive number, beside the existing
+  `dream.interval_minutes` check. Tests in `tests/test_config.py`: zero and a negative value
+  for each key are refused with the key named; the defaults load. Review checkpoint: no.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
