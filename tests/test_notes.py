@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 import yaml
 
-from aft import evidence, lint, notes, page, pagewrite
+from aft import evidence, lint, notes, pagewrite
 from aft import vault as vaultmod
 from aft.cli import main
 from aft.config import Config

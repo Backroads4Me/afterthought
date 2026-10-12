@@ -280,6 +280,8 @@ def _cite_settle(config: Config, rel: str, line: int, statement: str) -> str:
     (DESIGN 9). Returns the citation commit's message; raises when the citation cannot
     be made, leaving the settle commit as it stands.
     """
+    from contextlib import suppress
+
     from aft import page, pagewrite
     from aft import vault as vaultmod
     from aft.gitutil import git
@@ -323,10 +325,19 @@ def _cite_settle(config: Config, rel: str, line: int, statement: str) -> str:
         or any(count > was[message] for message, count in now.items())
     ):
         raise NoteError(f"the settle citation on {rel}:{line} would not read back as written")
+    before_bytes = path.read_bytes()
     pagewrite.atomic_write_text(path, result)
     message = f"aft: cite settle {sha[:7]} on {rel}:{line}"
-    if not vaultmod.commit(config.vault, [rel], message):
-        raise NoteError(f"{rel} was left unchanged; the settle citation wrote nothing")
+    try:
+        if not vaultmod.commit(config.vault, [rel], message):
+            raise NoteError(f"{rel} was left unchanged; the settle citation wrote nothing")
+    except Exception:
+        # The citation is all or nothing: a commit that did not land puts the page and the
+        # index back as the settle commit left them, so the first commit stands alone.
+        pagewrite.atomic_write_bytes(path, before_bytes)
+        with suppress(Exception):
+            git(["reset", "-q", "--", rel], cwd=config.vault)
+        raise
     return message
 
 
