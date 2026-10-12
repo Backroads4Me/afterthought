@@ -1634,6 +1634,8 @@ def test_time_only_query_lists_window_digests_newest_first(populated_vault: Conf
     assert digest_hits[0].path == "digests/widget/2026/09/2026-09-29-claude-s-widget-2.md"
     assert hits.index(digest_hits[-1]) < hits.index(evidence_hits[0])
     assert all(hit.rank == 0.0 for hit in hits)
+    paths = [hit.path for hit in digest_hits]
+    assert len(paths) == len(set(paths)), "a digest answers once however many sections it holds"
 
 
 def test_search_command_temporal_cli(populated_vault: Config, capsys) -> None:

@@ -303,7 +303,7 @@ def _window_rows(
             continue
         clause, extra = _scope(col, narrow_id)
         keep = conn.execute(
-            f"SELECT path, description, heading, body, project_id FROM {col}"
+            f"SELECT path, description, heading, body, project_id, session_id FROM {col}"
             f" WHERE 1=1{clause}{time_filter}"
             f" ORDER BY time DESC, rowid DESC LIMIT ?",
             (*extra, *params, limit),
@@ -317,6 +317,7 @@ def _window_rows(
                 "snippet": _body_snippet(row["body"]),
                 "rank": 0.0,
                 "project_id": row["project_id"],
+                "session_id": row["session_id"],
             }
             for row in keep
         )
@@ -488,8 +489,24 @@ def search(
             # The query is only a time expression (BUILD-PLAN M13): no words are left to
             # rank, so the window's digests answer first, then its evidence, each newest
             # first, with no BM25 order and no rerank call.
-            rows = _window_rows(conn, active_collections, tc, narrow_id, limit)
-            return [_hit_of_row(row, slugs) for row in rows[:limit]]
+            rows = _window_rows(conn, active_collections, tc, narrow_id, limit * 20)
+            listed: list[Hit] = []
+            seen: set[str] = set()
+            for row in rows:
+                # A digest answers once however many sections it holds, and a session's
+                # evidence once however many entries it holds, as in a ranked search.
+                key = (
+                    f"session:{row['session_id']}"
+                    if _is_raw_evidence(row["collection"], row["path"]) and row["session_id"]
+                    else row["path"]
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                listed.append(_hit_of_row(row, slugs))
+                if len(listed) >= limit:
+                    break
+            return listed
 
         seen_paths: set[str] = set()
         seen_evidence_sessions: set[str] = set()
