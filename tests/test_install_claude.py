@@ -102,14 +102,14 @@ PEOPLE = {
 }
 
 
-def test_install_writes_three_entries_into_an_empty_settings_file(tmp_path):
+def test_install_writes_the_installed_entries_into_an_empty_settings_file(tmp_path):
     settings = settings_in(tmp_path)
     write_settings(settings, {})
 
     assert claude_install.install(settings).changed is True
 
     hooks = read_settings(settings)["hooks"]
-    assert list(hooks) == ["SessionStart", "PreCompact", "SessionEnd"]
+    assert list(hooks) == list(claude_install.HOOK_EVENTS)
     for event in claude_install.HOOK_EVENTS:
         assert hooks[event] == [
             {
@@ -161,6 +161,7 @@ def test_install_appends_its_own_entries_after_everyone_elses(tmp_path):
         ("Stop", "echo done"),
         ("PreCompact", "aft hook claude PreCompact"),
         ("SessionEnd", "aft hook claude SessionEnd"),
+        ("UserPromptSubmit", "aft hook claude UserPromptSubmit"),
     ]
     assert foreign_commands(command_order(after)) == theirs
     assert after["hooks"]["PreToolUse"] == PEOPLE["hooks"]["PreToolUse"]
@@ -192,11 +193,12 @@ def test_installing_twice_changes_nothing(tmp_path):
     assert second.changed is False and second.backup is None and second.preview == ""
     assert settings.read_text(encoding="utf-8") == text
     assert sorted(settings.parent.glob("*.bak")) == backups
-    entries = dict.fromkeys(claude_install.HOOK_EVENTS, 0)
+    events = list(claude_install.HOOK_EVENTS)
+    entries: dict[str, int] = dict.fromkeys(events, 0)
     for seen_event, command in command_order(settings):
         if command in aft_commands():
             entries[seen_event] += 1
-    assert entries == dict.fromkeys(claude_install.HOOK_EVENTS, 1)
+    assert entries == dict.fromkeys(events, 1)
 
 
 def test_reinstall_adds_only_the_entry_that_is_missing(tmp_path):
@@ -584,8 +586,8 @@ def test_the_add_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch, cap
     assert "claude-opus" not in printed
     lines = printed.splitlines()
     head = lines[0]
-    hook_entries = lines[1:4]
-    assert head.startswith(f"3 entries to add to {settings}")
+    hook_entries = lines[1:5]
+    assert head.startswith(f"4 entries to add to {settings}")
     assert "5 second timeout" in head
     assert hook_entries == [
         f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
@@ -612,11 +614,11 @@ def test_the_removal_preview_names_only_aft_s_own_entries(tmp_path, monkeypatch,
     assert "echo status" not in printed
     assert "claude-opus" not in printed
     head, *rest = printed.splitlines()
-    assert head.startswith(f"3 entries to remove from {settings}")
-    assert rest[:3] == [
+    assert head.startswith(f"4 entries to remove from {settings}")
+    assert rest[:4] == [
         f"  {event}: aft hook claude {event}" for event in claude_install.HOOK_EVENTS
     ]
-    assert rest[3:5] == [f"--- {settings} (before)", f"+++ {settings} (after)"]
+    assert rest[4:6] == [f"--- {settings} (before)", f"+++ {settings} (after)"]
     assert settings.read_text(encoding="utf-8") == text
     assert sorted(settings.parent.glob("*.bak")) == backups
 

@@ -129,6 +129,21 @@ class InjectConfig:
 
 
 @dataclass(frozen=True)
+class RecallConfig:
+    """What each submitted prompt brings back from memory (BUILD-PLAN F87).
+
+    Recall runs on every prompt, so by default it searches with BM25 alone: the
+    reranker's reordering costs a model call per query, and recall borrows it only
+    when ``rerank`` is true.
+    """
+
+    enabled: bool = True
+    max_hits: int = 3
+    max_chars: int = 1500
+    rerank: bool = False
+
+
+@dataclass(frozen=True)
 class LibraryConfig:
     commit: bool = True
 
@@ -145,7 +160,9 @@ class Settings:
     dream: DreamConfig = field(default_factory=DreamConfig)
     work: WorkConfig = field(default_factory=WorkConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    search: SearchConfig = field(default_factory=SearchConfig)
     inject: InjectConfig = field(default_factory=InjectConfig)
+    recall: RecallConfig = field(default_factory=RecallConfig)
     library: LibraryConfig = field(default_factory=LibraryConfig)
     digest: DigestConfig = field(default_factory=DigestConfig)
 
@@ -216,6 +233,10 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         raise ConfigError(f"{path}: search.daily_token_budget must be positive")
     if settings.search.rerank_timeout_seconds <= 0:
         raise ConfigError(f"{path}: search.rerank_timeout_seconds must be positive")
+    if settings.recall.max_hits <= 0:
+        raise ConfigError(f"{path}: recall.max_hits must be positive")
+    if settings.recall.max_chars <= 0:
+        raise ConfigError(f"{path}: recall.max_chars must be positive")
     host = settings.host or default_host()
     return Config(home=home, vault=vault, host=host, settings=settings)
 
@@ -431,6 +452,18 @@ daily_token_budget = 200000
 
 [inject]
 max_chars = 8000
+
+[recall]
+# What each submitted prompt brings back from memory (BUILD-PLAN F87): up to max_hits
+# lines from `aft search`, one line each, under a heading that says to check them before
+# relying on them, within max_chars. Recall reads memory and writes nothing, so a session
+# whose capture is off still recalls.
+enabled = true
+max_hits = 3
+max_chars = 1500
+# Recall runs on every prompt, so it searches with BM25 alone by default: the model's
+# reordering is `aft search`'s, and recall borrows it only when this is true.
+rerank = false
 
 [library]
 # Commit library files to the vault's git repository. Every import brings the vault's

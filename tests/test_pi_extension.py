@@ -15,6 +15,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_TS = REPO_ROOT / "integrations" / "pi" / "afterthought.ts"
 
 
+def node_argv(script: str) -> list[str]:
+    """The node invocation for one extension script; every caller skips when node is gone."""
+    assert NODE is not None, "node is not available"
+    return [NODE, "--experimental-strip-types", "-e", script]
+
+
 @pytest.mark.skipif(NODE is None, reason="node is not available")
 def test_pi_extension_payload_construction_does_not_throw_when_session_methods_fail() -> None:
     """Building the payload cannot throw out of a handler, even if session methods throw
@@ -44,7 +50,7 @@ for (const ev of events) {{
 console.log("OK");
 """
     res = subprocess.run(
-        [NODE, "--experimental-strip-types", "-e", script],
+        node_argv(script),
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
@@ -92,14 +98,14 @@ const session = {{
 await handlers["session_compact"]({{ reason: "threshold" }}, {{ sessionManager: session }});
 
 const event = {{ systemPromptOptions: {{ sections: {{}} }} }};
-handlers["before_agent_start"](event);
+await handlers["before_agent_start"](event);
 console.log(JSON.stringify(event.systemPromptOptions.sections));
 """
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
     res = subprocess.run(
-        [NODE, "--experimental-strip-types", "-e", script],
+        node_argv(script),
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
@@ -138,7 +144,7 @@ const ctx = {{
 }};
 await handlers["session_start"]({{ reason: "startup" }}, ctx);
 const event = {{ systemPromptOptions: {{ sections: {{}} }} }};
-handlers["before_agent_start"](event);
+await handlers["before_agent_start"](event);
 console.log(JSON.stringify({{ sections: event.systemPromptOptions.sections, notices }}));
 """
     env = os.environ.copy()
@@ -179,3 +185,85 @@ def test_pi_extension_without_an_interface_still_gives_the_model_the_block(
 def test_pi_extension_takes_a_plain_block_as_it_is(tmp_path: Path) -> None:
     seen = run_session_start(tmp_path, "# Memory: Widget\n\n- A fact.")
     assert seen == {"sections": {"afterthought": "# Memory: Widget\n\n- A fact."}, "notices": []}
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not available")
+def test_pi_extension_sets_the_recall_section_per_prompt_and_clears_it_when_empty(
+    tmp_path: Path,
+) -> None:
+    """Each prompt's recall gets a section of its own beside the block, replaces the
+    previous prompt's, and an empty answer clears it while the block stays
+    (BUILD-PLAN F87). The hook's payload carries the prompt and the working directory."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (tmp_path / "recall").write_text("RECALLED: deploy the release\n", encoding="utf-8")
+    aft_stub = bin_dir / "aft"
+    aft_stub.write_text(
+        f"""#!/bin/sh
+if [ "$3" = "before_agent_start" ]; then
+  if [ -f "{tmp_path / "payload1.json"}" ]; then
+    cat > "{tmp_path / "payload2.json"}"
+  else
+    cat > "{tmp_path / "payload1.json"}"
+    cat "{tmp_path / "recall"}"
+    : > "{tmp_path / "recall"}"
+  fi
+  exit 0
+fi
+echo '# Memory: Widget'
+exit 0
+""",
+        encoding="utf-8",
+    )
+    aft_stub.chmod(0o755)
+
+    script = f"""
+import extension from "{EXTENSION_TS}";
+
+const handlers = {{}};
+extension({{ on(event, handler) {{ handlers[event] = handler; }} }});
+
+const session = {{
+  getSessionId() {{ return "session-123"; }},
+  getCwd() {{ return "/tmp/widget"; }},
+  getSessionFile() {{ return undefined; }},
+}};
+const ctx = {{ sessionManager: session }};
+
+await handlers["session_start"]({{ reason: "startup" }}, ctx);
+
+const sections = {{}};
+const first = {{ systemPromptOptions: {{ sections }}, prompt: "how do we deploy the release" }};
+await handlers["before_agent_start"](first, ctx);
+const afterFirst = JSON.parse(JSON.stringify(sections));
+
+const second = {{ systemPromptOptions: {{ sections }}, prompt: "and the rollback plan" }};
+await handlers["before_agent_start"](second, ctx);
+
+console.log(JSON.stringify({{ afterFirst, afterSecond: sections }}));
+"""
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+
+    res = subprocess.run(
+        node_argv(script),
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(res.stdout)
+    assert seen["afterFirst"] == {
+        "afterthought": "# Memory: Widget",
+        "afterthought-recall": "RECALLED: deploy the release",
+    }
+    assert seen["afterSecond"] == {"afterthought": "# Memory: Widget"}
+
+    first_payload = json.loads((tmp_path / "payload1.json").read_text(encoding="utf-8"))
+    assert first_payload["prompt"] == "how do we deploy the release"
+    assert first_payload["cwd"] == "/tmp/widget"
+    assert first_payload["hook_event_name"] == "before_agent_start"
+    assert first_payload["session_id"] == "session-123"
+    second_payload = json.loads((tmp_path / "payload2.json").read_text(encoding="utf-8"))
+    assert second_payload["prompt"] == "and the rollback plan"

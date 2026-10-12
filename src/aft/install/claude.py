@@ -9,16 +9,16 @@ when the event matches:
     {"hooks": {"SessionStart": [{"matcher": "startup", "hooks": [
         {"type": "command", "command": "aft hook claude SessionStart", "timeout": 5}]}]}}
 
-This module merges into that file the three entries BUILD-PLAN M1.3 names, one per event,
-each running ``aft hook claude <event>`` - the command line the merged ``aft hook`` command
-takes, with Claude Code's own event name as the argument ``adapters/claude.py`` reads. The
-file's path is an argument of every function here so a test can point it at a temporary
-file; `settings_path` is the default the command line uses.
+This module merges into that file the four entries BUILD-PLAN M1.3 and F87 name, one per
+event, each running ``aft hook claude <event>`` - the command line the merged ``aft hook``
+command takes, with Claude Code's own event name as the argument ``adapters/claude.py``
+reads. The file's path is an argument of every function here so a test can point it at a
+temporary file; `settings_path` is the default the command line uses.
 
 Three rules hold the user's own configuration safe:
 
 * A merge touches only what afterthought owns: the command hooks it writes, found by their
-  command line inside the matcher groups of its three event lists. Other people's hook
+  command line inside the matcher groups of its event lists. Other people's hook
   entries keep their position and their order, and uninstall removes command hooks and
   nothing else: every key of the user's keeps its place, a matcher group keeps its matcher
   once our hook leaves it, the ``hooks`` object an uninstall empties keeps its key as an
@@ -50,11 +50,11 @@ from aft.redact import redact
 
 AGENT = "claude"
 
-# The three events BUILD-PLAN M1.3 installs, in the order it lists them, which is the
+# The events BUILD-PLAN M1.3 and F87 install, in the order they list them, which is the
 # order they appear in the file when this module has to create them. Each key is Claude
 # Code's own event name, the same key `adapters/claude.py` maps, so the installed command
 # line and the parser that reads its payload share one spelling.
-HOOK_EVENTS = ("SessionStart", "PreCompact", "SessionEnd")
+HOOK_EVENTS = ("SessionStart", "PreCompact", "SessionEnd", "UserPromptSubmit")
 
 # Claude Code's hook handler field `timeout` is a number of seconds (hooks reference, "Hook
 # handler fields"); BUILD-PLAN M1.3 fixes 5 for each entry. The number matters most for
@@ -96,7 +96,7 @@ def hook_command(event: str) -> str:
 
 
 def install(settings: Path, *, dry_run: bool = False) -> Change:
-    """Merge afterthought's three hook entries into ``settings``, creating the file.
+    """Merge afterthought's hook entries into ``settings``, creating the file.
 
     Every event that does not already run our command gets one group of our own, appended
     after the elements already there: an entry is never inserted before, sorted among, or
@@ -126,8 +126,7 @@ def install(settings: Path, *, dry_run: bool = False) -> Change:
 def uninstall(settings: Path, *, dry_run: bool = False) -> Change:
     """Remove exactly afterthought's own hook entries from ``settings``.
 
-    Only the three events afterthought installs are read, and within them only the command
-    hooks running ``aft hook claude <event>`` inside a matcher group - the shape an install
+    Only the events afterthought installs are read, and within them only the command
     writes, plus whatever the user changed inside such a group. Nothing else is deleted and
     nothing is reordered: an element that is not ours keeps its keys and its place, and an
     event array that still holds one of them keeps its key. A command line of ours that
@@ -252,7 +251,7 @@ def _read(settings: Path) -> tuple[dict, str | None]:
     the one place that decides what invalid means: a file that cannot be opened or even
     looked up - a settings directory the user cannot search, say - text that is not UTF-8,
     text that is not JSON, a JSON value that is not an object, a ``hooks`` key that is not an
-    object, and a value where one of afterthought's three events lives that is not a list.
+    object, and a value where one of afterthought's events lives that is not a list.
     Each is refused rather than overwritten, because a file afterthought cannot read is a
     file it cannot merge into, and it is somebody's working configuration. Text with nothing
     in it is the exception, and so is a name that holds no file at all: an absent settings

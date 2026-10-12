@@ -6,15 +6,23 @@
 // Thin on purpose, like pi's own rtk extension: every memory decision lives in `aft`. This
 // file runs one command per event, keeps the one block that command printed, and adds that
 // block as a system prompt section of its own. `aft hook pi session_start` prints the block
-// `aft inject` prints for the session's directory; the other two events are capture's and
-// print nothing. When notes in memory wait on the user, session_start prints a JSON object
-// instead, `{"block", "notice"}`, and the notice is shown to the user (BUILD-PLAN F42). It has no queue, no retries, no cache and no settings of its own.
+// `aft inject` prints for the session's directory; the capture events print nothing. When
+// notes in memory wait on the user, session_start prints a JSON object instead,
+// `{"block", "notice"}`, and the notice is shown to the user (BUILD-PLAN F42). It has no
+// queue, no retries, no cache and no settings of its own.
+//
+// On every prompt, `before_agent_start` (BUILD-PLAN F87) calls `aft hook pi
+// before_agent_start` with the prompt and the working directory and puts what it prints in
+// a section of its own beside the block, replacing the previous prompt's section each time
+// (an empty answer clears it). pi's field for the prompt is the event's `prompt` field,
+// "The raw user prompt text (after expansion)" (pi's
+// dist/core/extensions/types.d.ts, BeforeAgentStartEvent).
 //
 // The payload is the shape src/aft/adapters/pi.py parses, and the event names are that
-// module's own table: `session_start`, `session_before_compact`, `session_shutdown`.
+// module's own table: `session_start`, `session_before_compact`, `session_shutdown`,
+// `before_agent_start`.
 // `aft hook` never fails and always exits 0 (BUILD-PLAN M1.1), so nothing here reads an exit
 // code: what it prints is the whole conversation between the two.
-
 import { spawn } from "node:child_process"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 
@@ -30,6 +38,10 @@ const HOOK_TIMEOUT_MS = 2_000
 // replaces instead of arriving a second time beside it.
 const SECTION = "afterthought"
 
+// The prompt recall's section, beside the block's: pi replaces a section by name, so each
+// prompt's recall stands in for the last prompt's, and an empty answer clears it
+// (BUILD-PLAN F87).
+const RECALL_SECTION = "afterthought-recall"
 /** What `aft hook pi <event>` reads on stdin, field for field with src/aft/adapters/pi.py. */
 interface HookPayload {
   session_id: string
@@ -37,6 +49,8 @@ interface HookPayload {
   transcript_path?: string
   hook_event_name: string
   reason?: string
+  /** The submitted prompt, for before_agent_start only (BUILD-PLAN F87). */
+  prompt?: string
 }
 
 /** The three facts about a session that aft reads, as pi's session manager exposes them. */
@@ -61,15 +75,39 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(start.notice, "warning")
         }
       }
-    } catch {}
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
   })
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    let recall = ""
     try {
-      if (block && event?.systemPromptOptions?.sections) {
-        event.systemPromptOptions.sections[SECTION] = block
+      // Recall on each prompt (BUILD-PLAN F87): the event's `prompt` field is the raw user
+      // prompt text (pi's dist/core/extensions/types.d.ts, BeforeAgentStartEvent). The
+      // answer replaces the previous prompt's section; an empty answer clears it.
+      const p = payload("before_agent_start", undefined, ctx?.sessionManager, ctx?.cwd)
+      if (p && typeof event?.prompt === "string" && event.prompt) {
+        p.prompt = event.prompt
+        recall = await hook("before_agent_start", p)
       }
-    } catch {}
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
+    try {
+      if (event?.systemPromptOptions?.sections) {
+        if (recall) {
+          event.systemPromptOptions.sections[RECALL_SECTION] = recall
+        } else {
+          delete event.systemPromptOptions.sections[RECALL_SECTION]
+        }
+        if (block) {
+          event.systemPromptOptions.sections[SECTION] = block
+        }
+      }
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
   })
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -78,7 +116,9 @@ export default function (pi: ExtensionAPI) {
       if (p) {
         await hook("session_before_compact", p)
       }
-    } catch {}
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
   })
 
   pi.on("session_compact", async (event, ctx) => {
@@ -91,7 +131,9 @@ export default function (pi: ExtensionAPI) {
           block = refreshed
         }
       }
-    } catch {}
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
   })
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -100,7 +142,9 @@ export default function (pi: ExtensionAPI) {
       if (p) {
         await hook("session_shutdown", p)
       }
-    } catch {}
+    } catch {
+      // Best-effort by design: memory never breaks the agent (see the header comment).
+    }
   })
 
   /**
