@@ -210,6 +210,12 @@ def load(environ: typing.Mapping[str, str] | None = None) -> Config:
         raise ConfigError(f"{path}: dream.short_term_sessions must be at least 1")
     if settings.dream.short_term_days < 1:
         raise ConfigError(f"{path}: dream.short_term_days must be at least 1")
+    if settings.work.daily_token_budget <= 0:
+        raise ConfigError(f"{path}: work.daily_token_budget must be positive")
+    if settings.search.daily_token_budget <= 0:
+        raise ConfigError(f"{path}: search.daily_token_budget must be positive")
+    if settings.search.rerank_timeout_seconds <= 0:
+        raise ConfigError(f"{path}: search.rerank_timeout_seconds must be positive")
     host = settings.host or default_host()
     return Config(home=home, vault=vault, host=host, settings=settings)
 

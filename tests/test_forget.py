@@ -38,7 +38,7 @@ from aft.events import SESSION_END, SessionEvent
 from aft.forget import FORGOTTEN_MARKER
 from aft.library import propose
 from aft.readers import CLAUDE, PI, Entry
-from conftest import make_repo, run_git
+from conftest import make_repo, run_git, spend
 from fakes.model_server import FakeEndpoint
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
@@ -1206,7 +1206,7 @@ def test_the_work_that_follows_a_forgetting_finds_nothing_to_digest(
     try:
         # The day's budget is spent before the queue is reached, so the row the sweep filed
         # waits for a later run with the session's words still unread (DESIGN 13).
-        first = work.run(with_budget(cfg, 0))
+        first = work.run(spend(with_budget(cfg, 1), 1))
         assert (first.swept, first.digested) == (1, 0), "the run spent no sweep on the session"
         assert queue_job_rows(cfg, FORGOTTEN_SESSION) != []
 
@@ -1548,7 +1548,7 @@ def test_a_redigest_after_the_day_s_budget_is_spent_asks_nothing_of_the_model(
     fake = FakeEndpoint([digest_answer("rotate the vault key")])
     fake.start()
     try:
-        cfg = with_budget(point_at(cfg, fake), 0)
+        cfg = spend(with_budget(point_at(cfg, fake), 1), 1)
         with pytest.raises(digest.DigestError):
             digest.redigest(cfg, "s-pat")
         asked = len(fake.requests)
