@@ -1924,7 +1924,10 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   keeps answering `aft search`. The cache keeps it too, and today's rewrite of library `*.md`
   sources breaks their recorded hashes although sources are read-only once imported.
   - **Cache:** `forget pattern` redacts every chunk text in `<home>/library/*.json` with the
-    same replacement; a rewrite that would no longer parse as JSON is refused and named.
+    same replacement, a cache no manifest lists included. A text redaction that would break a
+    listed cache's JSON goes through the import's writer instead, which always leaves it
+    parseable, so no listed cache keeps a match; an unlisted cache whose redaction would
+    break it is refused and named.
   - **Index:** each library document whose cached text changed has its rows and recorded hash
     dropped, so the same command's index update rebuilds them from the redacted cache. A
     document with no cache whose extracted text matches gets a redacted cache written first,
@@ -1939,7 +1942,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Tests:** a pattern found in a cached library chunk no longer answers `aft search` after
     `forget pattern`; the cache holds `[redacted]`; a library source file is unchanged and
     named in the report; an uncached PDF or text document gets a redacted cache before the
-    rebuild; a redaction that would break a cache file's JSON is refused and named. Review
+    rebuild; a redaction that would break a listed cache's JSON goes through the writer; an
+    unlisted cache is redacted too. Review
     checkpoint: yes (privacy: forget; lead reviews in full).
 
 - **M13 Dates in a query are read only when the query says so** (ruling 2026-10-12; ROADMAP

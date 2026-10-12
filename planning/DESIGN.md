@@ -945,9 +945,11 @@ Capture is automatic, so not capturing has to be deliberate and deterministic:
   `--withdraw <numbers|all>` strikes the lines you choose, each with its reason recorded.
 - **`aft forget pattern <regex>`** replaces matching text with `[redacted]` in the archive
   and everywhere afterthought copied it (digest quotes, page sources and statements, reports,
-  search phrases),
-  updates the index to match, and prints the line that adds the pattern to future redaction.
-  Quotes stay verifiable because the archive holds the same redaction.
+  search phrases, and the library's extracted-text cache, from which the library's search rows
+  are rebuilt), updates the index to match, and prints the line that adds the pattern to
+  future redaction. Library source files are read-only once imported, so it does not rewrite
+  them; it names each one that still holds the text, which deleting or re-importing the file
+  removes. Quotes stay verifiable because the archive holds the same redaction.
 
 Forgetting removes content from everything afterthought controls. The vault's git history
 still holds older commits; removing them means rewriting history, which `aft forget`
