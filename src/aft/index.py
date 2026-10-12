@@ -528,7 +528,7 @@ def _is_current_build(conn: sqlite3.Connection) -> bool:
     return recorded[0] == BUILD_STAMP
 
 
-def update(config: Config) -> list[str]:
+def update(config: Config, *, force: bool = False) -> list[str]:
     """Bring the index in step with the vault and the archive, leaving untouched rows alone.
 
     This is the incremental path BUILD-PLAN M3.1 names: a file is rebuilt only when its
@@ -542,6 +542,12 @@ def update(config: Config) -> list[str]:
     that takes no write lock - which is the difference between a search that checks the index
     and a search that rebuilds it. `reindex` never asks: dropping the index is the one answer
     that does not depend on what moved.
+
+    ``force`` skips that question. A caller that has just dropped the recorded hash a rebuild
+    keys on knows the index is behind in a way no stat of the files can see, because the files
+    themselves have not moved: the forget of a library document's extraction cache drops its
+    hash and its rows, and the write pass this flag asks for is what rebuilds them from the
+    cache it redacted (DESIGN 11).
 
     When a build stamp mismatch occurs, the index is automatically rebuilt from scratch under
     the write lock (reindex) rather than raising SearchIndexError.
@@ -560,7 +566,7 @@ def update(config: Config) -> list[str]:
                 _db_path(config),
             )
             return reindex(config)
-        if not _moved(probe, config):
+        if not force and not _moved(probe, config):
             return []
     with _writing(config) as conn:
         # Taken before the reading starts, so a file that moves while this run is in the middle
