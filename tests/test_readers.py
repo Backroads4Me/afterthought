@@ -156,6 +156,54 @@ def test_a_marked_user_turn_that_cannot_be_read_is_reported(tmp_path):
         list(readers.read(CLAUDE, path))
 
 
+def test_a_sidechain_record_is_not_read(tmp_path):
+    # A sidechain record is a subagent's conversation, whose user messages are the main
+    # agent's prompts, not the person's words, so neither side of it becomes an entry.
+    records = [
+        {
+            "type": "user",
+            "uuid": "main-user",
+            "timestamp": "2026-09-28T06:57:06.713Z",
+            "message": {"role": "user", "content": "schedule the valves"},
+        },
+        {
+            "type": "user",
+            "isSidechain": True,
+            "uuid": "side-user",
+            "timestamp": "2026-09-28T06:58:06.713Z",
+            "message": {"role": "user", "content": "check the valve specs"},
+        },
+        {
+            "type": "assistant",
+            "isSidechain": True,
+            "uuid": "side-assistant",
+            "timestamp": "2026-09-28T06:59:06.713Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "The spec says 5 bar"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "main-assistant",
+            "timestamp": "2026-09-28T07:00:06.713Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Set the valves to 5 bar"}],
+            },
+        },
+    ]
+    path = tmp_path / "claude-sidechain.jsonl"
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    entries = list(readers.read(CLAUDE, path))
+
+    assert [(e.id, e.role, e.text) for e in entries] == [
+        ("main-user", "user", "schedule the valves"),
+        ("main-assistant", "assistant", "Set the valves to 5 bar"),
+    ]
+
+
 def test_claude_splits_a_tool_result_out_of_the_user_message_it_came_in():
     tool = next(e for e in read(CLAUDE, "claude-session.jsonl") if e.role == "tool")
     assert tool.id == "d59a4bb6-be78-52de-92a5-2019e732fc1f#toolu_380fffc5950b58f6974ef308"

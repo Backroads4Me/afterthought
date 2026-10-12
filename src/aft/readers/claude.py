@@ -80,6 +80,9 @@ def _record_entries(record: dict) -> Iterator[Entry]:
     kind = record.get("type")
     if kind not in CONVERSATION:
         return
+    # isSidechain: a subagent's conversation, whose user messages are the main agent's prompts.
+    if record.get("isSidechain"):
+        return
     entry_id = record.get("uuid")
     time = parse_time(record.get("timestamp"))
     message = record.get("message")
