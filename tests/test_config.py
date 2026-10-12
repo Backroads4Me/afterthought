@@ -18,6 +18,9 @@ def test_defaults_when_file_missing(tmp_path, monkeypatch):
     assert cfg.settings.evidence.retention_days == 90
     assert cfg.settings.library.commit is True
     assert cfg.settings.capture.builtin_redaction is True
+    assert cfg.settings.work.daily_token_budget == 200_000
+    assert cfg.settings.search.daily_token_budget == 200_000
+    assert cfg.settings.search.rerank_timeout_seconds == 5.0
     assert cfg.host == configmod.default_host()
 
 
@@ -73,6 +76,18 @@ def test_digest_verify_settings_read_from_config(home):
         ("[search]\ndaily_token_budget = 'week'\n", "search.daily_token_budget must be an integer"),
         ("[dream]\ninterval_minutes = 0\n", "dream.interval_minutes must be positive"),
         ("[dream]\ninterval_minutes = -5\n", "dream.interval_minutes must be positive"),
+        ("[work]\ndaily_token_budget = 0\n", "work.daily_token_budget must be positive"),
+        ("[work]\ndaily_token_budget = -5\n", "work.daily_token_budget must be positive"),
+        ("[search]\ndaily_token_budget = 0\n", "search.daily_token_budget must be positive"),
+        ("[search]\ndaily_token_budget = -5\n", "search.daily_token_budget must be positive"),
+        (
+            "[search]\nrerank_timeout_seconds = 0\n",
+            "search.rerank_timeout_seconds must be positive",
+        ),
+        (
+            "[search]\nrerank_timeout_seconds = -1\n",
+            "search.rerank_timeout_seconds must be positive",
+        ),
         ("[library]\ncommit = 1\n", "library.commit must be true or false"),
         ("[capture]\nbuiltin_redaction = 1\n", "capture.builtin_redaction must be true or false"),
         (

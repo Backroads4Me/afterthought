@@ -52,7 +52,7 @@ from aft.model import ModelError
 from aft.readers import CLAUDE, PI, Entry
 from aft.readers.claude import SYNTHETIC_MODEL
 from aft.redact import REDACTED
-from conftest import make_repo
+from conftest import make_repo, spend
 from fakes.model_server import FakeEndpoint
 
 # The session's own clock: the entries are dated by it and the page is filed under it.
@@ -2808,7 +2808,7 @@ def test_worker_session_is_archived_and_indexed_but_not_digested_when_budget_is_
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     fake, cfg = serve(session.cfg, answer(said()))
     try:
-        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+        cfg = spend(with_capture(cfg, worker_paths=[str(worker_dir)], budget=1), 1)
 
         transcript = write_records(
             tmp_path / "worker.jsonl",
@@ -2979,7 +2979,7 @@ def _two_waiting_workers(session: Session, tmp_path) -> tuple[Config, FakeEndpoi
     """A config whose whole budget is spent and two worker sessions waiting in the queue."""
     directories = [make_repo(tmp_path / f"worker_{name}").resolve() for name in ("one", "two")]
     fake, cfg = serve(session.cfg)
-    cfg = with_capture(cfg, worker_paths=[str(d) for d in directories], budget=0)
+    cfg = spend(with_capture(cfg, worker_paths=[str(d) for d in directories], budget=1), 1)
     for directory, name in zip(directories, ("one", "two"), strict=True):
         transcript = write_records(
             tmp_path / f"worker-{name}.jsonl",
@@ -3046,7 +3046,7 @@ def _one_waiting_worker(session: Session, tmp_path) -> tuple[Config, FakeEndpoin
     """A spent budget and one worker session waiting in the queue."""
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     fake, cfg = serve(session.cfg)
-    cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+    cfg = spend(with_capture(cfg, worker_paths=[str(worker_dir)], budget=1), 1)
     transcript = write_records(
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},
@@ -3093,7 +3093,7 @@ def test_archiving_without_a_vault_stops_rather_than_indexing_nothing(session: S
     would report the worker as stored while indexing none of it (DESIGN 14).
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
-    cfg = with_capture(session.cfg, worker_paths=[str(worker_dir)], budget=0)
+    cfg = with_capture(session.cfg, worker_paths=[str(worker_dir)], budget=1)
     transcript = write_records(
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},
@@ -3276,7 +3276,7 @@ def test_capture_follows_a_worker_session_the_archive_stored(
     monkeypatch.setattr(queue, "_now", lambda: NOW)
     fake, cfg = serve(session.cfg)
     try:
-        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+        cfg = spend(with_capture(cfg, worker_paths=[str(worker_dir)], budget=1), 1)
         transcript = write_records(
             sessions / "dev-worker" / "worker-1.jsonl",
             {"cwd": str(worker_dir)},
@@ -3321,7 +3321,7 @@ def test_a_worker_that_goes_quiet_after_archiving_is_still_digested(session: Ses
     )
     fake, cfg = serve(session.cfg, worker_answer, worker_answer)
     try:
-        cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+        cfg = spend(with_capture(cfg, worker_paths=[str(worker_dir)], budget=1), 1)
         transcript = write_records(
             tmp_path / "worker.jsonl",
             {"cwd": str(worker_dir)},
@@ -3485,7 +3485,7 @@ def test_a_worker_session_with_one_prompt_is_not_archived(session: Session, tmp_
     """
     worker_dir = make_repo(tmp_path / "worker_repo").resolve()
     fake, cfg = serve(session.cfg)
-    cfg = with_capture(cfg, worker_paths=[str(worker_dir)], budget=0)
+    cfg = spend(with_capture(cfg, worker_paths=[str(worker_dir)], budget=1), 1)
     transcript = write_records(
         tmp_path / "worker.jsonl",
         {"cwd": str(worker_dir)},

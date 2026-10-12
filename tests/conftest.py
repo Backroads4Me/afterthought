@@ -4,8 +4,10 @@ configuration."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -92,3 +94,15 @@ def make_repo(path: Path, origin: str | None = None) -> Path:
     if origin:
         run_git(["remote", "add", "origin", origin], path)
     return path
+
+
+def spend(cfg: configmod.Config, tokens: int) -> configmod.Config:
+    """Record tokens of model use earlier today, the way aft.model logs a call.
+
+    The budget settings must stay positive (BUILD-PLAN T39), so a test that needs the day's
+    budget already spent writes the usage ledger instead of setting a budget of zero.
+    """
+    line = {"at": datetime.now(UTC).isoformat(), "prompt_tokens": tokens, "completion_tokens": 0}
+    with (cfg.home / "usage.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line) + "\n")
+    return cfg
