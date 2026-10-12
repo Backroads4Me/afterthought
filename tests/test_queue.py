@@ -1093,6 +1093,29 @@ def test_the_sweep_finds_a_session_the_last_sweep_ran_past(
     assert [e.session_id for e in found] == [path.stem]
 
 
+def test_the_sweep_does_not_read_a_subagent_transcript(
+    cfg: Config, tmp_path: Path, monkeypatch
+) -> None:
+    """A sidechain lives in `subagents/agent-*.jsonl` beside the session files of its
+    project, and the sweep reads only `<session id>.jsonl` there: a subagents file is a
+    subagent's conversation, not one of the person's sessions (BUILD-PLAN T40)."""
+    sessions = tmp_path / "agent-sessions"
+    sweep_dirs(monkeypatch, sessions, tmp_path)
+    queue.watching_since(cfg, NOW - timedelta(hours=2))
+    main = session_file(sessions, CLAUDE, "with-subagents", touched=NOW - timedelta(minutes=30))
+    subagents = main.parent / "subagents"
+    subagents.mkdir()
+    agent = subagents / "agent-x.jsonl"
+    agent.write_text(json.dumps({"cwd": "/home/ted/dev/app"}) + "\n")
+    stamp = (NOW - timedelta(minutes=29)).timestamp()
+    os.utime(agent, (stamp, stamp))
+
+    found = capture.sweep(cfg, NOW + timedelta(hours=1))
+
+    assert [e.session_id for e in found] == [main.stem]
+    assert "agent-x" not in [e.session_id for e in found]
+
+
 def test_a_session_untouched_since_its_digest_read_it_is_not_offered_again(
     cfg: Config, tmp_path: Path, monkeypatch
 ) -> None:
