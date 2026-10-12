@@ -2038,6 +2038,50 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   `paths` is committed; nothing staged within `paths` makes no commit even when another path
   is staged. Review checkpoint: no.
 
+- **F87 Recall on each prompt** (ruling 2026-10-12; DESIGN 10 and 15, which list "recall on
+  each prompt" after v1). An agent reads the block a session starts with and rarely runs
+  `aft search` itself (in the user's 300 latest Claude sessions, 3 searches), and no part of
+  the system may depend on the working model choosing to use memory. Each prompt therefore
+  brings back the few memory lines that bear on it, beside the prompt.
+  - **Hooks:** Claude Code's `UserPromptSubmit` (payload field `prompt`; context added as
+    `hookSpecificOutput.additionalContext`, capped by Claude Code at 10,000 characters) through
+    `aft hook claude UserPromptSubmit`, installed by `aft install claude` beside the existing
+    groups with the same 5 s timeout; pi's `before_agent_start` through the extension, as a
+    section of its own beside the block (the builder confirms which field of pi's event holds
+    the prompt and records it in the extension's comment).
+  - **Query:** the prompt with any `<pasted_content ...>` block, fenced code and the capture
+    markers (`aft off`, `aft on`, "off the record", "on the record") removed, cut to its first
+    32 content words (F81's filler list applies). A prompt left with fewer than 3 content words
+    ("yes", "do it") recalls nothing. The search runs as `aft search` does from the session's
+    working directory, BM25 only by default (`recall.rerank = false`): a recall runs on every
+    prompt and must not add seconds to it.
+  - **What is added:** at most `recall.max_hits` (3) hits whose matched row holds at least
+    min(3, n) of the query's n content words, none of them a line the session's start block
+    already holds, each one line (path, heading, the matched line or snippet), under the
+    factual heading "Memory that may bear on this prompt (from aft search; check before relying
+    on it):", the whole at most `recall.max_chars` (1,500). Nothing passes the bar: nothing is
+    printed.
+  - **Privacy:** the prompt's text is never written anywhere by recall (no log, no archive, no
+    index); a failure is logged as other hook failures are, without the prompt. A session whose
+    capture is off still recalls (recall stores nothing).
+  - **Settings:** `[recall]` with `enabled = true`, `max_hits = 3`, `max_chars = 1500`,
+    `rerank = false`, validated positive like T39's.
+  - **Present tense:** DESIGN 10 (recall on each prompt, its bar and its limits) and DESIGN 15
+    (remove it from the after-v1 list), `docs/commands.md`, `docs/configuration.md`, the aft
+    skill's description of what a session receives.
+  - **Measure, before merging (decision rule set now):** on T38's key, each question as a
+    prompt: recall@3 at least today's BM25 recall@3 (0.44) after the bar, and the share of
+    prompts that add anything reported; hook time p90 under 300 ms with BM25 only (and
+    reported with `rerank = true`); on 50 real user prompts sampled from the archive, the lead
+    reads every recall added and reports how many were useful, neutral or noise. Ted decides
+    whether the bar or `max_hits` changes before merging.
+  - **Tests:** a prompt that matches adds at most `max_hits` hits within `max_chars`, a short
+    prompt adds nothing, a pasted block and code fence do not reach the query, a line already in
+    the start block is not repeated, the prompt is in no file afterwards, a failure prints
+    nothing and exits 0, `aft install claude` adds the `UserPromptSubmit` group and
+    `--uninstall` removes it. Review checkpoint: yes (a new path into every session's context;
+    privacy of the prompt; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
