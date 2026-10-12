@@ -99,14 +99,15 @@ def query_words(prompt: str) -> list[str]:
     return [word for word in words if word and word.lower() not in FILLER_WORDS][:MAX_QUERY_WORDS]
 
 
-def recall(prompt: str | None, cwd, config: Config) -> str:
+def recall(prompt: str | None, cwd, config: Config, session_id: str = "") -> str:
     """The block to add for one submitted prompt, or "" when nothing bears on it.
 
     Reads memory only: the vault, the registry and the search index answer it, and
     nothing is written anywhere (BUILD-PLAN F87). The search runs as ``aft search`` does
     from ``cwd``, BM25 only unless ``recall.rerank`` says otherwise, and is asked for a
     pool wider than the block will show because the bar and the start-block dedupe both
-    drop hits. ``recall.enabled = false`` gives nothing, as does a prompt left with
+    drop hits. A hit from ``session_id`` itself (its archived entries, its digests) is
+    never shown. ``recall.enabled = false`` gives nothing, as does a prompt left with
     fewer than three content words, and so does a vault that is not initialized: a
     session that has no memory to give is not a failure and logs nothing.
     """
@@ -119,12 +120,12 @@ def recall(prompt: str | None, cwd, config: Config) -> str:
     if len(words) < MIN_QUERY_WORDS:
         return ""
     try:
-        return _recall(words, cwd, config, settings)
+        return _recall(words, cwd, config, settings, session_id)
     except Exception as exc:  # noqa: BLE001 - the hook turns any failure into a log line
         raise RecallError(f"recall failed: {type(exc).__name__}") from exc
 
 
-def _recall(words: list[str], cwd, config: Config, settings) -> str:
+def _recall(words: list[str], cwd, config: Config, settings, session_id: str) -> str:
     """The block one query recalls, within the configured bar, dedupe and budget."""
     registry = Registry.load(config.registry_path)
     try:
@@ -147,6 +148,10 @@ def _recall(words: list[str], cwd, config: Config, settings) -> str:
     for hit in hits:
         if len(lines) == settings.max_hits:
             break
+        if session_id and session_id in hit.path:
+            # The session's own archived entries and digests: once a session compacts,
+            # its earlier prompts are in the index, and recall would hand them back.
+            continue
         if not _holds_bar(hit, words):
             continue
         if _held_by_block(hit, held):

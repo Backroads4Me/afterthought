@@ -1765,7 +1765,8 @@ def _dispatch(event: SessionEvent) -> str:
     if event.kind == PROMPT:
         from aft import recall as recallmod
 
-        return _prompt_output(event.agent, recallmod.recall(event.prompt, event.cwd, load()))
+        block = recallmod.recall(event.prompt, event.cwd, load(), session_id=event.session_id)
+        return _prompt_output(event.agent, block)
     if event.kind in (COMPACTION, SESSION_END):
         from aft import queue
         from aft.config import is_excluded

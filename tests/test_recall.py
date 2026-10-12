@@ -171,6 +171,22 @@ def test_the_bar_counts_another_form_of_a_word():
     assert not recall._holds_bar(hit, ["deploy", "release", "prod"])
 
 
+def test_the_session_s_own_hits_are_not_recalled(workspace, cfg, monkeypatch):
+    """A session that compacted has its earlier prompts in the index; recall never hands
+    them back."""
+    cwd, _ = workspace
+    own = SimpleNamespace(
+        path="aft://session/claude/s-own#e1",
+        heading="",
+        description="",
+        snippet="deploy the release to staging, as asked before",
+    )
+    real_search = recall.search.search
+    monkeypatch.setattr(recall.search, "search", lambda *a, **k: [own, *real_search(*a, **k)])
+    assert "s-own" in recall.recall(PROMPT_TEXT, cwd, cfg, session_id="other")
+    assert "s-own" not in recall.recall(PROMPT_TEXT, cwd, cfg, session_id="s-own")
+
+
 # --- the parsers ---------------------------------------------------------------------
 
 
