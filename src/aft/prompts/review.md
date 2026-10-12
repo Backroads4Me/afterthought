@@ -11,6 +11,9 @@ with its date in the statement. Never a fact, long or short term: the status of 
 request, task, branch or commit; who is working on what; a test's name or result; a
 review's outcome; what a change or fix did to the code; and anything the repository's own
 documents already say.
+Also never a fact: a one-time order to do a piece of work, given or approved by the user,
+whether or not it was carried out. A standing rule, a permission, and the choice an
+approval settles are not such orders.
 
 Memory has two terms. A line on a long-term page should still be true and useful a
 year from now; one that will not last is not worth keeping. A line on recent.md is

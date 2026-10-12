@@ -17,6 +17,9 @@ request, task, branch or commit; who is working on what; a test's name or result
 review's outcome; what a change or fix did to the code; and anything the repository's own
 documents already say. A question, a proposal or a request from the user is never a
 decision or a preference.
+Also never a fact: a one-time order to do a piece of work, given or approved by the user,
+whether or not it was carried out. A standing rule, a permission, and the choice an
+approval settles are not such orders.
 
 Choose one action:
 - add: the fact is new; no existing line says the same thing or contradicts it.
@@ -43,5 +46,7 @@ the wording differs. Before naming a line for supersede or conflict, check that 
 the same thing as the new fact. A fact about something else, or one that can be true at the
 same time as the line, is not a supersede or a conflict: choose confirm if a line already
 says the same thing, and add otherwise.
+Two orders to do different pieces of work are about different things, never a supersede or
+a conflict.
 
 Give a reason of at most 200 characters that a person can check against the quote.

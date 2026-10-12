@@ -554,6 +554,16 @@ def test_the_decide_prompt_keeps_conflict_to_the_same_thing():
     assert "is not a supersede or a conflict: choose confirm if a line already" in words
 
 
+def test_two_orders_for_different_work_are_about_different_things():
+    """BUILD-PLAN F88: two orders to do different pieces of work never supersede or
+    conflict with each other."""
+    words = " ".join(decide.prompt().split())
+    assert (
+        "Two orders to do different pieces of work are about different things, never a"
+        " supersede or a conflict." in words
+    )
+
+
 def test_the_decide_prompt_keeps_the_plans_text():
     """The plan's own words still ship (BUILD-PLAN M4.3). M14 extends the prompt between
     the plan's lines; it never rewords or drops one."""
