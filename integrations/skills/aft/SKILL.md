@@ -93,10 +93,12 @@ To settle them:
    evidence says, and when each was said. Recommend one of the three choices, with your
    reason, and ask the user to choose:
    - Keep: the line stands as it is.
-   - Replace: a new statement takes the line's place, resting on the note's quotes. Draft
-     the statement from those quotes and let the user change it. Replace is refused when
-     none of the note's quotes still verifies, or only a worker session's do; offer keep
-     or withdraw then.
+   - Replace: a new statement takes the line's place, resting on the line's own quotes
+     and the note's. Draft the statement from those quotes and let the user change it.
+     Write each name and number as the quotes write it (`R1 to R10`, not `R1-R10`), since
+     a token holding a symbol has to match a quote exactly. Replace is refused when none
+     of the note's quotes still verifies, or only a worker session's do, whatever the
+     line's quotes say; offer keep or withdraw then.
    - Withdraw: the line is struck through, and nothing replaces it.
 3. Run `aft settle <where> --keep`, `aft settle <where> --withdraw`, or
    `aft settle <where> --replace <statement>`, using the `where` field of the note the user
