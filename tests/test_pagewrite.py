@@ -371,7 +371,7 @@ def test_add_source_appends_an_entry_and_leaves_the_rest_alone(initialized, doc)
 def test_add_source_fills_an_empty_sources_list(initialized):
     doc = make(initialized, BARE)
     before = doc.render()
-    doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+    doc.add_source("aft://edit/4f2a91c", quote="a line Sam added by hand")
     written(initialized, doc)
     assert edits(before, doc.render()) == (
         (5,),
@@ -379,7 +379,7 @@ def test_add_source_fills_an_empty_sources_list(initialized):
             "sources:",
             "  - id: s1",
             "    resource: aft://edit/4f2a91c",
-            "    quote: a line Ted added by hand",
+            "    quote: a line Sam added by hand",
         ),
     )
 
@@ -411,7 +411,7 @@ def test_add_source_refuses_a_list_someone_typed_inline(initialized):
     doc = make(initialized, INLINE_SOURCES)
     before = doc.render()
     with pytest.raises(pagewrite.WriteError, match="cannot append to an inline sources list"):
-        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+        doc.add_source("aft://edit/4f2a91c", quote="a line Sam added by hand")
     assert doc.render() == before
 
 
@@ -419,7 +419,7 @@ def test_add_source_refuses_a_page_with_no_frontmatter(initialized):
     doc = make(initialized, NO_FRONTMATTER)
     before = doc.render()
     with pytest.raises(pagewrite.WriteError, match="no frontmatter to add a source to"):
-        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+        doc.add_source("aft://edit/4f2a91c", quote="a line Sam added by hand")
     assert doc.render() == before
 
 
@@ -430,7 +430,7 @@ def test_add_source_names_an_unterminated_frontmatter_as_unreadable(initialized)
         pagewrite.WriteError,
         match="sources are unreadable: frontmatter has no closing",
     ):
-        doc.add_source("aft://edit/4f2a91c", quote="a line Ted added by hand")
+        doc.add_source("aft://edit/4f2a91c", quote="a line Sam added by hand")
     assert doc.render() == before
 
 
@@ -1346,7 +1346,7 @@ def test_a_row_typed_into_an_open_note_is_never_rewritten_and_archives_verbatim(
             STATE,
             "> [!conflict] 2026-10-01",
             "> A session says the host runs SGLang.",
-            "> Ted: SGLang was only the benchmark box.",
+            "> Sam: SGLang was only the benchmark box.",
         ]
     )
     doc = make(initialized, PAGE.replace(STATE, noted))
@@ -1354,7 +1354,7 @@ def test_a_row_typed_into_an_open_note_is_never_rewritten_and_archives_verbatim(
     assert disputed.state == page.CONFLICT
     assert disputed.callouts[0].text == [
         "A session says the host runs SGLang.",
-        "Ted: SGLang was only the benchmark box.",
+        "Sam: SGLang was only the benchmark box.",
     ]
     before = doc.render()
     with pytest.raises(pagewrite.WriteError, match="cannot add a callout to a conflict line"):
@@ -1362,7 +1362,7 @@ def test_a_row_typed_into_an_open_note_is_never_rewritten_and_archives_verbatim(
     assert doc.render() == before
     assert doc.resolve_callout(doc.fact("The GPU host runs vLLM.")) is True
     assert states(written(initialized, doc), "State") == [("The GPU host runs vLLM.", page.ACTIVE)]
-    assert "> Ted: SGLang was only the benchmark box." in archived(initialized)
+    assert "> Sam: SGLang was only the benchmark box." in archived(initialized)
 
 
 def test_resolve_callout_gives_the_line_back_and_archives_it_once(initialized, doc):
@@ -1389,7 +1389,7 @@ def test_resolve_callout_archives_the_note_verbatim_with_the_line_it_was_about(i
     note = [
         "> [!conflict] 2026-10-01",
         "> A session says the host runs SGLang.",
-        "> Ted: SGLang was only the benchmark box.",
+        "> Sam: SGLang was only the benchmark box.",
     ]
     doc = make(initialized, PAGE.replace(STATE, "\n".join([STATE, *note])))
     line = doc.fact("The GPU host runs vLLM.")

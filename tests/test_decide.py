@@ -62,7 +62,7 @@ aft:
 GLOBAL_PAGE = """---
 type: Preferences
 title: Preferences
-description: What Ted wants everywhere.
+description: What Sam wants everywhere.
 sources:
   - id: s1
     resource: aft://session/claude/2c1e9d0a#entry-7

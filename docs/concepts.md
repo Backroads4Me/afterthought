@@ -1,6 +1,6 @@
 # Concepts
 
-This page explains what afterthought keeps, how something becomes memory, and what you
+This page explains what Afterthought keeps, how something becomes memory, and what you
 will see from day to day. The reasons behind each choice are in
 [DESIGN.md](../planning/DESIGN.md).
 

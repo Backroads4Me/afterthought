@@ -862,7 +862,7 @@ def test_needs_you_regenerated_when_resolved_by_hand(initialized: Config):
         "## Decisions\n\n"
         "- A question fact. [stated] 2026-10-04 [^s1]\n\n"
         "> [!question] 2026-10-04\n"
-        "> Question to Ted\n",
+        "> Question to Sam\n",
         encoding="utf-8",
     )
     vault.commit(cfg.vault, ["projects/widget/overview.md"], "seed question")
@@ -870,7 +870,7 @@ def test_needs_you_regenerated_when_resolved_by_hand(initialized: Config):
     # Initial generation lists the question
     report.regenerate_needs_you(cfg.vault)
     ny_path = cfg.vault / "reports" / "needs-you.md"
-    assert "Question to Ted" in ny_path.read_text(encoding="utf-8")
+    assert "Question to Sam" in ny_path.read_text(encoding="utf-8")
 
     # Hand-resolve the question
     overview.write_text(
@@ -911,7 +911,7 @@ def test_needs_you_regenerated_when_resolved_by_hand(initialized: Config):
 
     # needs-you.md must have regenerated and cleared the question
     cleared_text = ny_path.read_text(encoding="utf-8")
-    assert "Question to Ted" not in cleared_text
+    assert "Question to Sam" not in cleared_text
     assert "Nothing is waiting on you." in cleared_text
 
 

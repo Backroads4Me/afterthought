@@ -128,7 +128,7 @@ Confirmed the flange fact and left two candidates below the gate.
 PREFERENCES = """---
 type: Preferences
 title: Preferences
-description: What Ted wants everywhere.
+description: What Sam wants everywhere.
 sources: []
 ---
 
