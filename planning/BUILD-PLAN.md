@@ -2002,6 +2002,31 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   search. Present tense: the `search()` docstring and DESIGN 10's "top 30". Tests: a reranked
   search shows the model a pool of 60 when 60 candidates exist. Review checkpoint: no.
 
+- **T43 A settled replacement cites the settle as its own source** (ruling 2026-10-12;
+  follows T41; DESIGN 6 and 9). `aft settle --replace` dates the new line by the newest of the
+  note's quotes, so evidence said after those quotes but before the user settled can reach the
+  dream later and count as newer than the user's decision. The settle commit is itself the
+  user's edit, and hand edits already cite their commit as a source (`aft://edit/<sha>`,
+  verified against the commit's added lines and dated by it, `tag_hand_edits`).
+  - **Two commits:** the settle commits as today (the replacement line with the note's
+    sources, the note to the page's archive). A second commit, `aft: cite settle <sha> on
+    <where>`, adds a source `aft://edit/<sha>` of that first commit to the new line, whose
+    quote is the line's statement as written, and dates the line with the first commit's UTC
+    date. The line's tag is unchanged (T41's grounding check still applies first). If the
+    second commit cannot be made, the first stands and the command says so.
+  - **No new kind of source:** the dream verifies and dates the new source through the
+    existing `aft://edit/` path; nothing in R1 to R10 changes.
+  - **Reporting and undo:** `aft settle` prints both commit hashes. The aft skill
+    (`integrations/skills/aft/SKILL.md`, both places it says `git revert`) and
+    `docs/commands.md` say a replacement is two commits, reverted newest first.
+  - **Present tense:** DESIGN's notes text where settling a note by replacement is described.
+  - **Tests:** a replacement line cites `aft://edit/<first sha>` with the statement as its
+    quote and carries the settle day's date; the dream's lookup verifies that source and dates
+    it by the commit; a digest dated between the note's quotes and the settle day does not
+    count as newer evidence than the line; reverting both commits restores the page and the
+    note; a failed second commit leaves the first commit's line valid. Review checkpoint: yes
+    (sources and dates; lead reviews in full).
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
