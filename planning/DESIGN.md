@@ -736,7 +736,7 @@ and negations (no, not, never) are kept. Words are stemmed by FTS5's Porter toke
 model when it can: the model ranks them by how well each answers the question, its order
 comes first, and the candidates it left out follow in BM25 order. When the model cannot answer
 (the `search.rerank` setting off, the endpoint cooling down or unreachable, the answer late or
-unusable, or the day's token budget spent), the search keeps the BM25 order. Every other
+unusable, or the day's search token budget spent), the search keeps the BM25 order. Every other
 caller, the memory block included, uses the BM25 order alone.
 
 Page lines and digest sections are also matched through search phrases: up to eight short
@@ -966,10 +966,12 @@ explains how to do but never does on its own.
   error messages.
 - Afterthought calls the endpoint over HTTP. It never runs an agent harness from inside a
   hook, which avoids a loop where memory work creates sessions to capture.
-- Budgets: a per-chunk input cap for digests, a per-run token budget for dreaming, and a
-  daily cap that digests and dreaming count against alike: once it is spent, a dream run
-  leaves its projects' digests waiting for the next day. `aft budget` shows the day's use,
-  and `aft budget reset` starts the count again from now, for when the budget was spent by
+- Budgets: a per-chunk input cap for digests, a per-run token budget for dreaming, and two
+  daily caps. `work.daily_token_budget` counts the digests', dream's and search phrases'
+  calls: once it is spent, a dream run leaves its projects' digests waiting for the next day.
+  `search.daily_token_budget` counts `aft search`'s reranking: once it is spent, search keeps
+  the BM25 order. Neither counts the other's tokens. `aft budget` shows both, and `aft
+  budget reset` starts both counts again from now, for when the budget was spent by
   something since fixed; the usage log that records every call is never changed. When a budget runs out, work waits in the queue and the report shows the
   backlog. Worker digests only use budget left over.
 - Expected load at today's volume is about 55,000 input tokens a day for digests plus a
