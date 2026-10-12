@@ -1,14 +1,17 @@
 """Deterministic temporal query parsing for aft search.
 
-Extracts natural language temporal constraints into UTC boundaries and
-strips temporal phrases from search queries.
+Extracts natural language temporal constraints into UTC boundaries and strips temporal
+phrases from search queries. A weekday is a date only after a cue (on, last, past, this,
+since, before, until); a bare weekday stays a search word. No window lands ahead of now
+(BUILD-PLAN M13): a start later than now moves back a week with its end, and an end later
+than now is clamped to now.
 """
 
 from __future__ import annotations
 
 import calendar
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 
@@ -83,6 +86,24 @@ def _end_of_day(dt: datetime) -> datetime:
     return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
 
 
+def _never_ahead(
+    start: datetime | None, end: datetime | None, now: datetime
+) -> tuple[datetime | None, datetime | None]:
+    """Keep a window out of the future (BUILD-PLAN M13).
+
+    A start later than now moves back a week and takes its end with it, so a resolved day
+    ahead of today ("this friday" asked on a Monday) becomes the most recent past
+    occurrence of that day. An end later than now is clamped to now.
+    """
+    if start is not None and start > now:
+        start -= timedelta(days=7)
+        if end is not None:
+            end -= timedelta(days=7)
+    if end is not None and end > now:
+        end = now
+    return start, end
+
+
 def _clean_query(query: str, span: tuple[int, int]) -> str:
     """Remove matched span from query and normalize whitespace."""
     start_idx, end_idx = span
@@ -148,10 +169,13 @@ _RE_RELATIVE_DAY = re.compile(
     re.IGNORECASE,
 )
 
-# Standalone weekday: (last/past/this)? Tuesday
-_RE_WEEKDAY = re.compile(
-    r"\b(?:(?P<mod>last|past|this)\s+)?"
-    r"(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
+# Weekday after a cue (BUILD-PLAN M13): (on|last|past|this|before|until) Tuesday. A bare
+# weekday stays a search word: "sun microsystems" and "sat solver" keep their words, and
+# "before friday" sets an end the way "before <date>" does.
+_RE_CUE_WEEKDAY = re.compile(
+    r"\b(?P<cue>on|last|past|this|before|until)\s+"
+    r"(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    r"|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\b",
     re.IGNORECASE,
 )
 
@@ -181,17 +205,26 @@ def _resolve_weekday_offset(cur_weekday: int, target_weekday: int, modifier: str
 
 
 def parse_temporal(query: str, now: datetime | None = None) -> TemporalConstraint:
-    """Parse temporal expressions from a query into UTC start and end bounds."""
+    """Parse temporal expressions from a query into UTC start and end bounds.
+
+    The window never lands ahead of now (BUILD-PLAN M13): a start later than now moves
+    back a week and takes its end with it, and an end later than now is clamped to now.
+    """
     if now is None:
         now = datetime.now(UTC)
     elif now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
     else:
         now = now.astimezone(UTC)
+    parsed = _parse_expression(query, now)
+    start, end = _never_ahead(parsed.start, parsed.end, now)
+    return replace(parsed, start=start, end=end)
 
+
+def _parse_expression(query: str, now: datetime) -> TemporalConstraint:
+    """The parsed constraint itself, before the window is kept out of the future."""
     today_start = _start_of_day(now)
     today_end = _end_of_day(now)
-
     # 1. Date range: YYYY-MM-DD to YYYY-MM-DD
     m_range = _RE_RANGE.search(query)
     if m_range:
@@ -389,19 +422,22 @@ def parse_temporal(query: str, now: datetime | None = None) -> TemporalConstrain
                     matched_text=query[m_iso.start() : m_iso.end()],
                 )
 
-    # 11. Standalone weekday: Tuesday, last Tuesday
-    m_wk = _RE_WEEKDAY.search(query)
-    if m_wk:
-        wk_str = m_wk.group("weekday").lower()
-        mod = (m_wk.group("mod") or "").lower()
-        target_wk = _WEEKDAYS[wk_str]
-        days_ago = _resolve_weekday_offset(now.weekday(), target_wk, mod if mod else None)
+    # 11. Weekday after a cue (BUILD-PLAN M13): on/last/past/this set one day and
+    # before/until set an end the way before/until <date> does. A bare weekday matches no
+    # branch, so it stays in the query as a search word.
+    m_cue_wk = _RE_CUE_WEEKDAY.search(query)
+    if m_cue_wk:
+        cue = m_cue_wk.group("cue").lower()
+        target_wk = _WEEKDAYS[m_cue_wk.group("weekday").lower()]
+        days_ago = _resolve_weekday_offset(
+            now.weekday(), target_wk, "this" if cue == "this" else None
+        )
         target_date = today_start - timedelta(days=days_ago)
         return TemporalConstraint(
-            start=_start_of_day(target_date),
+            start=None if cue in ("before", "until") else _start_of_day(target_date),
             end=_end_of_day(target_date),
-            stripped_query=_clean_query(query, m_wk.span()),
-            matched_text=query[m_wk.start() : m_wk.end()],
+            stripped_query=_clean_query(query, m_cue_wk.span()),
+            matched_text=query[m_cue_wk.start() : m_cue_wk.end()],
         )
 
     return TemporalConstraint(
