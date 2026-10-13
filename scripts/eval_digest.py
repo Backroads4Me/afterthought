@@ -1120,8 +1120,8 @@ class Judge:
     The judge is the configured endpoint, asked at temperature 0 with the schema that
     sits beside this script. It sees the key statement, the key quote and the run
     statement, and never which backend wrote the run statement. Every verdict is cached
-    under the data directory, keyed by the hash of the judge prompt, the key statement,
-    the key quote and the run statement, so scoring a stored run twice calls the model
+    under the data directory, keyed by the hash of the judge prompt, the model, the key
+    statement, the key quote and the run statement, so scoring a stored run twice calls the model
     once and gives the same numbers.
     """
 
@@ -1140,7 +1140,9 @@ class Judge:
 
     def verdict(self, key_statement: str, key_quote: str, run_statement: str) -> dict:
         """The judge's answer on one pair, from the cache or one call to the endpoint."""
-        key = _judge_key(self.prompt_hash, key_statement, key_quote, run_statement)
+        key = _judge_key(
+            self.prompt_hash, self.cfg.settings.model.name, key_statement, key_quote, run_statement
+        )
         hit = self.cache.get(key)
         if hit is not None:
             return hit
@@ -1169,9 +1171,14 @@ def _judge_user(key_statement: str, key_quote: str, run_statement: str) -> str:
     )
 
 
-def _judge_key(prompt_hash: str, key_statement: str, key_quote: str, run_statement: str) -> str:
-    """The cache key of one pair: the judge prompt's hash with the three texts."""
-    payload = json.dumps([prompt_hash, key_statement, key_quote, run_statement], ensure_ascii=False)
+def _judge_key(
+    prompt_hash: str, model: str, key_statement: str, key_quote: str, run_statement: str
+) -> str:
+    """The cache key of one pair: the judge prompt's hash and the model with the three
+    texts, so a verdict is reused only by the judge that gave it."""
+    payload = json.dumps(
+        [prompt_hash, model, key_statement, key_quote, run_statement], ensure_ascii=False
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2100,10 +2107,10 @@ def score_block(
     """Score a memory block against a scenario's values, each judged (BUILD-PLAN M16).
 
     A value is present when a block line holds all the tokens that tell the value apart,
-    matched casefolded with punctuation set aside, and the judge answers ``same`` or
-    ``narrower`` for that line: word overlap alone never counts, because a current and a
-    superseded value share most of their words. A present superseded value is recorded as
-    a contradiction.
+    matched casefolded with punctuation set aside, and the judge, given the line as the
+    key, answers ``same`` or ``narrower`` for the value: word overlap alone never counts,
+    because a current and a superseded value share most of their words. A present
+    superseded value is recorded as a contradiction.
     """
     lines = [line for line in block.splitlines() if line.strip()]
 
@@ -2113,7 +2120,10 @@ def score_block(
         present = False
         line_found = None
         for line in candidates:
-            answer = judge.verdict(value.value, "", line)
+            # The line is the key and the value the statement judged against it: a line
+            # holding the value and more answers narrower, where the other way round the
+            # line's extra words would read as a difference.
+            answer = judge.verdict(line, "", value.value)
             judged.append({"line": line, **answer})
             if answer["verdict"] in ("same", "narrower"):
                 present = True

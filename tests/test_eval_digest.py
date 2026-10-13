@@ -1288,7 +1288,12 @@ def test_score_block_on_handmade_blocks(ev, tmp_path, cfg):
     assert score["current"][0]["line"] == (
         "- Reply 'settle' to go through notes now. [stated] 2026-10-02"
     )
-    assert len(judge_requests(fake)) == 1
+    (request,) = judge_requests(fake)
+    # The line is the key and the value is judged against it, so a line that holds the
+    # value and more reads as narrower, not as a difference.
+    shown = request["messages"][-1]["content"]
+    assert "Key statement: - Reply 'settle' to go through notes now. [stated]" in shown
+    assert "Run statement: Reply 'settle' to go through notes now." in shown
 
     # A line holding the superseded value's tokens that the judge confirms is a
     # contradiction, no matter how the words are arranged.
