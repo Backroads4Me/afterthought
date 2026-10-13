@@ -216,6 +216,7 @@ def test_a_crash_between_reading_and_completing_leaves_the_job_retryable(
     assert queue.next_job(cfg) is None
 
 
+@pytest.mark.timing
 def test_the_hook_path_holds_its_budget_with_a_thousand_row_queue(cfg: Config) -> None:
     """DESIGN 8: the capture hook writes one row and returns in under 50 ms."""
     fill(cfg, 1000)
@@ -302,6 +303,7 @@ def fill_records(config: Config, records: int, jobs_per: int, path: Path) -> Non
         conn.close()
 
 
+@pytest.mark.timing
 def test_the_record_step_holds_its_budget_with_a_five_thousand_record_table(
     cfg: Config, tmp_path
 ) -> None:
@@ -1331,7 +1333,7 @@ def test_queue_shared_db_wal_mode_and_lock_serialization(cfg: Config) -> None:
 
 
 def test_attempts_increment_on_claim(cfg: Config) -> None:
-    """Each claim increments the job's attempts counter."""
+    """Each claim increments the job's attempts counter (H6)."""
     queue.enqueue(cfg, event(session_id="retry-job"))
     job1 = queue.next_job(cfg)
     assert job1 is not None
@@ -1341,7 +1343,7 @@ def test_attempts_increment_on_claim(cfg: Config) -> None:
 
 
 def test_stale_reclaim_marks_failed_when_max_attempts_exceeded(cfg: Config) -> None:
-    """A stale claim that has met MAX_ATTEMPTS is marked failed on reclaim."""
+    """A stale claim that has met MAX_ATTEMPTS is marked failed on reclaim (H6)."""
     queue.enqueue(cfg, event(session_id="poison-crash"))
     job = queue.next_job(cfg)
     assert job is not None
@@ -1360,7 +1362,7 @@ def test_stale_reclaim_marks_failed_when_max_attempts_exceeded(cfg: Config) -> N
 
 
 def test_failed_jobs_do_not_block_subsequent_jobs(cfg: Config) -> None:
-    """A failed job does not block subsequent jobs in the queue."""
+    """A failed job does not block subsequent jobs in the queue (H6)."""
     queue.enqueue(cfg, event(session_id="job-1"))
     queue.enqueue(cfg, event(session_id="job-2"))
     job1 = queue.next_job(cfg)

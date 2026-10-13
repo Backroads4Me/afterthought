@@ -732,6 +732,7 @@ def test_absent_pages_leave_the_block_with_what_exists(widget, tmp_path):
     )
 
 
+@pytest.mark.timing
 def test_builds_50_pages_of_200_lines_in_under_150_ms(initialized, tmp_path):
     registry = Registry.load(initialized.registry_path)
     project = registry.add("wide", "Wide")
@@ -1008,6 +1009,7 @@ def test_a_session_start_in_an_excluded_path_records_nothing(widget, tmp_path, c
     assert recorded_projects(widget) == []
 
 
+@pytest.mark.timing
 def test_a_busy_queue_costs_a_starting_session_nothing_it_can_see(
     widget, tmp_path, capsys, monkeypatch
 ):
@@ -1084,6 +1086,7 @@ def timed_session_start(monkeypatch, capsys, cwd: Path) -> tuple[str, float]:
     return out, time.monotonic() - started
 
 
+@pytest.mark.timing
 def test_a_stalled_page_read_ends_the_session_start_inside_the_budget(
     widget, tmp_path, capsys, monkeypatch
 ):
@@ -1113,6 +1116,7 @@ def test_a_stalled_page_read_ends_the_session_start_inside_the_budget(
     assert "HookTimeoutError" in lines[0]
 
 
+@pytest.mark.timing
 def test_a_stalled_git_ends_the_session_start_inside_the_budget(
     widget, tmp_path, capsys, monkeypatch
 ):

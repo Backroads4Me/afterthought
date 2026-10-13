@@ -2042,7 +2042,7 @@ def test_narrowed_search_puts_global_and_project_rows_on_one_tier(
 
 def test_raw_evidence_results_collapsed_per_session(populated_vault: Config) -> None:
     """Raw evidence results are collapsed per session so multiple hits from one session
-    do not flood results.
+    do not flood results (H5).
     """
     cfg = populated_vault
     now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)

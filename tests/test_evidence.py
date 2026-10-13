@@ -10,6 +10,7 @@ and through ``sqlite3`` directly where the claim is about the file itself.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import zlib
 from collections.abc import Iterator
@@ -826,6 +827,7 @@ def test_a_locked_archive_is_reported_and_changes_nothing(cfg, monkeypatch):
     assert (row_count(cfg), stored(cfg, "s1")) == before
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory anyway")
 def test_an_archive_that_will_not_give_its_text_back_is_reported_naming_it(cfg):
     """An archive that cannot be read - unreadable, or damaged the way a half-written file
     is - is the module's own error naming the file, not a database error escaping to
@@ -861,6 +863,7 @@ def test_a_home_that_cannot_hold_the_archive_is_reported_naming_it(cfg):
     assert str(occupied / "evidence.sqlite") in str(excinfo.value)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory anyway")
 def test_an_archive_that_refuses_the_write_ahead_log_leaves_no_handle(cfg, monkeypatch):
     """WAL is what lets a reader go past a writer, so a file that will not take it is
     reported rather than quietly used as another kind of journal. The connection that got

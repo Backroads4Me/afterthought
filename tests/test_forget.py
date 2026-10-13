@@ -321,7 +321,7 @@ def test_forget_session_with_open_note_withdraws_line_and_archives_note(
     initialized: Config, capsys
 ):
     """When a line with an open note rests only on the forgotten session, forget_session
-    resolves/archives a scrubbed copy of the note and withdraws the line."""
+    resolves/archives a scrubbed copy of the note and withdraws the line (H7)."""
     reg = registry.Registry.load(initialized.registry_path)
     prj = reg.add("beta", "Beta")
     reg.save()
@@ -1985,7 +1985,7 @@ def test_forget_session_scrubs_callout_and_does_not_reappear_in_needs_you(
     initialized: Config,
 ):
     """A callout citing a forgotten session is scrubbed/replaced with [forgotten] on the page
-    and does not re-appear when needs-you.md is regenerated."""
+    and does not re-appear when needs-you.md is regenerated (H7)."""
     from aft.dream import report as reportmod
 
     reg = registry.Registry.load(initialized.registry_path)
@@ -2048,7 +2048,8 @@ def test_forget_session_scrubs_callout_and_does_not_reappear_in_needs_you(
 
 
 def test_forget_session_scrubs_archived_notes_in_archive_directory(initialized: Config):
-    """Archived notes under archive/ citing the forgotten session or its sources are scrubbed."""
+    """Archived notes under archive/ citing the forgotten session or its sources are
+    scrubbed (H7)."""
     reg = registry.Registry.load(initialized.registry_path)
     prj = reg.add("widget", "Widget")
     reg.save()
@@ -2104,7 +2105,7 @@ def test_forget_session_line_resting_only_on_forgotten_session_with_open_note_wi
     initialized: Config, capsys
 ):
     """A line resting only on the forgotten session with an open note is successfully
-    withdrawn (with its note resolved and scrubbed) rather than skipped."""
+    withdrawn (with its note resolved and scrubbed) rather than skipped (H7)."""
     reg = registry.Registry.load(initialized.registry_path)
     prj = reg.add("widget", "Widget")
     reg.save()

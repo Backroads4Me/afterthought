@@ -3533,7 +3533,7 @@ def test_dream_refuses_stated_fact_with_ungrounded_statement(initialized, home, 
 
 def test_dream_refuses_stated_fact_quoted_from_a_question(initialized, home, fake):
     """R2: a quote cropped out of an asking sentence is a question, even though the crop
-    itself holds no question mark."""
+    itself holds no question mark (M1)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
@@ -3577,7 +3577,7 @@ def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_version_dot(
     initialized, home, fake
 ):
     """R2: a dot inside a version is not a sentence boundary, so the question mark after
-    it is still seen and the fact is refused."""
+    it is still seen and the fact is refused (M1)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
@@ -3621,7 +3621,7 @@ def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_filename_dot(
     initialized, home, fake
 ):
     """R2: a dot inside a filename is not a sentence boundary, so the question mark after
-    it is still seen and the fact is refused."""
+    it is still seen and the fact is refused (M1)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
@@ -3663,7 +3663,7 @@ def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_filename_dot(
 
 def test_dream_refuses_stated_fact_quoted_from_a_question_across_lines(initialized, home, fake):
     """R2: a question written across lines is still a question; the quote is judged by the
-    sentence it was cut from, whatever lines the turn broke it across."""
+    sentence it was cut from, whatever lines the turn broke it across (M1)."""
     cfg = config_with_fake(home, initialized.vault, fake)
     registry = Registry.load(cfg.registry_path)
     registry.add("widget", "Widget")
