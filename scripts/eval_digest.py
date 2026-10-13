@@ -78,7 +78,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
-from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -704,9 +703,12 @@ def run_session(
 ) -> dict:
     """One session through the digest pipeline, its answers and its verdicts written."""
     out = run_dir(data, backend.name, variant, session.session_id)
-    if out.exists():
+    # A rerun replaces the session's previous answers wholesale.
+    try:
         shutil.rmtree(out)
-    out.mkdir(parents=True)
+    except OSError:
+        pass
+    out.mkdir(parents=True, exist_ok=True)
     summary = {
         "session": session.session_id,
         "agent": session.agent,
@@ -1209,7 +1211,7 @@ def judge_pair(judge: Judge, key_statement: str, key_quote: str, run_statement: 
 def digest_prompt_hash() -> str:
     """The hash of the digest prompts, so a report says which wording produced it."""
     joined = "\n".join(
-        f"{name}\x00{(files('aft') / name).read_text(encoding='utf-8')}"
+        f"{name}\x00{(Path(digestmod.__file__).parent / name).read_text(encoding='utf-8')}"
         for name in DIGEST_PROMPT_FILES
     )
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
@@ -1532,7 +1534,7 @@ def _split_buckets() -> dict[str, dict[str, int]]:
     }
 
 
-def _split_bucket(splits: dict[str, dict[str, int]], name: object) -> dict[str, int]:
+def _split_bucket(splits: dict[str, dict[str, int]], name: str | None) -> dict[str, int]:
     """The bucket one split name counts in; a turn the split file does not name is unsplit."""
     return splits[name if name in splits else "unsplit"]
 
@@ -2193,8 +2195,8 @@ def load_scenario(path: Path) -> Scenario:
             values.append(ScenarioValue(value=value, tokens=tuple(tokens)))
         return tuple(values)
 
-    current = _to_values(raw.get("current"), scenario_file)
-    superseded = _to_values(raw.get("superseded"), scenario_file)
+    current = _to_values(raw.get("current"), str(scenario_file))
+    superseded = _to_values(raw.get("superseded"), str(scenario_file))
     config_overrides = raw.get("config") or {}
 
     sessions_raw = raw.get("sessions") or []
