@@ -172,11 +172,12 @@ def test_the_bar_counts_another_form_of_a_word():
 
 
 def test_the_session_s_own_hits_are_not_recalled(workspace, cfg, monkeypatch):
-    """A session that compacted has its earlier prompts in the index; recall never hands
-    them back."""
+    """A session that compacted has its own digest in the index; recall never hands it
+    back."""
     cwd, _ = workspace
     own = SimpleNamespace(
-        path="aft://session/claude/s-own#e1",
+        path="digests/widget/2026/10/2026-10-12-claude-s-own.md",
+        collection="digests",
         heading="",
         description="",
         snippet="deploy the release to staging, as asked before",
@@ -185,6 +186,32 @@ def test_the_session_s_own_hits_are_not_recalled(workspace, cfg, monkeypatch):
     monkeypatch.setattr(recall.search, "search", lambda *a, **k: [own, *real_search(*a, **k)])
     assert "s-own" in recall.recall(PROMPT_TEXT, cwd, cfg, session_id="other")
     assert "s-own" not in recall.recall(PROMPT_TEXT, cwd, cfg, session_id="s-own")
+
+
+def test_an_archive_entry_is_never_recalled(workspace, cfg, monkeypatch):
+    """Recall shows curated memory only; the archive answers `aft search`, not recall."""
+    cwd, _ = workspace
+    entry = SimpleNamespace(
+        path="aft://session/claude/s-old#e1",
+        collection="evidence",
+        heading="",
+        description="",
+        snippet="deploy the release to staging, as asked before",
+    )
+    real_search = recall.search.search
+    monkeypatch.setattr(recall.search, "search", lambda *a, **k: [entry, *real_search(*a, **k)])
+    block = recall.recall(PROMPT_TEXT, cwd, cfg)
+    assert "release candidate" in block
+    assert "s-old" not in block
+
+
+def test_a_worker_session_recalls_nothing(workspace, initialized):
+    """A worker's prompt is a machine-written brief; it recalls nothing."""
+    cwd, _ = workspace
+    (initialized.home / "config.toml").write_text(
+        f'vault = "{initialized.vault}"\nhost = "testhost"\n\n[capture]\nworker_paths = ["{cwd}"]\n'
+    )
+    assert recall.recall(PROMPT_TEXT, cwd, configmod.load()) == ""
 
 
 # --- the parsers ---------------------------------------------------------------------

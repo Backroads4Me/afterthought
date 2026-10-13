@@ -2060,7 +2060,9 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     already holds, each one line (path, heading, the matched line or snippet), under the
     factual heading "Memory that may bear on this prompt (from aft search; check before relying
     on it):", the whole at most `recall.max_chars` (1,500). Nothing passes the bar: nothing is
-    printed.
+    printed. Only curated memory is shown (page lines, digest sections, the library), never an
+    archive entry or the session's own digest; the bar counts a word on its first five letters,
+    as the index stems; a worker session (`capture.worker_paths`) recalls nothing.
   - **Privacy:** the prompt's text is never written anywhere by recall (no log, no archive, no
     index); a failure is logged as other hook failures are, without the prompt. A session whose
     capture is off still recalls (recall stores nothing).
@@ -2075,6 +2077,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     reported with `rerank = true`); on 50 real user prompts sampled from the archive, the lead
     reads every recall added and reports how many were useful, neutral or noise. Ted decides
     whether the bar or `max_hits` changes before merging.
+  - **Measured, ruling 2026-10-12** (`.board/f87-report.md`): with the archive included, key
+    recall@3 0.456 but more than half of the blocks on 41 real prompts were noise (the user's
+    own earlier prompts, tool output). Ted ruled curated memory only and no recall for worker
+    sessions. As merged: the start block alone holds 0.369 of the key's answers, start block
+    plus recall 0.466; 18 of 41 real prompts add a block (3 useful, 5 neutral, 10 noise, six
+    of them firstmate briefs from pi sessions outside `capture.worker_paths`); hook p90 275 ms.
   - **Tests:** a prompt that matches adds at most `max_hits` hits within `max_chars`, a short
     prompt adds nothing, a pasted block and code fence do not reach the query, a line already in
     the start block is not repeated, the prompt is in no file afterwards, a failure prints

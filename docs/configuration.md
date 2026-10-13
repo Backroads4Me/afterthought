@@ -91,7 +91,10 @@ send is searched, and up to `recall.max_hits` lines come back beside it, one lin
 with its path, its heading and the matched text, under the heading "Memory that may bear
 on this prompt (from aft search; check before relying on it):". Recall reads memory and
 writes nothing - not the prompt, not a log of it - so a session whose capture is off
-still recalls. A prompt left with fewer than three content words recalls nothing.
+still recalls. Only curated memory comes back (page lines, digest sections, the library),
+never an archive entry, and never a line the session's start block or its own digest
+already holds. A prompt left with fewer than three content words recalls nothing, and a
+worker session (`capture.worker_paths`) recalls nothing.
 
 | Setting | Default | What it does |
 |---|---|---|

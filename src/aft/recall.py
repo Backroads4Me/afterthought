@@ -14,8 +14,8 @@ from __future__ import annotations
 import re
 import string
 
-from aft import inject, keys, search, vault
-from aft.config import Config
+from aft import index, inject, keys, search, vault
+from aft.config import Config, is_worker
 from aft.gitutil import GitError
 from aft.registry import Registry
 from aft.search import FILLER_WORDS, Hit
@@ -43,10 +43,10 @@ STEM_CHARS = 5
 #: ("none", a project's one-word title) would otherwise hide any row that contains it.
 MIN_HELD_CHARS = 40
 
-#: How wide a candidate pool recall asks the search for, as a multiple of max_hits: the
-#: bar and the start-block dedupe both drop hits, so the search is asked for more than
-#: the block will show.
-POOL_FACTOR = 4
+#: How wide a candidate pool recall asks the search for, as a multiple of max_hits: archive
+#: entries, the bar and the start-block dedupe all drop hits, so the search is asked for
+#: more than the block will show.
+POOL_FACTOR = 8
 
 #: Claude Code marks text pasted into a prompt with this element. It is not part of what
 #: the prompt asks, so it leaves the query (BUILD-PLAN F87).
@@ -106,13 +106,18 @@ def recall(prompt: str | None, cwd, config: Config, session_id: str = "") -> str
     nothing is written anywhere (BUILD-PLAN F87). The search runs as ``aft search`` does
     from ``cwd``, BM25 only unless ``recall.rerank`` says otherwise, and is asked for a
     pool wider than the block will show because the bar and the start-block dedupe both
-    drop hits. A hit from ``session_id`` itself (its archived entries, its digests) is
-    never shown. ``recall.enabled = false`` gives nothing, as does a prompt left with
+    drop hits. Only curated memory is shown (pages, digests, the library), never an
+    archive entry, and never a digest of ``session_id`` itself. A worker session's prompt
+    recalls nothing. ``recall.enabled = false`` gives nothing, as does a prompt left with
     fewer than three content words, and so does a vault that is not initialized: a
     session that has no memory to give is not a failure and logs nothing.
     """
     settings = config.settings.recall
     if not settings.enabled or not prompt:
+        return ""
+    if is_worker(cwd, config):
+        # A worker session's prompt is a machine-written brief, which matches other briefs
+        # rather than anything the user would want beside it.
         return ""
     if not vault.is_initialized(config.vault):
         return ""
@@ -134,7 +139,7 @@ def _recall(words: list[str], cwd, config: Config, settings, session_id: str) ->
         # The directory git will not read is a session of no project, exactly as the
         # session-start injection reads it: the global pages alone, all one tier.
         result = keys.Resolution(kind=keys.NONE, cwd=cwd)
-    held = _block_lines(inject.build(config, result))
+    held: list[str] | None = None
     # A registered project's rows rank first, exactly as `aft search` ranks them from this
     # directory; an unregistered one has no rows to rank, so nothing narrows the tiers.
     hits = search.search(
@@ -148,12 +153,20 @@ def _recall(words: list[str], cwd, config: Config, settings, session_id: str) ->
     for hit in hits:
         if len(lines) == settings.max_hits:
             break
+        if hit.collection == index.EVIDENCE:
+            # Curated memory only: an archive entry is raw conversation, mostly earlier
+            # prompts and tool output, and `aft search` still reaches it when an agent looks.
+            continue
         if session_id and session_id in hit.path:
             # The session's own archived entries and digests: once a session compacts,
             # its earlier prompts are in the index, and recall would hand them back.
             continue
         if not _holds_bar(hit, words):
             continue
+        if held is None:
+            # Built only once a hit clears the bar: most prompts recall nothing, and the
+            # start block is the costliest part of a recall.
+            held = _block_lines(inject.build(config, result))
         if _held_by_block(hit, held):
             continue
         lines.append(_hit_line(hit))
@@ -163,9 +176,11 @@ def _recall(words: list[str], cwd, config: Config, settings, session_id: str) ->
 def _holds_bar(hit: Hit, words: list[str]) -> bool:
     """Whether the hit's matched row holds at least min(3, n) of the query's content words.
 
-    The row's own text as the hit carries it is what is counted: its body, which the
-    snippet is drawn from, and the heading the row sits under (DESIGN 10). A word counts
-    once, however often the row repeats it.
+    The row's own text as the hit carries it is what is counted: the snippet the index
+    draws from the matched row, and the heading the row sits under (DESIGN 10). A digest's
+    row is a whole section, and counting across it lets any long handoff clear the bar,
+    so the snippet's window is what has to hold the words. A word counts once, however
+    often the row repeats it.
     """
     row = f"{hit.snippet} {hit.heading}".lower()
     tokens = set(re.findall(r"\w+", row))
