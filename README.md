@@ -117,7 +117,7 @@ uv run ruff format --check
 Set `AFT_HOME` to point `aft` at a scratch home directory; the test suite does this so it
 never touches real memory.
 
-A few tests hold the wall-clock budgets the design states (DESIGN 10 in
+A few tests hold the wall-clock budgets the design states (DESIGN 8 and 10 in
 `planning/DESIGN.md`): the 150 ms memory block build and the capture hook's budgets. A
 default run includes them, so the budgets are held on the machine that runs the suite; on
 a loaded host, `uv run pytest -m "not timing"` leaves them out.
