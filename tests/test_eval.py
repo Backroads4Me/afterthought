@@ -686,7 +686,7 @@ def test_longmemeval_runner_synthetic(tmp_path: Path):
 
 
 def test_published_longmemeval_schema_parses_with_parallel_session_ids():
-    """Turns live in haystack_sessions, with ids and dates in the parallel lists."""
+    """Turns live in haystack_sessions, with ids and dates in the parallel lists (H8)."""
     (case,) = longmemeval.parse_questions([published_item()])
     assert case.question == "How do we hash passwords?"
     assert case.question_type == "single-session-user"
@@ -700,7 +700,7 @@ def test_published_longmemeval_schema_parses_with_parallel_session_ids():
 
 
 def test_haystack_ids_fall_back_to_the_session_record_then_the_position():
-    """A short parallel id list leaves room for record ids and positional names."""
+    """A short parallel id list leaves room for record ids and positional names (H8)."""
     item = {
         "question": "what was decided",
         "haystack_sessions": [
@@ -717,7 +717,7 @@ def test_haystack_ids_fall_back_to_the_session_record_then_the_position():
 
 
 def test_answer_sessions_fall_back_to_ground_truth():
-    """A fixture without answer_session_ids still names its answer session."""
+    """A fixture without answer_session_ids still names its answer session (H8)."""
     item = {
         "question": "what was decided",
         "ground_truth": "golden-1",
@@ -728,7 +728,7 @@ def test_answer_sessions_fall_back_to_ground_truth():
 
 
 def test_wrapper_document_pools_top_level_sessions_into_every_question():
-    """A dict of sessions plus a queries list gives each query the shared haystack."""
+    """A dict of sessions plus a queries list gives each query the shared haystack (H8)."""
     data = {
         "sessions": [
             {"session_id": "one", "messages": [{"role": "user", "content": "alpha beta"}]},
@@ -741,7 +741,7 @@ def test_wrapper_document_pools_top_level_sessions_into_every_question():
 
 
 def test_multi_target_recall_and_ndcg_metrics():
-    """recall_all demands every answer session; NDCG prices the misses."""
+    """recall_all demands every answer session; NDCG prices the misses (H8)."""
     ranked = ["s1", "s2", "s3", "s4"]
     assert evalmod.compute_recall_any_at_k(ranked, ["s2"], 2) == 1.0
     assert evalmod.compute_recall_any_at_k(ranked, ["s9"], 3) == 0.0
@@ -771,7 +771,7 @@ def test_multi_target_recall_and_ndcg_metrics():
 
 
 def test_ranked_sessions_deduplicates_per_session():
-    """A session surfacing through both a digest row and an evidence row ranks once."""
+    """A session surfacing through both a digest row and an evidence row ranks once (H8)."""
     hits = [
         search.Hit(
             path="digests/default/2023/05/2023-05-18-claude-answer_1.md", description="", snippet=""
@@ -785,7 +785,7 @@ def test_ranked_sessions_deduplicates_per_session():
 
 
 def test_published_schema_ranks_the_answer_session_end_to_end(tmp_path: Path):
-    """A file in the published shape runs, and the ranking is read at session level."""
+    """A file in the published shape runs, and the ranking is read at session level (H8)."""
     dataset_file = tmp_path / "longmemeval_s.json"
     dataset_file.write_text(json.dumps([published_item()]), encoding="utf-8")
     output_file = tmp_path / "results.json"
@@ -803,7 +803,7 @@ def test_published_schema_ranks_the_answer_session_end_to_end(tmp_path: Path):
 
 
 def test_multi_session_answers_score_recall_any_and_recall_all(tmp_path: Path):
-    """recall_any needs one answer session; recall_all needs all of them."""
+    """recall_any needs one answer session; recall_all needs all of them (H8)."""
     database_turns = [
         {"role": "user", "content": "What do we run the database with?"},
         {
@@ -866,7 +866,7 @@ def test_multi_session_answers_score_recall_any_and_recall_all(tmp_path: Path):
 
 
 def test_temporal_filtering_uses_haystack_dates_and_question_date(tmp_path: Path):
-    """Entry times come from haystack_dates, and the question is asked at question_date.
+    """Entry times come from haystack_dates, and the question is asked at question_date (H8).
 
     Both sessions say the same thing months apart; only the one inside the window
     "last week" opens from the question's date may reach the evidence index.
@@ -913,7 +913,7 @@ def test_temporal_filtering_uses_haystack_dates_and_question_date(tmp_path: Path
 
 
 def test_benchmark_asks_each_question_at_its_question_date(monkeypatch, tmp_path: Path):
-    """run_benchmark hands the question's date to search as the reference time."""
+    """run_benchmark hands the question's date to search as the reference time (H8)."""
     dataset_file = tmp_path / "longmemeval_s.json"
     dataset_file.write_text(json.dumps([published_item()]), encoding="utf-8")
     captured: dict[str, Any] = {}

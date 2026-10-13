@@ -560,7 +560,7 @@ def test_a_lifted_line_the_decide_step_refuses_stays_in_recent(cfg, fake):
 
 def test_a_lift_decide_never_retrieves_recent_lines(cfg):
     """A lift is decided against long-term memory alone (R10): the line being lifted is
-    the fact itself, and its retrieval must not bring it back as its own target."""
+    the fact itself, and its retrieval must not bring it back as its own target (C1)."""
     paused_line(cfg, "s1")
     fact = rules.NewFact("The hook rewrite is paused.", "state", "observed", TODAY, term=rules.LONG)
     shown = decide.related(cfg.vault, fact, SLUG)
@@ -573,7 +573,7 @@ def test_a_lift_decide_never_retrieves_recent_lines(cfg):
 def test_a_lift_confirmed_onto_a_long_term_line_confirms_it_and_leaves_recent(cfg, fake):
     """The lift decide sees long-term memory alone, so a confirm names a long-term line:
     the line it confirms gathers the sources on the overview, and the short-term line
-    leaves recent.md with its fact standing there."""
+    leaves recent.md with its fact standing there (C1)."""
     session_digest(cfg, 1)
     for n in range(2, 6):
         session_digest(cfg, n)
@@ -597,7 +597,7 @@ def test_a_lift_decision_that_names_a_recent_line_becomes_an_add_to_the_overview
 ):
     """Retrieval leaves recent.md out of a lift decide, so a decision naming one of its
     lines is not the confirm of the line being lifted: the guard judges it as a new
-    long-term line, and the overview gains the fact before the line leaves recent.md."""
+    long-term line, and the overview gains the fact before the line leaves recent.md (C1)."""
     session_digest(cfg, 1)
     for n in range(2, 6):
         session_digest(cfg, n)

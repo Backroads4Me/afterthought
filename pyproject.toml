@@ -26,6 +26,9 @@ packages = ["src/aft"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "timing: asserts a wall-clock budget (DESIGN 10); a default run includes it, and a loaded host leaves it out with -m 'not timing'",
+]
 
 [tool.ruff]
 line-length = 100

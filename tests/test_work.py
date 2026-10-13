@@ -70,7 +70,8 @@ def test_the_run_stop_line_names_when_the_cooldown_ends(cfg):
 def test_fatal_400_chunk_error_is_quarantined_and_subsequent_jobs_are_processed(
     initialized: Config, monkeypatch
 ) -> None:
-    """A job hitting a 400 context error is quarantined/failed and subsequent jobs are processed."""
+    """A job hitting a 400 context error is quarantined/failed and subsequent jobs are
+    processed (H6)."""
     cfg = initialized
     monkeypatch.setattr(work.capture, "sweep", lambda config, moment: [])
     queue.enqueue(cfg, queue_event(session_id="poison-400"))
@@ -110,7 +111,7 @@ def test_fatal_400_chunk_error_is_quarantined_and_subsequent_jobs_are_processed(
 def test_fatal_413_and_422_errors_are_quarantined_and_allow_progress(
     initialized: Config, monkeypatch
 ) -> None:
-    """413 Payload Too Large and 422 Unprocessable Entity errors fail only that job."""
+    """413 Payload Too Large and 422 Unprocessable Entity errors fail only that job (H6)."""
     cfg = initialized
     monkeypatch.setattr(work.capture, "sweep", lambda config, moment: [])
     queue.enqueue(cfg, queue_event(session_id="payload-413"))
@@ -151,7 +152,7 @@ def test_fatal_413_and_422_errors_are_quarantined_and_allow_progress(
 def test_transient_error_failing_three_times_is_marked_failed_and_unblocks_queue(
     initialized: Config, monkeypatch
 ) -> None:
-    """A job failing 3 times is marked failed and no longer blocks the queue."""
+    """A job failing 3 times is marked failed and no longer blocks the queue (H6)."""
     cfg = initialized
     monkeypatch.setattr(work.capture, "sweep", lambda config, moment: [])
     queue.enqueue(cfg, queue_event(session_id="timeout-job"))

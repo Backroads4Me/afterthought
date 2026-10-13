@@ -1017,7 +1017,7 @@ def test_an_index_written_by_another_build_is_automatically_rebuilt(
     initialized: Config, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """When a build stamp mismatch occurs, the index is automatically rebuilt from scratch
-    under the write lock rather than raising SearchIndexError."""
+    under the write lock rather than raising SearchIndexError (M7)."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
 
@@ -1031,7 +1031,7 @@ def test_an_index_written_by_another_build_is_automatically_rebuilt(
 def test_search_automatically_rebuilds_on_build_stamp_bump(
     initialized: Config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Search queries trigger auto-reindex when the build stamp is bumped."""
+    """Search queries trigger auto-reindex when the build stamp is bumped (M7)."""
     from aft.search import search
 
     rel = write(initialized, REL, PAGE)
@@ -1047,7 +1047,7 @@ def test_an_index_holding_rows_that_never_said_who_wrote_them_is_automatically_r
     initialized: Config, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An index written before the file said anything about its build is automatically rebuilt
-    on update rather than raising an error."""
+    on update rather than raising an error (M7)."""
     rel = write(initialized, REL, PAGE)
     assert index.update(initialized) == []
     with _open(initialized) as conn:

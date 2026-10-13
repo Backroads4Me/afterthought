@@ -315,6 +315,7 @@ class StalledStdin:
         return ""
 
 
+@pytest.mark.timing
 def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsys):
     """The budget covers the last thing the hook does: the failure record itself."""
     record = home / "logs" / "hooks.log"
@@ -335,6 +336,7 @@ def test_a_blocked_log_write_gives_up_inside_the_budget(home, monkeypatch, capsy
     assert elapsed < HOOK_TIMEOUT_SECONDS
 
 
+@pytest.mark.timing
 def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, monkeypatch, capsys):
     """The read spending its share cannot cost the failure line the remainder held back
     for it."""
@@ -348,6 +350,7 @@ def test_a_stalled_stdin_still_writes_its_failure_line_inside_the_budget(home, m
     assert elapsed < HOOK_TIMEOUT_SECONDS + HOOK_TIMING_SLACK_SECONDS
 
 
+@pytest.mark.timing
 def test_a_busy_queue_on_session_end_returns_inside_the_budget(home, monkeypatch, capsys):
     """When another process holds the queue write lock, the hook returns within its 2-second
     budget, and logs the database locked failure (BUILD-PLAN F23, M1 review 6)."""
@@ -374,6 +377,7 @@ def test_a_busy_queue_on_session_end_returns_inside_the_budget(home, monkeypatch
     assert "OperationalError: database is locked" in lines[0]
 
 
+@pytest.mark.timing
 def test_a_stalled_stdin_and_a_blocked_write_share_one_budget(home, monkeypatch, capsys):
     """Both blocking steps at once still fit the one bound the plan states: the budget is
     split between them up front, so it is not paid once per step."""

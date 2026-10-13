@@ -544,7 +544,7 @@ def test_base_digest_refuses_quoted_question_for_stated_fact(session: Session):
 
 def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
     """BUILD-PLAN F52: a quote cut out of an asking sentence is a question, even though
-    the crop itself holds no question mark."""
+    the crop itself holds no question mark (M1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -570,7 +570,7 @@ def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
 
 def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session: Session):
     """BUILD-PLAN F52: a question written across lines is still a question: the quote is
-    judged by the sentence it was cut from, whatever lines the turn broke it across."""
+    judged by the sentence it was cut from, whatever lines the turn broke it across (M1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -596,7 +596,7 @@ def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session:
 
 def test_base_digest_refuses_quote_cropped_from_a_question_with_dots(session: Session):
     """A dot inside a version is not a sentence boundary: the question a quote was cut
-    from is seen whole, and its question mark still refuses the fact (BUILD-PLAN F52)."""
+    from is seen whole, and its question mark still refuses the fact (BUILD-PLAN F52, M1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -621,7 +621,7 @@ def test_base_digest_refuses_quote_cropped_from_a_question_with_dots(session: Se
 
 
 def test_base_digest_refuses_a_trivial_quote(session: Session):
-    """A quote of fewer than four words that is not a whole sentence is too little to cite."""
+    """A quote of fewer than four words that is not a whole sentence is too little to cite (H1)."""
     wrote = digest_once(
         session,
         answer(
@@ -639,7 +639,7 @@ def test_base_digest_refuses_a_trivial_quote(session: Session):
 
 def test_base_digest_keeps_a_short_quote_that_is_the_whole_turn(session: Session):
     """A short [stated] quote that is the user's whole turn is no fragment: it is
-    everything the turn said."""
+    everything the turn said (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -664,7 +664,7 @@ def test_base_digest_keeps_a_short_quote_that_is_the_whole_turn(session: Session
 
 def test_base_digest_refuses_a_short_quote_cropped_from_a_longer_sentence(session: Session):
     """A quote of fewer than four words cut out of a longer sentence is a fragment, even
-    when the turn it sits in is short."""
+    when the turn it sits in is short (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -690,7 +690,7 @@ def test_base_digest_refuses_a_short_quote_cropped_from_a_longer_sentence(sessio
 
 def test_base_digest_refuses_a_short_quote_that_ends_in_a_full_stop(session: Session):
     """A short quote ending in a period is no sentence of its own when it was cropped out
-    of a longer one: the period the quote carries is not proof it was whole."""
+    of a longer one: the period the quote carries is not proof it was whole (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -716,7 +716,7 @@ def test_base_digest_refuses_a_short_quote_that_ends_in_a_full_stop(session: Ses
 
 def test_base_digest_keeps_a_short_quote_that_is_the_whole_sentence(session: Session):
     """A short quote that is the whole sentence the user said, written without its
-    terminal period, is no fragment."""
+    terminal period, is no fragment (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -741,7 +741,7 @@ def test_base_digest_keeps_a_short_quote_that_is_the_whole_sentence(session: Ses
 
 def test_base_digest_keeps_a_statement_on_line_one_of_an_unpunctuated_turn(session: Session):
     """A line break is a sentence boundary: a statement on the first line of a turn
-    without punctuation is not read with the question on the line below it."""
+    without punctuation is not read with the question on the line below it (M1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -765,7 +765,7 @@ def test_base_digest_keeps_a_statement_on_line_one_of_an_unpunctuated_turn(sessi
 
 
 def test_base_digest_keeps_a_short_approval_quote(session: Session):
-    """R2: an approval's yes is short by nature and is never refused as a fragment."""
+    """R2: an approval's yes is short by nature and is never refused as a fragment (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -793,7 +793,7 @@ def test_base_digest_keeps_a_short_approval_quote(session: Session):
 
 def test_base_digest_keeps_a_short_observed_quote(session: Session):
     """An observed quote reports what the session saw, and is never refused as a fragment:
-    an exit code or an error line is three words and still evidence."""
+    an exit code or an error line is three words and still evidence (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -820,7 +820,7 @@ def test_base_digest_keeps_a_short_observed_quote(session: Session):
 
 def test_base_digest_refuses_ungrounded_statement_for_observed_fact(session: Session):
     """An observed statement's names are grounded in the entry it cites, as a stated one
-    is in the user's turn."""
+    is in the user's turn (H1)."""
     write_records(
         session.transcript,
         {"cwd": str(session.cwd)},
@@ -2515,7 +2515,7 @@ def test_an_index_written_by_another_build_auto_reindexes_and_digests(
     session: Session, monkeypatch
 ):
     """When the build stamp changes, work automatically rebuilds the index and completes
-    digestion."""
+    digestion (M7)."""
     fake, cfg = serve(session.cfg, answer(said()))
     queue.enqueue(cfg, event(session.transcript, session.cwd, session_id="stale-1"))
     assert indexmod.update(cfg) == []
@@ -4275,7 +4275,7 @@ def test_grounding_known_limit_plain_words_not_caught():
 
 def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
     """A token holding a digit or symbol must be held exactly: near misses share its first
-    five characters and are not another form of it."""
+    five characters and are not another form of it (H2)."""
     assert digest.ungrounded("Paused until 2026-10-05.", "Paused until 2026-10-15.") == [
         "2026-10-05"
     ]
@@ -4290,7 +4290,7 @@ def test_ungrounded_demands_an_exact_hold_on_digits_and_symbols():
 
 def test_ungrounded_holds_a_hyphenated_word_exactly():
     """A token with a symbol or hyphen in it is held exactly; only a purely alphabetic
-    word matches another form of itself on their shared first five letters."""
+    word matches another form of itself on their shared first five letters (H2)."""
     assert digest.ungrounded("We re-digest the session.", "We are re-digesting it now.") == [
         "re-digest"
     ]
@@ -4306,7 +4306,7 @@ def test_ungrounded_holds_a_hyphenated_word_exactly():
 
 def test_ungrounded_demands_an_exact_hold_on_hyphenated_names():
     """Hyphenated names that share an opening are different names: self-hosted does not
-    ground on self-managed, auto-merge on auto-rebase, x-api-key on x-api-token."""
+    ground on self-managed, auto-merge on auto-rebase, x-api-key on x-api-token (H2)."""
     assert digest.ungrounded("The stack is self-hosted.", "The stack is self-managed.") == [
         "self-hosted"
     ]
@@ -4318,7 +4318,7 @@ def test_ungrounded_demands_an_exact_hold_on_hyphenated_names():
 
 def test_enclosing_sentence_skips_a_dot_inside_a_word():
     """A dot inside a version or a filename is not a sentence boundary: the sentence a
-    quote was cut from is taken whole, so a question mark after the dot is seen."""
+    quote was cut from is taken whole, so a question mark after the dot is seen (M1)."""
     question = "Should we pin requests to 2.31 or later?"
     assert digest.enclosing_sentence(question, "pin requests to") == question
     assert digest.enclosing_sentence(question, "2.31") == question
@@ -4335,7 +4335,7 @@ def test_enclosing_sentence_skips_a_dot_inside_a_word():
 
 def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
     """A line break closes a sentence the way a full stop does: the statement on one line
-    of an unpunctuated turn is not read with the question on the line below it."""
+    of an unpunctuated turn is not read with the question on the line below it (M1)."""
     turn = "always use uv for installs\nwhat about poetry?"
     assert digest.enclosing_sentence(turn, "use uv for installs") == "always use uv for installs"
     assert digest.enclosing_sentence(turn, "installs") == "always use uv for installs"
