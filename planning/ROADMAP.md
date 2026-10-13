@@ -6,7 +6,7 @@ This document tracks evaluated design proposals and feature candidates for the a
 
 ## Priority: Detailed Personal Memory Toggle (`memory.personal`)
 
-**Priority: high.** Ranked ahead of sections 1-7, the deferred Low findings and the prompt ideas in section 8; after the open trust and privacy findings (M6/F75, M15).
+**On hold** (Ted, 2026-10-13). It waits on M16, whose scorer and held-out split its per-level evals need. When it resumes it ranks ahead of sections 1-7, the deferred Low findings and the prompt ideas in section 8.
 
 ### Overview
 A setting for users whose use is not mainly coding: `memory.personal = "basic"` (default) keeps the short user profile of BUILD-PLAN F76, and `"detailed"` keeps everything about the user's life (activities, purchases, dated events and quantities, people, places, tastes) and gives non-project memory more weight.

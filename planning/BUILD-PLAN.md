@@ -2143,6 +2143,89 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     session's line quote does not ground it; a note with no verifying source is still refused
     whatever the line's quotes say. Review checkpoint: yes (R2 for a writer; lead reviews in
     full).
+- **M16 The digest evals score correctness, not word overlap** (ruling 2026-10-13; ROADMAP
+  finding M16). `scripts/eval_digest.py` pairs a run fact with a key item when their quotes
+  share 60% of their words or their statements 40% of their content words, and a pair counts
+  as found whatever the statement says: a right quote under a wrong statement scores correct.
+  `score_turns`, the merge rule of F77, F78 and F88, counts a key item found when any run fact
+  overlaps it, so one run fact satisfies several key items. `[observed]` facts are counted and
+  never judged. The key was labelled by backends under test, and every prompt change since
+  F73 was tuned on the same items it was scored on. `score_block` (`current`) finds a phrase
+  only as an exact substring.
+  - **One to one:** `score_turns` pairs key items and run facts through `match_facts`, the
+    strongest pairs first, as `score_session` already does, so a run fact answers at most one
+    key item. A `[stated]` fact left unpaired is wrong as today.
+  - **Each pair is judged, in two steps.** First the names and numbers check
+    (`digest.ungrounded`): a name or number of the run statement that neither the key
+    statement nor its quote holds makes the pair wrong, with no model call. Then a judge call
+    on the configured endpoint, temperature 0, schema-constrained, that sees the key
+    statement, the key quote and the run statement, never which backend wrote it, and answers
+    one question: does the run statement say what the key statement says? The schema puts
+    `differs` (the words that differ, empty when none) before `verdict` (`same`, `narrower`,
+    `different`). `same` is found; `narrower` is found and also counted on its own;
+    `different` is a wrong statement, and the key item counts as missed. The judge prompt
+    lives beside the script, not among the shipped prompts.
+  - **Verdict cache:** `<data>/judge-cache.json`, keyed by a hash of the judge prompt, the
+    key statement, the key quote and the run statement, so scoring a stored run twice calls
+    the model once and gives the same numbers.
+  - **The judge is checked before its verdicts count** (decision rule set now). The lead
+    writes `<data>/judge-check.json`: 40 key statements each with one name, number or
+    negation changed (planted wrong) and 40 rewritten in other words with the same meaning
+    (planted same). The judge passes at 38 of 40 planted wrong judged `different` and 36 of
+    40 planted same judged `same` or `narrower`. The lead also reads 40 real judged pairs
+    drawn across stored runs and agrees with at least 36. A judge that fails is reworked
+    (prompt, question split) before any score built on it is reported.
+  - **`[observed]` precision:** each `[observed]` fact is judged against its own cited quote
+    by the same judge (does the quote say what the statement says), and the report gives
+    observed facts supported, narrower and unsupported. Observed recall needs a key of agent
+    entries, which does not exist; it is not in this change.
+  - **Held-out split:** the key's labelled turns split by a hash of the turn id into `dev`
+    and `held-out`, about half each, frozen in `<data>/split.json` (it names real sessions,
+    so it stays out of git). `score` and `score-turns` report both splits; a prompt change is
+    tuned on `dev` and its merge rule reads `held-out`.
+  - **`current`:** a scenario names, for each current and superseded value, the tokens that
+    tell it apart (`settle` against `yes` in `replaced-rule`). A value is present when a block
+    line holds all its distinguishing tokens, matched casefolded with punctuation set aside,
+    and passes the judge as `same` or `narrower`. Word overlap alone never counts, because a
+    current and a superseded value share most of their words.
+  - **Each report records** the prompt hash of the digest prompts, the judge prompt hash, the
+    model, the temperature, the split, and each backend's prompt shape. The Claude and Gemini
+    backends embed the schema in the prompt text because their CLIs cannot enforce one (a
+    standing decision), so a report says which shape each backend ran.
+  - **Re-scoring:** the lead re-scores the stored runs under `answers/` (the F77, F78 and
+    F88 runs) with the new scorer and reports old and new numbers side by side in the PR,
+    and reads every pair the old scorer counted found and the judge counts different. The
+    figures quoted in earlier entries ("42 of 76", F88's `stated_wrong` 4 to 2) are old-scorer
+    numbers and are not compared with new ones.
+  - **Sandbox:** every eval run that calls a model uses a temporary `AFT_HOME` and a neutral
+    working directory, so the F87 recall hook and capture do not reach the user's memory.
+  - **Not in this change:** an `[observed]` recall key; paired per-session differences with
+    bootstrap intervals (ROADMAP prompt idea 7); the F69 LongMemEval run, which follows this.
+  - **Tests** (`tests/test_eval_digest.py`, with a fake judge): one run fact cannot answer two
+    key items; a right quote under a wrong statement scores wrong; a run statement naming
+    something neither key text holds is wrong with no judge call; a cached verdict makes no
+    call; an `[observed]` fact is judged against its own quote; `replaced-rule` finds
+    `settle` and does not count the superseded `yes` value from shared words; both splits are
+    reported; the report holds the hashes, model, temperature and prompt shape. Review
+    checkpoint: yes (the meter every later prompt change is judged by; lead reviews in full).
+- **M19 Remaining test gaps** (ruling 2026-10-13; ROADMAP finding M19).
+  - **Root:** the two tests in `tests/test_evidence.py` that rely on the OS refusing a mode
+    (the archive at `0o000` and at `0o444`) skip when `os.geteuid() == 0`, with the reason
+    `test_install_pi.py` already gives, since root reads and writes through any mode. No
+    other test depends on a refused mode.
+  - **Timing:** `pyproject.toml` registers a `timing` marker, and every test that asserts a
+    wall-clock budget carries it: the 150 ms block build in `tests/test_inject.py`, the hook
+    and record budgets in `tests/test_queue.py`, and any in `tests/test_adapters.py` or the
+    recall tests. A default run still includes them (DESIGN 10's budgets are tested on the
+    user's host); `pytest -m "not timing"` leaves them out on a loaded host, and the
+    README's section that runs `uv run pytest` says so.
+  - **Findings named in their tests:** every finding PR from the review of commit `36be494`
+    (#136 C1, #137 H1 H2 M1, #138 H3 H4 M3, #139 H6 M7, #140 H7, #141 H5, #143 H8, #147 M12)
+    added tests. The builder reads each PR's description, finds the test that covers each
+    finding it names, and names the finding in that test's docstring, as the H3, H4 and M12
+    tests already do. A finding with no covering test gets one. The PR lists each finding
+    with its test.
+  - Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
