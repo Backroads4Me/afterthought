@@ -84,6 +84,25 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 |---|---|---|
 | `inject.max_chars` | `8000` | The size cap of the memory block a session starts with, about 2,000 tokens. Lines are never cut in half: a line is in the block or left out. |
 
+## `[recall]`
+
+What each submitted prompt brings back from memory (BUILD-PLAN F87). Every prompt you
+send is searched, and up to `recall.max_hits` lines come back beside it, one line each
+with its path, its heading and the matched text, under the heading "Memory that may bear
+on this prompt (from aft search; check before relying on it):". Recall reads memory and
+writes nothing - not the prompt, not a log of it - so a session whose capture is off
+still recalls. Only curated memory comes back (page lines, digest sections, the library),
+never an archive entry, and never a line the session's start block or its own digest
+already holds. A prompt left with fewer than three content words recalls nothing, and a
+worker session (`capture.worker_paths`) recalls nothing.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `recall.enabled` | `true` | Whether prompts bring memory lines back at all. `false` and the prompt hook prints nothing. |
+| `recall.max_hits` | `3` | The most lines one prompt recalls. At least 1. |
+| `recall.max_chars` | `1500` | The size cap of the whole recall block, heading included. Whole lines are dropped to fit, never cut in half. At least 1. |
+| `recall.rerank` | `false` | Recall runs on every prompt, so it searches with BM25 alone by default. `true` borrows `aft search`'s model reordering, which can add seconds to a prompt. |
+
 ## `[library]`
 
 | Setting | Default | What it does |

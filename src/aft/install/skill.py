@@ -67,6 +67,7 @@ SHIPPED_SHA256 = {
             "49c8f7a62c132c09297ea8c55f2e8435be066eb25c35563c237ea2138ec945a7",
             "849486dc366bc4db8ae901ced8de5f9013a3fdbcf914830aae03d29d3acb5e3a",
             "481eeaa5b0b29ea01b39553af6e036d2d796af1c5e2c00692bd8b019a24e490c",
+            "75a33d176f9217c46e34b307c04606813c19aaa42ab294f8ab4a1de5dd5323b7",
         }
     ),
     "library-import.md": frozenset(
@@ -316,10 +317,15 @@ def _backup(target: Path, original: str | None, *, dry_run: bool) -> Path | None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = target.with_name(f"{target.name}{BACKUP_INFIX}{stamp}{BACKUP_SUFFIX}")
     if not dry_run:
-        with open(backup, "w", encoding="utf-8") as copy:
-            copy.write(original)
-            copy.flush()
-            os.fsync(copy.fileno())
+        try:
+            with open(backup, "w", encoding="utf-8") as copy:
+                copy.write(original)
+                copy.flush()
+                os.fsync(copy.fileno())
+        except OSError:
+            # The installer's except clause turns this into InstallError with the
+            # skills directory named; a failed backup leaves the target untouched.
+            raise
     return backup
 
 

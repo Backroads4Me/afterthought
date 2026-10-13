@@ -10,6 +10,11 @@ the background from past sessions. You reach it only through the `aft` command. 
 edit vault pages yourself; when the user wants to change memory by hand, tell them how
 (see "Changing memory by hand" below).
 
+What a session receives: it starts with the memory block, and each prompt you send also
+brings back up to three lines that bear on it, under the heading "Memory that may bear on
+this prompt (from aft search; check before relying on it):". Those lines come from search,
+not from the block; check the page behind one before relying on it.
+
 Add --help to any aft command to see its options.
 
 ## Commands you may run without asking

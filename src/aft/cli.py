@@ -18,7 +18,14 @@ from pathlib import Path
 
 from aft import __version__
 from aft.config import HOME_ENV, Config, ConfigError, load, resolve_home
-from aft.events import COMPACTION, SESSION_END, SESSION_START, AdapterError, SessionEvent
+from aft.events import (
+    COMPACTION,
+    PROMPT,
+    SESSION_END,
+    SESSION_START,
+    AdapterError,
+    SessionEvent,
+)
 from aft.gitutil import GitError
 from aft.registry import Registry, RegistryError, path_key, slugify, split_key
 
@@ -1742,13 +1749,24 @@ def _dispatch(event: SessionEvent) -> str:
     that is not initialized has no memory to give and returns nothing. `cmd_hook` also
     records the project a captured session started in, once the block is printed
     (`_session_start`).
-
     ``compaction`` and ``session_end`` are capture work, so each writes one queue row and
     returns nothing to print: no model call, no transcript read, no project resolution
     (DESIGN 8, BUILD-PLAN M2.2).
+
+    ``prompt`` is recall's (BUILD-PLAN F87): it returns the block `aft.recall` builds for
+    the submitted prompt, wrapped for the agent that asked for it (`_prompt_output`).
+    Recall only reads, so it writes nothing anywhere - no queue row, no log, no index of
+    its own - and the capture exclusions do not apply to it: a session whose capture is
+    off still recalls. A vault that is not initialized has nothing to recall, which is
+    no failure and logs nothing.
     """
     if event.kind == SESSION_START:
         return _session_start(event)[0]
+    if event.kind == PROMPT:
+        from aft import recall as recallmod
+
+        block = recallmod.recall(event.prompt, event.cwd, load(), session_id=event.session_id)
+        return _prompt_output(event.agent, block)
     if event.kind in (COMPACTION, SESSION_END):
         from aft import queue
         from aft.config import is_excluded
@@ -1813,6 +1831,27 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         )
 
     return block, remember
+
+
+def _prompt_output(agent: str, block: str) -> str:
+    """What a prompt hook prints for the block recall built (BUILD-PLAN F87).
+
+    Claude Code takes a ``UserPromptSubmit`` hook's added context as
+    ``hookSpecificOutput.additionalContext`` (hooks reference, "JSON output" and
+    "UserPromptSubmit"), printed only when there is a block and nothing otherwise. pi's
+    extension reads the hook's plain stdout and puts it in a section of its own, so the
+    block goes out as plain text for pi, and an empty answer prints nothing there either.
+    """
+    if not block or agent != "claude":
+        return block
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": block,
+            }
+        }
+    )
 
 
 def _start_output(agent: str, block: str, waiting: int) -> str:

@@ -11,10 +11,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-# The three kinds every agent's lifecycle events normalize into.
+# The four kinds every agent's lifecycle events normalize into.
 SESSION_START = "session_start"
 COMPACTION = "compaction"
 SESSION_END = "session_end"
+# A submitted prompt. It is injection's to answer (BUILD-PLAN F87) and capture's to
+# leave alone: nothing about it is ever recorded.
+PROMPT = "prompt"
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,9 @@ class SessionEvent:
     transcript_path: Path | None
     time: datetime  # when the hook ran, UTC
     detail: str | None  # why the agent fired the event, e.g. Claude's source=compact
+    # The submitted prompt text, for a PROMPT event only. It lives in memory alone:
+    # recall reads it, and nothing ever writes it anywhere (BUILD-PLAN F87).
+    prompt: str | None = None
 
 
 class AdapterError(Exception):

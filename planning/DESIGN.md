@@ -723,6 +723,22 @@ the block reaches its cap. Candidates, stale, superseded and withdrawn lines, an
 reports are left out, and nothing is injected per tool call. agentmemory found that
 injecting context into every tool turn burned tokens and turned it off by default. The cap is a starting point; M5 tunes it by usefulness.
 
+### Recall on each prompt
+
+An agent reads the block a session starts with and rarely searches by itself, so each
+prompt the user submits brings back the few memory lines that bear on it, beside the
+prompt (Claude Code's `UserPromptSubmit` hook, pi's `before_agent_start`). The query is
+the prompt's first 32 content words, without pasted blocks, fenced code or capture
+markers; fewer than three content words recall nothing. The search is BM25 alone by
+default, so a recall costs well under a second. Only curated memory comes back: page
+lines, digest sections and the library, never an archive entry, since the archive is
+mostly earlier prompts and tool output. A hit shows only when its matched row holds at
+least three of the query's words, counted on stems as the index counts them, and is not
+already in the session's start block or the session's own digest. At most three lines
+come back, within 1,500 characters, under a heading that says to check them before
+relying on them. A worker session's prompt recalls nothing. Recall writes nothing: the
+prompt is in no file, log or index afterwards.
+
 ### Search
 
 `aft search` queries a SQLite FTS5 index with BM25 ranking. It searches every project in two
@@ -1025,5 +1041,5 @@ not a target.
 
 **After v1, only when M5 shows the need:** link suggestions and aliases written by the
 dream; condensing and splitting pages over their cap; an HTML rendering of reports and a
-dashboard; recall on each prompt and before an edit; vector search on the CPU; more
+dashboard; recall before an edit; vector search on the CPU; more
 adapters; an MCP server; syncing between machines.

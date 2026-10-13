@@ -6,7 +6,10 @@ to the stdin of `aft hook pi <event>`. The event names here are pi's own extensi
 event names, and `reason` is pi's field for what set an event off: `session_start`
 carries startup, reload, new, resume or fork, `session_shutdown` carries quit,
 reload, new, resume or fork, and `session_before_compact` carries manual, threshold
-or overflow (BUILD-PLAN M1.1).
+or overflow (BUILD-PLAN M1.1). `before_agent_start` (BUILD-PLAN F87) is the one
+exception: its `prompt` field is not a reason but the event's own content, the raw
+user prompt text (pi's dist/core/extensions/types.d.ts, BeforeAgentStartEvent), and
+the parser keeps it as SessionEvent.prompt.
 
 `session_id`, `cwd` and `transcript_path` come from pi's session manager, whose
 `getSessionFile()` is undefined until the session is first written, so a payload can
@@ -19,6 +22,7 @@ from datetime import datetime
 
 from aft.events import (
     COMPACTION,
+    PROMPT,
     SESSION_END,
     SESSION_START,
     SessionEvent,
@@ -33,18 +37,20 @@ AGENT = "pi"
 
 # pi's event name -> the kind afterthought dispatches it as, and the field that says
 # why it fired, kept as SessionEvent.detail. pi names that field the same way on all
-# three events.
+# three capture events; the prompt event's field is the prompt itself (BUILD-PLAN F87).
 EVENTS = {
     "session_start": (SESSION_START, "reason"),
     "session_before_compact": (COMPACTION, "reason"),
     "session_compact": (COMPACTION, "reason"),
     "session_shutdown": (SESSION_END, "reason"),
+    "before_agent_start": (PROMPT, "prompt"),
 }
 
 
 def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
     """One pi event and payload, as a SessionEvent."""
-    kind, detail_field = resolve_event(AGENT, hook_event, EVENTS)
+    kind, field = resolve_event(AGENT, hook_event, EVENTS)
+    prompt = string_field(payload, field) if kind == PROMPT else None
     return SessionEvent(
         agent=AGENT,
         kind=kind,
@@ -52,5 +58,6 @@ def parse_pi(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
         cwd=path_field(payload, "cwd"),
         transcript_path=optional_path_field(payload, "transcript_path"),
         time=now,
-        detail=optional_string_field(payload, detail_field),
+        detail=None if kind == PROMPT else optional_string_field(payload, field),
+        prompt=prompt,
     )
