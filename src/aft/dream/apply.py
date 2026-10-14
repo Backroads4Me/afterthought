@@ -199,7 +199,7 @@ def _record_of(config: Config, digest_path: Path) -> tuple[str, str, queue.Proje
     session's id with a ``-<n>`` on the end, and the record is keyed by the session's own id,
     which is what comes back so the record can be rewritten against it.
     """
-    match = digest._DIGEST_NAME.match(digest_path.stem)
+    match = vaultmod.DIGEST_NAME.match(digest_path.stem)
     if match is None:
         return None
     agent, session = match.group("agent"), match.group("session")
@@ -393,16 +393,18 @@ def run_project(
                 for e in verified_evidence
                 if e.yours
             ]
-            if any(
-                "?" in q or (turn is not None and "?" in digest.enclosing_sentence(turn, q))
-                for q, turn in user_quotes
-            ):
+            refusal = None
+            for q, turn in user_quotes:
+                refusal = digest.stated_refusal(q, turn)
+                if refusal is not None:
+                    break
+            if refusal is not None:
                 report.rejected.append(
                     RejectedFact(
                         statement=new_fact.statement,
                         decision_action="add",
                         rule="R2",
-                        reason="the quote is a question, never a settled item",
+                        reason=refusal,
                     )
                 )
                 return False
@@ -891,7 +893,6 @@ def run_project(
                     # in the digest, where search finds it (DESIGN 7).
                     report.skips.append(SkipFact(statement=fact.statement, reason=UNFILED_SKIP))
                     continue
-                explicit_correction = bool(meta.get("explicit_correction", False))
 
                 new_fact = rules.NewFact(
                     statement=fact.statement,
@@ -900,7 +901,6 @@ def run_project(
                     date=fact.date,
                     scope=scope,
                     term=digest.term_of(meta),
-                    explicit_correction=explicit_correction,
                 )
 
                 # R1 trust rule: a quote must verify against its source before a line is written
@@ -1402,7 +1402,7 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
         return False
     later_part = re.compile(rf"{re.escape(sess_id)}-\d+")
     for path in digests_dir.rglob("*.md"):
-        named = digest._DIGEST_NAME.match(path.stem)
+        named = vaultmod.DIGEST_NAME.match(path.stem)
         if named is None or (agent and named.group("agent") != agent):
             continue
         session = named.group("session")

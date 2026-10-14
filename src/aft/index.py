@@ -141,6 +141,7 @@ from pathlib import Path
 from typing import Any
 
 from aft import db, inject, lint, page, phrases, vault
+from aft import fences as fences_mod
 from aft.config import Config
 from aft.evidence import EVIDENCE_NAME
 from aft.registry import Registry, RegistryError, path_key
@@ -456,14 +457,6 @@ _DROP_STATEMENTS: tuple[tuple[str, str], ...] = tuple(
 )
 
 _PROSE_HEADING = re.compile("^(#+)[ \t]+(.*[^ \t])?[ \t]*$")
-
-# Opens and closes a fenced block: up to three spaces of indentation, then three of the same
-# character, and whatever follows the opening marks names the language. Only a line of those
-# marks alone - same character, at least as many of them, nothing after - closes the block, and
-# a page ending inside a block ends there. A `#` line inside a block is the comment of a quoted
-# command rather than a heading of the page (`_prose_chunks`).
-_FENCE = re.compile("^[ ]{0,3}(`{3,}|~{3,})(.*)$")
-_DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 
 #: The heading a digest's handoff note is indexed under. The note itself lives in the digest's
@@ -1226,16 +1219,9 @@ def _prose_chunks(body: str) -> list[tuple[str, str]]:
     chunks: list[tuple[str, list[str]]] = []
     heading = ""
     lines: list[str] = []
-    fence = ""
+    fences = fences_mod.Fences()
     for line in body.split("\n"):
-        marker = _FENCE.match(line)
-        if marker is not None:
-            marks, rest = marker.group(1), marker.group(2)
-            if not fence:
-                fence = marks
-            elif marks[0] == fence[0] and len(marks) >= len(fence) and not rest.strip():
-                fence = ""
-        elif not fence:
+        if not fences.fenced(line):
             found = _PROSE_HEADING.match(line.rstrip())
             if found is not None:
                 chunks.append((heading, lines))
@@ -1351,7 +1337,7 @@ def _session_of(rel: str) -> tuple[str | None, str | None]:
     under: ``digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md``. The session id may
     hold hyphens, so only the first two fields of the name are taken. A name that does not
     read that way leaves both empty; the path still says where the text came from."""
-    match = _DIGEST_NAME.match(Path(rel).stem)
+    match = vault.DIGEST_NAME.match(Path(rel).stem)
     if match is None:
         return None, None
     return match.group("agent"), match.group("session")

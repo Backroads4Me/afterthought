@@ -172,7 +172,6 @@ ANSWER_REFUSED = "the answer failed its schema"
 # page's path, so it must be a name and nothing else: no separator, no drive form, and no
 # longer than the bound the endpoint's own schema-name rule uses.
 SESSION_ID = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
-_DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 # A page is staged through a temporary in the directory that will hold it. The suffix is not
 # a page extension because a run killed before the rename leaves the file in the vault,
@@ -1295,6 +1294,21 @@ def holds_tokens(statement: str, seen: Sequence[str]) -> bool:
     )
 
 
+def stated_refusal(quote: str, turn: str | None = None) -> str | None:
+    """What refuses a [stated] quote, or None when nothing does (BUILD-PLAN F52, R2).
+
+    A quote holding a question mark is never [stated], and a quote cropped from an asking
+    sentence is that question's tail, never a settled item: the sentence around the quote is
+    asked, so the quote alone cannot answer for it. ``turn`` is the user's turn the quote
+    was cut from; where the turn's text is unavailable the quote's own marks decide alone.
+    """
+    if "?" in quote:
+        return "the quote is a question, never a settled item"
+    if turn is not None and "?" in enclosing_sentence(turn, quote):
+        return "the quote is a question, never a settled item"
+    return None
+
+
 def grounding_sentence(text: str, statement: str, said: str, when: datetime | None = None) -> str:
     """The one sentence of ``text`` that, beside ``said``, grounds every name of
     ``statement``, verbatim; empty when none does or two do equally well."""
@@ -2047,14 +2061,11 @@ def verify(
             continue
         # A label is the prompt's name for the entry; what is recorded is the entry's own id.
         fact = {**fact, "entry": entry.id}
-        if fact["source"] == "stated" and (
-            "?" in fact["quote"] or "?" in enclosing_sentence(entry.text, fact["quote"])
-        ):
-            # BUILD-PLAN F52: a quote holding a question mark is never [stated], and a
-            # quote cropped from an asking sentence is that question's tail, never a
-            # settled item.
-            dropped.append(_refused(fact, "the quote is a question, never a settled item"))
-            continue
+        if fact["source"] == "stated":
+            refusal = stated_refusal(fact["quote"], entry.text)
+            if refusal is not None:
+                dropped.append(_refused(fact, refusal))
+                continue
         if not evidence.find_quote(config, session_id, entry.id, fact["quote"]):
             dropped.append(_refused(fact, f"{QUOTE_NOT_FOUND} {entry.id}"))
             continue
@@ -2607,7 +2618,7 @@ def _is_session_digest(path: Path, session_id: str, config: Config | None = None
     """
     if not path.is_file() or path.suffix != ".md":
         return False
-    match = _DIGEST_NAME.match(path.stem)
+    match = vault.DIGEST_NAME.match(path.stem)
     if match is None:
         return False
     sess = match.group("session")
@@ -2937,7 +2948,7 @@ def _unfiled_digests(config: Config) -> dict[str, list[Path]]:
     named: dict[str, list[Path]] = {}
     if root.is_dir():
         for path in root.rglob("*.md"):
-            match = _DIGEST_NAME.match(path.stem)
+            match = vault.DIGEST_NAME.match(path.stem)
             if match is None:
                 continue
             session = match.group("session")
