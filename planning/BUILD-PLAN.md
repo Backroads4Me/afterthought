@@ -2371,6 +2371,39 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Tests:** each path counts its reads (a monkeypatched walk or open) on a fixture with
     many digests or links and shows one walk per run; the answers match the current code's
     on the same fixture. Review checkpoint: no.
+- **F89 A fact refused for its names is restated once in its source's words** (ruling
+  2026-10-14; ROADMAP prompt idea 1). R2's names check (`digest.ungrounded`) is the largest
+  cause of lost facts: over main's four runs on the eval set, 64 `[stated]`, 108
+  `[observed]` and 155 `[inferred]` facts were refused because their statement names a
+  word the source does not hold. Most are the model's own spelling of a name the user
+  wrote otherwise ("Groq" for the user's "grok ai", "PLT Focus" for "PL Focus") or a term
+  it added ("Bluetooth"). The fact was there; only its wording broke the rule.
+  - **Repair call:** after a chunk's facts are verified (both pipelines), the facts refused
+    only by the names check go to one more call, at most one per chunk: for each, the
+    refused statement, the words it names that the source lacks, and the text it must be
+    grounded in (the user's turn and the proposal's words for `[stated]`, the cited
+    entry's text for the rest, each cut to what the check reads). The model answers, per
+    fact, a restated sentence that writes every name, number and key term as that text
+    writes it, or nothing when the claim cannot be said without the missing words. A new
+    prompt `restate.md` and schema `restate.schema.json`, schema-constrained (R9).
+  - **Every check runs again:** a restated fact goes through `verify` exactly as a first
+    answer does (quote found, own words, question, R2 names); a restated fact that fails
+    is dropped with its new reason. The trust rules do not change; the quote, tag, kind,
+    term and entry stay as the first answer gave them, and only the statement is new.
+  - **Setting:** `digest.restate` (default `true`), documented in
+    `docs/configuration.md`; the call counts against the day's budget like any digest call
+    and is skipped when the budget is spent.
+  - **Measure, before merging (decision rule set now):** four runs through
+    `scripts/eval_digest.py run` (sandboxed) scored with `score-turns` on the 60-item key,
+    against main's four: held-out mean found rises by at least 1 of 33; mean wrong
+    `[stated]` does not rise by more than 1; observed facts judged unsupported do not rise
+    by more than 2 per run on average. Tokens per run are reported.
+  - **Tests:** a fact refused for a name the source spells otherwise is restated and kept
+    with the source's spelling; a restated fact that still names an unheld word is
+    dropped; a restated fact whose quote is a paste or a question is dropped; nothing is
+    sent when no fact was refused for names; a spent budget skips the call; the setting
+    off makes no call. Review checkpoint: yes (a new path to a kept fact; lead reviews in
+    full).
 
 ## 6. Ted's checklists at milestone ends
 
