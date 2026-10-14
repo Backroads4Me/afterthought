@@ -2404,6 +2404,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     sent when no fact was refused for names; a spent budget skips the call; the setting
     off makes no call. Review checkpoint: yes (a new path to a kept fact; lead reviews in
     full).
+  - **Measured, ruling 2026-10-14: not merged** (#190 closed). Four runs (`f89-1` to `-4`,
+    restate examples that keep the claim) against main's four: held-out found 14, 15, 14,
+    14 against 12, 11, 11, 12 (+2.75); wrong `[stated]` 10, 8, 12, 21 against 7, 9, 8, 6
+    (+5.25); observed judged unsupported 9, 10, 7, 14 against 8, 4, 6, 9 (+3.25); tokens
+    about 1% more. The restated facts are partly true facts the key does not hold ("when
+    the user pushes the caps key they only hear a beep") and partly what the names check
+    had been refusing for a second reason: one-time orders ("Apply all of the proposed
+    firstmate changes except the tmux change."), session status ("Ted has restarted the
+    session."), troubleshooting notes. R2's names check also filters what the keep-test
+    should, so a recall gain there needs the keep-test to hold on its own first.
 
 ## 6. Ted's checklists at milestone ends
 
