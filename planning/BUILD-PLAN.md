@@ -2277,7 +2277,32 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     out of memory. Two hold a lasting value inside an order: "Use /home/ted/src/switchboard
     as the project location." and the voxtype sound theme set to default. F88 gains two
     items the pre-F88 runs miss.
-  - No code until Ted decides. Review checkpoint: n/a.
+  - **Ruling 2026-10-14:** F88 stays. The key follows F88's ruling: the 16 one-time orders
+    it labelled durable move to a `request` list on their turns (backup
+    `key-turns.2026-10-14-pre-t46.json`), leaving 60 durable items (33 held-out). On that
+    key, pre-F88 found 22, 23, 27, 26 and F88 23, 20, 21, 23 (held-out 13, 13, 15, 12
+    against 12, 11, 11, 12), with wrong `[stated]` 10, 11, 22, 17 against 7, 9, 8, 6. T47
+    takes the two lasting values.
+- **T47 An order keeps the lasting value it sets** (ruling 2026-10-14; follows T46).
+  F88 keeps a one-time order out of memory, and with it a value the order sets that a
+  later session needs: "use /home/ted/src/switchboard" (where the project lives), "change
+  to default" (the voxtype sound theme). The order is not memory; the value is.
+  - **`turns.md`:** a request that sets a lasting value (a location, a name, a setting, a
+    choice of tool) also gives that value as its own item, labelled decision or fact, with
+    a statement that says the value and not the order ("The switchboard project lives at
+    /home/ted/src/switchboard."). One neutral, invented example.
+  - **`digest.md`, `decide.md` and `review.md`:** the never-a-fact sentence on one-time
+    orders adds that a lasting value an order sets is not the order, and is kept as a fact
+    or decision stating the value.
+  - **Measure, before merging (decision rule set now):** four runs of the change through
+    `scripts/eval_digest.py run` (sandboxed), scored with `score-turns` on the 60-item key,
+    against main's four (`f88-new-1`, `-2`, `main-2026-10-14-1`, `-2`): the held-out mean
+    found rises by at least 1 of 33; the switchboard location and the voxtype sound theme
+    are each found in at least two of the four runs; and the mean wrong `[stated]` count
+    (an order kept as a fact counts wrong) does not rise by more than 1. Merge only if all
+    three hold.
+  - **Tests:** prompt-shape tests updated for the four prompts. Review checkpoint: yes
+    (prompt change; lead reviews in full).
 
 ## 6. Ted's checklists at milestone ends
 
