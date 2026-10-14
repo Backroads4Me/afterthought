@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "description": "Restated facts grounded in their source text (BUILD-PLAN F89).",
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "Restated facts writing every name, number and key term in the source text's words.",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "The label of the item being restated, such as #1.",
+            "maxLength": 8
+          },
+          "statement": {
+            "type": "string",
+            "description": "The restated sentence in the source text's words, or empty if it cannot be grounded.",
+            "maxLength": 300
+          }
+        },
+        "required": ["item", "statement"]
+      }
+    }
+  },
+  "required": ["items"]
+}

@@ -83,6 +83,10 @@ class DigestConfig:
     # endpoint takes no key. Read only with verifier_endpoint set; an empty endpoint uses
     # the [model] table as it is, its key and extra_body included.
     verifier_api_key_env: str = ""
+    # BUILD-PLAN F89: when true, a fact refused only because its statement names a word
+    # the source text does not hold (the ungrounded names check) is restated once in the
+    # source's words and verified again.
+    restate: bool = True
 
 
 @dataclass(frozen=True)
@@ -418,6 +422,9 @@ verifier_model = ""
 # endpoint takes no key. Read only with verifier_endpoint set: an empty endpoint uses
 # the [model] table as it is, its key and extra_body included.
 # verifier_api_key_env = ""
+# When a fact is refused because its statement names a word the source text does not
+# hold (the ungrounded names check), restate it once in the source's words (BUILD-PLAN F89).
+restate = true
 
 [dream]
 interval_minutes = 30

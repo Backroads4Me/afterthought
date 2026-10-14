@@ -53,6 +53,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 | `digest.verifier_endpoint` | `` (the `[model]` endpoint) | The endpoint the item check calls when `digest.verify_items` is on. Empty means the `[model]` endpoint, its key and `extra_body` included. When set, the check sends that endpoint the key `digest.verifier_api_key_env` names and no `extra_body` - the `[model]` table's key and request fields belong to its own endpoint. |
 | `digest.verifier_model` | `` (the `[model]` name) | The model the item check calls when `digest.verify_items` is on. Empty means the `[model]` name. |
 | `digest.verifier_api_key_env` | `` (no key) | The environment variable holding the verifier endpoint's API key, sent as a bearer token; empty means the verifier endpoint takes no key. Read only with `digest.verifier_endpoint` set. |
+| `digest.restate` | `true` | When a fact is refused because its statement names a word the source does not hold (the ungrounded names check), ask the model once to restate the fact in the source's words. When false, refused facts are dropped without a restatement attempt. |
 
 ## `[dream]`
 
