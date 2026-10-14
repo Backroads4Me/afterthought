@@ -1,8 +1,23 @@
 {
   "name": "expired-temporary-setting",
   "description": "a temporary setting that expires",
-  "current": ["The capture queue writes to jobs.sqlite in WAL mode."],
-  "superseded": ["DEBUG logging is active temporarily for troubleshooting capture queue latency."],
+  "current": [
+    {
+      "value": "The capture queue writes to jobs.sqlite in WAL mode.",
+      "tokens": [
+        "jobs.sqlite",
+        "wal"
+      ]
+    }
+  ],
+  "superseded": [
+    {
+      "value": "DEBUG logging is active temporarily for troubleshooting capture queue latency.",
+      "tokens": [
+        "debug"
+      ]
+    }
+  ],
   "sessions": [
     {
       "session_id": "exp-1",

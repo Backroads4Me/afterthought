@@ -38,15 +38,24 @@ Layout under the data directory (``--data``, default from ``AFT_EVAL_DATA``):
     answers/<backend>/[<variant>/]run.json  what was run, one merged record per backend
     compare/<variant>/<session>.json      where the backends' facts agree and differ
     key/<session>.json                    the answer key the lead settles
+    key-turns.json                        the per-turn key the lead settles (F55)
+    split.json                            the frozen dev/held-out split of the per-turn key (M16)
+    judge-cache.json                      the judge's verdicts, keyed by pair (M16)
+    judge-check.json                      the planted pairs the judge is checked against (M16)
     reports/<stamp>-<variant>-<backend>.json  what a run scored against the key
 
 Each call record holds the answer as the model returned it, before the script's checks,
 with the token usage the endpoint reported. Each session summary holds what the pipeline
 kept, what it refused, its parts, its summaries and handoff, the tokens and the time.
 ``compare`` matches facts across backends by quote overlap for the lead to settle into the
-key; ``score`` scores a run against the key: wrong facts, missed facts, wrong tags,
-questions recorded as decisions, and tokens. A synthetic session with no key file is
-scored against its own ``expected.json``.
+key; ``score`` and ``score-turns`` pair run facts with key facts one to one and judge each
+pair (BUILD-PLAN M16): the names and numbers of the run statement are checked against the
+key text without a model call, and what survives is judged by the model on the configured
+endpoint, which sees the key statement, the key quote and the run statement and answers
+whether the run statement says what the key text says. The judge prompt and its schema sit
+beside this script as ``judge.md`` and ``judge.schema.json``; every verdict is cached under
+the data directory. A synthetic session with no key file is scored against its own
+``expected.json``.
 
 The variant ``base`` is today's pipeline; a later variant scores against the same key, so
 the two runs' numbers are comparable.
@@ -55,7 +64,9 @@ the two runs' numbers are comparable.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -124,6 +135,53 @@ _COMMON = frozenset(
     " that these those as not no so than then when which who what user agent session"
     " uses use used has have had can will would should must may into over".split()
 )
+
+
+# ---------------------------------------------------------------------------
+# The judge of one pair (BUILD-PLAN M16)
+
+JUDGE_PROMPT_PATH = REPO_ROOT / "scripts" / "judge.md"
+JUDGE_SCHEMA_PATH = REPO_ROOT / "scripts" / "judge.schema.json"
+JUDGE_CACHE = "judge-cache.json"
+JUDGE_CHECK = "judge-check.json"
+SPLIT_FILE = "split.json"
+VERDICTS = frozenset({"same", "narrower", "broader", "different"})
+# The verdicts that count a key item found: the run statement says what the key says, part
+# of it, or all of it and more, and contradicts nothing.
+FOUND = frozenset({"same", "narrower", "broader"})
+SPLIT_NAMES = ("dev", "held-out")
+JUDGE_MAX_TOKENS = 200
+# The judge is asked at temperature 0 whatever the config says, so a stored run scores
+# the same twice.
+JUDGE_TEMPERATURE = 0.0
+# The judge-check bars, as the share of each planted set that must land right: 38 of 40
+# planted wrong judged ``different``, 36 of 40 planted same and 36 of 40 planted broader
+# judged found (BUILD-PLAN M16).
+JUDGE_CHECK_WRONG_SHARE = 0.95
+JUDGE_CHECK_SAME_SHARE = 0.90
+# The rule split.json is built by, stated for the reader of the file.
+SPLIT_RULE = "sha256 of the turn id, first 8 bytes read big-endian: even dev, odd held-out"
+
+# How a backend's answers are shaped: the local endpoint enforces the schema through
+# ``response_format``; a CLI only reads the prompt, so the schema is written into it (a
+# standing decision a report states).
+BACKEND_SHAPE = {"local": "endpoint-schema", "gemini": "prompt-schema", "claude": "prompt-schema"}
+
+# The digest pipeline's own prompts, hashed into every report so a report says which
+# wording produced its numbers.
+DIGEST_PROMPT_FILES = (
+    digestmod.PROMPT_FILE,
+    digestmod.TURNS_PROMPT_FILE,
+    digestmod.OBSERVED_PROMPT_FILE,
+    digestmod.FINAL_PROMPT_FILE,
+    digestmod.SUMMARY_PROMPT_FILE,
+    digestmod.VERIFY_PROMPT_FILE,
+)
+
+# The model call the judge makes, captured at import: a run of a CLI backend replaces
+# ``model.complete_json`` to shell its answers out, and the judge is not the backend's
+# to answer, it is the configured endpoint's.
+_MODEL_COMPLETE = model.complete_json
 
 
 class EvalError(Exception):
@@ -648,9 +706,12 @@ def run_session(
 ) -> dict:
     """One session through the digest pipeline, its answers and its verdicts written."""
     out = run_dir(data, backend.name, variant, session.session_id)
-    if out.exists():
+    # A rerun replaces the session's previous answers wholesale.
+    try:
         shutil.rmtree(out)
-    out.mkdir(parents=True)
+    except OSError:
+        pass
+    out.mkdir(parents=True, exist_ok=True)
     summary = {
         "session": session.session_id,
         "agent": session.agent,
@@ -1053,16 +1114,241 @@ def page_kinds() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# The judge of one pair, its cache, and the files built around it (BUILD-PLAN M16)
+
+
+class Judge:
+    """The judge of one pair of statements, with its verdict cache.
+
+    The judge is the configured endpoint, asked at temperature 0 with the schema that
+    sits beside this script. It sees the key statement, the key quote and the run
+    statement, and never which backend wrote the run statement. Every verdict is cached
+    under the data directory, keyed by the hash of the judge prompt, the model, the key
+    statement, the key quote and the run statement, so scoring a stored run twice calls the model
+    once and gives the same numbers.
+    """
+
+    def __init__(self, cfg: Config, cache_path: Path | None) -> None:
+        model_settings = replace(cfg.settings.model, temperature=JUDGE_TEMPERATURE)
+        self.cfg = replace(cfg, settings=replace(cfg.settings, model=model_settings))
+        try:
+            self.prompt = JUDGE_PROMPT_PATH.read_text(encoding="utf-8")
+            self.schema = json.loads(JUDGE_SCHEMA_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise EvalError(f"the judge prompt or schema cannot be read: {exc}") from exc
+        self.prompt_hash = hashlib.sha256(self.prompt.encode("utf-8")).hexdigest()[:16]
+        self.cache_path = cache_path
+        self.cache = _load_judge_cache(cache_path)
+        self.calls = 0
+
+    def verdict(self, key_statement: str, key_quote: str, run_statement: str) -> dict:
+        """The judge's answer on one pair, from the cache or one call to the endpoint."""
+        key = _judge_key(
+            self.prompt_hash, self.cfg.settings.model.name, key_statement, key_quote, run_statement
+        )
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit
+        answer = _MODEL_COMPLETE(
+            self.cfg,
+            self.prompt,
+            _judge_user(key_statement, key_quote, run_statement),
+            self.schema,
+            JUDGE_MAX_TOKENS,
+            purpose="eval",
+        )
+        verdict = {"differs": list(answer["differs"]), "verdict": answer["verdict"]}
+        self.cache[key] = verdict
+        self.calls += 1
+        if self.cache_path is not None:
+            _write_json(self.cache_path, self.cache)
+        return verdict
+
+
+def _judge_user(key_statement: str, key_quote: str, run_statement: str) -> str:
+    """What the judge is shown: the key text and the run statement, and nothing else."""
+    return (
+        f"Key statement: {key_statement or '(none)'}\n"
+        f"Key quote: {key_quote or '(none)'}\n"
+        f"Run statement: {run_statement}"
+    )
+
+
+def _judge_key(
+    prompt_hash: str, model: str, key_statement: str, key_quote: str, run_statement: str
+) -> str:
+    """The cache key of one pair: the judge prompt's hash and the model with the three
+    texts, so a verdict is reused only by the judge that gave it."""
+    payload = json.dumps(
+        [prompt_hash, model, key_statement, key_quote, run_statement], ensure_ascii=False
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _load_judge_cache(path: Path | None) -> dict[str, dict]:
+    """The verdicts cached under the data directory, refused when one is not a verdict."""
+    if path is None or not path.is_file():
+        return {}
+    raw = _read_json(path)
+    if not isinstance(raw, dict):
+        raise EvalError(f"{path}: expected an object of verdicts")
+    for key, verdict in raw.items():
+        if (
+            not isinstance(verdict, dict)
+            or verdict.get("verdict") not in VERDICTS
+            or not isinstance(verdict.get("differs"), list)
+        ):
+            raise EvalError(f"{path}: {key} does not hold a verdict")
+    return raw
+
+
+def run_evidence(fact: dict) -> str:
+    """The verified words a run fact rests on: its quote, and the proposal's words when the
+    fact is an approval the digest grounded in the proposal it answers."""
+    parts = [fact.get("quote") or ""]
+    proposal = fact.get("proposal")
+    if isinstance(proposal, list) and len(proposal) == 2 and isinstance(proposal[1], str):
+        parts.append(proposal[1])
+    return "\n".join(part for part in parts if part)
+
+
+def judge_pair(
+    judge: Judge, key_statement: str, key_quote: str, run_statement: str, run_quote: str = ""
+) -> dict:
+    """The judge's verdict on one pair (BUILD-PLAN M16): ``same``, ``narrower`` and
+    ``broader`` count as found, a ``different`` verdict is a wrong statement.
+
+    The names and numbers of the run statement that neither the key text nor the run
+    fact's own evidence (``run_evidence``) holds are recorded beside the verdict as
+    ``unheld``, for the reader of the report; they do not decide it. A summary keeps one
+    quote per fact, while the digest grounded the statement in the whole turn, so a true
+    detail can be missing from the quote; a name the run changed is the judge's to catch.
+    """
+    said = "\n".join(part for part in (key_statement, key_quote, run_quote) if part)
+    answer = judge.verdict(key_statement, key_quote, run_statement)
+    return {
+        "differs": answer["differs"],
+        "verdict": answer["verdict"],
+        "unheld": digestmod.ungrounded(run_statement, said),
+    }
+
+
+def digest_prompt_hash() -> str:
+    """The hash of the digest prompts, so a report says which wording produced it."""
+    joined = "\n".join(
+        f"{name}\x00{(Path(digestmod.__file__).parent / name).read_text(encoding='utf-8')}"
+        for name in DIGEST_PROMPT_FILES
+    )
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def build_split(data: Path, force: bool = False) -> Path:
+    """Freeze the dev/held-out split of the per-turn key's turns (BUILD-PLAN M16).
+
+    Each turn id is hashed and read as an integer, so the split is about half each and
+    a turn lands on the same side every time the file is rebuilt. The file names real
+    sessions, so it stays out of git.
+    """
+    path = data / SPLIT_FILE
+    if path.exists() and not force:
+        raise EvalError(f"{path} exists and is frozen; rebuild it only with --force")
+    key = _read_json(data / KEY_TURNS)
+    if not isinstance(key, dict) or not key:
+        raise EvalError(f"{data / KEY_TURNS}: expected a non-empty object of turns")
+    turns = {}
+    for turn_id in key:
+        number = int.from_bytes(hashlib.sha256(turn_id.encode("utf-8")).digest()[:8], "big")
+        turns[turn_id] = SPLIT_NAMES[number % 2]
+    _write_json(path, {"built": datetime.now(UTC).isoformat(), "rule": SPLIT_RULE, "turns": turns})
+    return path
+
+
+def load_split(data: Path) -> dict[str, str] | None:
+    """The frozen split of turn ids, or None when the data directory holds none."""
+    path = data / SPLIT_FILE
+    if not path.is_file():
+        return None
+    raw = _read_json(path)
+    if not isinstance(raw, dict) or not isinstance(raw.get("turns"), dict):
+        raise EvalError(f"{path}: expected an object holding a turns object")
+    for turn_id, name in raw["turns"].items():
+        if name not in SPLIT_NAMES:
+            raise EvalError(
+                f"{path}: turn {turn_id!r} names split {name!r}; the splits are"
+                f" {', '.join(SPLIT_NAMES)}"
+            )
+    return raw["turns"]
+
+
+def split_record(data: Path) -> dict[str, Any] | None:
+    """What a report records about the split it read: the counts and the file's hash."""
+    turns = load_split(data)
+    if turns is None:
+        return None
+    counts = {name: 0 for name in SPLIT_NAMES}
+    for name in turns.values():
+        counts[name] += 1
+    return {
+        "rule": SPLIT_RULE,
+        "turns": counts,
+        "sha256": hashlib.sha256((data / SPLIT_FILE).read_bytes()).hexdigest()[:16],
+    }
+
+
+def load_judge_check(data: Path) -> dict[str, list[dict]]:
+    """The lead's planted pairs the judge is checked against (BUILD-PLAN M16).
+
+    ``wrong`` holds key statements with one name, number or negation changed, which the
+    judge must call ``different``; ``same`` holds key statements rewritten in other words
+    with the same meaning, which the judge must call ``same`` or ``narrower``; ``broader``
+    holds key statements with a true detail added, which the judge must count found.
+    Planted wrong statements include supersets that hide one changed name, number or
+    negation inside added detail, the case a ``broader`` verdict must not let through.
+    """
+    path = data / JUDGE_CHECK
+    if not path.is_file():
+        raise EvalError(f"{path}: no judge check; the lead writes one first")
+    raw = _read_json(path)
+    if not isinstance(raw, dict):
+        raise EvalError(f"{path}: expected an object")
+    check: dict[str, list[dict]] = {}
+    for name in ("wrong", "same", "broader"):
+        entries = raw.get(name)
+        if not isinstance(entries, list) or not entries:
+            raise EvalError(f"{path}: expected a non-empty {name!r} list")
+        checked = []
+        for number, entry in enumerate(entries, start=1):
+            where = f"{path}: {name} entry {number}"
+            if not isinstance(entry, dict):
+                raise EvalError(f"{where}: expected an object")
+            checked.append(
+                {
+                    "statement": _key_text(entry.get("statement"), where, required=True),
+                    "quote": _key_text(entry.get("quote"), where, required=False),
+                    "planted": _key_text(entry.get("planted"), where, required=True),
+                }
+            )
+        check[name] = checked
+    return check
+
+
+# ---------------------------------------------------------------------------
 # Scoring a run against the key
 
 
-def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
+def score_run(data: Path, variant: str, backend: str, synthetic: Path, judge: Judge) -> dict:
     """Score one backend's run of one variant against the key, and write a dated report.
 
-    A run fact that matches no key fact is wrong; a key fact no run fact matches was
-    missed; a matched pair whose source, kind, term or scope disagree is a wrong tag; a
-    kept fact whose kind is a decision and whose quote asks a question is a question
-    recorded as a decision. Tokens and time come from the run's own records.
+    Run facts and key facts are paired one to one and each pair is judged (BUILD-PLAN
+    M16): a pair judged ``different`` is a wrong statement, and its key fact counts as
+    missed. A run fact that matches no key fact is wrong; a key fact no run fact matches
+    was missed; a pair judged ``same`` or ``narrower`` whose source, kind, term or scope
+    disagree is a wrong tag; a kept fact whose kind is a decision and whose quote asks a
+    question is a question recorded as a decision. Every ``[observed]`` fact is judged
+    against its own cited quote. When the data directory holds a split of the per-turn
+    key, the key-side numbers are reported for both splits, each key fact sitting in the
+    split of the key-turn item it names the same thing as. Tokens and time come from the
+    run's own records.
     """
     if backend not in BACKENDS:
         raise EvalError(f"unknown backend {backend!r}; the backends are {', '.join(BACKENDS)}")
@@ -1072,6 +1358,8 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
     session_dirs = [path for path in sorted(root.iterdir()) if (path / "summary.json").is_file()]
     if not session_dirs:
         raise EvalError(f"no session summaries for backend {backend!r} under {root}")
+    split = load_split(data)
+    labelled = load_turn_items(data)
     sessions = []
     unkeyed = []
     totals = {
@@ -1080,14 +1368,22 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
         "key_facts": 0,
         "wrong_facts": 0,
         "missed_facts": 0,
+        "narrower": 0,
+        "broader": 0,
         "wrong_tags": 0,
         "question_decisions": 0,
+        "observed": 0,
+        "observed_supported": 0,
+        "observed_narrower": 0,
+        "observed_broader": 0,
+        "observed_unsupported": 0,
         "refused_facts": 0,
         "refused_parts": 0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "seconds": 0.0,
     }
+    splits = _split_buckets() if split else None
     for path in session_dirs:
         summary = _read_json(path / "summary.json")
         if not isinstance(summary, dict):
@@ -1098,14 +1394,28 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
         except EvalError:
             unkeyed.append(session_id)
             continue
-        scored = score_session(summary, key)
+        scored = score_session(
+            summary, key, judge, key_splits=_key_splits(key, labelled.get(session_id), split)
+        )
         scored["session"] = session_id
         scored["key_from"] = source
         sessions.append(scored)
         totals["sessions"] += 1
         totals["facts_kept"] += len(summary.get("facts", []))
         totals["key_facts"] += len(key)
-        for name in ("wrong_facts", "missed_facts", "wrong_tags", "question_decisions"):
+        for name in (
+            "wrong_facts",
+            "missed_facts",
+            "narrower",
+            "broader",
+            "wrong_tags",
+            "question_decisions",
+            "observed",
+            "observed_supported",
+            "observed_narrower",
+            "observed_broader",
+            "observed_unsupported",
+        ):
             totals[name] += scored[name]
         totals["refused_facts"] += len(summary.get("dropped", []))
         totals["refused_parts"] += len(summary.get("refused_parts", []))
@@ -1113,11 +1423,21 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
         totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
         totals["completion_tokens"] += usage.get("completion_tokens", 0)
         totals["seconds"] += summary.get("seconds", 0.0)
+        if splits is not None:
+            _add_session_splits(splits, scored)
     report = {
         "at": datetime.now(UTC).isoformat(),
         "variant": variant,
         "backend": backend,
+        "judge_prompt": judge.prompt_hash,
+        "digest_prompts": digest_prompt_hash(),
+        "model": judge.cfg.settings.model.name or None,
+        "temperature": JUDGE_TEMPERATURE,
+        "judge_calls": judge.calls,
+        "prompt_shapes": {backend: BACKEND_SHAPE[backend]},
+        "split": split_record(data),
         "totals": totals,
+        "splits": splits,
         "unkeyed": sorted(unkeyed),
         "sessions": sessions,
     }
@@ -1131,18 +1451,55 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path) -> dict:
     return report
 
 
-def score_session(summary: dict, key: list[dict]) -> dict:
-    """One session's numbers against its key facts."""
-    run_facts = [fact for fact in summary.get("facts", []) if fact.get("quote")]
+def score_session(
+    summary: dict, key: list[dict], judge: Judge, key_splits: dict[int, str] | None = None
+) -> dict:
+    """One session's numbers against its key facts, each pair judged (BUILD-PLAN M16)."""
+    placed = key_splits or {}
+    run_facts = [dict(fact) for fact in summary.get("facts", []) if fact.get("quote")]
     groups = match_facts({KEY_BACKEND: key, summary["backend"]: run_facts})
-    wrong = [group.facts[summary["backend"]] for group in groups if KEY_BACKEND not in group.facts]
-    missed = [group.facts[KEY_BACKEND] for group in groups if summary["backend"] not in group.facts]
+    wrong: list[dict] = []
+    missed: list[dict] = []
     tags = []
+    pairs = []
+    narrower = 0
+    broader = 0
     for group in groups:
         run_fact = group.facts.get(summary["backend"])
         key_fact = group.facts.get(KEY_BACKEND)
-        if run_fact is None or key_fact is None:
+        if key_fact is not None and run_fact is None:
+            missed.append({**key_fact, "split": placed.get(id(key_fact))})
             continue
+        if run_fact is not None and key_fact is None:
+            wrong.append(dict(run_fact))
+            continue
+        assert run_fact is not None and key_fact is not None
+        answer = judge_pair(
+            judge,
+            key_fact.get("statement", ""),
+            key_fact.get("quote", ""),
+            run_fact.get("statement", ""),
+            run_evidence(run_fact),
+        )
+        split = placed.get(id(key_fact))
+        pairs.append(
+            {
+                "key": key_fact.get("statement", ""),
+                "run": run_fact.get("statement", ""),
+                "verdict": answer["verdict"],
+                "differs": answer["differs"],
+                "unheld": answer["unheld"],
+                "split": split,
+            }
+        )
+        if answer["verdict"] == "different":
+            wrong.append({**run_fact, "split": split})
+            missed.append({**key_fact, "split": split})
+            continue
+        if answer["verdict"] == "narrower":
+            narrower += 1
+        if answer["verdict"] == "broader":
+            broader += 1
         for name in ("source", "kind", "term", "scope"):
             if run_fact.get(name) != key_fact.get(name):
                 tags.append(
@@ -1158,18 +1515,27 @@ def score_session(summary: dict, key: list[dict]) -> dict:
         for fact in run_facts
         if fact.get("kind") == "decision" and "?" in fact.get("quote", "")
     ]
+    observed = _judge_observed(judge, run_facts)
     usage = summary.get("usage") or {}
     return {
         "facts_kept": len(run_facts),
         "key_facts": len(key),
         "wrong_facts": len(wrong),
         "missed_facts": len(missed),
+        "narrower": narrower,
+        "broader": broader,
         "wrong_tags": len(tags),
         "question_decisions": len(questions),
+        "observed": observed["count"],
+        "observed_supported": observed["supported"],
+        "observed_narrower": observed["narrower"],
+        "observed_broader": observed["broader"],
+        "observed_unsupported": observed["unsupported"],
         "wrong": wrong,
         "missed": missed,
         "tags": tags,
         "questions": questions,
+        "pairs": pairs,
         "refused_facts": len(summary.get("dropped", [])),
         "refused_parts": len(summary.get("refused_parts", [])),
         "prompt_tokens": usage.get("prompt_tokens", 0),
@@ -1180,19 +1546,154 @@ def score_session(summary: dict, key: list[dict]) -> dict:
     }
 
 
+def _judge_observed(judge: Judge, run_facts: list[dict]) -> dict[str, int]:
+    """Each ``[observed]`` fact judged against its own cited quote (BUILD-PLAN M16).
+
+    The judge answers whether the quote says what the statement says; the report gives
+    how many observed facts are supported, narrower, broader (the statement says more than
+    its quote) and unsupported. Observed recall
+    needs a key of agent entries, which does not exist.
+    """
+    counts = {"count": 0, "supported": 0, "narrower": 0, "broader": 0, "unsupported": 0}
+    buckets = {
+        "same": "supported",
+        "narrower": "narrower",
+        "broader": "broader",
+        "different": "unsupported",
+    }
+    for fact in run_facts:
+        if fact.get("source") != "observed" or not fact.get("quote"):
+            continue
+        answer = judge_pair(judge, "", fact["quote"], fact.get("statement", ""))
+        counts["count"] += 1
+        counts[buckets[answer["verdict"]]] += 1
+    return counts
+
+
+def _split_buckets() -> dict[str, dict[str, int]]:
+    """The per-split key-side counts a report carries, ``unsplit`` making them add up."""
+    return {
+        name: {"key_facts": 0, "found": 0, "narrower": 0, "broader": 0, "missed": 0, "wrong": 0}
+        for name in (*SPLIT_NAMES, "unsplit")
+    }
+
+
+def _split_bucket(splits: dict[str, dict[str, int]], name: str | None) -> dict[str, int]:
+    """The bucket one split name counts in; a turn the split file does not name is unsplit."""
+    return splits[name if name in splits else "unsplit"]
+
+
+def _add_session_splits(splits: dict[str, dict[str, int]], scored: dict) -> None:
+    """Add one session's key-side results to the split buckets they sit in."""
+    for record in scored["missed"]:
+        bucket = _split_bucket(splits, record.get("split"))
+        bucket["key_facts"] += 1
+        bucket["missed"] += 1
+    for record in scored["pairs"]:
+        if record["verdict"] == "different":
+            continue
+        bucket = _split_bucket(splits, record.get("split"))
+        bucket["key_facts"] += 1
+        bucket["found"] += 1
+        if record["verdict"] in ("narrower", "broader"):
+            bucket[record["verdict"]] += 1
+    for record in scored["wrong"]:
+        if record.get("split") is None:
+            continue
+        _split_bucket(splits, record["split"])["wrong"] += 1
+
+
+def load_turn_items(data: Path) -> dict[str, list[tuple[str, dict]]]:
+    """The per-turn key as session -> its labelled (turn id, item) pairs; {} without one."""
+    path = data / KEY_TURNS
+    if not path.is_file():
+        return {}
+    key = _read_json(path)
+    if not isinstance(key, dict):
+        raise EvalError(f"{path}: expected an object of turns")
+    return _turn_items(key, path)
+
+
+def _turn_items(key: dict, path: Path) -> dict[str, list[tuple[str, dict]]]:
+    """The labelled durable items of a per-turn key: session -> (turn id, item) pairs."""
+    labelled: dict[str, list[tuple[str, dict]]] = {}
+    for turn_id, turn in key.items():
+        where = f"{path}: turn {turn_id!r}"
+        if not isinstance(turn, dict) or not isinstance(turn.get("durable"), list):
+            raise EvalError(f"{where}: expected an object with a durable list")
+        for item in turn["durable"]:
+            labelled.setdefault(turn_id.rsplit("#", 1)[0], []).append(
+                (turn_id, _key_item(item, where))
+            )
+    return labelled
+
+
+def _key_item(item: object, where: str) -> dict:
+    """One durable item of the per-turn key, which must say something to be judged."""
+    if not isinstance(item, dict):
+        raise EvalError(f"{where}: expected an object")
+    normalized = dict(item)
+    for name in ("statement", "quote"):
+        value = normalized.get(name)
+        if value is not None and not isinstance(value, str):
+            raise EvalError(f"{where}: {name} must be a string")
+        if value is None:
+            normalized[name] = ""
+    if not normalized["statement"].strip() and not normalized["quote"].strip():
+        raise EvalError(f"{where}: a durable item carries a statement or a quote")
+    return normalized
+
+
+def _key_splits(
+    key: list[dict], labelled: list[tuple[str, dict]] | None, split: dict[str, str] | None
+) -> dict[int, str]:
+    """The split each key fact of a session sits in, through the key-turn item it names.
+
+    A key fact sits in the split of the labelled item it names the same thing as; a key
+    fact the per-turn key does not hold sits in no split.
+    """
+    if not labelled or not split:
+        return {}
+    groups = match_facts({KEY_BACKEND: key, "turns": [item for _, item in labelled]})
+    turn_of = {id(item): turn_id for turn_id, item in labelled}
+    splits = {}
+    for group in groups:
+        key_fact = group.facts.get(KEY_BACKEND)
+        item = group.facts.get("turns")
+        if key_fact is None or item is None:
+            continue
+        name = split.get(turn_of.get(id(item), ""))
+        if name is not None:
+            splits[id(key_fact)] = name
+    return splits
+
+
 def _print_report(report: dict) -> None:
     totals = report["totals"]
     print(
         f"{report['backend']} ({report['variant']}): {totals['sessions']} sessions, "
         f"{totals['facts_kept']} facts kept against {totals['key_facts']} key facts: "
         f"{totals['wrong_facts']} wrong, {totals['missed_facts']} missed, "
+        f"{totals['narrower']} narrower, {totals['broader']} broader, "
         f"{totals['wrong_tags']} wrong tags, {totals['question_decisions']} questions "
-        f"as decisions, {totals['refused_facts']} refused facts, "
+        f"as decisions, observed {totals['observed_supported']} supported, "
+        f"{totals['observed_narrower']} narrower, {totals['observed_broader']} broader, "
+        f"{totals['observed_unsupported']} "
+        f"unsupported of {totals['observed']}, "
+        f"{totals['refused_facts']} refused facts, "
         f"{totals['refused_parts']} refused parts, "
         f"tokens={totals['prompt_tokens'] + totals['completion_tokens']}, "
         f"{totals['seconds']:.1f}s",
         flush=True,
     )
+    for name, bucket in (report.get("splits") or {}).items():
+        print(
+            f"  split {name}: {bucket['found']} of {bucket['key_facts']} key facts found"
+            f" ({bucket['narrower']} narrower, {bucket['broader']} broader),"
+            f" {bucket['missed']} missed,"
+            f" {bucket['wrong']} wrong statements",
+            flush=True,
+        )
     if report["unkeyed"]:
         print(f"unkeyed, not scored: {', '.join(report['unkeyed'])}", file=sys.stderr)
 
@@ -1254,6 +1755,21 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--backend", default="local")
     p.set_defaults(handler=_cmd_score_turns)
 
+    p = sub.add_parser("split", help="freeze the dev/held-out split of the per-turn key")
+    p.add_argument("--data")
+    p.add_argument("--force", action="store_true", help="rewrite an existing split.json")
+    p.set_defaults(handler=_cmd_split)
+
+    p = sub.add_parser("judge-check", help="check the judge against the lead's planted pairs")
+    p.add_argument("--data")
+    p.add_argument(
+        "--endpoint", default=LOCAL_ENDPOINT, help="local backend endpoint ($AFT_EVAL_ENDPOINT)"
+    )
+    p.add_argument("--model", dest="model_name", default=LOCAL_MODEL, help="local backend model")
+    p.add_argument(
+        "--extra-body", default=LOCAL_EXTRA_BODY, help="local backend extra_body, as JSON"
+    )
+    p.set_defaults(handler=_cmd_judge_check)
     p = sub.add_parser("current", help="run end-to-end current-truth eval over scenarios")
     p.add_argument("--data", help="eval data directory for output reports")
     p.add_argument("--backend", choices=BACKENDS, default="local")
@@ -1292,76 +1808,179 @@ def with_pipeline(cfg: Config, variant: str) -> Config:
 # Scoring a run against the per-turn key (BUILD-PLAN F55)
 
 KEY_TURNS = "key-turns.json"
-_STATEMENT_WORD_MIN = 4
 
 
-def _content_words(text: str) -> set[str]:
-    return {
-        w for w in quote_tokens(text or "") if len(w) >= _STATEMENT_WORD_MIN and w not in _COMMON
-    }
+def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
+    """A run's facts against the per-turn key, one key item to one run fact (BUILD-PLAN M16).
 
-
-def same_item(left: dict, right: dict) -> bool:
-    """Whether two items name the same settled thing: their quotes overlap to half their
-    words, or their statements share ``STATEMENT_MATCH_RATIO`` of their content words."""
-    if left.get("quote") and right.get("quote"):
-        if quote_overlap(left["quote"], right["quote"]) >= 0.5:
-            return True
-    return (
-        statement_overlap(left.get("statement", ""), right.get("statement", ""))
-        >= STATEMENT_MATCH_RATIO
-    )
-
-
-def score_turns(data: Path, variant: str, backend: str) -> dict:
-    """A run's facts against the per-turn key: of the key's durable items, how many the run
-    found (any source), and how many of the run's [stated] facts the key does not hold. The
-    key labels the user's turns only, so [observed] facts are counted but not judged."""
+    Key items and run facts are paired through ``match_facts``, strongest pairs first, so
+    a run fact answers at most one key item, and each pair is judged: the names and
+    numbers of the run statement are checked against the key text with no model call, and
+    what survives is judged. A key item counts as found only when its pair is judged
+    ``same`` or ``narrower``; a ``[stated]`` fact left unpaired, or judged ``different``,
+    is wrong. Every ``[observed]`` fact is judged against its own cited quote; the key
+    labels the user's turns only, so it holds no observed recall. When the data directory
+    holds a frozen split, the key-side numbers are reported for both splits.
+    """
+    if backend not in BACKENDS:
+        raise EvalError(f"unknown backend {backend!r}; the backends are {', '.join(BACKENDS)}")
     key_path = data / KEY_TURNS
     if not key_path.exists():
         raise EvalError(f"{key_path}: no per-turn key")
-    key = json.loads(key_path.read_text(encoding="utf-8"))
-    expected: dict[str, list[dict]] = {}
-    for name, turn in key.items():
-        expected.setdefault(name.rsplit("#", 1)[0], []).extend(turn["durable"])
+    labelled = _turn_items(_read_json(key_path), key_path)
+    split = load_split(data)
     totals = {
         "sessions": 0,
         "key_items": 0,
         "found": 0,
+        "narrower": 0,
+        "broader": 0,
+        "missed": 0,
         "stated": 0,
         "stated_wrong": 0,
         "observed": 0,
+        "observed_supported": 0,
+        "observed_narrower": 0,
+        "observed_broader": 0,
+        "observed_unsupported": 0,
     }
+    buckets = _split_buckets() if split else None
     sessions = []
-    for session_id, items in sorted(expected.items()):
+    for session_id, items in sorted(labelled.items()):
         summary_path = run_dir(data, backend, variant, session_id) / "summary.json"
         if not summary_path.exists():
             continue
-        facts = json.loads(summary_path.read_text(encoding="utf-8")).get("facts", [])
-        stated = [fact for fact in facts if fact.get("source") == "stated"]
-        found = [item for item in items if any(same_item(item, fact) for fact in facts)]
-        wrong = [fact for fact in stated if not any(same_item(fact, item) for item in items)]
+        summary = _read_json(summary_path)
+        facts = [dict(fact) for fact in summary.get("facts", [])]
+        scored = _score_turns_session(judge, backend, items, facts, split)
         totals["sessions"] += 1
-        totals["key_items"] += len(items)
-        totals["found"] += len(found)
-        totals["stated"] += len(stated)
-        totals["stated_wrong"] += len(wrong)
-        totals["observed"] += sum(1 for fact in facts if fact.get("source") == "observed")
-        sessions.append(
+        for name, value in scored["totals"].items():
+            totals[name] += value
+        sessions.append({"session": session_id, **scored["record"]})
+        if buckets is not None and scored["splits"] is not None:
+            for name, bucket in scored["splits"].items():
+                for field, value in bucket.items():
+                    buckets[name][field] += value
+    return {
+        "variant": variant,
+        "backend": backend,
+        "judge_prompt": judge.prompt_hash,
+        "digest_prompts": digest_prompt_hash(),
+        "model": judge.cfg.settings.model.name or None,
+        "temperature": JUDGE_TEMPERATURE,
+        "judge_calls": judge.calls,
+        "prompt_shapes": {backend: BACKEND_SHAPE[backend]},
+        "split": split_record(data),
+        "totals": totals,
+        "splits": buckets,
+        "sessions": sessions,
+    }
+
+
+def _score_turns_session(
+    judge: Judge,
+    backend: str,
+    items: list[tuple[str, dict]],
+    facts: list[dict],
+    split: dict[str, str] | None,
+) -> dict:
+    """One session against its labelled key items, each pair judged (BUILD-PLAN M16)."""
+    turn_of = {id(item): turn_id for turn_id, item in items}
+    groups = match_facts({KEY_BACKEND: [item for _, item in items], backend: facts})
+    counts = {
+        "key_items": len(items),
+        "found": 0,
+        "narrower": 0,
+        "broader": 0,
+        "missed": 0,
+        "stated": 0,
+        "stated_wrong": 0,
+    }
+    buckets = _split_buckets() if split else None
+    pairs = []
+    wrong_statements = []
+    missed_statements = []
+    for group in groups:
+        item = group.facts.get(KEY_BACKEND)
+        fact = group.facts.get(backend)
+        where = split.get(turn_of.get(id(item), "")) if split and item is not None else None
+        bucket = _split_bucket(buckets, where) if buckets is not None else None
+        if item is not None and fact is None:
+            counts["missed"] += 1
+            missed_statements.append(item.get("statement", ""))
+            if bucket is not None:
+                bucket["key_facts"] += 1
+                bucket["missed"] += 1
+            continue
+        if fact is not None and item is None:
+            if fact.get("source") == "stated":
+                counts["stated_wrong"] += 1
+                wrong_statements.append(fact.get("statement", ""))
+            continue
+        assert item is not None and fact is not None
+        answer = judge_pair(
+            judge,
+            item.get("statement", ""),
+            item.get("quote", ""),
+            fact.get("statement", ""),
+            run_evidence(fact),
+        )
+        pairs.append(
             {
-                "session": session_id,
-                "key_items": len(items),
-                "found": len(found),
-                "stated": len(stated),
-                "wrong": [fact["statement"] for fact in wrong],
+                "key": item.get("statement", ""),
+                "run": fact.get("statement", ""),
+                "verdict": answer["verdict"],
+                "differs": answer["differs"],
+                "unheld": answer["unheld"],
+                "split": where,
             }
         )
-    return {"variant": variant, "backend": backend, "totals": totals, "sessions": sessions}
+        if bucket is not None:
+            bucket["key_facts"] += 1
+        if answer["verdict"] == "different":
+            counts["missed"] += 1
+            missed_statements.append(item.get("statement", ""))
+            if bucket is not None:
+                bucket["missed"] += 1
+            if fact.get("source") == "stated":
+                counts["stated_wrong"] += 1
+                wrong_statements.append(fact.get("statement", ""))
+                if bucket is not None:
+                    bucket["wrong"] += 1
+            continue
+        counts["found"] += 1
+        if bucket is not None:
+            bucket["found"] += 1
+        if answer["verdict"] in ("narrower", "broader"):
+            counts[answer["verdict"]] += 1
+            if bucket is not None:
+                bucket[answer["verdict"]] += 1
+    observed = _judge_observed(judge, facts)
+    counts["stated"] = sum(1 for fact in facts if fact.get("source") == "stated")
+    counts["observed"] = observed["count"]
+    counts["observed_supported"] = observed["supported"]
+    counts["observed_narrower"] = observed["narrower"]
+    counts["observed_broader"] = observed["broader"]
+    counts["observed_unsupported"] = observed["unsupported"]
+    record = {
+        "key_items": len(items),
+        "found": counts["found"],
+        "narrower": counts["narrower"],
+        "broader": counts["broader"],
+        "missed": counts["missed"],
+        "stated": counts["stated"],
+        "wrong": wrong_statements,
+        "missed_items": missed_statements,
+        "pairs": pairs,
+    }
+    return {"record": record, "totals": counts, "splits": buckets}
 
 
 def _cmd_score_turns(args: argparse.Namespace) -> int:
     data = _data_dir(args)
-    report = score_turns(data, args.variant, args.backend)
+    cfg = load_config()
+    judge = Judge(cfg, data / JUDGE_CACHE)
+    report = score_turns(data, args.variant, args.backend, judge)
     t = report["totals"]
     out = (
         data
@@ -1370,10 +1989,19 @@ def _cmd_score_turns(args: argparse.Namespace) -> int:
     )
     _write_json(out, report)
     print(
-        f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items;"
-        f" {t['stated_wrong']} of {t['stated']} [stated] facts not in the key;"
-        f" {t['observed']} [observed] facts, not judged by this key; report {out}"
+        f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items"
+        f" ({t['narrower']} narrower, {t['broader']} broader); {t['stated_wrong']} of"
+        f" {t['stated']} [stated] facts"
+        f" not in the key; observed {t['observed_supported']} supported,"
+        f" {t['observed_narrower']} narrower, {t['observed_broader']} broader,"
+        f" {t['observed_unsupported']} unsupported of"
+        f" {t['observed']}; judge calls {report['judge_calls']}; report {out}"
     )
+    for name, bucket in (report.get("splits") or {}).items():
+        print(
+            f"  split {name}: found {bucket['found']} of {bucket['key_facts']}"
+            f" key items ({bucket['narrower']} narrower, {bucket['broader']} broader)"
+        )
     return 0
 
 
@@ -1416,12 +2044,84 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
 
 def _cmd_score(args: argparse.Namespace) -> int:
-    score_run(_data_dir(args), args.variant, args.backend, _synthetic_dir(args))
+    data = _data_dir(args)
+    cfg = load_config()
+    score_run(
+        data, args.variant, args.backend, _synthetic_dir(args), Judge(cfg, data / JUDGE_CACHE)
+    )
     return 0
+
+
+def _cmd_split(args: argparse.Namespace) -> int:
+    path = build_split(_data_dir(args), force=args.force)
+    turns = load_split(path.parent) or {}
+    counts = {name: 0 for name in SPLIT_NAMES}
+    for name in turns.values():
+        counts[name] += 1
+    print(
+        f"{path}: {counts[SPLIT_NAMES[0]]} {SPLIT_NAMES[0]}, {counts[SPLIT_NAMES[1]]}"
+        f" {SPLIT_NAMES[1]} of {len(turns)} turns"
+    )
+    return 0
+
+
+def _cmd_judge_check(args: argparse.Namespace) -> int:
+    data = _data_dir(args)
+    cfg = with_model(load_config(), args.endpoint, args.model_name, args.extra_body)
+    judge = Judge(cfg, data / JUDGE_CACHE)
+    check = load_judge_check(data)
+    judged = {}
+    for name, entries in check.items():
+        judged[name] = [
+            {**entry, **judge.verdict(entry["statement"], entry["quote"], entry["planted"])}
+            for entry in entries
+        ]
+    wrong_hits = sum(1 for row in judged["wrong"] if row["verdict"] == "different")
+    same_hits = sum(1 for row in judged["same"] if row["verdict"] in ("same", "narrower"))
+    broader_hits = sum(1 for row in judged["broader"] if row["verdict"] in FOUND)
+    need_wrong = math.ceil(JUDGE_CHECK_WRONG_SHARE * len(judged["wrong"]))
+    need_same = math.ceil(JUDGE_CHECK_SAME_SHARE * len(judged["same"]))
+    need_broader = math.ceil(JUDGE_CHECK_SAME_SHARE * len(judged["broader"]))
+    passed = wrong_hits >= need_wrong and same_hits >= need_same and broader_hits >= need_broader
+    report = {
+        "at": datetime.now(UTC).isoformat(),
+        "judge_prompt": judge.prompt_hash,
+        "model": judge.cfg.settings.model.name or None,
+        "temperature": JUDGE_TEMPERATURE,
+        "judge_calls": judge.calls,
+        "wrong": judged["wrong"],
+        "same": judged["same"],
+        "broader": judged["broader"],
+        "wrong_different": wrong_hits,
+        "wrong_needed": need_wrong,
+        "same_ok": same_hits,
+        "same_needed": need_same,
+        "broader_found": broader_hits,
+        "broader_needed": need_broader,
+        "passed": passed,
+    }
+    out = data / "reports" / f"{time.strftime('%Y%m%dT%H%M%S')}-judge-check.json"
+    _write_json(out, report)
+    print(
+        f"judge check: {wrong_hits} of {len(judged['wrong'])} planted wrong judged"
+        f" different (need {need_wrong}), {same_hits} of {len(judged['same'])} planted"
+        f" same judged same or narrower (need {need_same}), {broader_hits} of"
+        f" {len(judged['broader'])} planted broader judged found (need {need_broader}) ->"
+        f" {'PASS' if passed else 'FAIL'}; report {out}"
+    )
+    return 0 if passed else 1
 
 
 # ---------------------------------------------------------------------------
 # F60: current truth evaluation (BUILD-PLAN F60)
+
+
+@dataclass(frozen=True)
+class ScenarioValue:
+    """One expected value of a scenario and the tokens that tell it apart (BUILD-PLAN M16)."""
+
+    value: str
+    tokens: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1442,24 +2142,58 @@ class Scenario:
 
     name: str
     description: str
-    current: tuple[str, ...]
-    superseded: tuple[str, ...]
+    name: str
+    description: str
+    current: tuple[ScenarioValue, ...]
+    superseded: tuple[ScenarioValue, ...]
     sessions: tuple[ScenarioSession, ...]
     slug: str = "afterthought"
     config_overrides: dict[str, Any] = field(default_factory=dict)
 
 
-def score_block(block: str, current: Sequence[str], superseded: Sequence[str]) -> dict[str, Any]:
-    """Score a memory block against expected current and superseded phrases.
+def score_block(
+    block: str,
+    current: Sequence[ScenarioValue],
+    superseded: Sequence[ScenarioValue],
+    judge: Judge,
+) -> dict[str, Any]:
+    """Score a memory block against a scenario's values, each judged (BUILD-PLAN M16).
 
-    The block states each current value, and holds no superseded one.
-    A superseded value appearing in the block is recorded as a contradiction.
+    A value is present when a block line holds all the tokens that tell the value apart,
+    matched casefolded with punctuation set aside, and the judge, given the line as the
+    key, answers ``same`` or ``narrower`` for the value: word overlap alone never counts,
+    because a current and a superseded value share most of their words. A present
+    superseded value is recorded as a contradiction.
     """
-    found_current = [item for item in current if item in block]
-    missed_current = [item for item in current if item not in block]
-    found_superseded = [item for item in superseded if item in block]
-    current_present = len(missed_current) == 0
-    superseded_absent = len(found_superseded) == 0
+    lines = [line for line in block.splitlines() if line.strip()]
+
+    def value_result(value: ScenarioValue) -> dict[str, Any]:
+        candidates = [line for line in lines if _holds_tokens(line, value.tokens)]
+        judged = []
+        present = False
+        line_found = None
+        for line in candidates:
+            # The line is the key and the value the statement judged against it: a line
+            # holding the value and more answers narrower, where the other way round the
+            # line's extra words would read as a difference.
+            answer = judge.verdict(line, "", value.value)
+            judged.append({"line": line, **answer})
+            if answer["verdict"] in FOUND:
+                present = True
+                line_found = line
+                break
+        return {
+            "value": value.value,
+            "tokens": list(value.tokens),
+            "present": present,
+            "line": line_found,
+            "judged": judged,
+        }
+
+    current_results = [value_result(value) for value in current]
+    superseded_results = [value_result(value) for value in superseded]
+    current_present = all(result["present"] for result in current_results)
+    superseded_absent = not any(result["present"] for result in superseded_results)
     contradiction = not superseded_absent
     passed = current_present and superseded_absent
     return {
@@ -1467,12 +2201,25 @@ def score_block(block: str, current: Sequence[str], superseded: Sequence[str]) -
         "superseded_absent": superseded_absent,
         "contradiction": contradiction,
         "passed": passed,
-        "current": list(current),
-        "superseded": list(superseded),
-        "found_current": found_current,
-        "missed_current": missed_current,
-        "found_superseded": found_superseded,
+        "current": current_results,
+        "superseded": superseded_results,
     }
+
+
+def _holds_tokens(line: str, tokens: Sequence[str]) -> bool:
+    """Whether a line holds every token, casefolded with punctuation set aside.
+
+    A token may be a short phrase: its words must stand together in the line's words.
+    """
+    words = _TOKENS.findall(line.casefold())
+    for token in tokens:
+        wanted = _TOKENS.findall(token.casefold())
+        if not wanted or not any(
+            words[start : start + len(wanted)] == wanted
+            for start in range(len(words) - len(wanted) + 1)
+        ):
+            return False
+    return True
 
 
 def load_scenario(path: Path) -> Scenario:
@@ -1488,17 +2235,31 @@ def load_scenario(path: Path) -> Scenario:
     description = raw.get("description") or ""
     slug = raw.get("slug") or "afterthought"
 
-    def _to_tuple(val: object) -> tuple[str, ...]:
+    def _to_values(val: object, where: str) -> tuple[ScenarioValue, ...]:
         if val is None:
             return ()
-        if isinstance(val, str):
-            return (val,)
-        if isinstance(val, list):
-            return tuple(str(x) for x in val)
-        return ()
+        if not isinstance(val, list):
+            raise EvalError(f"{where}: expected a list of values")
+        values = []
+        for number, entry in enumerate(val, start=1):
+            place = f"{where}: value {number}"
+            if not isinstance(entry, dict):
+                raise EvalError(f"{place}: expected an object with a value and its tokens")
+            value = entry.get("value")
+            tokens = entry.get("tokens")
+            if not isinstance(value, str) or not value.strip():
+                raise EvalError(f"{place}: expected a non-empty value")
+            if (
+                not isinstance(tokens, list)
+                or not tokens
+                or not all(isinstance(token, str) and token.strip() for token in tokens)
+            ):
+                raise EvalError(f"{place}: expected a non-empty list of distinguishing tokens")
+            values.append(ScenarioValue(value=value, tokens=tuple(tokens)))
+        return tuple(values)
 
-    current = _to_tuple(raw.get("current"))
-    superseded = _to_tuple(raw.get("superseded"))
+    current = _to_values(raw.get("current"), str(scenario_file))
+    superseded = _to_values(raw.get("superseded"), str(scenario_file))
     config_overrides = raw.get("config") or {}
 
     sessions_raw = raw.get("sessions") or []
@@ -1591,6 +2352,7 @@ def run_scenario(
     scenario: Scenario,
     cfg: Config,
     backend: Backend,
+    judge: Judge,
     variant: str = BASE_VARIANT,
 ) -> dict[str, Any]:
     """Run one scenario end-to-end through capture, digest, dream, and inject."""
@@ -1704,7 +2466,7 @@ def run_scenario(
                 if backend.command is not None:
                     model.complete_json = original_complete
 
-            score = score_block(block, scenario.current, scenario.superseded)
+            score = score_block(block, scenario.current, scenario.superseded, judge)
             score["scenario"] = scenario.name
             score["description"] = scenario.description
             score["block"] = block
@@ -1718,11 +2480,14 @@ def run_scenario(
                 "contradiction": False,
                 "passed": False,
                 "error": str(exc),
-                "current": list(scenario.current),
-                "superseded": list(scenario.superseded),
-                "found_current": [],
-                "missed_current": list(scenario.current),
-                "found_superseded": [],
+                "current": [
+                    {"value": value.value, "tokens": list(value.tokens), "present": False}
+                    for value in scenario.current
+                ],
+                "superseded": [
+                    {"value": value.value, "tokens": list(value.tokens), "present": False}
+                    for value in scenario.superseded
+                ],
                 "block": "",
             }
         finally:
@@ -1753,12 +2518,13 @@ def run_scenarios(
     scenarios: list[Scenario],
     cfg: Config,
     backend: Backend,
+    judge: Judge,
     variant: str = BASE_VARIANT,
 ) -> dict[str, Any]:
     """Run a list of scenarios and summarize totals per model and scenario."""
     results = []
     for scenario in scenarios:
-        results.append(run_scenario(scenario, cfg, backend, variant=variant))
+        results.append(run_scenario(scenario, cfg, backend, judge, variant=variant))
 
     count = len(results)
     current_present = sum(1 for r in results if r["current_present"])
@@ -1782,6 +2548,10 @@ def run_scenarios(
         "variant": variant,
         "model": None if backend.command else (cfg.settings.model.name or None),
         "endpoint": None if backend.command else cfg.settings.model.endpoint,
+        "judge_prompt": judge.prompt_hash,
+        "digest_prompts": digest_prompt_hash(),
+        "temperature": JUDGE_TEMPERATURE,
+        "prompt_shapes": {backend.name: BACKEND_SHAPE[backend.name]},
         "at": datetime.now(UTC).isoformat(),
         "totals": totals,
         "scenarios": results,
@@ -1815,11 +2585,12 @@ def _cmd_current(args: argparse.Namespace) -> int:
     cfg = with_model(load_config(), args.endpoint, args.model_name, args.extra_body)
     cfg = with_pipeline(cfg, args.variant)
     backend = build_backend(args.backend)
+    judge = Judge(cfg, Path(args.data) / JUDGE_CACHE if args.data else None)
     scenarios_dir = args.scenarios_dir or DEFAULT_CURRENT_SCENARIOS
     scenarios = load_scenarios(scenarios_dir, args.scenario)
     if not scenarios:
         raise EvalError(f"{scenarios_dir}: no scenarios found")
-    report = run_scenarios(scenarios, cfg, backend, variant=args.variant)
+    report = run_scenarios(scenarios, cfg, backend, judge, variant=args.variant)
     print_current_report(report)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

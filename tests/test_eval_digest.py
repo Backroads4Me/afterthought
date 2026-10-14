@@ -1,15 +1,18 @@
-"""The F54 harness: the digest pipeline runs unmodified over the test set, every raw
-answer is saved, the backends agree and differ by quote overlap, and a run scores against
-the answer key (BUILD-PLAN F54).
+"""The eval harness: the digest pipeline runs unmodified over the test set, every raw
+answer is saved, the backends agree, and a run scores against a key one pair at a time,
+with a held-out split and a checked judge (BUILD-PLAN F54, M16).
 
 The gemini and claude backends are exercised only through a fake command, never the real
-CLI. The local backend is exercised through the fake endpoint, never a real one.
+CLI. The local backend is exercised through the fake endpoint, never a real one. The
+judge is exercised through the same fake endpoint with scripted verdicts.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,7 +21,7 @@ import pytest
 from aft import config as configmod
 from aft import model
 from aft.config import Config
-from fakes.model_server import MODEL_NAME, FakeEndpoint
+from fakes.model_server import MODEL_NAME, FakeEndpoint, Reply
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "eval_digest.py"
@@ -77,9 +80,8 @@ def claude_record(kind: str, entry_id: str, text: str, seconds: int = 0) -> dict
     }
 
 
-def serve(cfg: Config, *answers: object) -> FakeEndpoint:
-    """Point the config at the fake endpoint, which answers with these objects in order."""
-    fake = FakeEndpoint(list(answers))
+def serve_fake(cfg: Config, fake: FakeEndpoint) -> FakeEndpoint:
+    """Point the config at this fake endpoint."""
     fake.start()
     path = cfg.home / configmod.CONFIG_NAME
     path.write_text(
@@ -88,6 +90,88 @@ def serve(cfg: Config, *answers: object) -> FakeEndpoint:
         encoding="utf-8",
     )
     return fake
+
+
+def serve(cfg: Config, *answers: object) -> FakeEndpoint:
+    """Point the config at the fake endpoint, which answers with these objects in order."""
+    return serve_fake(cfg, FakeEndpoint(list(answers)))
+
+
+def verdict(name: str, *differs: str) -> dict:
+    """A judge answer in the shape judge.schema.json describes."""
+    return {"differs": list(differs), "verdict": name}
+
+
+def judged(ev, cfg: Config, data: Path, *replies: dict) -> tuple[FakeEndpoint, object]:
+    """A judge over the fake endpoint scripted with these verdicts, and the fake.
+
+    Verdicts are cached in the data directory, so a second judge over the same key text
+    and run statements makes no calls.
+    """
+    fake = serve(cfg, *replies)
+    judge = ev.Judge(ev.with_model(cfg, fake.endpoint, MODEL_NAME, "{}"), data / ev.JUDGE_CACHE)
+    return fake, judge
+
+
+def judge_requests(fake: FakeEndpoint) -> list[dict]:
+    """The calls the fake endpoint saw that were judge calls."""
+    return [
+        request
+        for request in fake.requests
+        if "Run statement:" in request["messages"][-1]["content"]
+    ]
+
+
+def run_fact(statement: str, quote: str, source: str = "stated", kind: str = "decision") -> dict:
+    """A run fact with an exact statement, for pair-level tests."""
+    return {
+        "statement": statement,
+        "kind": kind,
+        "source": source,
+        "term": "long",
+        "quote": quote,
+        "entry": "#1",
+        "scope": "project",
+    }
+
+
+def key_turns_file(data: Path, turns: dict) -> Path:
+    """Write the per-turn key these turns describe and return its path."""
+    data.mkdir(parents=True, exist_ok=True)
+    path = data / "key-turns.json"
+    path.write_text(json.dumps(turns), encoding="utf-8")
+    return path
+
+
+class RoutedEndpoint(FakeEndpoint):
+    """A fake endpoint with one script for digest and dream calls, one for judge calls.
+
+    The F60 scenarios drive the whole pipeline over an ordered digest script, so an
+    ordered script alone would hand the judge a dream action. Routing on the user
+    message keeps the two apart: the judge is the only caller whose last message
+    starts a run statement.
+    """
+
+    def __init__(self, digest_replies: list, judge_replies: list) -> None:
+        super().__init__([])
+        self.digest_replies = [
+            reply if isinstance(reply, Reply) else Reply(content=reply) for reply in digest_replies
+        ]
+        self.judge_replies = [
+            reply if isinstance(reply, Reply) else Reply(content=reply) for reply in judge_replies
+        ]
+        self.digest_calls = 0
+        self.judge_calls = 0
+
+    def reply_for(self, call: int, body: dict) -> Reply:
+        judge_call = body["messages"][-1]["content"].startswith("Key statement:")
+        script = self.judge_replies if judge_call else self.digest_replies
+        count = self.judge_calls if judge_call else self.digest_calls
+        if judge_call:
+            self.judge_calls += 1
+        else:
+            self.digest_calls += 1
+        return script[min(count, len(script) - 1)] if script else Reply()
 
 
 def run_local(ev, data: Path, fake: FakeEndpoint, tmp_path: Path, *extra: str) -> int:
@@ -658,7 +742,7 @@ def test_compare_without_answers_is_refused(ev, tmp_path):
 # Scoring a run against the key
 
 
-def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path):
+def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path, cfg):
     data = tmp_path / "data"
     write_summary(
         data,
@@ -679,16 +763,30 @@ def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path):
             key_fact("the endpoint moved to port 8008", source="observed"),
         ],
     )
-    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path))
+    fake, judge = judged(ev, cfg, data, verdict("same"), verdict("same"))
+    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
     assert report["totals"]["wrong_facts"] == 1
     assert report["totals"]["missed_facts"] == 1
     assert report["totals"]["wrong_tags"] == 1
     assert report["totals"]["question_decisions"] == 1
+    assert report["totals"]["narrower"] == 0
+    assert report["totals"]["observed"] == 1
+    assert report["totals"]["observed_supported"] == 1
+    assert report["totals"]["observed_unsupported"] == 0
     assert report["totals"]["prompt_tokens"] == 100
     assert report["totals"]["completion_tokens"] == 20
+    assert report["judge_calls"] == 2
     session = report["sessions"][0]
     assert session["wrong"][0]["quote"] == "should the report go out at noon?"
     assert session["missed"][0]["quote"] == "the endpoint moved to port 8008"
+    assert session["pairs"][0] == {
+        "key": "The session said: run the full suite before pushing",
+        "run": "The session said: run the full suite before pushing",
+        "verdict": "same",
+        "differs": [],
+        "unheld": [],
+        "split": None,
+    }
     assert session["tags"][0] == {
         "statement": "The session said: run the full suite before pushing",
         "tag": "source",
@@ -696,9 +794,13 @@ def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path):
         "key": "stated",
     }
     assert session["questions"][0]["quote"] == "should the report go out at noon?"
+    assert (
+        report["judge_prompt"]
+        == (hashlib.sha256(ev.JUDGE_PROMPT_PATH.read_bytes()).hexdigest()[:16])
+    )
 
 
-def test_score_reads_tokens_from_the_calls_of_the_run(ev, tmp_path):
+def test_score_reads_tokens_from_the_calls_of_the_run(ev, tmp_path, cfg):
     data = tmp_path / "data"
     path = write_summary(data, "local", "sess-1", [])
     call = {
@@ -708,13 +810,14 @@ def test_score_reads_tokens_from_the_calls_of_the_run(ev, tmp_path):
     }
     (path / "call-001.json").write_text(json.dumps(call) + "\n", encoding="utf-8")
     write_key(data, "sess-1", [])
-    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path))
+    _, judge = judged(ev, cfg, data)
+    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
     # Tokens are the run's own record, so the scorer reads them from there and adds nothing.
     assert report["totals"]["prompt_tokens"] == 100
     assert report["totals"]["completion_tokens"] == 20
 
 
-def test_score_refusals_of_a_session_count_in_the_report(ev, tmp_path):
+def test_score_refusals_of_a_session_count_in_the_report(ev, tmp_path, cfg):
     data = tmp_path / "data"
     write_summary(
         data,
@@ -735,13 +838,14 @@ def test_score_refusals_of_a_session_count_in_the_report(ev, tmp_path):
         ],
     )
     write_key(data, "sess-1", [key_fact("the endpoint moved to port 8008")])
-    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path))
+    _, judge = judged(ev, cfg, data)
+    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
     assert report["totals"]["refused_facts"] == 1
     assert report["totals"]["refused_parts"] == 1
     assert report["totals"]["missed_facts"] == 1
 
 
-def test_a_synthetic_session_scores_against_its_expected_answer(ev, tmp_path):
+def test_a_synthetic_session_scores_against_its_expected_answer(ev, tmp_path, cfg):
     data = tmp_path / "data"
     synthetic = tmp_path / "synthetic" / "synthetic-nothing"
     synthetic.mkdir(parents=True)
@@ -757,25 +861,28 @@ def test_a_synthetic_session_scores_against_its_expected_answer(ev, tmp_path):
         encoding="utf-8",
     )
     write_summary(data, "local", "synthetic-nothing", [])
-    report = ev.score_run(data, "base", "local", tmp_path / "synthetic")
+    _, judge = judged(ev, cfg, data)
+    report = ev.score_run(data, "base", "local", tmp_path / "synthetic", judge)
     assert report["sessions"][0]["key_from"] == "expected"
     assert report["totals"]["missed_facts"] == 1
 
 
-def test_an_unkeyed_session_is_listed_and_not_scored(ev, tmp_path):
+def test_an_unkeyed_session_is_listed_and_not_scored(ev, tmp_path, cfg):
     data = tmp_path / "data"
     write_summary(data, "local", "sess-1", [key_fact("run the full suite before pushing")])
-    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path))
+    _, judge = judged(ev, cfg, data)
+    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
     assert report["unkeyed"] == ["sess-1"]
     assert report["totals"]["sessions"] == 0
     assert report["totals"]["facts_kept"] == 0
 
 
-def test_score_writes_a_dated_report(ev, tmp_path):
+def test_score_writes_a_dated_report(ev, tmp_path, cfg):
     data = tmp_path / "data"
     write_summary(data, "local", "sess-1", [])
     write_key(data, "sess-1", [])
-    ev.score_run(data, "base", "local", empty_synthetic(tmp_path))
+    _, judge = judged(ev, cfg, data)
+    ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
     reports = list((data / "reports").iterdir())
     assert len(reports) == 1
     assert reports[0].name.endswith("-base-local.json")
@@ -783,11 +890,12 @@ def test_score_writes_a_dated_report(ev, tmp_path):
     assert payload["variant"] == "base" and payload["backend"] == "local"
 
 
-def test_score_scores_a_variant_in_its_own_directory(ev, tmp_path):
+def test_score_scores_a_variant_in_its_own_directory(ev, tmp_path, cfg):
     data = tmp_path / "data"
     write_summary(data, "local", "sess-1", [], variant="narrow")
     write_key(data, "sess-1", [key_fact("run the full suite before pushing")])
-    report = ev.score_run(data, "narrow", "local", empty_synthetic(tmp_path))
+    _, judge = judged(ev, cfg, data)
+    report = ev.score_run(data, "narrow", "local", empty_synthetic(tmp_path), judge)
     assert report["variant"] == "narrow"
     assert report["totals"]["missed_facts"] == 1
 
@@ -805,9 +913,357 @@ def test_a_broken_key_is_refused(ev, tmp_path):
         ev.load_key(data, "sess-1", synthetic)
 
 
-def test_score_refuses_an_unknown_backend(ev, tmp_path):
+def test_score_refuses_an_unknown_backend(ev, tmp_path, cfg):
+    _, judge = judged(ev, cfg, tmp_path / "data")
     with pytest.raises(ev.EvalError, match="unknown backend"):
-        ev.score_run(tmp_path / "data", "base", "openai", tmp_path)
+        ev.score_run(tmp_path / "data", "base", "openai", tmp_path, judge)
+
+
+def test_one_run_fact_cannot_answer_two_key_items(ev, tmp_path, cfg):
+    """Two key items match one run fact: only the strongest pairing is judged and counted."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
+            "sess-1#2": {
+                "user": "",
+                "durable": [key_fact("deploy happens on port 8008 with the blue runner")],
+            },
+        },
+    )
+    write_summary(data, "local", "sess-1", [key_fact("deploy happens on port 8008")])
+    fake, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["key_items"] == 2
+    assert report["totals"]["found"] == 1
+    assert report["totals"]["missed"] == 1
+    assert len(judge_requests(fake)) == 1
+    missed = report["sessions"][0]["missed_items"]
+    assert missed == ["The session said: deploy happens on port 8008 with the blue runner"]
+
+
+def test_a_right_quote_under_a_wrong_statement_is_wrong(ev, tmp_path, cfg):
+    """A run fact citing the key's quote but naming another number is wrong: the judge
+    decides, and the number neither text holds is recorded as unheld."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data, {"sess-1#1": {"user": "", "durable": [key_fact("the api listens on 8008")]}}
+    )
+    write_summary(
+        data, "local", "sess-1", [run_fact("the api listens on 9999", "the api listens on 8008")]
+    )
+    fake, judge = judged(ev, cfg, data, verdict("different", "9999"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 0
+    assert report["totals"]["missed"] == 1
+    assert report["totals"]["stated_wrong"] == 1
+    assert len(judge_requests(fake)) == 1
+    pair = report["sessions"][0]["pairs"][0]
+    assert pair["verdict"] == "different" and pair["unheld"] == ["9999"]
+
+
+def test_a_broader_statement_counts_found_and_its_own_quote_grounds_added_names(ev, tmp_path, cfg):
+    """A run statement holding the key's claim and a true detail beside it is found and
+    counted broader; a name its own verified quote holds is not recorded as unheld."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {"sess-1#1": {"user": "", "durable": [key_fact("only the replica moved to db-03")]}},
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Staging is still on db-02; only the replica moved to db-03.",
+                "staging is still on db-02. only the replica moved to db-03",
+            )
+        ],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("broader", "staging is still on db-02"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 1
+    assert report["totals"]["broader"] == 1
+    assert report["totals"]["stated_wrong"] == 0
+    assert len(judge_requests(fake)) == 1
+    assert report["sessions"][0]["pairs"][0]["unheld"] == []
+
+
+def test_an_approval_s_proposal_words_ground_its_statement(ev, tmp_path, cfg):
+    """A name an approval took from the proposal it answers is held by the proposal's
+    words, so it is not recorded as unheld."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("and the guardrail")]}})
+    fact = run_fact("Add the guardrail line to captain.md.", "and the guardrail")
+    fact["proposal"] = ["entry-1", "Add a line to captain.md saying not to push."]
+    write_summary(data, "local", "sess-1", [fact])
+    fake, judge = judged(ev, cfg, data, verdict("broader", "captain.md"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 1
+    assert report["sessions"][0]["pairs"][0]["unheld"] == []
+
+
+def test_a_statement_the_judge_rejects_scores_wrong(ev, tmp_path, cfg):
+    """A run fact the name check cannot fault is judged, and its verdict decides."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("never push to main")]}})
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [run_fact("The session said: push to main when the tests pass", "never push to main")],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("different", "the session says push freely"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 0
+    assert report["totals"]["missed"] == 1
+    assert report["totals"]["stated_wrong"] == 1
+    assert len(judge_requests(fake)) == 1
+    pair = report["sessions"][0]["pairs"][0]
+    assert pair["verdict"] == "different"
+
+
+def test_a_narrower_verdict_counts_without_a_tag_check(ev, tmp_path, cfg):
+    """A pair judged narrower counts as found and skips the tag comparison."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("run the full suite")]}})
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [key_fact("run the full suite", source="observed")],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("narrower", "the run only names the suite"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 1
+    assert report["totals"]["narrower"] == 1
+    assert report["totals"]["stated_wrong"] == 0
+
+
+def test_a_cached_verdict_makes_no_call(ev, tmp_path, cfg):
+    """A second scoring pass over the same statements reads the verdicts from the cache."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]}})
+    write_summary(data, "local", "sess-1", [key_fact("use port 8008")])
+    fake, judge = judged(ev, cfg, data, verdict("same"))
+    first = ev.score_turns(data, "base", "local", judge)
+    assert judge.calls == 1
+    again = ev.Judge(ev.with_model(cfg, fake.endpoint, MODEL_NAME, "{}"), data / ev.JUDGE_CACHE)
+    second = ev.score_turns(data, "base", "local", again)
+    assert again.calls == 0
+    assert second["totals"]["found"] == first["totals"]["found"]
+
+
+def test_an_observed_fact_is_judged_against_its_own_quote(ev, tmp_path, cfg):
+    """Recall the run itself witnessed is judged against the quote it cites, not the key."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]}})
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "The test run failed with three errors",
+                "FAILED tests/test_api.py::test_upload - assert 3 == 0",
+                source="observed",
+                kind="fact",
+            ),
+            run_fact(
+                "The test run failed in tests/test_api.py",
+                "FAILED tests/test_api.py::test_upload - assert 3 == 0",
+                source="observed",
+                kind="fact",
+            ),
+        ],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("different", "three errors"), verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["observed"] == 2
+    assert report["totals"]["observed_supported"] == 1
+    assert report["totals"]["observed_unsupported"] == 1
+    request = judge_requests(fake)[0]
+    assert "Key statement: (none)" in request["messages"][-1]["content"]
+    assert (
+        "FAILED tests/test_api.py::test_upload - assert 3 == 0"
+        in request["messages"][-1]["content"]
+    )
+
+
+def test_the_turns_report_holds_the_hashes_model_and_temperature(ev, tmp_path, cfg):
+    """The report records what was judged with, so a rerun can be compared line by line."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]}})
+    write_summary(data, "local", "sess-1", [key_fact("use port 8008")])
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    digest = hashlib.sha256(ev.JUDGE_PROMPT_PATH.read_bytes()).hexdigest()[:16]
+    assert report["judge_prompt"] == digest
+    assert re.fullmatch(r"[0-9a-f]{16}", report["digest_prompts"])
+    assert report["model"] == MODEL_NAME
+    assert report["temperature"] == 0.0
+    assert report["prompt_shapes"] == {"local": "endpoint-schema"}
+
+
+def test_both_splits_are_reported_for_the_per_turn_key(ev, tmp_path, cfg):
+    """A frozen split reports the key-side numbers for dev and held-out separately."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]},
+            "sess-1#2": {"user": "", "durable": [key_fact("never push to main")]},
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [key_fact("use port 8008"), key_fact("never push to main")],
+    )
+    split_path = ev.build_split(data)
+    assert split_path == data / "split.json"
+    fake, judge = judged(ev, cfg, data, verdict("same"), verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    turns = report["split"]["turns"]
+    assert turns["dev"] + turns["held-out"] == 2
+    assert set(report["splits"]) == {"dev", "held-out", "unsplit"}
+    buckets = report["splits"]
+    assert buckets["dev"]["key_facts"] + buckets["held-out"]["key_facts"] == 2
+    assert buckets["dev"]["found"] + buckets["held-out"]["found"] == 2
+    assert buckets["unsplit"]["key_facts"] == 0
+
+
+def test_score_reports_the_split_of_its_key_facts(ev, tmp_path, cfg):
+    """The per-session key reports its facts' splits too, through the per-turn key."""
+    data = tmp_path / "data"
+    write_summary(data, "local", "sess-1", [key_fact("use port 8008")])
+    write_key(data, "sess-1", [key_fact("use port 8008")])
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]}})
+    ev.build_split(data)
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_run(data, "base", "local", empty_synthetic(tmp_path), judge)
+    buckets = report["splits"]
+    assert sum(bucket["key_facts"] for bucket in buckets.values()) == 1
+    assert sum(bucket["found"] for bucket in buckets.values()) == 1
+    assert buckets["unsplit"]["key_facts"] == 0
+
+
+def test_split_refuses_to_overwrite_and_rebuilds_identically(ev, tmp_path):
+    """A frozen split is only rewritten with --force, and the rule rebuilds the same."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("one")]},
+            "sess-1#2": {"user": "", "durable": [key_fact("two")]},
+            "sess-1#3": {"user": "", "durable": [key_fact("three")]},
+        },
+    )
+    path = ev.build_split(data)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["rule"] == ev.SPLIT_RULE
+    with pytest.raises(ev.EvalError, match="frozen"):
+        ev.build_split(data)
+    again = ev.build_split(data, force=True)
+    assert json.loads(again.read_text(encoding="utf-8"))["turns"] == payload["turns"]
+    assert set(payload["turns"].values()) <= {"dev", "held-out"}
+
+
+def test_a_split_naming_an_unknown_side_is_refused(ev, tmp_path):
+    """A split file may only name dev and held-out."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("one")]}})
+    (data / "split.json").write_text(
+        json.dumps({"built": NOW, "rule": "odd", "turns": {"sess-1#1": "training"}}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ev.EvalError, match="dev"):
+        ev.load_split(data)
+
+
+def test_judge_check_passes_and_fails_on_the_bars(ev, tmp_path, cfg):
+    """The check passes when the planted wrong pairs are caught and the same and broader
+    pairs hold."""
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    check = {
+        "wrong": [
+            {
+                "statement": "The session said: retry twice",
+                "quote": "retry twice",
+                "planted": "twice",
+            }
+        ],
+        "same": [
+            {
+                "statement": "The session said: retry twice",
+                "quote": "retry twice",
+                "planted": "the session says to try the task two times",
+            }
+        ],
+        "broader": [
+            {
+                "statement": "The session said: retry twice",
+                "quote": "retry twice",
+                "planted": "the session says to retry twice, with a pause between tries",
+            }
+        ],
+    }
+    (data / ev.JUDGE_CHECK).write_text(json.dumps(check), encoding="utf-8")
+
+    caught = run_judge_check(
+        ev, cfg, data, verdict("different"), verdict("same"), verdict("broader")
+    )
+    assert caught == 0
+    # The verdict cache would answer the second run from the first, so drop it.
+    (data / ev.JUDGE_CACHE).unlink()
+    missed = run_judge_check(ev, cfg, data, verdict("same"), verdict("same"), verdict("broader"))
+    assert missed == 1
+    (data / ev.JUDGE_CACHE).unlink()
+    # A superset the judge calls different fails the broader bar.
+    strict = run_judge_check(
+        ev, cfg, data, verdict("different"), verdict("same"), verdict("different")
+    )
+    assert strict == 1
+
+
+def run_judge_check(ev, cfg: Config, data: Path, *replies: dict) -> int:
+    """Run the judge-check command against a fake endpoint scripted with these verdicts.
+
+    The endpoint is given on the command line, so the check can run twice in one test
+    without rewriting the config.
+    """
+    fake = FakeEndpoint(list(replies))
+    fake.start()
+    return ev.main(
+        [
+            "judge-check",
+            "--data",
+            str(data),
+            "--endpoint",
+            fake.endpoint,
+            "--model",
+            MODEL_NAME,
+        ]
+    )
+
+
+def test_judge_check_refuses_bad_planted_pairs(ev, tmp_path):
+    """The check needs at least one planted wrong pair and one planted same pair."""
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    (data / ev.JUDGE_CHECK).write_text(json.dumps({"wrong": [], "same": []}), encoding="utf-8")
+    with pytest.raises(ev.EvalError, match="wrong"):
+        ev.load_judge_check(data)
+    (data / ev.JUDGE_CHECK).write_text(
+        json.dumps({"wrong": [{"statement": "s", "quote": "q", "planted": "p"}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ev.EvalError, match="same"):
+        ev.load_judge_check(data)
 
 
 def test_two_quotes_of_one_fact_are_matched_by_what_the_statements_say(ev):
@@ -832,74 +1288,101 @@ def test_a_variant_named_after_a_pipeline_runs_that_pipeline(ev, cfg):
     assert ev.with_pipeline(cfg, "trial-3") is cfg
 
 
-def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, tmp_path):
+def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, tmp_path, cfg):
     data = tmp_path / "data"
-    key = {
-        "sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]},
-        "sess-1#2": {"user": "", "durable": [key_fact("never push to main")]},
-    }
-    data.mkdir(parents=True)
-    (data / "key-turns.json").write_text(json.dumps(key), encoding="utf-8")
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("use port 8008")]},
+            "sess-1#2": {"user": "", "durable": [key_fact("never push to main")]},
+        },
+    )
     write_summary(
         data,
         "local",
         "sess-1",
         [key_fact("use port 8008"), key_fact("should the report go out at noon?")],
     )
-    report = ev.score_turns(data, "base", "local")
+    fake, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
     assert report["totals"] == {
         "sessions": 1,
         "key_items": 2,
         "found": 1,
+        "narrower": 0,
+        "broader": 0,
+        "missed": 1,
         "stated": 2,
         "stated_wrong": 1,
         "observed": 0,
+        "observed_supported": 0,
+        "observed_narrower": 0,
+        "observed_broader": 0,
+        "observed_unsupported": 0,
     }
+    assert len(judge_requests(fake)) == 1
+    pair = report["sessions"][0]["pairs"][0]
+    assert pair["verdict"] == "same" and pair["unheld"] == []
 
 
 # ---------------------------------------------------------------------------
 # F60: current truth evaluation (BUILD-PLAN F60)
 
 
-def test_score_block_on_handmade_blocks(ev):
-    """Scoring checks that the current value is present and the superseded value is absent."""
+def test_score_block_on_handmade_blocks(ev, tmp_path, cfg):
+    """A value is present when a line holds its tokens and the judge agrees with it."""
+    current = [ev.ScenarioValue("Reply 'settle' to go through notes now.", ("settle",))]
+    superseded = [ev.ScenarioValue("Reply 'yes' to go through notes.", ("yes",))]
     block = (
         "# afterthought\n\n"
-        "## Preferences\n"
-        "- Commit messages must start with a capitalized imperative verb. [stated] 2026-10-02\n"
+        "## Decisions\n"
+        "- Reply 'settle' to go through notes now. [stated] 2026-10-02\n"
     )
-    current = ["Commit messages must start with a capitalized imperative verb."]
-    superseded = ["always write them in lowercase imperative style"]
 
-    # When current is present and superseded is absent, the scenario passes.
-    score = ev.score_block(block, current, superseded)
+    # The line is not a substring of the value: tokens do the finding and the judge
+    # decides, so wording differences between value and block line cannot fail it.
+    fake, judge = judged(ev, cfg, tmp_path / "data", verdict("same"))
+    score = ev.score_block(block, current, superseded, judge)
     assert score["current_present"] is True
     assert score["superseded_absent"] is True
     assert score["contradiction"] is False
     assert score["passed"] is True
-    assert score["found_current"] == current
-    assert score["missed_current"] == []
-    assert score["found_superseded"] == []
+    assert score["current"][0]["line"] == (
+        "- Reply 'settle' to go through notes now. [stated] 2026-10-02"
+    )
+    (request,) = judge_requests(fake)
+    # The line is the key and the value is judged against it, so a line that holds the
+    # value and more reads as narrower, not as a difference.
+    shown = request["messages"][-1]["content"]
+    assert "Key statement: - Reply 'settle' to go through notes now. [stated]" in shown
+    assert "Run statement: Reply 'settle' to go through notes now." in shown
 
-    # When a superseded value is present, a contradiction is recorded.
-    contradicted_block = block + "- always write them in lowercase imperative style\n"
-    score_bad = ev.score_block(contradicted_block, current, superseded)
+    # A line holding the superseded value's tokens that the judge confirms is a
+    # contradiction, no matter how the words are arranged.
+    contradicted = block + "- Reply 'yes' to go through notes when asked again\n"
+    fake_bad, judge_bad = judged(
+        ev, cfg, tmp_path / "data-contradicted", verdict("same"), verdict("same")
+    )
+    score_bad = ev.score_block(contradicted, current, superseded, judge_bad)
     assert score_bad["current_present"] is True
     assert score_bad["superseded_absent"] is False
     assert score_bad["contradiction"] is True
     assert score_bad["passed"] is False
-    assert score_bad["found_superseded"] == superseded
+    assert score_bad["superseded"][0]["line"] == (
+        "- Reply 'yes' to go through notes when asked again"
+    )
+    assert len(judge_requests(fake_bad)) == 2
 
-    # When a required current value is missing, the scenario fails.
-    score_missing = ev.score_block("## Preferences\n", current, superseded)
+    # A missing current value fails the scenario.
+    _, judge_missing = judged(ev, cfg, tmp_path / "data-missing", verdict("same"))
+    score_missing = ev.score_block("## Decisions\n", current, superseded, judge_missing)
     assert score_missing["current_present"] is False
     assert score_missing["superseded_absent"] is True
     assert score_missing["contradiction"] is False
     assert score_missing["passed"] is False
-    assert score_missing["missed_current"] == current
 
     # When there is no superseded value to check, absence is always satisfied.
-    score_no_sup = ev.score_block(block, current, [])
+    score_no_sup = ev.score_block(block, current, [], judge_missing)
     assert score_no_sup["current_present"] is True
     assert score_no_sup["superseded_absent"] is True
     assert score_no_sup["passed"] is True
@@ -917,12 +1400,39 @@ def test_load_scenarios_from_repo(ev):
         "replaced-rule",
         "restated-fact",
     }
+    by_name = {s.name: s for s in scenarios}
+    assert by_name["replaced-rule"].current[0].tokens == ("settle",)
+    assert by_name["replaced-rule"].superseded[0].tokens == ("yes",)
+    assert by_name["restated-fact"].current[0].tokens == ("retention", "90")
+    assert by_name["restated-fact"].superseded == ()
+    assert by_name["reversed-preference"].current[0].tokens == ("capitalized",)
+    assert by_name["reversed-preference"].superseded[0].tokens == ("lowercase",)
     selected = ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["reversed-preference"])
     assert len(selected) == 1
     assert selected[0].name == "reversed-preference"
 
     with pytest.raises(ev.EvalError, match="unknown scenario"):
         ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["nonexistent"])
+
+
+def test_a_scenario_value_without_tokens_is_refused(ev, tmp_path):
+    """A current value with no distinguishing tokens cannot be scored, so it is refused."""
+    directory = tmp_path / "scenarios" / "thin"
+    directory.mkdir(parents=True)
+    (directory / "scenario.json").write_text(
+        json.dumps(
+            {
+                "name": "thin",
+                "description": "a value with no tokens",
+                "current": ["just a phrase"],
+                "superseded": [],
+                "sessions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ev.EvalError, match="tokens"):
+        ev.load_scenarios(tmp_path / "scenarios")
 
 
 def test_current_refuses_real_home_and_vault(ev, monkeypatch):
@@ -972,12 +1482,13 @@ def test_current_runs_scenario_with_fake_endpoint(ev, tmp_path, cfg):
         ),
         {"action": "supersede", "line": "L1", "reason": "reversed preference"},
     ]
-    with FakeEndpoint(script) as fake:
+    with RoutedEndpoint(script, [verdict("same")]) as fake:
         scenarios = ev.load_scenarios(ev.DEFAULT_CURRENT_SCENARIOS, wanted=["reversed-preference"])
         assert len(scenarios) == 1
         backend = ev.Backend("local")
         config = ev.with_model(cfg, fake.endpoint, "fake-model", "{}")
-        report = ev.run_scenarios(scenarios, config, backend, variant="base")
+        judge = ev.Judge(config, tmp_path / "judge-cache.json")
+        report = ev.run_scenarios(scenarios, config, backend, judge, variant="base")
 
         assert report["totals"]["scenarios"] == 1
         assert report["totals"]["current_present"] == 1
@@ -1031,7 +1542,7 @@ def test_current_cli_command_with_report_file(ev, tmp_path, cfg):
         {"action": "supersede", "line": "L1", "reason": "reversed preference"},
     ]
     report_file = tmp_path / "reports" / "current-test.json"
-    with FakeEndpoint(script) as fake:
+    with RoutedEndpoint(script, [verdict("same")]) as fake:
         code = ev.main(
             [
                 "current",

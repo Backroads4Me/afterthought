@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "properties": {
+    "differs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "description": "The words that carry a difference between the key text and the run statement: a name, a number, a date, a negation, or a condition one side holds and the other does not. Empty when the two say the same thing."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "same",
+        "narrower",
+        "broader",
+        "different"
+      ],
+      "description": "same: the run statement says what the key text says. narrower: it says part of what the key text says and contradicts nothing. broader: it says everything the key text says and adds more beside it, changing nothing the key text says. different: it changes or contradicts what the key text says, says something else in its place, or leaves out something that changes the meaning."
+    }
+  },
+  "required": [
+    "differs",
+    "verdict"
+  ],
+  "additionalProperties": false
+}

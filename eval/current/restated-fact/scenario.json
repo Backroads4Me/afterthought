@@ -1,7 +1,15 @@
 {
   "name": "restated-fact",
   "description": "a fact restated unchanged",
-  "current": ["The evidence archive retention window is 90 days."],
+  "current": [
+    {
+      "value": "The evidence archive retention window is 90 days.",
+      "tokens": [
+        "retention",
+        "90"
+      ]
+    }
+  ],
   "superseded": [],
   "sessions": [
     {

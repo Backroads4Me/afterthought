@@ -1,8 +1,22 @@
 {
   "name": "replaced-rule",
   "description": "a rule the user replaces (F51's case)",
-  "current": ["reply 'settle' to go through notes now"],
-  "superseded": ["reply 'yes' to go through notes"],
+  "current": [
+    {
+      "value": "reply 'settle' to go through notes now",
+      "tokens": [
+        "settle"
+      ]
+    }
+  ],
+  "superseded": [
+    {
+      "value": "reply 'yes' to go through notes",
+      "tokens": [
+        "yes"
+      ]
+    }
+  ],
   "sessions": [
     {
       "session_id": "rule-1",

@@ -1,8 +1,22 @@
 {
   "name": "paused-then-resumed",
   "description": "X is paused then X is resumed the same day (F58)",
-  "current": ["The search indexer background worker is resumed."],
-  "superseded": ["The search indexer background worker is paused."],
+  "current": [
+    {
+      "value": "The search indexer background worker is resumed.",
+      "tokens": [
+        "resumed"
+      ]
+    }
+  ],
+  "superseded": [
+    {
+      "value": "The search indexer background worker is paused.",
+      "tokens": [
+        "paused"
+      ]
+    }
+  ],
   "sessions": [
     {
       "session_id": "pause-1",
