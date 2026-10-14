@@ -2303,6 +2303,34 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     three hold.
   - **Tests:** prompt-shape tests updated for the four prompts. Review checkpoint: yes
     (prompt change; lead reviews in full).
+- **T48 Low findings: consistency and portability** (ruling 2026-10-14; ROADMAP Low
+  findings L2, L7, L9, L11). Each item is checked against main first; one already fixed is
+  named in the PR and left alone.
+  - **L2:** `docs/configuration.md` names the default `digest.pipeline` as `config.py` sets
+    it (`turns`), and the summary schema and the docs agree on the summary's fields.
+  - **L7:** `aft inject` and the session-start hook resolve a directory's project with the
+    same `never=capture.exclude_paths`, so the two cannot disagree; a test runs both on an
+    excluded path.
+  - **L9:** the `git merge-base` call in `dream/maintain.py` passes `--end-of-options`
+    before revisions, and the `rg -F` lookup is replaced by Python's `in` on the text
+    already read (no subprocess); behaviour unchanged, tests show both.
+  - **L11:** digest metadata is keyed so two facts with the same statement do not collide;
+    the duplicated line assignment in `dream/schedule.py` is removed; `eval/longmemeval.py`
+    reports peak RSS in MB on Linux and macOS (`ru_maxrss` is KB on Linux, bytes on macOS);
+    a request with `json_schema` sets `strict: true` where the endpoint takes it, with a
+    test on the request body.
+  - Review checkpoint: no.
+- **T49 Low findings: one copy of each check** (ruling 2026-10-14; ROADMAP Low findings
+  L3, L12). Behaviour-preserving: the full suite passes unchanged except tests that name a
+  removed helper.
+  - **L3:** `explicit_correction` is never set by any writer, so R3's correction bypass
+    cannot run. It is removed from `dream/rules.py` and `dream/apply.py` with its tests;
+    DESIGN keeps no mention of it (the lead checks DESIGN 9).
+  - **L12:** fenced-code detection, digest file-name parsing and the `[stated]` trust
+    checks each live once. The `[stated]` checks in `digest.verify` and `notes.settle` (or
+    `apply.settle`) call one function; fence detection and digest-name parsing move to one
+    module each and every caller uses it.
+  - Review checkpoint: yes (R1, R2 and R3 code paths; lead reviews in full).
 
 ## 6. Ted's checklists at milestone ends
 
