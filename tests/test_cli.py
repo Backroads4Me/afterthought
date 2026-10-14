@@ -792,3 +792,53 @@ def test_project_merge_refuses_unknown_projects(initialized, tmp_path, capsys):
     assert registry.by_slug("alpha") is not None
     assert registry.by_slug("delta") is None
     assert run_git(["status", "--porcelain"], initialized.vault) == ""
+
+
+def test_project_merge_does_not_copy_source_listing(initialized, tmp_path, capsys):
+    """A merge does not copy the source's reserved listing files, and rewrites the
+    destination's listing to name the pages it now holds (T50)."""
+    alpha_repo = make_repo(tmp_path / "alpha")
+    beta_repo = make_repo(tmp_path / "beta")
+    assert main(["project", "add", str(alpha_repo)]) == 0
+    assert main(["project", "add", str(beta_repo)]) == 0
+    capsys.readouterr()
+    vault_root = initialized.vault
+    _write_page(
+        vault_root / "projects" / "alpha" / "overview.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: Alpha.\nsources: []\n"
+        "---\n\n## Facts\n\n- alpha fact [stated] 2026-10-01\n",
+    )
+    _write_page(
+        vault_root / "projects" / "alpha" / "notes.md",
+        "---\ntype: Project\ntitle: alpha\ndescription: Alpha notes.\nsources: []\n"
+        "---\n\n## Facts\n\n- alpha note [stated] 2026-10-01\n",
+    )
+    _write_page(
+        vault_root / "projects" / "alpha" / "index.md",
+        "# alpha\n\n- overview.md\n- notes.md\n",
+    )
+    _write_page(vault_root / "projects" / "alpha" / "log.md", "alpha log\n")
+    _write_page(
+        vault_root / "projects" / "beta" / "overview.md",
+        "---\ntype: Project\ntitle: beta\ndescription: Beta.\nsources: []\n"
+        "---\n\n## Facts\n\n- beta fact [stated] 2026-10-02\n",
+    )
+    _write_page(
+        vault_root / "projects" / "beta" / "index.md",
+        "# beta\n\n- overview.md\n",
+    )
+    vault.commit(vault_root, ["projects"], "seed alpha and beta with listings")
+
+    assert main(["project", "merge", "alpha", "beta"]) == 0
+    assert capsys.readouterr().out == "merged alpha into beta\n"
+
+    assert not (vault_root / "projects" / "alpha").exists()
+    assert not (vault_root / "projects" / "beta" / "index-2.md").exists()
+    assert not (vault_root / "projects" / "beta" / "log-2.md").exists()
+    assert not (vault_root / "projects" / "beta" / "log.md").exists()
+    beta_index = (vault_root / "projects" / "beta" / "index.md").read_text()
+    assert "- overview.md" in beta_index
+    assert "- notes.md" in beta_index
+    assert "index-2.md" not in beta_index
+    assert "log" not in beta_index
+    assert run_git(["status", "--porcelain"], vault_root) == ""
