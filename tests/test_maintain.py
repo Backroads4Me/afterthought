@@ -299,8 +299,11 @@ def test_append_log(initialized):
     assert "- second run\n" in log_text
 
 
-def test_anchor_check_falls_back_when_ripgrep_missing(initialized, tmp_path, monkeypatch):
-    monkeypatch.setattr(maintain.shutil, "which", lambda _cmd: None)
+def test_anchor_check_uses_python_in_without_subprocess(initialized, tmp_path):
+    """L9: anchor checking uses Python in directly on content, without rg or subprocess."""
+    assert not hasattr(maintain, "subprocess")
+    assert not hasattr(maintain, "shutil")
+
     repo = make_repo(tmp_path / "widget")
     (repo / "index.py").write_text("def search(): pass\n")
     run_git(["add", "index.py"], repo)
@@ -337,6 +340,61 @@ aft:
     broken, cleared = maintain.check_anchors(root, proj, TODAY, initialized.host)
     assert len(broken) == 1
     assert broken[0].statement == "The index uses SQLite."
+
+
+def test_anchor_check_merge_base_passes_end_of_options(initialized, tmp_path, monkeypatch):
+    """L9: git merge-base call in check_anchors passes --end-of-options before revisions."""
+    recorded_commands = []
+    real_git = maintain.git
+
+    def tracking_git(args, **kwargs):
+        recorded_commands.append(list(args))
+        return real_git(args, **kwargs)
+
+    monkeypatch.setattr(maintain, "git", tracking_git)
+    repo = make_repo(tmp_path / "widget")
+    (repo / "index.py").write_text("import sqlite3\n")
+    run_git(["add", "index.py"], repo)
+    run_git(["commit", "-m", "add index"], repo)
+    commit_sha = run_git(["rev-parse", "HEAD"], repo)
+
+    registry = Registry.load(initialized.registry_path)
+    proj = registry.add("widget", "Widget")
+    registry.add_path(proj, path_key(initialized.host, repo))
+    registry.save()
+
+    root = initialized.vault
+    overview = root / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(f"""---
+type: Project
+title: widget
+sources:
+  - id: s1
+    resource: aft://session/claude/123#e1
+    quote: "we use sqlite"
+aft:
+  project: {proj.id}
+  anchors:
+    s1: {{path: index.py, all_of: ["sqlite3"], commit: {commit_sha}}}
+---
+
+## Facts
+
+- The index uses SQLite. [observed] 2026-09-30 [^s1]
+""")
+    vault.commit(root, ["projects"], "seed")
+
+    maintain.check_anchors(root, proj, TODAY, initialized.host)
+    merge_bases = [cmd for cmd in recorded_commands if len(cmd) > 1 and cmd[0] == "merge-base"]
+    assert len(merge_bases) >= 1
+    assert merge_bases[0] == [
+        "merge-base",
+        "--is-ancestor",
+        "--end-of-options",
+        commit_sha,
+        "main",
+    ]
 
 
 def test_fact_with_two_anchors_remains_stale_when_one_anchor_is_broken(initialized, tmp_path):

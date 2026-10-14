@@ -4603,3 +4603,62 @@ def test_f75_source_with_purged_archive_and_no_recorded_role_writes_no_role_said
     # Since evidence is not verified without archive row or check hash, it is rejected at R1
     assert len(rep.rejected) == 1
     assert rep.rejected[0].rule == "R1"
+
+
+def test_digest_metadata_keyed_avoids_collision_on_same_statement(initialized, home, fake):
+    """L11: two facts with the same statement do not collide in digest metadata."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    statement = "The service runs on port 8080."
+    write_digest(
+        cfg,
+        "widget",
+        "d-collision",
+        facts=[
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+                "entry": "e1",
+                "scope": "project",
+                "term": "long",
+            },
+            {
+                "statement": statement,
+                "kind": "fact",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s2",
+                "entry": "e2",
+                "scope": "global",
+                "term": "long",
+            },
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess1#e1",
+                "quote": statement,
+            },
+            {
+                "id": "s2",
+                "resource": "aft://session/claude/sess1#e2",
+                "quote": statement,
+            },
+        ],
+    )
+
+    fake.script = [
+        reply("add", None, "project fact"),
+        reply("add", None, "global fact"),
+    ]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 2
+    paths = {a.path for a in report.added}
+    assert paths == {"projects/widget/overview.md", "global/profile.md"}

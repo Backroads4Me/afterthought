@@ -476,16 +476,15 @@ def _injection_block(path: Path) -> str:
     """The block a session starting in ``path`` is given, "" when there is none.
 
     `aft inject` and the session-start hook both print what this returns, so an agent's
-    session starts with exactly the text `aft inject` shows for its directory.
+    session starts with exactly the text `aft inject` shows for its directory. Injection
+    only reads, so the capture exclusions do not take a directory's memory away.
     """
     from aft import gitutil, inject, keys
 
     config = load()
     registry = Registry.load(config.registry_path)
     try:
-        result = keys.resolve(
-            path, registry, config.host, never=config.settings.capture.exclude_paths
-        )
+        result = keys.resolve(path, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=path)
     return inject.build(config, result)
@@ -685,7 +684,9 @@ def cmd_project_merge(args) -> int:
             if remote not in target.remotes:
                 target.remotes.append(remote)
         changed = ["registry.yaml"]
-        _merge_project_directories(config, source.slug, target.slug, changed)
+        _merge_project_directories(
+            config, source.slug, target.slug, changed, target_title=target.title
+        )
         registry.projects.remove(source)
         registry.save()
         vault.commit(config.vault, changed, f"aft: merge {source.slug} into {target.slug}")
@@ -694,14 +695,21 @@ def cmd_project_merge(args) -> int:
 
 
 def _merge_project_directories(
-    config: Config, from_slug: str, into_slug: str, changed: list[str]
+    config: Config,
+    from_slug: str,
+    into_slug: str,
+    changed: list[str],
+    target_title: str | None = None,
 ) -> None:
-    """Move the source project's vault directories into the destination's (F70).
+    """Move the source project's vault directories into the destination's (F70, T50).
 
     Appends every path that gained or lost files to ``changed``, so one commit covers the
     moves; a directory that held nothing adds nothing, since git has no path to stage.
+    Reserved listing files of the source are not moved, and the destination's listing is
+    rewritten to name the pages it now holds.
     """
-    from aft import vault
+    from aft import lint, vault
+    from aft.dream import maintain
 
     try:
         source = config.vault / "digests" / from_slug
@@ -727,7 +735,6 @@ def _merge_project_directories(
         source = config.vault / "projects" / from_slug
         if source.exists():
             target = config.vault / "projects" / into_slug
-            moved = False
             for name in ("overview.md", "recent.md"):
                 page = source / name
                 if not page.exists():
@@ -738,10 +745,22 @@ def _merge_project_directories(
                 else:
                     target.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(page), str(target / name))
-                moved = True
-            moved = _move_all(source, target) or moved
-            if moved:
-                changed += [f"projects/{from_slug}", f"projects/{into_slug}"]
+            for name in lint.RESERVED:
+                reserved = source / name
+                if reserved.exists():
+                    reserved.unlink()
+            _move_all(source, target)
+            if target.exists():
+                title = target_title
+                if not title and (target / "index.md").exists():
+                    first_line = (target / "index.md").read_text(encoding="utf-8").split("\n", 1)[0]
+                    if first_line.startswith("# "):
+                        title = first_line[2:].strip()
+                maintain.regenerate_index(config.vault, into_slug, title or into_slug.capitalize())
+            if f"projects/{from_slug}" not in changed:
+                changed.append(f"projects/{from_slug}")
+            if target.exists() and f"projects/{into_slug}" not in changed:
+                changed.append(f"projects/{into_slug}")
             source.rmdir()
     except OSError as exc:
         raise vault.VaultError(f"cannot merge project directories: {exc}") from exc
@@ -749,15 +768,18 @@ def _merge_project_directories(
 
 def _move_into(source: Path, target: Path) -> bool:
     """Move the file or directory ``source`` onto the name ``target``, and say whether
-    anything moved (F70).
+    anything moved (F70, T50).
 
     A directory whose name the destination holds has its children moved in one by one; a
     file whose name is taken keeps its name with a number appended, so nothing the vault
-    holds is overwritten.
+    holds is overwritten. Reserved listing files are never moved.
     """
-    from aft import vault
+    from aft import lint, vault
 
     try:
+        if not source.is_dir() and source.name in lint.RESERVED:
+            source.unlink()
+            return False
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.exists():
             shutil.move(str(source), str(target))
@@ -781,9 +803,14 @@ def _move_into(source: Path, target: Path) -> bool:
 
 def _move_all(source: Path, target: Path) -> bool:
     """Move every entry of the directory ``source`` to the same name under ``target``,
-    and say whether anything moved (F70)."""
+    and say whether anything moved (F70, T50)."""
+    from aft import lint
+
     moved = False
     for item in list(source.iterdir()):
+        if not item.is_dir() and item.name in lint.RESERVED:
+            item.unlink()
+            continue
         moved = _move_into(item, target / item.name) or moved
     return moved
 
@@ -1797,9 +1824,10 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         return "", None
     registry = Registry.load(config.registry_path)
     try:
-        # The directory is resolved without the capture exclusions: they keep a session's
-        # words out of the queue, and the record is skipped below for that, but a session
-        # that starts in an excluded path still gets the memory the path's project holds.
+        # The directory is resolved without the capture exclusions, as `aft inject` resolves
+        # it: they keep a session's words out of the queue, and the record is skipped below
+        # for that, but a session that starts in an excluded path still gets the memory the
+        # path's project holds.
         result = keys.resolve(event.cwd, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -256,6 +257,14 @@ def locked(config: Config) -> Iterator[None]:
 def require(config: Config) -> None:
     if not is_initialized(config.vault):
         raise VaultError(f"no vault at {config.vault}; run `aft init` first")
+
+
+#: A digest file's name carries the day it covers, the agent that read the session and the
+#: session's id, as BUILD-PLAN M2.6 files it under the vault tree:
+#: ``digests/<slug>/<yyyy>/<mm>/<date>-<agent>-<session>.md``. The session id may hold
+#: hyphens, so only the first two fields of the name are taken, and a session digested more
+#: than once in a day carries ``-<n>`` on its id, which the name keeps.
+DIGEST_NAME = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})-(?P<agent>[^-]+)-(?P<session>.+)$")
 
 
 PROJECT_DIRS: tuple[str, ...] = ("projects", "digests", "archive")

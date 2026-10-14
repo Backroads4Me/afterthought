@@ -550,16 +550,6 @@ def test_an_unverified_quote_is_no_signal_at_all():
     assert outcome == downgrade("candidate", "R3")
 
 
-def test_an_explicit_correction_from_you_skips_the_gate():
-    outcome = check(
-        decide("add", line=None),
-        new_fact(source="stated", explicit_correction=True),
-        None,
-        ctx(sig("a", "2026-10-04")),
-    )
-    assert outcome == apply("add")
-
-
 def test_a_suggested_fact_is_held_to_the_same_gate_as_an_inferred_one():
     """R3 names the gate for ``[inferred]``; a ruling on R3 holds that the same bar holds a
     ``[suggested]`` fact, so the weaker tag gets no easier path out of Candidates."""
@@ -746,7 +736,7 @@ def test_a_stated_line_still_needs_your_own_words_against_an_imported_document()
     file rewrites a fact recorded as your word (design 9 R2)."""
     outcome = check(
         decide("supersede"),
-        new_fact(source="stated", date=NEWER, explicit_correction=True),
+        new_fact(source="stated", date=NEWER),
         line(SESSION_END),
         ctx(sig("col1", NEWER, origin=rules.LIBRARY, yours=False)),
     )
@@ -980,18 +970,6 @@ def test_a_date_that_is_not_one_carries_no_replacement():
     assert outcome == downgrade("conflict", "R4")
 
 
-def test_an_explicit_correction_skips_the_gate_and_no_other_rule():
-    """Design 9 lets your own correction skip R3's gate; R4's authority and its newer
-    verified quote still stand between a fact and a standing line."""
-    outcome = check(
-        decide("supersede"),
-        new_fact(source="stated", date=NEWER, explicit_correction=True),
-        line(VLLM),
-        ctx(sig("a", OLDER)),
-    )
-    assert outcome == downgrade("conflict", "R4")
-
-
 @pytest.mark.parametrize("statement", [NO_RGB, SQLITE])
 @pytest.mark.parametrize("action", ["supersede", "conflict"])
 def test_an_observation_contradicting_a_commitment_needs_you_whichever_action_named_it(
@@ -1140,16 +1118,6 @@ def test_a_suggested_candidate_leaves_only_over_the_gate(
 ) -> None:
     outcome = check(decide("confirm"), new_fact(source="suggested"), line(OFF_THE_RECORD), evidence)
     assert outcome == expected
-
-
-def test_an_explicit_correction_promotes_a_candidate_without_the_gate():
-    outcome = check(
-        decide("confirm"),
-        new_fact(source="stated", explicit_correction=True),
-        line(CHECKPOINTS),
-        ctx(sig("a", "2026-10-04")),
-    )
-    assert outcome == apply("promote")
 
 
 def test_a_candidate_held_by_the_worker_rule_needs_only_a_primary_session():
@@ -1444,36 +1412,6 @@ def test_worker_and_unverified_footnotes_on_a_candidate_add_nothing_to_the_gate(
                 sig("u1", "2026-10-02", source="u1", verified=False),
             ),
         ),
-    )
-    assert outcome == apply("confirm")
-
-
-def test_an_explicit_correction_without_a_quote_of_yours_skips_no_gate():
-    outcome = check(
-        decide("add", line=None),
-        new_fact(source="inferred", explicit_correction=True),
-        None,
-        ctx(sig("a", NEWER, yours=False)),
-    )
-    assert outcome == downgrade("candidate", "R3")
-
-
-def test_your_explicit_correction_promotes_the_candidate_it_confirms():
-    outcome = check(
-        decide("confirm"),
-        new_fact(source="stated", explicit_correction=True),
-        line(SWEEP),
-        ctx(sig("a", NEWER)),
-    )
-    assert outcome == apply("promote")
-
-
-def test_a_correction_in_your_words_from_a_worker_session_skips_no_gate():
-    outcome = check(
-        decide("confirm"),
-        new_fact(source="stated", explicit_correction=True),
-        line(SWEEP),
-        ctx(sig("p", OLDER, yours=False), sig("w", NEWER, origin=rules.WORKER)),
     )
     assert outcome == apply("confirm")
 

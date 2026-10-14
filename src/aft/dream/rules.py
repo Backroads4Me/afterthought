@@ -191,11 +191,6 @@ class NewFact:
     """``long`` or ``short`` (design 6). A short-term fact goes only to ``recent.md`` and
     edits a long-term line only to confirm it (R10)."""
 
-    explicit_correction: bool = False
-    """You corrected the record yourself. It counts only on a ``[stated]`` fact backed by a
-    verified quote of yours from a primary session, and then it skips R3's gate, which
-    promotes a candidate line it confirms (design 9)."""
-
 
 @dataclass(frozen=True)
 class Decision:
@@ -412,7 +407,7 @@ def _new_line(new_fact: NewFact, context: Context) -> Outcome:
     """Where an added line goes: R3's gate decides between a kind section and Candidates.
     The line has no footnotes yet, so the gate counts the quotes handed in and nothing
     else."""
-    if new_fact.source in NEEDS_THE_GATE and not _corrected(new_fact, context):
+    if new_fact.source in NEEDS_THE_GATE:
         if not _passes_gate(context):
             return downgrade("candidate", "R3")
     return apply("add")
@@ -426,8 +421,6 @@ def _confirm(new_fact: NewFact, target_line: page.Fact, context: Context) -> Out
     footnotes the line would end up citing, so the candidate's own come from the line."""
     if target_line.kind is not None:
         return apply("confirm")
-    if _corrected(new_fact, context):
-        return apply("promote")  # R3: an explicit correction from you skips the gate
     if target_line.source in NEEDS_THE_GATE:
         return apply("promote") if _passes_gate(context) else apply("confirm")
     # A stated or observed line is in Candidates because the worker rule held it; a
@@ -481,16 +474,6 @@ def _yours(evidence: tuple[Evidence, ...]) -> list[Evidence]:
     """The verified quotes in your own words from a primary session: the ones that carry
     your authority, which nothing said in a worker session does (design 8)."""
     return [q for q in _primary(evidence) if q.yours]
-
-
-def _corrected(new_fact: NewFact, context: Context) -> bool:
-    """An explicit correction is your own ``[stated]`` words, backed by a verified quote of
-    yours from a primary session. Anything less is not a correction from you."""
-    return (
-        new_fact.explicit_correction
-        and new_fact.source == "stated"
-        and bool(_yours(context.evidence))
-    )
 
 
 def _refusal(new_fact: NewFact, target_line: page.Fact) -> str:

@@ -16,6 +16,7 @@ makes one commit per project run (separate from M4.1's checkpoint and tagging co
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -199,7 +200,7 @@ def _record_of(config: Config, digest_path: Path) -> tuple[str, str, queue.Proje
     session's id with a ``-<n>`` on the end, and the record is keyed by the session's own id,
     which is what comes back so the record can be rewritten against it.
     """
-    match = digest._DIGEST_NAME.match(digest_path.stem)
+    match = vaultmod.DIGEST_NAME.match(digest_path.stem)
     if match is None:
         return None
     agent, session = match.group("agent"), match.group("session")
@@ -278,6 +279,24 @@ def _project_of_group(
             return project, (None if project is not None else path)
         return registry.by_slug(record.slug), None
     return registry.by_slug(slug), None
+
+
+def _fact_entry(fact_item: page.Fact, sources_map: dict[str, dict]) -> str | None:
+    for ref in fact_item.refs:
+        s_entry = sources_map.get(ref, {})
+        res = str(s_entry.get("resource", ""))
+        if "#" in res:
+            return res.rsplit("#", 1)[-1]
+    return None
+
+
+def _meta_key(f_dict: dict) -> tuple[str, str | None, str | None, str | None]:
+    return (
+        f_dict.get("statement", ""),
+        f_dict.get("entry"),
+        f_dict.get("kind"),
+        f_dict.get("source"),
+    )
 
 
 def run_project(
@@ -393,16 +412,18 @@ def run_project(
                 for e in verified_evidence
                 if e.yours
             ]
-            if any(
-                "?" in q or (turn is not None and "?" in digest.enclosing_sentence(turn, q))
-                for q, turn in user_quotes
-            ):
+            refusal = None
+            for q, turn in user_quotes:
+                refusal = digest.stated_refusal(q, turn)
+                if refusal is not None:
+                    break
+            if refusal is not None:
                 report.rejected.append(
                     RejectedFact(
                         statement=new_fact.statement,
                         decision_action="add",
                         rule="R2",
-                        reason="the quote is a question, never a settled item",
+                        reason=refusal,
                     )
                 )
                 return False
@@ -875,23 +896,40 @@ def run_project(
                 if isinstance(s, dict) and s.get("id") is not None
             }
 
-            facts_meta = {
-                f["statement"]: f
-                for f in (aft_dict.get("facts") or [])
-                if isinstance(f, dict) and "statement" in f
-            }
+            facts_meta: dict[tuple[str, str | None, str | None, str | None], list[dict]] = (
+                defaultdict(list)
+            )
+            for f in aft_dict.get("facts") or []:
+                if isinstance(f, dict) and "statement" in f:
+                    facts_meta[_meta_key(f)].append(f)
 
             parsed_page = page.parse(d_text, digest_path)
 
             for fact in parsed_page.facts:
-                meta = facts_meta.get(fact.statement, {})
+                entry = _fact_entry(fact, sources_map)
+                key = (fact.statement, entry, fact.kind, fact.source)
+                if facts_meta.get(key):
+                    meta = facts_meta[key].pop(0)
+                else:
+                    no_entry_key = (fact.statement, None, fact.kind, fact.source)
+                    if facts_meta.get(no_entry_key):
+                        meta = facts_meta[no_entry_key].pop(0)
+                    else:
+                        match = next(
+                            (
+                                k
+                                for k, meta_items in facts_meta.items()
+                                if k[0] == fact.statement and meta_items
+                            ),
+                            None,
+                        )
+                        meta = facts_meta[match].pop(0) if match is not None else {}
                 scope = meta.get("scope", "project")
                 if unfiled and scope != "global":
                     # A session of no project has no project page for this fact; it stays
                     # in the digest, where search finds it (DESIGN 7).
                     report.skips.append(SkipFact(statement=fact.statement, reason=UNFILED_SKIP))
                     continue
-                explicit_correction = bool(meta.get("explicit_correction", False))
 
                 new_fact = rules.NewFact(
                     statement=fact.statement,
@@ -900,7 +938,6 @@ def run_project(
                     date=fact.date,
                     scope=scope,
                     term=digest.term_of(meta),
-                    explicit_correction=explicit_correction,
                 )
 
                 # R1 trust rule: a quote must verify against its source before a line is written
@@ -1402,7 +1439,7 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
         return False
     later_part = re.compile(rf"{re.escape(sess_id)}-\d+")
     for path in digests_dir.rglob("*.md"):
-        named = digest._DIGEST_NAME.match(path.stem)
+        named = vaultmod.DIGEST_NAME.match(path.stem)
         if named is None or (agent and named.group("agent") != agent):
             continue
         session = named.group("session")

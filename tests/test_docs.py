@@ -57,6 +57,12 @@ def test_every_setting_is_documented():
     assert missing == [], f"settings with no entry in docs/configuration.md: {missing}"
 
 
+def test_digest_pipeline_documented_default_is_turns():
+    """L2: docs/configuration.md documents the default digest.pipeline as turns."""
+    text = (DOCS / "configuration.md").read_text()
+    assert "| `digest.pipeline` | `turns` |" in text
+
+
 def test_every_command_is_documented():
     text = (DOCS / "commands.md").read_text()
     names = command_names()

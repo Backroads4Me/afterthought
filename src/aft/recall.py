@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import string
 
+from aft import fences as fences_mod
 from aft import index, inject, keys, search, vault
 from aft.config import Config, is_worker
 from aft.gitutil import GitError
@@ -52,10 +53,6 @@ POOL_FACTOR = 8
 #: the prompt asks, so it leaves the query (BUILD-PLAN F87).
 _PASTED = re.compile(r"<pasted_content[^>]*>.*?</pasted_content>", re.DOTALL | re.IGNORECASE)
 
-#: A fence opens at a line of three or more backticks or tildes and closes at the same
-#: marks alone, the way `aft.index` reads a page's fences.
-_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
-
 #: The capture markers set what afterthought keeps; they are not a request to search for
 #: (BUILD-PLAN F87, inject.RECORD_MARKERS). Longer alternations first, so "off the
 #: record" is not left holding "on the record".
@@ -82,18 +79,9 @@ def query_words(prompt: str) -> list[str]:
     text = _PASTED.sub(" ", prompt)
     text = _MARKERS.sub(" ", text)
     words: list[str] = []
-    fence = ""
+    fences = fences_mod.Fences()
     for line in text.split("\n"):
-        marker = _FENCE.match(line)
-        if marker is not None:
-            marks, rest = marker.group(1), marker.group(2)
-            if not fence:
-                fence = marks
-                continue
-            if marks[0] == fence[0] and len(marks) >= len(fence) and not rest.strip():
-                fence = ""
-                continue
-        if fence:
+        if fences.fenced(line):
             continue
         words.extend(token.strip(string.punctuation) for token in line.split())
     return [word for word in words if word and word.lower() not in FILLER_WORDS][:MAX_QUERY_WORDS]
