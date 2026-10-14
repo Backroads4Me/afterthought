@@ -2303,6 +2303,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     three hold.
   - **Tests:** prompt-shape tests updated for the four prompts. Review checkpoint: yes
     (prompt change; lead reviews in full).
+  - **Measured, ruling 2026-10-14: not merged** (#185 closed). As built (runs `t47-1` to
+    `-4`): held-out 13, 15, 15, 15 against main's 12, 11, 11, 12; the switchboard location
+    found in 4 runs and the sound theme in 3; wrong `[stated]` 11, 10, 10, 14 against 7, 9,
+    8, 6 (+3.75). A second wording that names the values a later session must know and
+    excludes work started or finished (`t47b-1` to `-4`): held-out 12, 13, 13, 13, wrong
+    `[stated]` 15, 12, 13, 13 (+5.75). Both fail the third condition. About half the new
+    wrong lines are true values the key does not hold (the sound theme now default, where
+    firstmate's copies live); the rest are requests turned into status ("the user has
+    started the run"). Asking the turns call to produce a second item from a request makes
+    it label more requests as facts. The two lasting values stay unrecovered.
 - **T48 Low findings: consistency and portability** (ruling 2026-10-14; ROADMAP Low
   findings L2, L7, L9, L11). Each item is checked against main first; one already fixed is
   named in the PR and left alone.
