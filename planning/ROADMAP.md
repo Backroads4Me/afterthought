@@ -158,46 +158,17 @@ Afterthought injects the entire memory block into Pi's system prompt options. Wh
 
 ---
 
-## 8. Deferred Review Findings
+## 8. Review Findings
 
-Open findings from the full code review of commit `36be494`, deferred behind core functionality. Each lists where the problem is, what goes wrong and the intended fix.
+Findings from the full code review of commit `36be494`. All are resolved; each line names the task that did it. The v1 review of 2026-10-14 (`.board/v1-review.md`) found nothing blocking.
 
-### M6. Evidence lives outside the vault and cannot be rebuilt (needs a design decision)
-- **Where:** `src/aft/library/propose.py`, `src/aft/claude_memory.py`, `src/aft/dream/apply.py`, `src/aft/dream/rules.py`, `src/aft/evidence.py`, `src/aft/work.py`.
-- **Problem:** `~/.afterthought/library/verified_quotes.json` is the only proof for quotes from excluded instruction files and imported Claude memory, and it is outside the vault. The dream re-verifies quotes against the archive, which `aft run` purges after 90 days, so R3 signals older than 90 days count zero and a digest waiting longer than retention loses every fact to R1. A vault cloned to a new machine rejects every waiting library-proposal and Claude-memory digest. DESIGN 8 and 14 promise permanent quotes.
-- **Fix:** Commit the verification record in the vault beside the import; record "verified at digest time" on the digest and trust it after evidence expires; never purge evidence a waiting digest needs.
-
-### M13. Temporal parsing misreads common words and filters only evidence
-- **Where:** `src/aft/temporal.py`, `src/aft/search.py`.
-- **Problem:** Weekday abbreviations match ordinary words ("sun microsystems", "sat solver", "wed to the schema"); "this friday" can resolve to the future; only evidence is time-filtered, not digests; a purely temporal query returns arbitrary rows.
-- **Fix:** Require full weekday names or a cue (on, last, since); clamp to the past; filter digests by date; list the period's digests for a purely temporal query.
-
-### M15. `aft forget pattern` does not reach the library's extracted text
-- **Where:** `src/aft/forget.py`, `src/aft/index.py`, the cache `~/.afterthought/library/<hash>.json`.
-- **Problem:** Redaction rewrites library `*.md` files but the index rows and chunk cache are keyed by the import-time hash, so they are skipped; PDF, txt, html and json files are never redacted; the rewrite breaks recorded hashes so quotes stop verifying. A secret in an imported doc stays searchable after `forget pattern`.
-- **Fix:** Redact the cache and rebuild affected library rows; refuse or report edits to library files instead of silently invalidating hashes.
-
-### M16. The digest and current-truth evals score quotes and substrings, not correctness
-- **Where:** `scripts/eval_digest.py`.
-- **Problem:** Facts match on 60% quote overlap or 40% shared words, so a right quote with a wrong statement scores correct; one run fact can satisfy several key items; `[observed]` facts are never scored; the key is built from the backends under test with no held-out split; `score_block` uses exact substrings; shell backends get a different prompt shape than production.
-- **Fix:** Match one-to-one; judge statements for matched pairs; score `[observed]`; freeze a held-out split; paraphrase-tolerant current matching. Do this before the F69 benchmark run.
-
-### M19. Remaining test gaps
-- Skip `tests/test_evidence.py` chmod tests when `os.geteuid() == 0`; mark the 150 ms timing test in `tests/test_inject.py`. Confirm the regression tests named for C1, H1-H8 and M12 exist.
-
-### Low findings
-- **L1** Recent layer keeps the oldest ten lines (`inject.py`): sort newest first before slicing.
-- **L2** Summary schema lacks `goal` and `files`, and `docs/configuration.md` names `base` as default while `config.py` uses `turns`.
-- **L3** `explicit_correction` is never set, so R3's correction bypass is unreachable: set it or remove it.
-- **L4** `aft settle --replace` writes an ungrounded `[stated]` line dated with the old evidence.
-- **L5** The Claude reader ignores `isSidechain`, so subagent prompts read as user turns.
-- **L6** Paste detection only counts tagged blocks. Ruled (2026-10-14) to stay as it is: a paste the client does not tag has no reliable mark, and a heuristic that guesses one would refuse the user's own words; the prompts already say pasted material is never the user's, and R2 grounds every `[stated]` quote.
-- **L7** `aft inject` passes `never=exclude_paths` while the hook does not, so they can disagree.
-- **L8** `vault.commit` commits whatever else is staged: use `git commit --only -- <paths>`.
-- **L9** Anchor commits reach `git merge-base` without `--end-of-options`; the `rg -F` call adds nothing over Python `in`.
-- **L10** Hot spots: per-lookup digest walk in `dream/apply.py`, full `usage.jsonl` parse per budget check, full newest-session re-read in `reconcile.py`, vault walk per link in `index.py`.
-- **L11** Digest metadata keyed by statement collides; duplicated line assignment in `schedule.py`; macOS `ru_maxrss` units in `eval/longmemeval.py`; `json_schema` sent without `strict`.
-- **L12** Fenced-code detection exists four times, digest-name parsing four times, and the `[stated]` trust checks twice (`digest.verify`, `apply.settle`); merge the trust checks first.
+- **M6** Evidence outside the vault: F75 (a digest's quote check at digest time is trusted after evidence expires).
+- **M13** Temporal parsing: M13 (#174).
+- **M15** `aft forget pattern` and the library's extracted text: M15 (#173).
+- **M16** Evals scored overlap, not correctness: M16 (#183).
+- **M19** Test gaps: M19 (#184).
+- **L1, L4** T41. **L5** T40. **L8** T44. **L2, L7, L9, L11** T48 (#188); `json_schema` stays without `strict`, since six response schemas do not meet strict mode's rules. **L3, L12** T49 (#187). **L10** T51 (#189).
+- **L6** Paste detection counts only tagged blocks, and stays so: a paste the client does not tag has no reliable mark, and a heuristic that guesses one would refuse the user's own words; the prompts say pasted material is never the user's, and R2 grounds every `[stated]` quote.
 
 ### Prompt and injection ideas, ranked by expected impact
 1. Bind statements to evidence: evidence-first schemas, whole-sentence quotes, exact grounding of names and numbers for every tag; add a statement-correctness check to `eval_digest.py score`.
