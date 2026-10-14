@@ -2331,6 +2331,22 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     `apply.settle`) call one function; fence detection and digest-name parsing move to one
     module each and every caller uses it.
   - Review checkpoint: yes (R1, R2 and R3 code paths; lead reviews in full).
+- **T50 A project merge does not copy the source's listing** (ruling 2026-10-14; found by
+  `aft lint` on the user's vault). `aft project merge` moves every file of the source
+  project directory into the destination, and a name the destination already holds is
+  kept with a number appended (F70). The source's `index.md`, a listing afterthought
+  writes, therefore lands as `index-2.md`: a page with no frontmatter that `aft lint`
+  reports, listed in the destination's `index.md`.
+  - **Merge:** the reserved listing files (`lint.RESERVED`: `index.md`, `log.md`) of the
+    source are not moved; the destination's listing is rewritten to name the pages it now
+    holds, the way afterthought writes listings elsewhere.
+  - **Lint:** a file named `index-<n>.md` or `log-<n>.md` beside a listing is reported
+    with what to do ("a listing left by a project merge; delete it and its line in
+    index.md"), so a vault merged before this change is told how to repair itself. Agents
+    do not edit vault pages; the user deletes it.
+  - **Tests:** merging two projects that each have `index.md` leaves one listing naming
+    every page and no `index-2.md`; lint names a leftover `index-2.md` with the repair.
+  - Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
