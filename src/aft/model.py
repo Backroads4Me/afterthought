@@ -2,12 +2,13 @@
 
 Every call asks for structured output with ``response_format: json_schema``, so
 decoding is constrained by the schema the caller passed. vLLM and hosted endpoints
+both take that field as written. The answer is still checked with ``aft.schema``,
+because constrained decoding is a strong expectation rather than a guarantee:
 output that fails validation, and a 5xx, are each retried once before the call
-raises (DESIGN 14); an answer that failed because it ran out of output tokens is
-not, since a repair turn would be cut again, and the caller asks on a shorter
-input or refuses instead (BUILD-PLAN T54). A retry is not the same ask again: a
-schema failure sends the
-model its own invalid answer beside the validator's reason as a repair turn, and
+raises (DESIGN 14); a caller that can ask on a shorter input may have an answer that
+failed because it ran out of output tokens raised at once instead (BUILD-PLAN T54). A
+retry is not the same ask again: a schema failure sends the model its own invalid
+answer beside the validator's reason as a repair turn, and
 each attempt after the first is asked at a temperature raised off the first ask's,
 so a model that repeats itself at temperature 0 is given room to answer differently.
 
@@ -112,15 +113,17 @@ def complete_json(
     record_cooldown: bool = True,
     repair: bool = True,
     purpose: str = "work",
+    raise_cut: bool = False,
 ) -> dict:
     """Ask the model for one JSON object that satisfies ``schema``.
 
     Raises ``ModelError`` when ``model.name`` is empty or ``schema`` misuses a keyword,
     when the endpoint is cooling down from an earlier failure, when the endpoint cannot
     be reached, answers with a non-2xx, an unusable body or no usable token count, or
-    returns output that fails ``schema`` twice. An answer that failed ``schema`` while
-    the endpoint reported ``finish_reason: length`` raises ``OutputCut`` at once, with
-    no repair turn: the model had no room left to write the answer in (BUILD-PLAN T54).
+    returns output that fails ``schema`` twice. With ``raise_cut``, an answer that failed
+    ``schema`` while the endpoint reported ``finish_reason: length`` raises ``OutputCut``
+    at once, with no repair turn, for a caller that can ask again on less input (a digest
+    chunk, BUILD-PLAN T54); every other caller keeps the ordinary retry.
 
     A retry is not the same ask again: a schema failure sends the model its own invalid
     answer beside the validator's reason as a repair turn, and every attempt after the
@@ -184,7 +187,7 @@ def complete_json(
         try:
             answer = _checked(content, schema)
         except schemamod.SchemaError as exc:
-            if finish_reason == "length":
+            if raise_cut and finish_reason == "length":
                 # The answer failed because it ran out of output tokens, not because the
                 # model misread the ask: a repair turn would be cut again, so the ordinary
                 # retry is skipped and the caller decides - a digest call asks again on

@@ -2124,7 +2124,7 @@ def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict
     theirs is refused.
     """
     try:
-        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS)
+        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS, raise_cut=True)
     except OutputCut:
         # An answer the endpoint cut for length is this chunk's own problem, and the
         # caller's to split (BUILD-PLAN T54): it is not refused here, where the entries
