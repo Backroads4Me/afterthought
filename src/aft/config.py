@@ -83,6 +83,10 @@ class DigestConfig:
     # endpoint takes no key. Read only with verifier_endpoint set; an empty endpoint uses
     # the [model] table as it is, its key and extra_body included.
     verifier_api_key_env: str = ""
+    # BUILD-PLAN F90: when true, every fact a turns digest keeps is asked once, in batches
+    # of up to 20, whether it passes the keep-test on its own; one answered false is dropped
+    # with the reason recorded on the page.
+    keep_check: bool = False
 
 
 @dataclass(frozen=True)
@@ -418,6 +422,10 @@ verifier_model = ""
 # endpoint takes no key. Read only with verifier_endpoint set: an empty endpoint uses
 # the [model] table as it is, its key and extra_body included.
 # verifier_api_key_env = ""
+# When true, every fact a turns digest keeps is asked once in batches whether it
+# passes the keep-test on its own; one answered false is dropped with the reason
+# recorded on the page (BUILD-PLAN F90).
+keep_check = false
 
 [dream]
 interval_minutes = 30
