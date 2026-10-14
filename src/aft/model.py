@@ -2,10 +2,11 @@
 
 Every call asks for structured output with ``response_format: json_schema``, so
 decoding is constrained by the schema the caller passed. vLLM and hosted endpoints
-both take that field as written. The answer is still checked with ``aft.schema``,
-because constrained decoding is a strong expectation rather than a guarantee:
 output that fails validation, and a 5xx, are each retried once before the call
-raises (DESIGN 14). A retry is not the same ask again: a schema failure sends the
+raises (DESIGN 14); an answer that failed because it ran out of output tokens is
+not, since a repair turn would be cut again, and the caller asks on a shorter
+input or refuses instead (BUILD-PLAN T54). A retry is not the same ask again: a
+schema failure sends the
 model its own invalid answer beside the validator's reason as a repair turn, and
 each attempt after the first is asked at a temperature raised off the first ask's,
 so a model that repeats itself at temperature 0 is given room to answer differently.
@@ -79,6 +80,15 @@ class _Retryable(Exception):
     """The endpoint answered badly in a way one more call can plausibly fix."""
 
 
+class OutputCut(ModelError):
+    """The endpoint's answer failed the schema because it ran out of output tokens.
+
+    A repair turn asks the same question again and would be cut again, so the ordinary
+    retry is skipped and the caller decides: a digest call asks again on half its input
+    (BUILD-PLAN T54), and any other caller refuses the ask.
+    """
+
+
 class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
     """Hand a 3xx back as an HTTPError rather than following it.
 
@@ -108,7 +118,9 @@ def complete_json(
     Raises ``ModelError`` when ``model.name`` is empty or ``schema`` misuses a keyword,
     when the endpoint is cooling down from an earlier failure, when the endpoint cannot
     be reached, answers with a non-2xx, an unusable body or no usable token count, or
-    returns output that fails ``schema`` twice.
+    returns output that fails ``schema`` twice. An answer that failed ``schema`` while
+    the endpoint reported ``finish_reason: length`` raises ``OutputCut`` at once, with
+    no repair turn: the model had no room left to write the answer in (BUILD-PLAN T54).
 
     A retry is not the same ask again: a schema failure sends the model its own invalid
     answer beside the validator's reason as a repair turn, and every attempt after the
@@ -158,7 +170,7 @@ def complete_json(
         # a model that answered twice alike at one temperature is given room not to.
         body["temperature"] = retry_temperature(config.settings.model.temperature, attempt)
         try:
-            content = _chat(
+            content, finish_reason = _chat(
                 config,
                 body,
                 endpoint=target_endpoint,
@@ -172,6 +184,15 @@ def complete_json(
         try:
             answer = _checked(content, schema)
         except schemamod.SchemaError as exc:
+            if finish_reason == "length":
+                # The answer failed because it ran out of output tokens, not because the
+                # model misread the ask: a repair turn would be cut again, so the ordinary
+                # retry is skipped and the caller decides - a digest call asks again on
+                # half its input (BUILD-PLAN T54), any other caller refuses the ask.
+                raise OutputCut(
+                    f"the answer used all {body.get('max_tokens')} output tokens"
+                    " (finish_reason length)"
+                ) from exc
             error = _quoted(config, str(exc))
             problems.append(f"the answer failed its schema: {error}")
             # The retry carries the failed answer and the reason it failed, so the model
@@ -535,8 +556,10 @@ def _chat(
     timeout: float | None = None,
     record_cooldown: bool = True,
     purpose: str = "work",
-) -> str:
-    """One HTTP call. Returns the assistant message content.
+) -> tuple[str, str | None]:
+    """One HTTP call. Returns the assistant message content and the finish reason the
+    endpoint reported for it, which tells a caller whose answer failed its schema
+    whether the answer ran out of output tokens (BUILD-PLAN T54).
 
     ``timeout=None`` keeps TIMEOUT_SECONDS. ``record_cooldown=False`` leaves the
     cooldown file alone: no cooldown is set when the endpoint fails, and none is
@@ -627,11 +650,11 @@ def _chat(
     if not isinstance(choices, list) or not choices:
         echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} returned no choices: {echo}")
+    finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
-        finish = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-        if finish == "length":
+        if finish_reason == "length":
             # A reasoning model spends its tokens thinking before it answers, and one that
             # runs out has nothing left to answer with. The cause is the endpoint's setup,
             # so the error names the setting that fixes it rather than the reply alone.
@@ -642,7 +665,7 @@ def _chat(
             )
         echo = _quoted(config, raw)[:200]
         raise ModelError(f"{url} returned no message content: {echo}")
-    return content
+    return content, finish_reason if isinstance(finish_reason, str) else None
 
 
 def _headers(config: Config) -> dict[str, str]:

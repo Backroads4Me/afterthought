@@ -163,6 +163,17 @@ def test_an_answer_lost_to_reasoning_names_the_setting_that_fixes_it(serve):
     assert len(fake.requests) == 1
 
 
+def test_an_answer_cut_for_length_raises_the_cut_error_without_a_repair_turn(serve):
+    """BUILD-PLAN T54: an answer that failed its schema because it ran out of output
+    tokens is not asked for again at the same width - a repair turn would be cut again -
+    so the call raises ``OutputCut`` at once, for the caller to split or refuse."""
+    fake, cfg = serve(Reply(content='{"answer": "cut off mid-ans', finish_reason="length"))
+    with pytest.raises(model.OutputCut, match="finish_reason length") as cut:
+        call(cfg)
+    assert "used all 128 output tokens" in str(cut.value)
+    assert len(fake.requests) == 1
+
+
 def test_two_invalid_answers_raise_after_one_retry(serve):
     fake, cfg = serve({"answer": "x" * 40}, {"answer": 7})
     with pytest.raises(model.ModelError) as answer:
