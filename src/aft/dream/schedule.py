@@ -632,7 +632,6 @@ def last_activity(config: Config) -> dict[str, datetime]:
             # The project the directory answers for is where its sessions' digests file,
             # even when a record wrote an earlier, unregistered name (DESIGN 7, F49).
             slug = resolution.project.slug
-            slug = resolution.project.slug
         elif resolution.root is not None:
             # A record is the name its session's digest files under, and a fresh answer for
             # an unregistered directory is not: the record's settled name decides (DESIGN 7,

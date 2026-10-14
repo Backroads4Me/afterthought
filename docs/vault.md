@@ -102,6 +102,7 @@ skips them, and the dream never reads them.
 
 A digest page records one session's part as the model read it: its `description` is the
 summary, `aft.handoff` is what the next session is told was in flight, failed or open,
+its goal and the files it touched,
 and its lines are the facts that passed quote verification. Two records explain what it
 left out:
 

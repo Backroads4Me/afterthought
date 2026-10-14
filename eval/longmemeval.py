@@ -451,6 +451,13 @@ def ranked_sessions(hits: list[search.Hit], allowed: set[str] | None = None) -> 
     return ranked
 
 
+def _peak_rss_mb() -> float:
+    """Peak RSS of this process in MB on Linux (where ru_maxrss is KB) and macOS (bytes)."""
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    divisor = (1024.0 * 1024.0) if sys.platform == "darwin" else 1024.0
+    return rss / divisor
+
+
 def run_benchmark(
     dataset_path: Path | str,
     limit: int | None = None,
@@ -537,7 +544,7 @@ def run_benchmark(
         recall_all_at_10=mean(recalls_all_10),
         ndcg_at_10=mean(ndcgs_10),
         avg_latency_ms=mean(latencies_ms),
-        peak_rss_mb=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0,
+        peak_rss_mb=_peak_rss_mb(),
         total_queries=total,
     )
 

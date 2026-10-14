@@ -9,9 +9,14 @@ lines a failed command left.
 
 Write:
 - summary: one to four sentences on what happened.
-- handoff: what was in flight when this part ended, approaches that failed, and what is
-  still open, each item with the label of the entry it comes from. Use empty values when
-  there is nothing to hand off.
+- handoff:
+  - goal: one sentence stating the user's primary goal or request for this session, with
+    its entry label.
+  - in_flight: what was being worked on when this part ended, with its entry label.
+  - failed: approaches that failed, with entry labels.
+  - open: questions and next steps left open, with entry labels.
+  - files: list of relative file paths touched or relevant to the in-flight work.
+  Use empty values when there is nothing to hand off.
 
 Everything you write calls the user "the user" and the agent "the agent": never by name,
 and never with he, she or another pronoun that guesses who they are. Other people may be

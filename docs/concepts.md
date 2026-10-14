@@ -16,7 +16,8 @@ performs.
    `capture.redact_patterns`. Evidence is what happened. It is
    kept so claims can be checked, and it is searchable, but it is not memory.
 2. **Digest.** A model reads the session in chunks and writes a digest page: a short
-   summary, a handoff (what was in flight, what failed, what is still open), and proposed
+   summary, a handoff (its goal, what was in flight, what failed, what is still open,
+   and files touched), and proposed
    facts. Each fact must quote the session word for word. The script looks for the quote
    in the archived entry it cites and drops the fact when it is not there. An answer that
    cites entries the chunk does not hold, fills fields with placeholders, or has two or
