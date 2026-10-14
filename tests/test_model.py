@@ -163,6 +163,28 @@ def test_an_answer_lost_to_reasoning_names_the_setting_that_fixes_it(serve):
     assert len(fake.requests) == 1
 
 
+def test_an_answer_cut_for_length_raises_the_cut_error_when_the_caller_can_split(serve):
+    """BUILD-PLAN T54: a caller that can ask again on less input (a digest chunk) asks
+    with ``raise_cut``, and an answer that failed its schema because it ran out of output
+    tokens raises ``OutputCut`` at once, with no repair turn."""
+    fake, cfg = serve(Reply(content='{"answer": "cut off mid-ans', finish_reason="length"))
+    with pytest.raises(model.OutputCut, match="finish_reason length") as cut:
+        model.complete_json(
+            cfg, "You answer briefly.", "Is it working?", SCHEMA, 128, raise_cut=True
+        )
+    assert "used all 128 output tokens" in str(cut.value)
+    assert len(fake.requests) == 1
+
+
+def test_an_answer_cut_for_length_keeps_the_ordinary_retry_for_other_callers(serve):
+    """Every caller that cannot split its ask keeps the repair turn (BUILD-PLAN T54)."""
+    fake, cfg = serve(
+        Reply(content='{"answer": "cut off mid-ans', finish_reason="length"), {"answer": "ok"}
+    )
+    assert call(cfg) == {"answer": "ok"}
+    assert len(fake.requests) == 2
+
+
 def test_two_invalid_answers_raise_after_one_retry(serve):
     fake, cfg = serve({"answer": "x" * 40}, {"answer": 7})
     with pytest.raises(model.ModelError) as answer:

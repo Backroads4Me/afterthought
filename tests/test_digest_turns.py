@@ -27,6 +27,7 @@ from test_digest import (
     Session,
     claim,
     event,
+    frontmatter,
     pages,
     record,
     rows,
@@ -161,6 +162,163 @@ def test_an_observed_item_the_successful_output_backs_stays_observed(session: Se
         },
     )
     assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e3")]
+
+
+def cut_reply() -> Reply:
+    """An answer the endpoint cut off at max_tokens: broken JSON, no room left."""
+    return Reply(content='{"items": [', finish_reason="length")
+
+
+def two_tool_transcript(session: Session) -> None:
+    """A session with one tool result in each half of its one part, so a split observed
+    call reads one apiece."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+        tool_record("e3", "t1", "the hook wrote one row"),
+        record("e4", "user", SECOND_PROMPT),
+        record("e5", "assistant", SECOND_ANSWER, model="claude-real"),
+        tool_record("e6", "t2", "the retry took its own setting"),
+    )
+
+
+def observed_asks(fake: FakeEndpoint) -> list[str]:
+    """The input each observed call carried, in the order the endpoint received them."""
+    return [
+        request["messages"][1]["content"]
+        for request in fake.requests
+        if "actions of one part" in request["messages"][0]["content"]
+    ]
+
+
+def test_an_observed_answer_cut_for_length_is_asked_again_on_half_the_part(session: Session):
+    """BUILD-PLAN T54: the observed call that ran out of output tokens is asked again on
+    half its input, once per half, and both halves' facts are kept."""
+    two_tool_transcript(session)
+    fake, cfg = serve(
+        session.cfg,
+        summary(),
+        settled(),
+        cut_reply(),
+        {"items": [seen("The hook wrote one row.", "one row", "#3")]},
+        {"items": [seen("The retry took its own setting.", "its own setting", "#3")]},
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.source, f.entry) for f in wrote.facts if f.source == "observed"] == [
+        ("observed", "e3#t1"),
+        ("observed", "e6#t2"),
+    ]
+    asks = observed_asks(fake)
+    assert len(asks) == 3, "the cut ask was replaced by one ask per half, not repeated"
+    assert "the hook wrote one row" in asks[1] and "its own setting" not in asks[1]
+    assert "the retry took its own setting" in asks[2] and "one row" not in asks[2]
+
+
+def test_an_observed_half_that_fails_again_is_refused(session: Session):
+    """BUILD-PLAN T54: a half whose answer is cut in its turn is refused the way the call
+    would have been, and the half that answered still gives the page its fact."""
+    two_tool_transcript(session)
+    fake, cfg = serve(
+        session.cfg,
+        summary(),
+        settled(),
+        cut_reply(),
+        {"items": [seen("The hook wrote one row.", "one row", "#3")]},
+        cut_reply(),
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.source, f.entry) for f in wrote.facts if f.source == "observed"] == [
+        ("observed", "e3#t1")
+    ]
+    assert len(observed_asks(fake)) == 3, "the refused half was asked once, never split again"
+    refusals = [d for d in wrote.dropped if d.reason.startswith("observed refused")]
+    assert len(refusals) == 1
+    assert "finish_reason length" in refusals[0].reason
+    assert refusals[0].entry == "e4", "the refusal names the half that failed"
+
+
+def test_an_observed_answer_that_fails_for_another_reason_keeps_the_ordinary_retry(
+    session: Session,
+):
+    """A schema failure with output room left is the failure it was before T54: the model
+    is sent its own answer as a repair turn, and the part is never split."""
+    fake, cfg = serve(
+        session.cfg,
+        summary(),
+        settled(),
+        "not json at all",
+        {"items": [seen("The file was written.", "written", "e3#t1")]},
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.source, f.entry) for f in wrote.facts if f.source == "observed"] == [
+        ("observed", "e3#t1")
+    ]
+    asks = observed_asks(fake)
+    assert len(asks) == 2, "the ask and its repair, with no halves asked"
+
+
+def test_a_summary_answer_cut_for_length_is_refused_as_today(session: Session):
+    """BUILD-PLAN T54, the ruling: the summary call's answer is one bounded summary and
+    handoff, so a cut in it is refused the way any summary failure is, and the part still
+    gives what its user settled and what it observed."""
+    fake, cfg = serve(
+        session.cfg,
+        cut_reply(),
+        settled(
+            item("e1", "decision", "Capture runs at session end.", "Capture runs at session end.")
+        ),
+        {"items": []},
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [f.statement for f in wrote.facts] == ["Capture runs at session end."]
+    refusals = [d for d in wrote.dropped if d.reason.startswith("summary refused")]
+    assert len(refusals) == 1
+    assert "finish_reason length" in refusals[0].reason
+    written = frontmatter(cfg, wrote.path)
+    assert written["aft"]["handoff"] == {"in_flight": "", "failed": [], "open": []}
+
+
+def test_a_turns_answer_cut_for_length_is_refused_as_today(session: Session):
+    """BUILD-PLAN T54, the ruling: one turns call reads at most TURN_BATCH turns, so a cut
+    in it is refused the way any turns failure is, and the observed call still runs."""
+    fake, cfg = serve(
+        session.cfg,
+        summary(),
+        cut_reply(),
+        {"items": [seen("The file was written.", "written", "e3#t1")]},
+    )
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.source, f.entry) for f in wrote.facts] == [("observed", "e3#t1")]
+    refusals = [d for d in wrote.dropped if d.reason.startswith("turns refused")]
+    assert len(refusals) == 1
+    assert "finish_reason length" in refusals[0].reason
 
 
 def test_an_assistant_claim_without_tool_backing_becomes_inferred(session: Session):

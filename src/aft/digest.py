@@ -63,7 +63,7 @@ from aft import registry as registrymod
 from aft.config import Config, is_excluded, is_worker
 from aft.dream import rules
 from aft.gitutil import GitError, git
-from aft.model import ModelError
+from aft.model import ModelError, OutputCut
 from aft.page import KIND_SECTIONS
 from aft.readers import ASSISTANT, TOOL, USER, Entry
 
@@ -840,6 +840,33 @@ def _raw_spans(
     return spans
 
 
+def _half_parts(
+    part: Sequence[Entry], raw: Sequence[Entry] | None
+) -> list[tuple[Sequence[Entry], Sequence[Entry] | None]]:
+    """A part asked again on half its input (BUILD-PLAN T54): its entries in two halves,
+    cut between entries, each beside the raw span its half of the part covers, which the
+    observed check reads (BUILD-PLAN F78). A span the read does not hold - a rebuild from
+    the archive, or a transcript that moved - leaves the half without one, and its
+    observed check falls back to the filtered entries, F77's check. A part of fewer than
+    two entries cannot be cut, so it has no halves."""
+    if len(part) < 2:
+        return []
+    where = {entry.id: n for n, entry in enumerate(raw)} if raw is not None else {}
+    halves: list[tuple[Sequence[Entry], Sequence[Entry] | None]] = []
+    middle = len(part) // 2
+    for half in (part[:middle], part[middle:]):
+        first, last = where.get(half[0].id), where.get(half[-1].id)
+        halves.append(
+            (
+                half,
+                raw[first : last + 1]
+                if raw is not None and first is not None and last is not None
+                else None,
+            )
+        )
+    return halves
+
+
 def _digest_parts(
     config: Config,
     session_id: str,
@@ -875,29 +902,54 @@ def _digest_parts_base(
     again. When the last part is refused, nothing says where the work stood at the end, so
     the handoff is empty. A job whose every part is refused has nothing to file: it fails,
     and its watermark stays.
+
+    A part whose answer the endpoint cut for length is asked again on half its input, once
+    per half, in place of the ordinary retry (BUILD-PLAN T54); a half that fails again is
+    refused the way the part would have been, recorded with its own first and last entry.
     """
     prompt = prompt_text()
     schema = digest_schema()
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     last_refused = False
-    for number, part in enumerate(chunks):
-        raw = raws[number] if raws is not None else None
+
+    def ask_part(part: Sequence[Entry], raw: Sequence[Entry] | None, split: bool) -> None:
+        """Ask one part and add what it gave to the page; an answer refused twice raises
+        ``AnswerRefused`` for the caller to record (BUILD-PLAN T54)."""
+        nonlocal result, last_refused
         try:
             answer, part_facts, part_dropped = _matching_answer(
                 config, prompt, part, schema, session_id, role, raw
             )
+        except OutputCut as exc:
+            if not split or len(part) < 2:
+                raise AnswerRefused(str(exc)) from exc
+            # The part was longer than the answer had room for: its two halves are asked
+            # once each, and a half is never split again, so a half cut in its turn is
+            # refused as the part would have been.
+            for half, half_raw in _half_parts(part, raw):
+                try:
+                    ask_part(half, half_raw, split=False)
+                except AnswerRefused as refused:
+                    result.refused_parts.append(
+                        {"first": half[0].id, "last": half[-1].id, "reason": str(refused)}
+                    )
+                    last_refused = True
+            return
+        result.facts.extend(part_facts)
+        result.dropped.extend(part_dropped)
+        result.summaries.append(answer["summary"])
+        last_refused = False
+        result = replace(result, handoff=grounded_handoff(answer["handoff"], part))
+
+    for number, part in enumerate(chunks):
+        raw = raws[number] if raws is not None else None
+        try:
+            ask_part(part, raw, split=True)
         except AnswerRefused as exc:
             result.refused_parts.append(
                 {"first": part[0].id, "last": part[-1].id, "reason": str(exc)}
             )
             last_refused = True
-            continue
-        result.facts.extend(part_facts)
-        result.dropped.extend(part_dropped)
-        result.summaries.append(answer["summary"])
-        handoff = grounded_handoff(answer["handoff"], part)
-        last_refused = False
-        result = replace(result, handoff=handoff)
     if not result.summaries:
         raise AnswerRefused(result.refused_parts[-1]["reason"])
     if last_refused:
@@ -1549,7 +1601,10 @@ def _final_state(
     )
     try:
         answer = _model_answer(config, final_prompt_text(), listing, final_schema())
-    except AnswerRefused as exc:
+    except (AnswerRefused, OutputCut) as exc:
+        # A final-state answer the endpoint cut for length is refused as any other final
+        # state failure is (BUILD-PLAN T54): the call reads a listing of the facts, not
+        # the chunk's entries, so there is no half of it to ask for.
         return ordered, [
             Dropped(
                 statement="",
@@ -1802,7 +1857,11 @@ def _digest_parts_turns(
     the session never used is refused first. Across the job, a later item replaces an earlier
     one only where the user said so. A refused summary, turns or observed call is recorded
     beside the refused facts and the part's other calls still run; a job that gives neither
-    a summary nor a fact is refused. With ``digest.verify_items`` on, every ``[stated]``
+    a summary nor a fact is refused. An observed call whose answer the endpoint cut for
+    length is asked again on half its input, once per half, in place of the ordinary retry
+    (BUILD-PLAN T54), and a half that fails again is refused the way the call would have
+    been; the summary and turns calls read a bounded ask, so a cut in one of them is
+    refused as any other failure. With ``digest.verify_items`` on, every ``[stated]``
     item left is asked back once more over the entries around it, whether the user asserted
     it and whether it still stands.
     """
@@ -1829,9 +1888,12 @@ def _digest_parts_turns(
                 summary = None
             if summary is None:
                 raise AnswerRefused("the summary is empty or a placeholder")
-        except AnswerRefused as exc:
+        except (AnswerRefused, OutputCut) as exc:
             # The turns and observed questions do not read the summary: the part still
-            # gives what its user settled and what it observed.
+            # gives what its user settled and what it observed. A summary answer the
+            # endpoint cut for length is refused as any other summary failure is: the
+            # call's answer is one bounded summary and handoff, with no halves to ask
+            # for (BUILD-PLAN T54).
             result.dropped.append(_call_refused(part, "summary", str(exc)))
             summary_refused = str(exc)
             summary = None
@@ -1864,7 +1926,12 @@ def _digest_parts_turns(
                     )
                     result.facts.extend(kept)
                     result.dropped.extend(dropped)
-                except AnswerRefused as exc:
+                except (AnswerRefused, OutputCut) as exc:
+                    # A turns answer the endpoint cut for length is refused as any other
+                    # turns failure is (BUILD-PLAN T54): one call reads at most
+                    # TURN_BATCH turns, and a turn the answer skipped is asked again on
+                    # its own, so the ask is already smaller than the chunk the cut rule
+                    # halves.
                     result.dropped.append(_call_refused(part, "turns", str(exc)))
                     break
                 pending = [b for b in pending if cited[turn_label(b)].id not in labelled]
@@ -1872,20 +1939,46 @@ def _digest_parts_turns(
                     break
         seen = compacted_blocks(part, users=False)
         if seen:
-            try:
-                kept, dropped = _asked(
+
+            def observed_ask(
+                text: str, scope: Sequence[Entry], span: Sequence[Entry] | None
+            ) -> tuple[list[Fact], list[Dropped]]:
+                """One observed call, its items verified (BUILD-PLAN F55)."""
+                return _asked(
                     config,
                     observed_prompt_text(),
-                    seen,
+                    text,
                     observed_schema(),
                     session_id,
-                    part,
+                    scope,
                     role,
                     _observed_facts,
-                    raw=raw,
+                    raw=span,
                 )
+
+            try:
+                kept, dropped = observed_ask(seen, part, raw)
                 result.facts.extend(kept)
                 result.dropped.extend(dropped)
+            except OutputCut as exc:
+                # The observed call ran out of output tokens before it closed (BUILD-PLAN
+                # T54): the part's entries are split in two halves and each half is asked
+                # once, in place of the ordinary retry. A half is never split again, so a
+                # half cut in its turn is refused as the call would have been. A part of
+                # one entry cannot be cut, so its cut is refused as the call's failure.
+                halves = _half_parts(part, raw)
+                for half, half_raw in halves:
+                    half_seen = compacted_blocks(half, users=False)
+                    if not half_seen:
+                        continue
+                    try:
+                        kept, dropped = observed_ask(half_seen, half, half_raw)
+                        result.facts.extend(kept)
+                        result.dropped.extend(dropped)
+                    except (AnswerRefused, OutputCut) as refused:
+                        result.dropped.append(_call_refused(half, "observed", str(refused)))
+                if not halves:
+                    result.dropped.append(_call_refused(part, "observed", str(exc)))
             except AnswerRefused as exc:
                 result.dropped.append(_call_refused(part, "observed", str(exc)))
         if summary is None:
@@ -2024,10 +2117,19 @@ def _model_answer(config: Config, prompt: str, chunk: str, schema: dict) -> dict
     was, and the next session gets its turn. Anything else aft.model raises is the endpoint
     or its setup, which every job left would meet alike, so it stays a ModelError and the
     run stops with the queue kept for a later attempt (DESIGN 14: an endpoint that is down
-    leaves the jobs queued).
+    leaves the jobs queued). An answer the endpoint cut for length is raised as
+    ``OutputCut`` instead, for the caller to split the chunk it was given (BUILD-PLAN
+    T54); the calls whose input is not a chunk of entries - the summary, the turns
+    batch and the final state - refuse one at their call sites, as any failure of
+    theirs is refused.
     """
     try:
-        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS)
+        return model.complete_json(config, prompt, chunk, schema, MAX_OUTPUT_TOKENS, raise_cut=True)
+    except OutputCut:
+        # An answer the endpoint cut for length is this chunk's own problem, and the
+        # caller's to split (BUILD-PLAN T54): it is not refused here, where the entries
+        # to halve are not known.
+        raise
     except ModelError as exc:
         if exc.__cause__ is None and ANSWER_REFUSED in str(exc):
             raise AnswerRefused(str(exc)) from exc

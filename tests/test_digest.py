@@ -53,7 +53,7 @@ from aft.readers import CLAUDE, PI, Entry
 from aft.readers.claude import SYNTHETIC_MODEL
 from aft.redact import REDACTED
 from conftest import make_repo, spend
-from fakes.model_server import FakeEndpoint
+from fakes.model_server import FakeEndpoint, Reply
 
 # The session's own clock: the entries are dated by it and the page is filed under it.
 # A run that measures a quiet period or a day of tokens uses the host's clock instead, so
@@ -2229,6 +2229,107 @@ def test_a_refused_last_part_leaves_the_handoff_empty(session: Session):
     assert written["description"] == "The first part."
     assert written["aft"]["handoff"] == {"in_flight": "", "failed": [], "open": []}
     assert written["aft"]["refused_parts"][0]["last"] == "e40"
+
+
+def half_transcript(name: str, session: Session) -> Path:
+    """A four-entry session: two exchanges, so the part's two halves are one exchange each."""
+    return write_records(
+        session.transcript.with_name(name),
+        {"cwd": str(session.cwd)},
+        record("e1", "user", USER_PROMPT),
+        record("e2", "assistant", ASSISTANT_ANSWER, model="claude-real"),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER, model="claude-real"),
+    )
+
+
+def cut_reply() -> Reply:
+    """An answer the endpoint cut off at max_tokens: broken JSON, no room left."""
+    return Reply(content='{"summary": "cut off mid-sent', finish_reason="length")
+
+
+def test_an_answer_cut_for_length_is_asked_again_on_half_the_part(session: Session):
+    """BUILD-PLAN T54: an answer that ran out of output tokens is asked again on half its
+    input, once per half, in place of the ordinary retry, and both halves' facts are kept."""
+    path = half_transcript("cut-halves.jsonl", session)
+    fake, cfg = serve(
+        session.cfg,
+        cut_reply(),
+        answer(said(entry="#1")),
+        answer(
+            said(
+                statement="The retry got its own setting.",
+                quote="Give the retry its own setting",
+                entry="#1",
+            ),
+            summary="The retry got its own setting.",
+        ),
+    )
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, path, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.statement, f.entry) for f in wrote.facts] == [
+        ("Capture runs at session end, not per turn.", "e1"),
+        ("The retry got its own setting.", "e3"),
+    ]
+    sent = [request["messages"][1]["content"] for request in fake.requests]
+    assert len(sent) == 3, "the cut ask was replaced by one ask per half, not repeated"
+    assert "Give the retry its own setting" not in sent[1]
+    assert "Capture runs at session end" not in sent[2]
+    written = frontmatter(cfg, wrote.path)
+    assert written["description"] == "Built the capture hook. The retry got its own setting."
+
+
+def test_a_schema_failure_that_is_not_a_cut_keeps_the_ordinary_retry(session: Session):
+    """A schema failure with output room left is the failure it was before T54: the model
+    is sent its own answer as a repair turn, and the chunk is never split."""
+    path = half_transcript("cut-other-reason.jsonl", session)
+    fake, cfg = serve(session.cfg, {"summary": 7}, answer(said(entry="#1")))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, path, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [f.entry for f in wrote.facts] == ["e1"]
+    assert len(fake.requests) == 2, "the ask and its repair, with no halves asked"
+    repair = fake.requests[1]["messages"][-1]
+    assert repair["role"] == "user"
+    assert "failed JSON schema validation" in repair["content"]
+
+
+def test_a_half_that_fails_again_is_refused(session: Session):
+    """BUILD-PLAN T54: a half whose answer is cut in its turn is refused the way the part
+    would have been, recorded with its own first and last entry; the half that answered
+    still gives the page its fact."""
+    path = half_transcript("cut-half-refused.jsonl", session)
+    fake, cfg = serve(
+        session.cfg,
+        cut_reply(),
+        answer(said(entry="#1")),
+        cut_reply(),
+    )
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, path, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [f.entry for f in wrote.facts] == ["e1"]
+    assert len(fake.requests) == 3, "the refused half was asked once and never split again"
+    written = frontmatter(cfg, wrote.path)
+    [part] = written["aft"]["refused_parts"]
+    assert part["first"] == "e3" and part["last"] == "e4"
+    assert "finish_reason length" in part["reason"]
+
+
+def test_a_part_of_one_entry_has_no_halves():
+    """A part of fewer than two entries cannot be cut between entries, so it has no
+    halves: the cut rule refuses it as the call's failure instead (BUILD-PLAN T54)."""
+    entry = Entry(id="e1", time=NOW, role="user", text="one entry", is_error=False)
+    assert digest._half_parts([entry], None) == []
+    halves = digest._half_parts([entry, entry], None)
+    assert [[e.id for e in half] for half, _ in halves] == [["e1"], ["e1"]]
 
 
 def test_redigest_keeps_the_parts_it_can_and_records_the_one_it_cannot(session: Session):

@@ -568,7 +568,15 @@ class CallRecorder:
         self.count = 0
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
-    def __call__(self, cfg: Config, system: str, user: str, schema: dict, max_tokens: int) -> dict:
+    def __call__(
+        self,
+        cfg: Config,
+        system: str,
+        user: str,
+        schema: dict,
+        max_tokens: int,
+        raise_cut: bool = False,
+    ) -> dict:
         self.count += 1
         record: dict[str, Any] = {
             "session": self.session.session_id,
@@ -585,7 +593,12 @@ class CallRecorder:
         before = _ledger(self.cfg)
         started = time.monotonic()
         try:
-            answer = self.answer(cfg, system, user, schema, max_tokens)
+            # The local backend asks the endpoint client, which splits a length cut for a
+            # digest chunk (BUILD-PLAN T54); a shell backend has no such answer to give.
+            if self.backend.command is None:
+                answer = self.answer(cfg, system, user, schema, max_tokens, raise_cut=raise_cut)
+            else:
+                answer = self.answer(cfg, system, user, schema, max_tokens)
         except model.ModelError as exc:
             record.update(
                 {
