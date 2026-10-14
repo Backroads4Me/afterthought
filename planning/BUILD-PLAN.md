@@ -2414,6 +2414,62 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     firstmate changes except the tmux change."), session status ("Ted has restarted the
     session."), troubleshooting notes. R2's names check also filters what the keep-test
     should, so a recall gain there needs the keep-test to hold on its own first.
+- **T52 The key rules on what the runs call wrong** (ruling 2026-10-14; lead and Ted).
+  `score-turns` counts every `[stated]` fact the key does not hold as wrong, so a true,
+  durable fact the key never labelled reads as an error (T47, F89). The lead collects every
+  distinct `[stated]` statement the runs of 2026-10-14 (`main-*`, `f88-*`, `t47*`, `f89-*`)
+  counted wrong, rules each one `durable` (it passes the keep-test: a future session would
+  act differently for knowing it), `order`, `status` or `noise`, and adds the durable ones
+  to `key-turns.json` on the turn their quote comes from, with the quote. Rulings the lead
+  is unsure of go to Ted. The split is unchanged (it is by turn).
+- **T53 The key grows by twenty sessions** (ruling 2026-10-14; lead and Ted). 60 durable
+  items with 33 held-out cannot show a change of one or two items against a run-to-run
+  spread of three to four. The lead exports about twenty more real sessions read-only to
+  `~/src/aft-eval-data` (registered projects, primary sessions, a spread of projects and
+  lengths, none a worker's), writes their turns files, and labels them three ways as F54
+  did: the lead, Gemini (`label_turns.py gemini`) and the local model. The lead settles
+  disagreements and sends Ted only the ones it cannot settle. New turns join the split by
+  the same hash rule without moving any existing turn. Goal: about 150 durable items.
+  Main's baseline is re-run on the grown key before any task below is measured.
+- **F90 A kept fact must pass the keep-test on its own** (ruling 2026-10-14). Extraction
+  and the keep-test share one call, so a call asked to find more also keeps more that is
+  not worth keeping (T47, F89): orders, session status, troubleshooting steps. A second,
+  narrow call asks only the keep-test.
+  - **Keep call:** with `digest.keep_check` on, every fact a turns digest keeps (any
+    source) is asked once, in batches of up to 20 per call: would a future session act
+    differently, or ask the user again, without it; or is it a one-time order to do work,
+    the status of work in the session (started, ran, restarted, finished, failed), a step
+    of troubleshooting that ended with the session, or a value the repository already
+    records? The schema gives per fact `reason` first, then `keep` (true or false). A fact
+    answered false is dropped with the reason recorded on the page's dropped list. A new
+    prompt `keep.md` and schema `keep.schema.json`; the never-a-fact list in `digest.md`
+    is the source of its wording, so the two say the same thing.
+  - **Trust:** the call only removes facts; it never adds, edits or retags one.
+  - **Setting:** `digest.keep_check`, default `false` until measured; the calls count
+    against the day's budget and are skipped when it is spent (the facts are then kept as
+    today).
+  - **Measure, before merging (decision rule set now), on the grown key (T52, T53):** four
+    runs with the check on against main's four re-run on the same key: mean wrong
+    `[stated]` falls by at least 2; held-out mean found does not fall by more than 1;
+    observed judged unsupported does not rise. If all three hold, the default becomes
+    `true`. Tokens per run are reported.
+  - **Tests:** a fact answered false is dropped with its reason; a true one is kept as it
+    was; the setting off makes no call; a spent budget makes no call and keeps the facts;
+    a batch of 25 facts makes two calls. Review checkpoint: yes (a model call that drops
+    facts; lead reviews in full).
+- **F91 F89 again, behind the keep call** (ruling 2026-10-14). After F90 merges, the F89
+  branch (`f89-restate`, restate examples that keep the claim) is rebased onto main with
+  the restated facts passing F90's keep call like any other, and measured on the grown key
+  with F89's rule against main with F90 on.
+- **T54 A call that runs out of output is asked again on half its input** (ruling
+  2026-10-14). An `observed` call on a long chunk sometimes writes until `max_tokens` and
+  returns broken JSON (main's runs: about one and a half chunks per run, each losing every
+  observed fact of its chunk). When a digest call's answer fails its schema and the
+  endpoint reported `finish_reason: length`, the chunk's entries are split in two halves
+  and each half is asked once, in place of the ordinary retry; a half that fails again is
+  refused as today. Tests: a length-cut answer is asked again as two halves and both
+  halves' facts are kept; an answer that fails for another reason keeps today's retry; a
+  half that fails again is refused. Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
