@@ -191,7 +191,7 @@ Open findings from the full code review of commit `36be494`, deferred behind cor
 - **L3** `explicit_correction` is never set, so R3's correction bypass is unreachable: set it or remove it.
 - **L4** `aft settle --replace` writes an ungrounded `[stated]` line dated with the old evidence.
 - **L5** The Claude reader ignores `isSidechain`, so subagent prompts read as user turns.
-- **L6** Paste detection only counts tagged blocks.
+- **L6** Paste detection only counts tagged blocks. Ruled (2026-10-14) to stay as it is: a paste the client does not tag has no reliable mark, and a heuristic that guesses one would refuse the user's own words; the prompts already say pasted material is never the user's, and R2 grounds every `[stated]` quote.
 - **L7** `aft inject` passes `never=exclude_paths` while the hook does not, so they can disagree.
 - **L8** `vault.commit` commits whatever else is staged: use `git commit --only -- <paths>`.
 - **L9** Anchor commits reach `git merge-base` without `--end-of-options`; the `rg -F` call adds nothing over Python `in`.

@@ -2347,6 +2347,20 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Tests:** merging two projects that each have `index.md` leaves one listing naming
     every page and no `index-2.md`; lint names a leftover `index-2.md` with the repair.
   - Review checkpoint: no.
+- **T51 Hot spots walk once per run** (ruling 2026-10-14; ROADMAP Low finding L10).
+  Behaviour-preserving: each answer stays the same, only how often the disk is read
+  changes. Each item is checked against main first.
+  - **`dream/apply.py`:** the digest walk done for each lookup (worker-digest names, a
+    digest's record) is done once per project run and looked up from what it built.
+  - **Budget:** a budget check does not parse the whole `usage.jsonl` each time; the day's
+    total is read from the file's tail, or kept beside it and rebuilt from the file when
+    the two disagree (the file stays the truth).
+  - **`reconcile.py`:** the newest session is not re-read in full when only its new
+    entries are needed.
+  - **`index.py`:** resolving links walks the vault once per index build, not once per link.
+  - **Tests:** each path counts its reads (a monkeypatched walk or open) on a fixture with
+    many digests or links and shows one walk per run; the answers match the current code's
+    on the same fixture. Review checkpoint: no.
 
 ## 6. Ted's checklists at milestone ends
 
