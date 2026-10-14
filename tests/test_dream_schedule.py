@@ -388,7 +388,7 @@ def test_an_expiry_failure_is_reported_once_a_day(widget, initialized, monkeypat
 
     error = "the expiry said no"
 
-    def failing_expiry(cfg, slug, now=None):
+    def failing_expiry(cfg, slug, now=None, roles=None):
         raise RuntimeError(error)
 
     monkeypatch.setattr(apply, "expire_short_term", failing_expiry)
@@ -409,7 +409,7 @@ def test_an_expiry_failure_is_reported_once_a_day(widget, initialized, monkeypat
     assert subjects(initialized) == commits
 
     # A different error is news again, the day's page carrying one section for it.
-    def other_failure(cfg, slug, now=None):
+    def other_failure(cfg, slug, now=None, roles=None):
         raise RuntimeError("the expiry said something else")
 
     monkeypatch.setattr(apply, "expire_short_term", other_failure)

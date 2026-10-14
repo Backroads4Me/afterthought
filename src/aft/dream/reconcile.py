@@ -26,7 +26,7 @@ skipped when that budget is spent.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import files
@@ -82,6 +82,7 @@ def run(
     report: ProjectRunReport,
     record_write,
     now: datetime | None = None,
+    stems: Collection[str] | None = None,
 ) -> None:
     """Reconcile the project's short-term lines with the newest primary session applied.
 
@@ -92,6 +93,8 @@ def run(
     archive, or when the day's token budget is spent. ``page_slug`` is the project's slug,
     which is where ``recent.md`` lives; it and the directory the digests were filed under
     are the same unless the project was registered under another name (DESIGN 7, F49).
+    ``stems`` is the digest file names the run's one walk already listed (BUILD-PLAN T51);
+    without it the digests directory is walked here.
     """
     recent = vault_path / "projects" / page_slug / page.RECENT_PAGE
     if not recent.exists():
@@ -100,10 +103,15 @@ def run(
     numbered = [fact for fact in doc.page.facts if fact.state == page.ACTIVE]
     if not numbered:
         return
-    target = newest_primary(vault_path, digests)
+    target = newest_primary(vault_path, digests, stems)
     if target is None:
         return
     agent, session_id = target
+    # The daily cap counts the reconcile's calls with the digests' (DESIGN 13), and the
+    # entries the call would read are the session's whole archive text: a spent day reads
+    # none of it (BUILD-PLAN T51).
+    if model.tokens_used_today(config, now) >= config.settings.work.daily_token_budget:
+        return
     entries = evidence.entries(config, session_id, agent=agent)
     if not entries:
         return
@@ -139,7 +147,9 @@ def run(
         )
 
 
-def newest_primary(vault_path: Path, digests: Sequence[Path]) -> tuple[str, str] | None:
+def newest_primary(
+    vault_path: Path, digests: Sequence[Path], stems: Collection[str] | None = None
+) -> tuple[str, str] | None:
     """The newest primary session among the digests a run applied, as (agent, session id).
 
     The digests arrive in session order and are applied in it, so the last primary one is
@@ -149,10 +159,14 @@ def newest_primary(vault_path: Path, digests: Sequence[Path]) -> tuple[str, str]
     where it was. A digest filed as a later part of one day names its session's first
     part, where the evidence archive holds the session.
     """
-    stems = {path.stem for path in (vault_path / shortterm.DIGESTS).rglob("*.md")}
+    known: Collection[str] = (
+        stems
+        if stems is not None
+        else {path.stem for path in (vault_path / shortterm.DIGESTS).rglob("*.md")}
+    )
     newest: tuple[str, str] | None = None
     for path in digests:
-        named = shortterm.names_session(path, stems)
+        named = shortterm.names_session(path, known)
         if named is not None:
             agent, session, _ = named
             newest = (agent, session)

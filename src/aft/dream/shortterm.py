@@ -16,7 +16,7 @@ Everything here reads files only; ``aft.dream.apply`` makes the edits.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,7 +63,7 @@ def written_at(frontmatter: dict) -> str:
     return at if isinstance(at, str) else ""
 
 
-def names_session(path: Path, stems: set[str]) -> tuple[str, str, dict] | None:
+def names_session(path: Path, stems: Collection[str]) -> tuple[str, str, dict] | None:
     """The (agent, session id) one digest file names for the project's own work, with the
     file's frontmatter, or None when it names none.
 
@@ -94,6 +94,51 @@ def names_session(path: Path, stems: set[str]) -> tuple[str, str, dict] | None:
     return agent, session, frontmatter
 
 
+@dataclass(frozen=True)
+class DigestRoles:
+    """What one walk of the digests directory says about its sessions (BUILD-PLAN T51).
+
+    The evidence archive stores no worker role, so the digest page is what says a session
+    was a worker's (DESIGN 8). One walk of ``digests/`` per dream run reads each named
+    digest's record once, and a lookup asks the map instead of walking the directory
+    again for every fact it judges. ``stems`` is every digest file name the walk listed,
+    which the reconcile reads a session's own digests by (a later part of one day counts
+    as its session's first part only when that first part's file is beside it).
+    """
+
+    stems: frozenset[str]
+    workers: frozenset[tuple[str, str]]
+
+
+def digest_roles(vault_path: Path) -> DigestRoles:
+    """One walk of the digests directory, read once for the run (BUILD-PLAN T51).
+
+    Every ``*.md`` under ``digests/`` is listed once, and each one whose name parses has
+    its frontmatter read once, so the run's worker-role lookups and the reconcile's
+    session naming are answered from what this walk built. A page whose record cannot be
+    read says nothing about a role and is skipped, the way ``names_session`` skips it. A
+    lookup outside a dream run that takes no map walks the directory itself, which is
+    what ``apply._worker_digest_names`` does without one.
+    """
+    root = vault_path / DIGESTS
+    stems: set[str] = set()
+    workers: set[tuple[str, str]] = set()
+    if root.is_dir():
+        for path in root.rglob("*.md"):
+            stems.add(path.stem)
+            named = vault.DIGEST_NAME.match(path.stem)
+            if named is None:
+                continue
+            try:
+                frontmatter = page.split_frontmatter(path.read_text(encoding="utf-8"))[0] or {}
+            except (OSError, UnicodeDecodeError):
+                continue
+            aft = frontmatter.get("aft")
+            if isinstance(aft, dict) and aft.get("role") == "worker":
+                workers.add((named.group("agent"), named.group("session")))
+    return DigestRoles(stems=frozenset(stems), workers=frozenset(workers))
+
+
 def sessions(vault: Path, slug: str) -> list[Session]:
     """The project's primary sessions that have a digest, in session order.
 
@@ -104,9 +149,10 @@ def sessions(vault: Path, slug: str) -> list[Session]:
     root = vault / DIGESTS / slug
     if not root.is_dir():
         return []
-    stems = {path.stem for path in root.rglob("*.md")}
+    paths = list(root.rglob("*.md"))
+    stems = {path.stem for path in paths}
     found: list[tuple[str, str, str, str, str]] = []
-    for path in root.rglob("*.md"):
+    for path in paths:
         named = names_session(path, stems)
         if named is None:
             continue

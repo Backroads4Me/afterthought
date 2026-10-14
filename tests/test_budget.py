@@ -100,6 +100,81 @@ def test_budget_reports_use_before_and_after_a_reset(cfg, capsys):
     assert after.count("since a reset at") == 2
 
 
+def _ledger_total(cfg) -> int:
+    """The ledger's whole billable total, summed from the file itself."""
+    total = 0
+    for line in model.usage_path(cfg).read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        prompt, completion = record.get("prompt_tokens"), record.get("completion_tokens")
+        if isinstance(prompt, int) and isinstance(completion, int):
+            total += prompt + completion
+    return total
+
+
+def test_a_check_reads_the_ledger_once_and_a_call_keeps_the_answer_fresh(cfg, monkeypatch):
+    """A budget check reads the day's total from the tail of the ledger (BUILD-PLAN T51):
+    the file is read once, the line a call appends is folded into what that read built,
+    and the next check answers without reading the file - and answers what the file
+    holds. Anything else that writes the file is read again, because the file is the
+    truth and the cache beside it is only a way to read it less."""
+    for day in range(40):
+        spend(cfg, NOON - timedelta(days=day), 100)
+
+    parses = []
+    real_parse = model._parse_usage
+
+    def counting_parse(path, stat):
+        parses.append(path)
+        return real_parse(path, stat)
+
+    monkeypatch.setattr(model, "_parse_usage", counting_parse)
+
+    assert model.tokens_used_today(cfg, NOON) == 100
+    assert len(parses) == 1, "the check read the ledger once"
+
+    # A call appends its line; the next check answers from the read plus the line.
+    model._record_usage(cfg, NOON, {"prompt_tokens": 30, "completion_tokens": 12})
+    assert model.tokens_used_today(cfg, NOON) == 142
+    assert len(parses) == 1, "the check after the call read the ledger again"
+    assert model.tokens_used(cfg) == _ledger_total(cfg)
+
+    # A line anything else wrote moves the file, so the next check reads it again.
+    spend(cfg, NOON, 7)
+    assert model.tokens_used_today(cfg, NOON) == 149
+    assert len(parses) == 2
+    assert model.tokens_used(cfg) == _ledger_total(cfg)
+
+
+def test_a_cache_that_is_gone_or_corrupt_is_rebuilt_from_the_file(cfg):
+    """The cache beside the ledger is disposable: a check that finds it absent or
+    unreadable reads the ledger and answers what the file says (BUILD-PLAN T51)."""
+    spend(cfg, NOON, 500)
+    spend(cfg, NOON, 40, purpose="search")
+    assert model.tokens_used_today(cfg, NOON) == 500
+    cache = cfg.home / model.USAGE_CACHE
+    assert cache.exists()
+    cache.write_text("{not the cache")
+    assert model.tokens_used_today(cfg, NOON) == 500
+    assert model.tokens_used_today(cfg, NOON, purpose="search") == 40
+    cache.unlink()
+    assert model.tokens_used_today(cfg, NOON) == 500
+
+
+def test_a_check_older_than_the_kept_days_reads_the_file_whole(cfg):
+    """The cache keeps the newest days' lines; a check since an older moment reads the
+    ledger whole and answers what the file says (BUILD-PLAN T51)."""
+    for day in range(30):
+        spend(cfg, NOON - timedelta(days=day), 100)
+    assert model.tokens_used(cfg, since=NOON - timedelta(days=20)) == 2_100
+    assert model.tokens_used(cfg, since=NOON - timedelta(days=3)) == 400
+    assert model.tokens_used(cfg) == 3_000
+
+
 class _Report:
     failures = ()
 

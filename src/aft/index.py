@@ -133,7 +133,7 @@ import logging
 import re
 import sqlite3
 import zlib
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -680,6 +680,10 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         )
         _drop_paths(conn, rebuild)
         phrase_recorded = phrase_changed
+    # One walk of the vault answers every stem match this build asks (BUILD-PLAN T51): a
+    # link that names no page directly is resolved from the listing, not by walking again
+    # for each link.
+    stems = _stem_paths(config.vault) if rebuild else None
     for rel in rebuild:
         current = found.get(rel)
         if current is None:
@@ -692,7 +696,7 @@ def _sync_files(conn: sqlite3.Connection, config: Config, projects: _Projects) -
         for collection, file_rows in rows.items():
             for row in file_rows:
                 _insert(conn, collection, row)
-        _sync_page_links(conn, config, rel, current.text)
+        _sync_page_links(conn, config, rel, current.text, stems)
         conn.execute(_RECORD_HASH, (rel, current.digest, current.state))
     _record_phrase_hashes(conn, found, phrase_recorded)
     for rel in sorted(gone):
@@ -1852,7 +1856,9 @@ def _db_path(config: Config) -> Path:
     return config.home / INDEX_NAME
 
 
-def resolve_target_path(vault_root: Path, target: str) -> str | None:
+def resolve_target_path(
+    vault_root: Path, target: str, stems: Mapping[str, str] | None = None
+) -> str | None:
     """Resolve a wikilink target to a vault-relative path if a matching page exists.
 
     A target is answered from where the vault files it: the exact relative path first,
@@ -1861,6 +1867,9 @@ def resolve_target_path(vault_root: Path, target: str) -> str | None:
     vault decide, and that match has its own precedence - a project page ahead of a
     global page ahead of a reference ahead of the rest, ties broken by path - so two
     pages of one stem resolve the same way whatever order the filesystem lists them in.
+    ``stems`` is the map one walk of the vault built (BUILD-PLAN T51); an index build
+    passes it so the walk answers for every link of the build, and a caller that gives
+    none gets the walk made here.
     """
     t = target.split("#", 1)[0].strip()
     if not t:
@@ -1895,6 +1904,10 @@ def resolve_target_path(vault_root: Path, target: str) -> str | None:
     # resort, and it decides by the precedence above rather than by the order the
     # filesystem happens to list the files in.
     target_clean = t.removesuffix(".md")
+    if stems is not None:
+        # The build's one walk of the vault already answered for this stem (BUILD-PLAN
+        # T51): the map holds the same precedence the walk below decides by.
+        return stems.get(target_clean)
     ranked: list[tuple[int, str]] = []
     for md_file in vault_root.rglob("*.md"):
         if md_file.stem != target_clean:
@@ -1923,8 +1936,39 @@ def _stem_rank(rel: str) -> int:
     return 3
 
 
-def _sync_page_links(conn: sqlite3.Connection, config: Config, rel: str, text: str) -> None:
-    """Parse wikilinks from page rows/facts and insert into page_links."""
+def _stem_paths(vault_root: Path) -> dict[str, str]:
+    """Every markdown stem in the vault and the path its stem match resolves to.
+
+    One walk of the vault answers every stem match an index build asks (BUILD-PLAN T51),
+    where resolving each link walked the vault again per link. The map keeps the same
+    precedence ``resolve_target_path`` decides by - a project page ahead of a global page
+    ahead of a reference ahead of the rest, ties broken by path - so it resolves a stem
+    the way the per-link walk did.
+    """
+    best: dict[str, tuple[int, str]] = {}
+    for md_file in vault_root.rglob("*.md"):
+        try:
+            rel = md_file.relative_to(vault_root).as_posix()
+        except ValueError:
+            continue
+        ranked = (_stem_rank(rel), rel)
+        if md_file.stem not in best or ranked < best[md_file.stem]:
+            best[md_file.stem] = ranked
+    return {stem: rel for stem, (_, rel) in best.items()}
+
+
+def _sync_page_links(
+    conn: sqlite3.Connection,
+    config: Config,
+    rel: str,
+    text: str,
+    stems: Mapping[str, str] | None = None,
+) -> None:
+    """Parse wikilinks from page rows/facts and insert into page_links.
+
+    ``stems`` is the map one walk of the vault built (BUILD-PLAN T51); a build passes it
+    so no link's resolution walks the vault again.
+    """
     # Code is masked on the whole text, not line by line: a fence spanning several lines
     # hides the links inside it only when the fence is read as one block (F68). Masking
     # keeps every character offset where it was, so a match's offset names the line the
@@ -1943,7 +1987,7 @@ def _sync_page_links(conn: sqlite3.Connection, config: Config, rel: str, text: s
         if (line_idx, target) in seen:
             continue
         seen.add((line_idx, target))
-        target_path = resolve_target_path(config.vault, target)
+        target_path = resolve_target_path(config.vault, target, stems)
         conn.execute(
             f"INSERT OR REPLACE INTO {LINKS_TABLE} "
             "(source_path, target, target_path, line_index) VALUES (?, ?, ?, ?)",

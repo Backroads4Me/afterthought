@@ -4662,3 +4662,139 @@ def test_digest_metadata_keyed_avoids_collision_on_same_statement(initialized, h
     assert len(report.added) == 2
     paths = {a.path for a in report.added}
     assert paths == {"projects/widget/overview.md", "global/profile.md"}
+
+
+def test_the_dream_walks_the_digests_once_per_run(initialized, home, fake, monkeypatch):
+    """The worker-role lookups ask the map one walk of the digests directory built
+    (BUILD-PLAN T51): a run that judges several facts of a worker session answers as it
+    always did, and walks the directory once for the run, not once per lookup."""
+    from aft.dream import shortterm
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    seed_overview(
+        cfg,
+        "widget",
+        body="## State\n\n- The server is online. [observed] 2026-09-01 [^s1]\n",
+        sources=[{"id": "s1", "resource": "aft://session/c/1#e1", "quote": "online"}],
+    )
+
+    # The digest of the worker session sits in the tree, already consumed: the run's
+    # digest cites its session, and the role lookup answers from the worker's page.
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-w-1",
+        role="worker",
+        facts=[],
+        sources=[],
+        consumed="dream-widget-20260929T000000Z",
+        store_evidence=False,
+    )
+    write_digest(
+        cfg,
+        "widget",
+        "d1",
+        facts=[
+            {
+                "statement": f"Day {n} of the run is green.",
+                "kind": "fact",
+                "source": "observed",
+                "date": TODAY,
+                "ref": f"s{n}",
+            }
+            for n in (1, 2, 3)
+        ],
+        sources=[
+            {"id": f"s{n}", "resource": f"aft://session/w/1#e{n}", "quote": f"day {n} is green"}
+            for n in (1, 2, 3)
+        ],
+    )
+
+    walks = []
+    real_walk = shortterm.digest_roles
+
+    def counting_walk(vault_path):
+        walks.append(vault_path)
+        return real_walk(vault_path)
+
+    monkeypatch.setattr(shortterm, "digest_roles", counting_walk)
+
+    lookups = []
+    real_names = apply._worker_digest_names
+
+    def counting_names(config, agent, sess_id, roles=None):
+        lookups.append((agent, sess_id))
+        return real_names(config, agent, sess_id, roles)
+
+    monkeypatch.setattr(apply, "_worker_digest_names", counting_names)
+
+    fake.script = [reply("add", None, "worker signal") for _ in range(3)]
+    res = schedule.run(cfg, now=NOW)
+
+    assert len(lookups) >= 3, "each fact's source asked the worker role"
+    assert len(walks) == 1, "the digests directory was walked once for the run"
+    report = res.reports["widget"]
+    assert [c.statement for c in report.candidates] == [
+        "Day 1 of the run is green.",
+        "Day 2 of the run is green.",
+        "Day 3 of the run is green.",
+    ]
+    assert res.ran == ["widget"]
+
+
+def test_expiry_walks_the_digests_once_per_pass(initialized, home, fake):
+    """The expiry of a project's short-term lines answers each line's newest source
+    through the map one walk of the digests directory built (BUILD-PLAN T51): two lines
+    to judge walk the directory once, and the lines expire as they always did."""
+    from aft.dream import shortterm
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    write_digest(
+        cfg,
+        "widget",
+        "2026-10-05-w-1",
+        role="worker",
+        facts=[],
+        sources=[],
+        consumed="dream-widget-20260929T000000Z",
+        store_evidence=False,
+    )
+    recent = cfg.vault / "projects" / "widget" / "recent.md"
+    recent.parent.mkdir(parents=True)
+    recent.write_text(
+        "---\ntype: Project\ntitle: t\ndescription: d\n"
+        "sources:\n"
+        "  - {id: s1, resource: 'aft://session/w/1#e1', quote: first}\n"
+        "  - {id: s2, resource: 'aft://session/w/1#e2', quote: second}\n"
+        "aft:\n  project: p_widget\n---\n\n"
+        "## State\n\n"
+        "- The rewrite is paused. [observed] 2026-08-01 [^s1]\n"
+        "- The queue is on SQLite. [observed] 2026-08-01 [^s2]\n"
+    )
+
+    walks = []
+    real_walk = shortterm.digest_roles
+
+    def counting_walk(vault_path):
+        walks.append(vault_path)
+        return real_walk(vault_path)
+
+    monkeypatch_walk = pytest.MonkeyPatch()
+    monkeypatch_walk.setattr(shortterm, "digest_roles", counting_walk)
+    try:
+        result = apply.expire_short_term(cfg, "widget", now=NOW)
+    finally:
+        monkeypatch_walk.undo()
+
+    assert result is not None
+    report, written = result
+    assert [line.statement for line in report.expired] == [
+        "The rewrite is paused.",
+        "The queue is on SQLite.",
+    ]
+    assert "projects/widget/recent.md" in written
+    assert len(walks) == 1, "the digests directory was walked once for the pass"
