@@ -2414,6 +2414,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     firstmate changes except the tmux change."), session status ("Ted has restarted the
     session."), troubleshooting notes. R2's names check also filters what the keep-test
     should, so a recall gain there needs the keep-test to hold on its own first.
+  - **The F89 measurement does not stand.** The restate call checks the day's budget,
+    and the sandbox home the runs shared had spent its default 200,000 tokens hours
+    before, so the call almost never ran: the F89 runs made 146 to 148 calls against
+    main's 143 to 144. The difference above is therefore what four runs of nearly the
+    same code vary by: about 3 held-out items and 5 wrong `[stated]` facts. F91 measures
+    restating again, behind F90, in a sandbox whose budget does not run out, on the grown
+    key (T52, T53). T47's +3.75 wrong `[stated]` is inside the same spread; T47 makes no
+    budgeted call, so its runs stand, but its result is inconclusive rather than a loss.
 - **T52 The key rules on what the runs call wrong** (ruling 2026-10-14; lead and Ted).
   `score-turns` counts every `[stated]` fact the key does not hold as wrong, so a true,
   durable fact the key never labelled reads as an error (T47, F89). The lead collects every
@@ -2431,6 +2439,18 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   disagreements and sends Ted only the ones it cannot settle. New turns join the split by
   the same hash rule without moving any existing turn. Goal: about 150 durable items.
   Main's baseline is re-run on the grown key before any task below is measured.
+  - **Done 2026-10-14:** 23 sessions exported (373 user turns: LibreCoach site and
+    releases, backups, retirement planning, inference, pi, and two long Afterthought lead
+    sessions), labelled by the local model and Gemini with the labelling prompt following
+    F88, and settled by the lead: 30 durable items kept (decisions and tax facts of the
+    retirement plan, backup setup, release preferences, profile facts, standing
+    permissions); one-time orders, session status, troubleshooting, settle replies, and
+    choices the repository records (site styling, config values) left out. The key holds
+    97 durable items over 639 turns (50 held-out, 47 dev); no existing turn changed side.
+  - **Measuring on it:** every run's sandbox home sets `work.daily_token_budget` far above
+    a day of runs, since a budgeted call skips itself once the budget is spent (the F89
+    runs lost their restate call that way). Four runs of each side, as before; a merge
+    rule on the grown key states its threshold against the spread of main's own four runs.
 - **F90 A kept fact must pass the keep-test on its own** (ruling 2026-10-14). Extraction
   and the keep-test share one call, so a call asked to find more also keeps more that is
   not worth keeping (T47, F89): orders, session status, troubleshooting steps. A second,
