@@ -22,6 +22,7 @@ Never a fact (keep is false):
   history, configuration files, README).
 
 For each fact in the batch, in the order shown, give:
+- item: the fact's label, such as #1.
 - reason: one short sentence explaining why a future session would or would not act
   differently or ask the user again without it, or naming which excluded kind it is.
 - keep: true when the fact passes the keep-test and must be kept; false when it is an

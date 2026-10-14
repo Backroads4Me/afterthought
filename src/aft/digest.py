@@ -1845,19 +1845,23 @@ def _kept_facts(config: Config, facts: list[Fact]) -> tuple[list[Fact], list[Dro
                 listing,
                 keep_schema(),
             )
-        except AnswerRefused:
+        except (AnswerRefused, OutputCut):
             kept.extend(batch)
             continue
-        verdicts = answer.get("facts")
-        if not isinstance(verdicts, list):
-            verdicts = answer.get("items")
-        if not isinstance(verdicts, list):
-            kept.extend(batch)
-            continue
-        for n, fact in enumerate(batch):
-            if n < len(verdicts):
-                verdict = verdicts[n]
-                if isinstance(verdict, dict) and verdict.get("keep") is False:
+        # A verdict answers for the fact its label names; a fact no verdict names, or
+        # named twice, is kept as it was, so a skipped or extra answer never shifts a
+        # verdict onto another fact.
+        named: dict[int, list[dict]] = {}
+        for verdict in answer.get("facts") or []:
+            if isinstance(verdict, dict):
+                number = _label_number(str(verdict.get("item", "")))
+                if number is not None:
+                    named.setdefault(number, []).append(verdict)
+        for n, fact in enumerate(batch, start=1):
+            verdicts = named.get(n, [])
+            if len(verdicts) == 1:
+                verdict = verdicts[0]
+                if verdict.get("keep") is False:
                     reason = str(verdict.get("reason") or "").strip() or "failed keep-test"
                     dropped.append(
                         Dropped(

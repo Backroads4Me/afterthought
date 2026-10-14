@@ -1470,7 +1470,7 @@ def test_keep_check_true_item_is_kept(session: Session):
         summary(),
         settled(SETTLED),
         {"items": []},
-        {"facts": [{"reason": "A standing architecture decision.", "keep": True}]},
+        {"facts": [{"item": "#1", "reason": "A standing architecture decision.", "keep": True}]},
     )
     assert [(f.statement, f.source) for f in wrote.facts] == [
         ("Capture runs at session end.", "stated")
@@ -1487,7 +1487,11 @@ def test_keep_check_false_item_is_dropped_with_its_reason(session: Session):
         summary(),
         settled(SETTLED),
         {"items": []},
-        {"facts": [{"reason": "A one-time instruction to run tests.", "keep": False}]},
+        {
+            "facts": [
+                {"item": "#1", "reason": "A one-time instruction to run tests.", "keep": False}
+            ]
+        },
     )
     assert not wrote.facts
     assert [(d.statement, d.reason) for d in wrote.dropped] == [
@@ -1537,8 +1541,8 @@ def test_keep_check_spent_budget_makes_no_call_and_keeps_facts(session: Session)
 def test_keep_check_batch_of_25_facts_makes_two_calls(session: Session):
     fake, cfg = serve(
         session.cfg,
-        {"facts": [{"reason": "valid", "keep": True} for _ in range(20)]},
-        {"facts": [{"reason": "valid", "keep": True} for _ in range(5)]},
+        {"facts": [{"item": "#1", "reason": "valid", "keep": True} for _ in range(20)]},
+        {"facts": [{"item": "#1", "reason": "valid", "keep": True} for _ in range(5)]},
     )
     twenty_five = [
         digest.Fact(
@@ -1573,7 +1577,7 @@ def test_keep_check_asks_about_an_observed_item(session: Session):
         summary(),
         settled(item("e1", "none", "", "")),
         {"items": [seen("The file was written.", "written", "e3#t1")]},
-        {"facts": [{"reason": "Transient session status.", "keep": False}]},
+        {"facts": [{"item": "#1", "reason": "Transient session status.", "keep": False}]},
     )
     assert not wrote.facts
     assert [(d.statement, d.reason) for d in wrote.dropped] == [
@@ -1592,5 +1596,40 @@ def test_keep_check_prompt_and_schema_ship():
     schemamod.check(schema)
     assert schema["required"] == ["facts"]
     items = schema["properties"]["facts"]["items"]
-    assert items["required"] == ["reason", "keep"]
+    assert items["required"] == ["item", "reason", "keep"]
     assert schema["properties"]["facts"]["maxItems"] == 20
+
+
+def _fact(statement: str) -> digest.Fact:
+    return digest.Fact(statement, "decision", "stated", statement, "e1", "project", "2026-10-04")
+
+
+def test_a_keep_verdict_answers_only_for_the_fact_its_label_names(session: Session):
+    """A skipped verdict never shifts onto another fact: a verdict counts for the fact its
+    label names, and a fact no verdict names is kept as it was (BUILD-PLAN F90)."""
+    facts = [_fact("Run the suite on port 9000."), _fact("All workers talk over TLS on 8443.")]
+    fake, cfg = serve(
+        session.cfg, {"facts": [{"item": "#2", "reason": "Status of the session.", "keep": False}]}
+    )
+    try:
+        kept, dropped = digest._kept_facts(keep_config(turns_config(cfg)), facts)
+    finally:
+        fake.stop()
+    assert kept == facts[:1]
+    assert [d.statement for d in dropped] == [facts[1].statement]
+
+
+def test_a_keep_answer_cut_for_length_keeps_the_batch(session: Session, monkeypatch):
+    """A keep call whose answer ran out of output keeps its batch as it was, and the digest
+    goes on (BUILD-PLAN F90, T54)."""
+    from aft import model
+
+    facts = [_fact("All workers talk over TLS on 8443.")]
+
+    def cut(*args, **kwargs):
+        raise model.OutputCut("the answer used all 8000 output tokens (finish_reason length)")
+
+    monkeypatch.setattr(digest, "_model_answer", cut)
+    kept, dropped = digest._kept_facts(keep_config(turns_config(session.cfg)), facts)
+    assert kept == facts
+    assert dropped == []

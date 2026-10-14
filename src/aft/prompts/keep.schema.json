@@ -9,6 +9,11 @@
       "items": {
         "type": "object",
         "properties": {
+          "item": {
+            "type": "string",
+            "description": "The label of the fact, such as #1.",
+            "maxLength": 8
+          },
           "reason": {
             "type": "string",
             "description": "One short sentence explaining why a future session would or would not act differently or ask the user again without it, or naming which excluded kind it is.",
@@ -19,9 +24,15 @@
             "description": "Whether to keep the fact (true) or drop it (false)."
           }
         },
-        "required": ["reason", "keep"]
+        "required": [
+          "item",
+          "reason",
+          "keep"
+        ]
       }
     }
   },
-  "required": ["facts"]
+  "required": [
+    "facts"
+  ]
 }
