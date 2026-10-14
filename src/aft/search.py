@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from aft import evidence, index, inject, keys, model, page, vault
+from aft import fences as fences_mod
 from aft.config import Config
 from aft.registry import Registry, path_key
 from aft.temporal import TemporalConstraint, parse_temporal
@@ -49,7 +50,6 @@ from aft.temporal import TemporalConstraint, parse_temporal
 LOGGER = logging.getLogger(__name__)
 #: A heading is 1 to 6 `#` followed by whitespace, so `#tag` and `#include` lines are not.
 _HEADING = re.compile(r"^#{1,6}\s")
-_FENCE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 
 #: What a trace says when the archive no longer holds the session a quote rested on, which is
 #: also what it says once `aft forget` took that session away (DESIGN 10, DESIGN 12).
@@ -878,24 +878,9 @@ def _extract_outline(text: str) -> str:
     """Extract headings outside fenced code blocks."""
     _, body, _, _ = page.split_frontmatter(text)
     headings: list[str] = []
-    in_fence = False
-    fence_char = ""
-    fence_len = 0
+    fences = fences_mod.Fences()
     for line in body.splitlines():
-        fence_match = _FENCE.match(line)
-        if fence_match:
-            chars = fence_match.group(1)
-            char = chars[0]
-            count = len(chars)
-            if not in_fence:
-                in_fence = True
-                fence_char = char
-                fence_len = count
-                continue
-            elif char == fence_char and count >= fence_len and not fence_match.group(2).strip():
-                in_fence = False
-                continue
-        if in_fence:
+        if fences.fenced(line):
             continue
         stripped = line.strip()
         if _HEADING.match(stripped):

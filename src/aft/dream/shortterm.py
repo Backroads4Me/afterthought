@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from aft import digest, page
+from aft import page, vault
 from aft.gitutil import git
 
 DIGESTS = "digests"
@@ -76,7 +76,7 @@ def names_session(path: Path, stems: set[str]) -> tuple[str, str, dict] | None:
     """
     if "-library-" in path.name or "-import-" in path.name:
         return None
-    named = digest._DIGEST_NAME.match(path.stem)
+    named = vault.DIGEST_NAME.match(path.stem)
     if named is None:
         return None
     try:
