@@ -476,16 +476,15 @@ def _injection_block(path: Path) -> str:
     """The block a session starting in ``path`` is given, "" when there is none.
 
     `aft inject` and the session-start hook both print what this returns, so an agent's
-    session starts with exactly the text `aft inject` shows for its directory.
+    session starts with exactly the text `aft inject` shows for its directory. Injection
+    only reads, so the capture exclusions do not take a directory's memory away.
     """
     from aft import gitutil, inject, keys
 
     config = load()
     registry = Registry.load(config.registry_path)
     try:
-        result = keys.resolve(
-            path, registry, config.host, never=config.settings.capture.exclude_paths
-        )
+        result = keys.resolve(path, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=path)
     return inject.build(config, result)
@@ -1825,13 +1824,11 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         return "", None
     registry = Registry.load(config.registry_path)
     try:
-        # The directory is resolved with capture.exclude_paths, matching aft inject.
-        result = keys.resolve(
-            event.cwd,
-            registry,
-            config.host,
-            never=config.settings.capture.exclude_paths,
-        )
+        # The directory is resolved without the capture exclusions, as `aft inject` resolves
+        # it: they keep a session's words out of the queue, and the record is skipped below
+        # for that, but a session that starts in an excluded path still gets the memory the
+        # path's project holds.
+        result = keys.resolve(event.cwd, registry, config.host)
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
     from aft import notes

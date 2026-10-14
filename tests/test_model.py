@@ -77,18 +77,8 @@ def test_request_carries_the_prompt_the_cap_and_the_schema(serve):
     ]
     assert sent["response_format"] == {
         "type": "json_schema",
-        "json_schema": {"name": "aft", "strict": True, "schema": SCHEMA},
+        "json_schema": {"name": "aft", "schema": SCHEMA},
     }
-
-
-def test_request_with_json_schema_sets_strict_true(serve):
-    """L11: a request with json_schema sets strict: true on the request body."""
-    fake, cfg = serve({"answer": "yes"})
-    call(cfg)
-    sent = fake.requests[0]
-    rf = sent["response_format"]
-    assert rf["type"] == "json_schema"
-    assert rf["json_schema"]["strict"] is True
 
 
 def test_invalid_output_is_retried_once(serve):

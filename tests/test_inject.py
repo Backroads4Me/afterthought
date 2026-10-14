@@ -958,12 +958,12 @@ def test_a_session_start_hook_injects_into_a_path_capture_excludes(
 def test_session_start_hook_and_inject_agree_on_an_excluded_path(
     widget, tmp_path, capsys, monkeypatch
 ):
-    """L7: aft inject and the session-start hook resolve an excluded path with the same
-    never=capture.exclude_paths, so both agree."""
+    """L7: aft inject and the session-start hook resolve a directory under an excluded path
+    the same way, and both give it the memory of the project around it."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
-    excluded_dir = tmp_path / "scratch" / "nested"
+    scratch = tmp_path / "widget" / "scratch"
+    excluded_dir = scratch / "nested"
     excluded_dir.mkdir(parents=True)
-    scratch = tmp_path / "scratch"
     cfg_file = widget.home / "config.toml"
     cfg_file.write_text(cfg_file.read_text() + f'[capture]\nexclude_paths = ["{scratch}"]\n')
 
@@ -973,6 +973,7 @@ def test_session_start_hook_and_inject_agree_on_an_excluded_path(
         monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, excluded_dir
     )
     assert out == injected
+    assert "Prefer short commits." in injected
 
 
 def recorded_projects(config: Config) -> list[tuple[str, str | None, str]]:
