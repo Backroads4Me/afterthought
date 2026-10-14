@@ -2265,6 +2265,18 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     `digest.md`) dropped it.
   - **Ted decides:** keep F88 as is (the difference is noise), narrow its wording (a
     following task with its own merge rule on held-out), or revert it.
+  - **Measured, 2026-10-14** (pre-F88 `a19d85c` runs `f88-base-1` to `-4`; F88 runs
+    `f88-new-1`, `-2` and main `main-2026-10-14-1`, `-2`): found of 76, pre-F88 29, 29,
+    34, 33 against F88 26, 24, 25, 27; held-out of 41, 17, 17, 18, 15 against 14, 14, 14,
+    15; wrong `[stated]` 3, 5, 15, 10 against 4, 5, 4, 2. Every pre-F88 run finds more
+    than every F88 run, and F88 halves the wrong `[stated]` facts. Eight key items are
+    found by at least two pre-F88 runs and at most one F88 run (two of them held-out). Six
+    are one-time work orders the key labels durable ("Apply the PASEO.md edits.", "Add
+    --print-timeout 60m to the lead prompt's agy command.", "Apply all the proposed
+    OpenViking integration changes except the tmux change."), which F88's ruling keeps
+    out of memory. Two hold a lasting value inside an order: "Use /home/ted/src/switchboard
+    as the project location." and the voxtype sound theme set to default. F88 gains two
+    items the pre-F88 runs miss.
   - No code until Ted decides. Review checkpoint: n/a.
 
 ## 6. Ted's checklists at milestone ends
