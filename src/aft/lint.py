@@ -18,6 +18,7 @@ SKIP_DIRS = {".git", ".obsidian", "library"}
 RESERVED = {"index.md", "log.md"}
 STATUSES = {"draft", "stable", "deprecated"}
 _FOOTNOTE = re.compile(r"\[\^([A-Za-z0-9_-]+)\]")
+_LEFTOVER_LISTING = re.compile(r"^(index|log)-\d+\.md$")
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,12 @@ def lint_file(vault: Path, rel: Path, registry: Registry | None) -> list[Finding
 
     def add(line: int, message: str) -> None:
         out.append(Finding(name, line, message))
+
+    if _LEFTOVER_LISTING.match(rel.name) and any(
+        (vault / rel.parent / listing).exists() for listing in RESERVED
+    ):
+        add(1, "a listing left by a project merge; delete it and its line in index.md")
+        return out
 
     frontmatter, body, body_start, error = pagemod.split_frontmatter(text)
     if error:

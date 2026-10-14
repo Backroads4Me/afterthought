@@ -190,3 +190,25 @@ def test_typed_answers_under_a_refused_note_are_not_findings(initialized):
     )
     write(initialized, "projects/widget/overview.md", text)
     assert messages(initialized) == ["projects/widget/overview.md:18: invalid date 2026-09-31"]
+
+
+def test_leftover_listing_from_merge_is_reported(initialized):
+    """A leftover listing left by a merge is reported with the repair (T50)."""
+    project = register(initialized)
+    write(
+        initialized,
+        "projects/widget/overview.md",
+        PAGE.format(project_id=project.id),
+    )
+    write(initialized, "projects/widget/index.md", "# widget\n\n- overview.md\n")
+    write(initialized, "projects/widget/index-2.md", "# old\n\n- old.md\n")
+    write(initialized, "projects/widget/log-2.md", "old log\n")
+    found = messages(initialized)
+    expected = "a listing left by a project merge; delete it and its line in index.md"
+    assert f"projects/widget/index-2.md:1: {expected}" in found
+    assert f"projects/widget/log-2.md:1: {expected}" in found
+    # Once deleted, lint passes cleanly
+
+    (initialized.vault / "projects/widget/index-2.md").unlink()
+    (initialized.vault / "projects/widget/log-2.md").unlink()
+    assert messages(initialized) == []
