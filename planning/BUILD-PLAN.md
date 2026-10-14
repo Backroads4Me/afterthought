@@ -2155,29 +2155,38 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **One to one:** `score_turns` pairs key items and run facts through `match_facts`, the
     strongest pairs first, as `score_session` already does, so a run fact answers at most one
     key item. A `[stated]` fact left unpaired is wrong as today.
-  - **Each pair is judged, in two steps.** First the names and numbers check
-    (`digest.ungrounded`): a name or number of the run statement that neither the key
-    statement nor its quote holds makes the pair wrong, with no model call. Then a judge call
-    on the configured endpoint, temperature 0, schema-constrained, that sees the key
-    statement, the key quote and the run statement, never which backend wrote it, and answers
-    one question: does the run statement say what the key statement says? The schema puts
-    `differs` (the words that differ, empty when none) before `verdict` (`same`, `narrower`,
-    `different`). `same` is found; `narrower` is found and also counted on its own;
-    `different` is a wrong statement, and the key item counts as missed. The judge prompt
+  - **Each pair is judged.** A judge call on the configured endpoint, temperature 0,
+    schema-constrained, sees the key statement, the key quote and the run statement, never
+    which backend wrote it, and answers one question: does the run statement say what the
+    key statement says? The schema puts `differs` (the words that differ, empty when none)
+    before `verdict`: `same`; `narrower` (part of the key's claim, contradicting nothing);
+    `broader` (all of the key's claim and more beside it, changing none of it); `different`
+    (changes, contradicts or replaces the key's claim). `same`, `narrower` and `broader` are
+    found, the last two also counted on their own; `different` is a wrong statement, and
+    the key item counts as missed. A name, number, date or negation put in place of the
+    key's own is always `different`, however much detail surrounds it. The judge prompt
     lives beside the script, not among the shipped prompts.
+  - **Unheld names:** the names and numbers of the run statement that neither the key text
+    nor the run fact's own evidence (its quote, and the proposal's words for an approval)
+    holds are recorded on the pair as `unheld` (`digest.ungrounded`), for the reader; they
+    do not decide the verdict. A summary keeps one quote per fact while the digest grounded
+    the statement in the whole turn, so a true detail can be missing from the quote; as a
+    verdict this check failed correct statements (`captain.md`, a tester's name).
   - **Verdict cache:** `<data>/judge-cache.json`, keyed by a hash of the judge prompt, the
-    key statement, the key quote and the run statement, so scoring a stored run twice calls
-    the model once and gives the same numbers.
+    model, the key statement, the key quote and the run statement, so scoring a stored run
+    twice calls the model once and gives the same numbers.
   - **The judge is checked before its verdicts count** (decision rule set now). The lead
-    writes `<data>/judge-check.json`: 40 key statements each with one name, number or
-    negation changed (planted wrong) and 40 rewritten in other words with the same meaning
-    (planted same). The judge passes at 38 of 40 planted wrong judged `different` and 36 of
-    40 planted same judged `same` or `narrower`. The lead also reads 40 real judged pairs
-    drawn across stored runs and agrees with at least 36. A judge that fails is reworked
+    writes `<data>/judge-check.json`: 40 planted wrong (key statements with one name,
+    number or negation changed, half of them hidden inside added detail), 40 planted same
+    (rewritten in other words) and 40 planted broader (a true detail added). The judge
+    passes at 38 of 40 planted wrong judged `different`, 36 of 40 planted same judged `same`
+    or `narrower`, and 36 of 40 planted broader judged found. The lead also reads 40 real
+    judged pairs from runs not read while building the judge and agrees with at least 36. A judge that fails is reworked
     (prompt, question split) before any score built on it is reported.
   - **`[observed]` precision:** each `[observed]` fact is judged against its own cited quote
     by the same judge (does the quote say what the statement says), and the report gives
-    observed facts supported, narrower and unsupported. Observed recall needs a key of agent
+    observed facts supported, narrower, broader (the statement says more than its quote)
+    and unsupported. Observed recall needs a key of agent
     entries, which does not exist; it is not in this change.
   - **Held-out split:** the key's labelled turns split by a hash of the turn id into `dev`
     and `held-out`, about half each, frozen in `<data>/split.json` (it names real sessions,
@@ -2186,7 +2195,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **`current`:** a scenario names, for each current and superseded value, the tokens that
     tell it apart (`settle` against `yes` in `replaced-rule`). A value is present when a block
     line holds all its distinguishing tokens, matched casefolded with punctuation set aside,
-    and passes the judge as `same` or `narrower`. Word overlap alone never counts, because a
+    and the judge, given the line as the key, finds the value in it. Word overlap alone never counts, because a
     current and a superseded value share most of their words.
   - **Each report records** the prompt hash of the digest prompts, the judge prompt hash, the
     model, the temperature, the split, and each backend's prompt shape. The Claude and Gemini
@@ -2197,6 +2206,15 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     and reads every pair the old scorer counted found and the judge counts different. The
     figures quoted in earlier entries ("42 of 76", F88's `stated_wrong` 4 to 2) are old-scorer
     numbers and are not compared with new ones.
+  - **Measured, ruling 2026-10-14:** judge check 40/40 wrong, 40/40 same, 40/40 broader;
+    the lead agreed with 37 of 40 verdicts on the Claude runs (the 3 misses lenient: "PLT
+    Focus" for the user's "PL Focus" passed inside longer statements twice). `current`: 5 of
+    5 scenarios pass. Split: 35 dev and 41 held-out key items. The local runs, old scorer
+    against new (found of 76; wrong `[stated]`): f77 39 to 33, 12 to 14; f78 37 to 31, 7 to
+    10; F88 base 31 and 32 to 29 and 29, 4 and 4 to 3 and 5; F88 new 30 and 30 to 26 and
+    24, 2 and 2 to 4 and 5. Under the new scorer F88 does not meet its own rule; T46
+    follows it up. A first judge without `broader` and with the names check deciding
+    failed the hand read: it called most statements holding a true extra detail wrong.
   - **Sandbox:** every eval run that calls a model uses a temporary `AFT_HOME` and a neutral
     working directory, so the F87 recall hook and capture do not reach the user's memory.
   - **Not in this change:** an `[observed]` recall key; paired per-session differences with
@@ -2226,6 +2244,23 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     tests already do. A finding with no covering test gets one. The PR lists each finding
     with its test.
   - Review checkpoint: no.
+- **T46 What F88 loses under the corrected scorer** (ruling 2026-10-14; follows M16 and
+  F88). Under M16's scorer, F88's prompt change finds fewer key items than the prompts
+  before it (held-out 17 and 17 against 14 and 14; all 76: 29 and 29 against 26 and 24)
+  and wrong `[stated]` facts do not fall (3 and 5 against 4 and 5). Two runs each cannot
+  tell a loss of 3 items in 41 from run-to-run noise. F88 stays merged meanwhile: it keeps
+  one-time work orders out of memory and out of the notes waiting on the user.
+  - **Lead, measure:** two more runs of each side (the commit before F88 and main) through
+    `scripts/eval_digest.py run`, sandboxed, then `score-turns`, so each side has four
+    runs on the same key and split. Report found and wrong `[stated]` per run, on held-out
+    and on all items.
+  - **Lead, read:** every held-out key item that two or more pre-F88 runs find and two or
+    more F88 runs miss, with F88's statement for that turn if any, and name which part of
+    the F88 wording (the request rule in `turns.md`, the never-a-fact sentence in
+    `digest.md`) dropped it.
+  - **Ted decides:** keep F88 as is (the difference is noise), narrow its wording (a
+    following task with its own merge rule on held-out), or revert it.
+  - No code until Ted decides. Review checkpoint: n/a.
 
 ## 6. Ted's checklists at milestone ends
 
