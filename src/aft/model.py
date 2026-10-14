@@ -417,7 +417,7 @@ def tokens_used(config: Config, since: datetime | None = None, purpose: str | No
     # A torn write must not spoil the ledger for good, so bytes that do not decode
     # are read as replacement characters and any line that is not a billable record
     # of this home's own shape is left out of the total.
-    for line in path.read_text(errors="replace").splitlines():
+    for line in _ledger_lines(path, start):
         try:
             record = json.loads(line)
         except ValueError:
@@ -436,6 +436,53 @@ def tokens_used(config: Config, since: datetime | None = None, purpose: str | No
             continue
         total += prompt + completion
     return total
+
+
+#: The ledger is appended in time order, give or take writers racing each other, so a
+#: read from the end stops once it passes a line this much older than the start it
+#: counts from (BUILD-PLAN T51).
+LEDGER_SLACK = timedelta(hours=1)
+#: How much of the ledger a read from the end takes at a time.
+LEDGER_BLOCK = 64 * 1024
+
+
+def _ledger_lines(path: Path, start: datetime | None) -> list[str]:
+    """The ledger's lines a check since ``start`` needs: all of them when ``start`` is
+    None, otherwise the lines from the end back to the first one stamped more than
+    ``LEDGER_SLACK`` before ``start`` (BUILD-PLAN T51). The file stays the only record;
+    a budget check reads the day's tail instead of every day the ledger has kept."""
+    if start is None:
+        return path.read_text(errors="replace").splitlines()
+    stop = start - LEDGER_SLACK
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        data = b""
+        while position > 0:
+            step = min(LEDGER_BLOCK, position)
+            position -= step
+            handle.seek(position)
+            data = handle.read(step) + data
+            # The first line of what is read may be cut short by the block's edge; only
+            # the whole lines after it can say how far back the read has come.
+            whole = data.split(b"\n")[1:] if position > 0 else data.split(b"\n")
+            if any(_before(line, stop) for line in whole):
+                break
+    lines = data.decode(errors="replace").splitlines()
+    return lines[1:] if position > 0 else lines
+
+
+def _before(line: bytes, stop: datetime) -> bool:
+    """Whether a ledger line is stamped before ``stop``; a line that cannot be read is
+    not, so it never ends a read early."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(record, dict):
+        return False
+    at = _time(record.get("at"))
+    return at is not None and at < stop
 
 
 def tokens_used_today(config: Config, now: datetime | None = None, purpose: str = "work") -> int:

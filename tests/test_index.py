@@ -2096,6 +2096,50 @@ def test_resolve_target_path_precedence(initialized: Config) -> None:
     assert index.resolve_target_path(vault, "no-such-target") is None
 
 
+def test_resolving_links_walks_the_vault_once_per_build(initialized: Config, monkeypatch) -> None:
+    """A build that rewrites pages answers every link's stem match from one walk of the
+    vault (BUILD-PLAN T51): many stem-match links in the rewritten pages resolve to what
+    ``resolve_target_path`` answers, and the walk happens once, not once per link."""
+    vault = initialized.vault
+    # Two pages of one stem, filed so the precedence decides: the projects page.
+    write(initialized, "references/hold/gamma.md", "# gamma\n")
+    write(initialized, "projects/other/gamma.md", "# gamma\n")
+    # A rewritten page holding several links no candidate names directly.
+    lines = "\n".join(
+        f"- Line {n} points at [[gamma]]. [observed] 2026-10-0{n} [^s{n}]" for n in range(1, 8)
+    )
+    source_page = (
+        f"---\ntype: Project\ntitle: Widget\nsources: []\n---\n\n## Decisions\n\n{lines}\n"
+    )
+    source_rel = write(initialized, "projects/widget/overview.md", source_page)
+
+    walks = []
+    real_stem_paths = index._stem_paths
+
+    def counting_stem_paths(vault_root):
+        walks.append(vault_root)
+        return real_stem_paths(vault_root)
+
+    monkeypatch.setattr(index, "_stem_paths", counting_stem_paths)
+
+    assert index.update(initialized) == []
+    assert len(walks) == 1, "the vault was walked once for the build"
+
+    conn = sqlite3.connect(initialized.home / index.INDEX_NAME)
+    try:
+        rows = conn.execute(
+            f"SELECT target, target_path FROM {index.LINKS_TABLE} WHERE source_path = ?",
+            (source_rel,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 7
+    assert all(target_path == "projects/other/gamma.md" for _, target_path in rows)
+    # Each row answers what resolving the link on its own answers.
+    for target, target_path in rows:
+        assert target_path == index.resolve_target_path(vault, target)
+
+
 def test_a_two_line_section_gives_two_rows_with_distinct_keys(initialized: Config) -> None:
     """F82: each live curated line of a pages section is its own row, with its position
     in the section added to the row key."""

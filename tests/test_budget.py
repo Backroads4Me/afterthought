@@ -100,6 +100,60 @@ def test_budget_reports_use_before_and_after_a_reset(cfg, capsys):
     assert after.count("since a reset at") == 2
 
 
+def _ledger_total(cfg, since=None, purpose=None) -> int:
+    """The ledger's billable total, summed from the whole file."""
+    total = 0
+    for line in model.usage_path(cfg).read_text(errors="replace").splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if purpose is not None and record.get("purpose", "work") != purpose:
+            continue
+        if since is not None and model._time(record.get("at")) < since:
+            continue
+        prompt, completion = record.get("prompt_tokens"), record.get("completion_tokens")
+        if isinstance(prompt, int) and isinstance(completion, int):
+            total += prompt + completion
+    return total
+
+
+def test_a_check_reads_the_ledger_from_its_end(cfg, monkeypatch):
+    """A budget check reads the ledger back from its end only as far as the day it counts
+    from (BUILD-PLAN T51), in blocks whose edges may cut a line, and answers what a read
+    of the whole file answers."""
+    monkeypatch.setattr(model, "LEDGER_BLOCK", 97)
+    for day in reversed(range(40)):
+        spend(cfg, NOON - timedelta(days=day), 100)
+        spend(cfg, NOON - timedelta(days=day), 9, purpose="search")
+    lines = model.usage_path(cfg).read_text().splitlines()
+
+    tail = model._ledger_lines(model.usage_path(cfg), NOON - timedelta(hours=1))
+    assert 0 < len(tail) < len(lines) / 4
+    for days in (0, 1, 3, 20, 45):
+        since = NOON - timedelta(days=days, hours=1)
+        assert model.tokens_used(cfg, since=since) == _ledger_total(cfg, since)
+        assert model.tokens_used(cfg, since=since, purpose="search") == _ledger_total(
+            cfg, since, "search"
+        )
+    assert model.tokens_used(cfg) == _ledger_total(cfg)
+    assert model.tokens_used(cfg, purpose="search") == 40 * 9
+    assert model.tokens_used_today(cfg, NOON) == 100
+
+
+def test_a_torn_line_does_not_end_a_read_from_the_end(cfg, monkeypatch):
+    """A line that cannot be read is skipped, never taken as the line that ends the read."""
+    monkeypatch.setattr(model, "LEDGER_BLOCK", 50)
+    spend(cfg, NOON - timedelta(days=2), 100)
+    spend(cfg, NOON, 30)
+    with model.usage_path(cfg).open("a") as ledger:
+        ledger.write('{"at": "not a time", "prompt_t\n')
+    spend(cfg, NOON, 12)
+    assert model.tokens_used_today(cfg, NOON) == 42
+
+
 class _Report:
     failures = ()
 

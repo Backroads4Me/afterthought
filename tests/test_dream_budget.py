@@ -222,6 +222,41 @@ def test_a_partially_applied_digest_is_not_marked_consumed(initialized, home, fa
     assert "- The GPU host serves vLLM. [stated] 2026-10-05" in overview
 
 
+def test_a_reconcile_a_spent_budget_reaches_reads_no_entries(initialized, home, fake, monkeypatch):
+    """The reconcile's one call sits behind the day's cap (DESIGN 13), and the entries it
+    would read are the newest session's whole archive text: a run that reaches it with the
+    budget spent reads none of them (BUILD-PLAN T51), and answers as it always did -
+    nothing withdrawn, the applied digest consumed."""
+    from aft import evidence
+
+    cfg = config_with_fake(home, initialized.vault, fake)
+    _register_widget(cfg)
+    _seed_overview(cfg)
+    _one_fact_digest(cfg, "d1", "The queue uses SQLite WAL mode.", "2")
+
+    # The decide call spends the last of the day, so the reconcile that follows it is
+    # reached with nothing left.
+    spend(cfg, cfg.settings.work.daily_token_budget - 250)
+    fake.script = [reply("add", None, "new decision")]
+
+    reads = []
+    real_entries = evidence.entries
+
+    def counting_entries(config, session_id, agent=None):
+        reads.append(session_id)
+        return real_entries(config, session_id, agent=agent)
+
+    monkeypatch.setattr(evidence, "entries", counting_entries)
+
+    run = schedule.run(cfg, now=NOW)
+    assert run.ran == ["widget"]
+    assert reads == [], "the reconcile read the session's archive with the budget spent"
+    assert len(fake.requests) == 1, "the reconcile made no call of its own either"
+    assert _consumed(cfg, "d1")
+    report = run.reports["widget"]
+    assert report.withdrawn == []
+
+
 def test_the_cli_says_a_run_stopped_for_the_budget(initialized, home, fake, capsys):
     """``aft dream`` names the project whose run the day's budget stopped mid-way."""
     from aft.cli import main

@@ -28,6 +28,7 @@ from aft import digest, evidence, lint, model, page, pagewrite, queue
 from aft import vault as vaultmod
 from aft.config import Config
 from aft.dream import decide, maintain, reconcile, rules, shortterm
+from aft.dream.shortterm import DigestRoles
 from aft.gitutil import git
 from aft.registry import Project, Registry, path_key
 
@@ -304,10 +305,17 @@ def run_project(
     slug: str,
     digests: Sequence[Path],
     now: datetime | None = None,
+    roles: DigestRoles | None = None,
 ) -> ProjectRunReport:
-    """Process waiting digests for one project, run maintenance, and commit."""
+    """Process waiting digests for one project, run maintenance, and commit.
+
+    ``roles`` is the map the run's one walk of the digests directory built (BUILD-PLAN
+    T51); a caller that gives none gets one built for this project run alone.
+    """
     if not digests:
         return ProjectRunReport(project=slug)
+    if roles is None:
+        roles = shortterm.digest_roles(config.vault)
 
     registry = Registry.load(config.registry_path)
     project, project_path = _project_of_group(config, registry, slug, digests)
@@ -504,6 +512,7 @@ def run_project(
                     q,
                     fallback_date=proposal.target.fact.date,
                     source_entry=s_dict,
+                    roles=roles,
                 )
                 line_evidence.append(
                     rules.Evidence(
@@ -950,7 +959,12 @@ def run_project(
                     res = str(s_entry.get("resource", ""))
                     q = str(s_entry.get("quote", ""))
                     v, origin, ev_date, y = _lookup_evidence(
-                        config, res, q, fallback_date=fact.date or today, source_entry=s_entry
+                        config,
+                        res,
+                        q,
+                        fallback_date=fact.date or today,
+                        source_entry=s_entry,
+                        roles=roles,
                     )
                     evidence_list.append(
                         rules.Evidence(
@@ -994,7 +1008,15 @@ def run_project(
             # line it showed done, false or replaced is withdrawn on its verified quote
             # (BUILD-PLAN F47).
             reconcile.run(
-                config, vault_path, page_slug, digests, today, report, record_write, now=now
+                config,
+                vault_path,
+                page_slug,
+                digests,
+                today,
+                report,
+                record_write,
+                now=now,
+                stems=roles.stems,
             )
 
             # Short-term memory: lift the lines that became long-term, then roll off the
@@ -1003,7 +1025,16 @@ def run_project(
             # digests the group was filed under, and the page it edits is the project's
             # (DESIGN 6, F49).
             _short_term(
-                config, vault_path, slug, page_slug, to_lift, settle, report, record_write, today
+                config,
+                vault_path,
+                slug,
+                page_slug,
+                to_lift,
+                settle,
+                report,
+                record_write,
+                today,
+                roles=roles,
             )
         # Maintenance
         broken, cleared = maintain.check_anchors(
@@ -1114,6 +1145,7 @@ def _short_term(
     report: ProjectRunReport,
     record_write,
     today: str,
+    roles: DigestRoles | None = None,
 ) -> None:
     """Lift the short-term lines that became long-term, then roll off the lines whose
     sessions have gone by, and expire the ones their days have left behind (design 6,
@@ -1177,6 +1209,7 @@ def _short_term(
                 str(entry.get("quote", "")),
                 fallback_date=line.date,
                 source_entry=entry,
+                roles=roles,
             )
             evidence_list.append(
                 rules.Evidence(
@@ -1251,7 +1284,7 @@ def _short_term(
     # stands struck as the record of what the newest session showed, and the backstop
     # would strike the same line again in one run and list it twice in the report.
     settled = {line.statement for line in report.withdrawn}
-    if _expired_lines(config, vault_path, doc, report, today, settled, record_write):
+    if _expired_lines(config, vault_path, doc, report, today, settled, record_write, roles):
         changed = True
     if changed:
         record_write(recent)
@@ -1308,7 +1341,10 @@ def _stored_long_term(
 
 
 def expire_short_term(
-    config: Config, slug: str, now: datetime | None = None
+    config: Config,
+    slug: str,
+    now: datetime | None = None,
+    roles: DigestRoles | None = None,
 ) -> tuple[ProjectRunReport, list[str]] | None:
     """Expire one project's short-term lines whose days are spent, and write the page.
 
@@ -1317,8 +1353,13 @@ def expire_short_term(
     digest that never comes (DESIGN 6, R10). A note under an expiring line moves to the
     archive first, the way roll-off moves one. Returns the report and the vault-relative
     paths it wrote, or None when the page has nothing to expire.
+
+    ``roles`` is the map the run's one walk of the digests directory built (BUILD-PLAN
+    T51); a caller that gives none gets one built for this pass alone.
     """
     vault_path = config.vault.resolve()
+    if roles is None:
+        roles = shortterm.digest_roles(config.vault)
     recent = vault_path / "projects" / slug / page.RECENT_PAGE
     if not recent.exists():
         return None
@@ -1333,7 +1374,7 @@ def expire_short_term(
 
     doc = pagewrite.PageDoc.read(recent, vault=vault_path)
     if not _expired_lines(
-        config, vault_path, doc, report, now.date().isoformat(), set(), record_write
+        config, vault_path, doc, report, now.date().isoformat(), set(), record_write, roles
     ):
         return None
     record_write(recent)
@@ -1349,6 +1390,7 @@ def _expired_lines(
     today: str,
     settled: set[str],
     record_write,
+    roles: DigestRoles | None = None,
 ) -> bool:
     """Take every line whose newest source is older than ``dream.short_term_days`` off the
     page ``doc`` holds, and say whether anything went.
@@ -1366,7 +1408,7 @@ def _expired_lines(
                 f
                 for f in doc.page.facts
                 if f.statement not in settled
-                and _expired(config, f, doc.sources, vault_path, today)
+                and _expired(config, f, doc.sources, vault_path, today, roles)
             ),
             None,
         )
@@ -1387,6 +1429,7 @@ def _expired(
     sources: dict[str, dict],
     vault_path: Path,
     today: str,
+    roles: DigestRoles | None = None,
 ) -> bool:
     """Whether the line's newest source is older than ``dream.short_term_days`` days.
 
@@ -1395,7 +1438,7 @@ def _expired(
     keeps the quote on the page); a line whose sources carry no date at all stays, as a
     line no source can place stays for roll-off.
     """
-    newest = _newest_source_date(config, fact, sources, vault_path)
+    newest = _newest_source_date(config, fact, sources, vault_path, roles)
     if not newest:
         return False
     try:
@@ -1406,7 +1449,11 @@ def _expired(
 
 
 def _newest_source_date(
-    config: Config, fact: page.Fact, sources: dict[str, dict], vault_path: Path
+    config: Config,
+    fact: page.Fact,
+    sources: dict[str, dict],
+    vault_path: Path,
+    roles: DigestRoles | None = None,
 ) -> str:
     """The newest date among the line's sources, as their evidence carries it."""
     dates = []
@@ -1418,13 +1465,16 @@ def _newest_source_date(
             str(entry.get("quote", "")),
             fallback_date=fact.date,
             source_entry=entry,
+            roles=roles,
         )
         if when:
             dates.append(when)
     return max(dates) if dates else ""
 
 
-def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
+def _worker_digest_names(
+    config: Config, agent: str, sess_id: str, roles: DigestRoles | None = None
+) -> bool:
     """Whether one of this session's digest pages carries ``aft.role: worker``.
 
     The evidence archive stores no worker role, so the digest page is what says a session
@@ -1433,7 +1483,18 @@ def _worker_digest_names(config: Config, agent: str, sess_id: str) -> bool:
     is digested more than once in a day, so the name must have that shape and the agent
     must match too: a session id that is another session's prefix, and the same id under
     another agent, keep their own role.
+
+    The run's one walk of the digests directory (``shortterm.digest_roles``) answers when
+    it is given; without it the directory is walked here, which is what a lookup outside a
+    dream run does.
     """
+    if roles is not None:
+        later_part = re.compile(rf"{re.escape(sess_id)}-\d+")
+        return any(
+            (not agent or named_agent == agent)
+            and (session == sess_id or later_part.fullmatch(session))
+            for named_agent, session in roles.workers
+        )
     digests_dir = config.vault / "digests"
     if not digests_dir.is_dir():
         return False
@@ -1519,6 +1580,7 @@ def _lookup_evidence(
     quote: str,
     fallback_date: str = "",
     source_entry: dict | None = None,
+    roles: DigestRoles | None = None,
 ) -> tuple[bool, str, str, bool]:
     """Look up an evidence footnote in the archive or library.
 
@@ -1551,7 +1613,7 @@ def _lookup_evidence(
                     sess_id, entry_id, recorded_role, recorded_said, quote
                 )
                 if recorded_check == expected_check:
-                    is_worker = _worker_digest_names(config, agent, sess_id)
+                    is_worker = _worker_digest_names(config, agent, sess_id, roles)
                     origin = rules.WORKER if is_worker else rules.PRIMARY
                     found = evidence.entry_role_said(config, sess_id, entry_id)
                     if found is not None:
@@ -1573,7 +1635,7 @@ def _lookup_evidence(
                             is_yours = entry_role == "user"
                             is_worker = entry_role == "worker"
                             if not is_worker:
-                                is_worker = _worker_digest_names(config, agent, sess_id)
+                                is_worker = _worker_digest_names(config, agent, sess_id, roles)
                             origin = rules.WORKER if is_worker else rules.PRIMARY
                             return True, origin, entry_date, is_yours
                 except Exception:

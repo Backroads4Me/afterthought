@@ -44,6 +44,7 @@ from aft import digest, keys, model, page, pagewrite, queue, vault
 from aft.config import Config
 from aft.dream import apply, shortterm
 from aft.dream.apply import ProjectRunReport
+from aft.dream.shortterm import DigestRoles
 from aft.gitutil import git
 from aft.registry import Registry
 
@@ -135,7 +136,9 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             if changes:
                 return result
             with _run_in_progress(config, now):
-                _expire_short_term(config, result, now, None, None)
+                # One walk of the digests directory serves the whole run (BUILD-PLAN T51).
+                roles = shortterm.digest_roles(config.vault)
+                _expire_short_term(config, result, now, None, None, roles)
                 # A run with nothing waiting still writes the idle and gone section: a home
                 # whose every project is idle is exactly the state the section exists to name
                 # (DESIGN 7, F49). It appends to the day's report, once a day.
@@ -146,6 +149,11 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
             return result
         if changes and vault.commit(config.vault, sorted(changes), CHECKPOINT_MESSAGE):
             result.checkpoint = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
+        # One walk of the digests directory serves the whole run (BUILD-PLAN T51): the
+        # worker-role lookups the project runs make and the reconcile's session naming ask
+        # the map it built instead of walking again for every fact or link. Nothing between
+        # here and a lookup changes what a digest page says a session's role is.
+        roles = shortterm.digest_roles(config.vault)
         # The checkpoint above went in first, so a person's hand edits are never under the
         # marker: every write from here on is this run's, and the next run meets a dirty
         # tree only if this one died mid-write, to roll it back rather than commit it as
@@ -156,7 +164,7 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                 if result.tagged:
                     result.tag_commit = git(["rev-parse", "HEAD"], cwd=config.vault).stdout.strip()
             checkpoint_reported = _expire_short_term(
-                config, result, now, result.checkpoint, result.tag_commit
+                config, result, now, result.checkpoint, result.tag_commit, roles
             )
             budget = config.settings.work.daily_token_budget
             registry = Registry.load(config.registry_path)
@@ -180,7 +188,7 @@ def run(config: Config, process: Process | None = None, now: datetime | None = N
                         if process is not None:
                             rep = process(config, slug, group)
                         else:
-                            rep = apply.run_project(config, slug, group, now=now)
+                            rep = apply.run_project(config, slug, group, now=now, roles=roles)
                         result.ran.append(slug)
                     except Exception as exc:
                         result.failures[slug] = str(exc)
@@ -328,6 +336,7 @@ def _expire_short_term(
     now: datetime,
     checkpoint: str | None,
     tag_commit: str | None,
+    roles: DigestRoles | None = None,
 ) -> bool:
     """Expire the short-term lines whose days are spent, as maintenance, for every
     registered project with a recent.md and nothing waiting (DESIGN 6, R10).
@@ -350,7 +359,7 @@ def _expire_short_term(
         if not (config.vault / "projects" / slug / page.RECENT_PAGE).exists():
             continue
         try:
-            expired = apply.expire_short_term(config, slug, now=now)
+            expired = apply.expire_short_term(config, slug, now=now, roles=roles)
         except Exception as exc:
             error = str(exc)
             result.failures[slug] = error
