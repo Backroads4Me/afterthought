@@ -35,7 +35,10 @@ item labelled question, proposal, request or none.
 - request: an instruction for the task at hand or momentary session pacing ("run the tests",
   "investigate why X", "squash-merge it", "fix it", "yes, build the importer and merge it",
   "don't start new agents right now", "go ahead", "pause for now", "park this for now"), with
-  nothing that stands as a permanent rule.
+  nothing that stands as a permanent rule. A request that sets a lasting value (a location,
+  a name, a setting, a choice of tool) also gives that value as its own item, labelled decision
+  or fact, with a statement that says the value and not the order ("The project lives at
+  /srv/project").
 - none: anything else: thanks, pasted material (a document, a log, another agent's message),
   a reply with no content.
 

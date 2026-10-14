@@ -564,6 +564,16 @@ def test_two_orders_for_different_work_are_about_different_things():
     )
 
 
+def test_the_decide_prompt_keeps_lasting_values_set_by_orders():
+    """BUILD-PLAN T47: a lasting value an order sets is not the order, and is kept as a fact
+    or decision stating the value."""
+    words = " ".join(decide.prompt().split())
+    assert (
+        "A lasting value an order sets is not the order, and is kept as a fact or decision"
+        " stating the value." in words
+    )
+
+
 def test_the_decide_prompt_keeps_the_plans_text():
     """The plan's own words still ship (BUILD-PLAN M4.3). M14 extends the prompt between
     the plan's lines; it never rewords or drops one."""

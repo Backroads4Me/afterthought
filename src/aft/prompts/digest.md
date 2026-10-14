@@ -27,6 +27,8 @@ documents already say.
 Also never a fact: a one-time order to do a piece of work, given or approved by the user,
 whether or not it was carried out. A standing rule, a permission, and the choice an
 approval settles are not such orders.
+A lasting value an order sets is not the order, and is kept as a fact or decision
+stating the value.
 
 What this part of the session did and where the work stood when it ended (the task in
 progress, what was merged or run, what comes next) is not a fact. What was done goes

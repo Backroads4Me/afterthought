@@ -2560,8 +2560,9 @@ def test_the_work_reports_a_failure_as_a_nonzero_exit(session: Session, capsys):
 # --------------------------------------------------------- the prompt and the schema shipped
 
 
-def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
-    """The plan's own words are the prompt; a quietly rewritten prompt is a new system."""
+def test_the_prompt_shipped_keeps_the_plans_text():
+    """The plan's own words still ship (BUILD-PLAN M2.6). Later tasks extend the prompt
+    between the plan's lines; they never reword or drop one."""
     lines = PLAN.read_text(encoding="utf-8").splitlines(keepends=True)
     start = next(index for index, line in enumerate(lines) if line.startswith("- **Prompt**"))
     stop = next(index for index, line in enumerate(lines) if line.startswith("- **Schema**"))
@@ -2571,7 +2572,15 @@ def test_the_prompt_shipped_is_the_ones_text_in_the_plan():
         if line.strip() in ("```text", "```")
     ]
     assert len(fences) == 2, "the plan's prompt block is not the fenced pair this reads"
-    assert digest.prompt_text() == "".join(lines[fences[0] + 1 : fences[1]])
+    plan_prompt = lines[fences[0] + 1 : fences[1]]
+
+    shipped = digest.prompt_text().splitlines(keepends=True)
+    cursor = 0
+    for plan_line in plan_prompt:
+        while cursor < len(shipped) and shipped[cursor] != plan_line:
+            cursor += 1
+        assert cursor < len(shipped), f"the plan's line is gone from the prompt: {plan_line!r}"
+        cursor += 1
 
 
 def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
@@ -3846,6 +3855,15 @@ def test_the_digest_prompt_names_what_is_never_a_fact():
         "anything the repository's own documents already say",
     ):
         assert item in words
+
+
+def test_the_digest_prompt_keeps_lasting_values_set_by_orders():
+    """BUILD-PLAN T47: a lasting value an order sets is not the order, and is kept as a fact
+    or decision stating the value."""
+    assert (
+        "A lasting value an order sets is not the order, and is kept as a fact or decision"
+        " stating the value." in prompt_words()
+    )
 
 
 def test_the_digest_prompt_defines_short_term_as_a_temporary_condition():

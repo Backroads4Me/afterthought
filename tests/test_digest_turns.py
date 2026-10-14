@@ -1280,3 +1280,16 @@ def test_the_turns_prompt_labels_a_yes_to_work_a_request():
         " something) is a request, as the same words without the proposal would be." in words
     )
     assert '"yes, build the importer and merge it"' in words
+
+
+def test_the_turns_prompt_keeps_a_lasting_value_set_by_a_request():
+    """BUILD-PLAN T47: a request that sets a lasting value also gives that value as its
+    own item, labelled decision or fact, with a statement that says the value and not
+    the order."""
+    words = " ".join(digest.turns_prompt_text().split())
+    assert (
+        "A request that sets a lasting value (a location, a name, a setting, a choice of"
+        " tool) also gives that value as its own item, labelled decision or fact, with a"
+        ' statement that says the value and not the order ("The project lives at /srv/project").'
+        in words
+    )
