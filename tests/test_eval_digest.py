@@ -784,7 +784,7 @@ def test_score_counts_wrong_missed_tags_and_questions(ev, tmp_path, cfg):
         "run": "The session said: run the full suite before pushing",
         "verdict": "same",
         "differs": [],
-        "check": "judge",
+        "unheld": [],
         "split": None,
     }
     assert session["tags"][0] == {
@@ -943,22 +943,66 @@ def test_one_run_fact_cannot_answer_two_key_items(ev, tmp_path, cfg):
     assert missed == ["The session said: deploy happens on port 8008 with the blue runner"]
 
 
-def test_a_right_quote_under_a_wrong_statement_is_wrong_without_a_judge_call(ev, tmp_path, cfg):
-    """A run fact citing the key's quote but naming another number is wrong with no call."""
+def test_a_right_quote_under_a_wrong_statement_is_wrong(ev, tmp_path, cfg):
+    """A run fact citing the key's quote but naming another number is wrong: the judge
+    decides, and the number neither text holds is recorded as unheld."""
     data = tmp_path / "data"
     key_turns_file(
         data, {"sess-1#1": {"user": "", "durable": [key_fact("the api listens on 8008")]}}
     )
-    write_summary(data, "local", "sess-1", [key_fact("the api listens on 9999")])
-    fake, judge = judged(ev, cfg, data, verdict("same"))
+    write_summary(
+        data, "local", "sess-1", [run_fact("the api listens on 9999", "the api listens on 8008")]
+    )
+    fake, judge = judged(ev, cfg, data, verdict("different", "9999"))
     report = ev.score_turns(data, "base", "local", judge)
     assert report["totals"]["found"] == 0
     assert report["totals"]["missed"] == 1
     assert report["totals"]["stated_wrong"] == 1
-    assert len(judge_requests(fake)) == 0
+    assert len(judge_requests(fake)) == 1
     pair = report["sessions"][0]["pairs"][0]
-    assert pair["verdict"] == "different" and pair["check"] == "ungrounded"
-    assert pair["differs"] == ["9999"]
+    assert pair["verdict"] == "different" and pair["unheld"] == ["9999"]
+
+
+def test_a_broader_statement_counts_found_and_its_own_quote_grounds_added_names(ev, tmp_path, cfg):
+    """A run statement holding the key's claim and a true detail beside it is found and
+    counted broader; a name its own verified quote holds is not recorded as unheld."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {"sess-1#1": {"user": "", "durable": [key_fact("only the replica moved to db-03")]}},
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Staging is still on db-02; only the replica moved to db-03.",
+                "staging is still on db-02. only the replica moved to db-03",
+            )
+        ],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("broader", "staging is still on db-02"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 1
+    assert report["totals"]["broader"] == 1
+    assert report["totals"]["stated_wrong"] == 0
+    assert len(judge_requests(fake)) == 1
+    assert report["sessions"][0]["pairs"][0]["unheld"] == []
+
+
+def test_an_approval_s_proposal_words_ground_its_statement(ev, tmp_path, cfg):
+    """A name an approval took from the proposal it answers is held by the proposal's
+    words, so it is not recorded as unheld."""
+    data = tmp_path / "data"
+    key_turns_file(data, {"sess-1#1": {"user": "", "durable": [key_fact("and the guardrail")]}})
+    fact = run_fact("Add the guardrail line to captain.md.", "and the guardrail")
+    fact["proposal"] = ["entry-1", "Add a line to captain.md saying not to push."]
+    write_summary(data, "local", "sess-1", [fact])
+    fake, judge = judged(ev, cfg, data, verdict("broader", "captain.md"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["found"] == 1
+    assert report["sessions"][0]["pairs"][0]["unheld"] == []
 
 
 def test_a_statement_the_judge_rejects_scores_wrong(ev, tmp_path, cfg):
@@ -978,7 +1022,7 @@ def test_a_statement_the_judge_rejects_scores_wrong(ev, tmp_path, cfg):
     assert report["totals"]["stated_wrong"] == 1
     assert len(judge_requests(fake)) == 1
     pair = report["sessions"][0]["pairs"][0]
-    assert pair["verdict"] == "different" and pair["check"] == "judge"
+    assert pair["verdict"] == "different"
 
 
 def test_a_narrower_verdict_counts_without_a_tag_check(ev, tmp_path, cfg):
@@ -1141,7 +1185,8 @@ def test_a_split_naming_an_unknown_side_is_refused(ev, tmp_path):
 
 
 def test_judge_check_passes_and_fails_on_the_bars(ev, tmp_path, cfg):
-    """The check passes when the planted wrong pairs are caught and the same pairs hold."""
+    """The check passes when the planted wrong pairs are caught and the same and broader
+    pairs hold."""
     data = tmp_path / "data"
     data.mkdir(parents=True)
     check = {
@@ -1159,15 +1204,30 @@ def test_judge_check_passes_and_fails_on_the_bars(ev, tmp_path, cfg):
                 "planted": "the session says to try the task two times",
             }
         ],
+        "broader": [
+            {
+                "statement": "The session said: retry twice",
+                "quote": "retry twice",
+                "planted": "the session says to retry twice, with a pause between tries",
+            }
+        ],
     }
     (data / ev.JUDGE_CHECK).write_text(json.dumps(check), encoding="utf-8")
 
-    caught = run_judge_check(ev, cfg, data, verdict("different"), verdict("same"))
+    caught = run_judge_check(
+        ev, cfg, data, verdict("different"), verdict("same"), verdict("broader")
+    )
     assert caught == 0
     # The verdict cache would answer the second run from the first, so drop it.
     (data / ev.JUDGE_CACHE).unlink()
-    missed = run_judge_check(ev, cfg, data, verdict("same"), verdict("same"))
+    missed = run_judge_check(ev, cfg, data, verdict("same"), verdict("same"), verdict("broader"))
     assert missed == 1
+    (data / ev.JUDGE_CACHE).unlink()
+    # A superset the judge calls different fails the broader bar.
+    strict = run_judge_check(
+        ev, cfg, data, verdict("different"), verdict("same"), verdict("different")
+    )
+    assert strict == 1
 
 
 def run_judge_check(ev, cfg: Config, data: Path, *replies: dict) -> int:
@@ -1250,17 +1310,19 @@ def test_score_turns_counts_key_items_found_and_stated_facts_the_key_lacks(ev, t
         "key_items": 2,
         "found": 1,
         "narrower": 0,
+        "broader": 0,
         "missed": 1,
         "stated": 2,
         "stated_wrong": 1,
         "observed": 0,
         "observed_supported": 0,
         "observed_narrower": 0,
+        "observed_broader": 0,
         "observed_unsupported": 0,
     }
     assert len(judge_requests(fake)) == 1
     pair = report["sessions"][0]["pairs"][0]
-    assert pair["verdict"] == "same" and pair["check"] == "judge"
+    assert pair["verdict"] == "same" and pair["unheld"] == []
 
 
 # ---------------------------------------------------------------------------

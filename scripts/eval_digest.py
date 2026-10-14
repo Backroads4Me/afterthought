@@ -145,15 +145,18 @@ JUDGE_SCHEMA_PATH = REPO_ROOT / "scripts" / "judge.schema.json"
 JUDGE_CACHE = "judge-cache.json"
 JUDGE_CHECK = "judge-check.json"
 SPLIT_FILE = "split.json"
-VERDICTS = frozenset({"same", "narrower", "different"})
+VERDICTS = frozenset({"same", "narrower", "broader", "different"})
+# The verdicts that count a key item found: the run statement says what the key says, part
+# of it, or all of it and more, and contradicts nothing.
+FOUND = frozenset({"same", "narrower", "broader"})
 SPLIT_NAMES = ("dev", "held-out")
 JUDGE_MAX_TOKENS = 200
 # The judge is asked at temperature 0 whatever the config says, so a stored run scores
 # the same twice.
 JUDGE_TEMPERATURE = 0.0
 # The judge-check bars, as the share of each planted set that must land right: 38 of 40
-# planted wrong judged ``different``, 36 of 40 planted same judged ``same`` or
-# ``narrower`` (BUILD-PLAN M16).
+# planted wrong judged ``different``, 36 of 40 planted same and 36 of 40 planted broader
+# judged found (BUILD-PLAN M16).
 JUDGE_CHECK_WRONG_SHARE = 0.95
 JUDGE_CHECK_SAME_SHARE = 0.90
 # The rule split.json is built by, stated for the reader of the file.
@@ -1199,20 +1202,35 @@ def _load_judge_cache(path: Path | None) -> dict[str, dict]:
     return raw
 
 
-def judge_pair(judge: Judge, key_statement: str, key_quote: str, run_statement: str) -> dict:
-    """The verdict on one pair, in two steps (BUILD-PLAN M16).
+def run_evidence(fact: dict) -> str:
+    """The verified words a run fact rests on: its quote, and the proposal's words when the
+    fact is an approval the digest grounded in the proposal it answers."""
+    parts = [fact.get("quote") or ""]
+    proposal = fact.get("proposal")
+    if isinstance(proposal, list) and len(proposal) == 2 and isinstance(proposal[1], str):
+        parts.append(proposal[1])
+    return "\n".join(part for part in parts if part)
 
-    First the names and numbers check: a name or number of the run statement that
-    neither the key statement nor its quote holds makes the pair wrong, with no model
-    call. What survives is judged: ``same`` and ``narrower`` count as found, a
-    ``different`` verdict is a wrong statement.
+
+def judge_pair(
+    judge: Judge, key_statement: str, key_quote: str, run_statement: str, run_quote: str = ""
+) -> dict:
+    """The judge's verdict on one pair (BUILD-PLAN M16): ``same``, ``narrower`` and
+    ``broader`` count as found, a ``different`` verdict is a wrong statement.
+
+    The names and numbers of the run statement that neither the key text nor the run
+    fact's own evidence (``run_evidence``) holds are recorded beside the verdict as
+    ``unheld``, for the reader of the report; they do not decide it. A summary keeps one
+    quote per fact, while the digest grounded the statement in the whole turn, so a true
+    detail can be missing from the quote; a name the run changed is the judge's to catch.
     """
-    said = "\n".join(part for part in (key_statement, key_quote) if part)
-    missing = digestmod.ungrounded(run_statement, said)
-    if missing:
-        return {"differs": missing, "verdict": "different", "check": "ungrounded"}
+    said = "\n".join(part for part in (key_statement, key_quote, run_quote) if part)
     answer = judge.verdict(key_statement, key_quote, run_statement)
-    return {"differs": answer["differs"], "verdict": answer["verdict"], "check": "judge"}
+    return {
+        "differs": answer["differs"],
+        "verdict": answer["verdict"],
+        "unheld": digestmod.ungrounded(run_statement, said),
+    }
 
 
 def digest_prompt_hash() -> str:
@@ -1282,7 +1300,10 @@ def load_judge_check(data: Path) -> dict[str, list[dict]]:
 
     ``wrong`` holds key statements with one name, number or negation changed, which the
     judge must call ``different``; ``same`` holds key statements rewritten in other words
-    with the same meaning, which the judge must call ``same`` or ``narrower``.
+    with the same meaning, which the judge must call ``same`` or ``narrower``; ``broader``
+    holds key statements with a true detail added, which the judge must count found.
+    Planted wrong statements include supersets that hide one changed name, number or
+    negation inside added detail, the case a ``broader`` verdict must not let through.
     """
     path = data / JUDGE_CHECK
     if not path.is_file():
@@ -1291,7 +1312,7 @@ def load_judge_check(data: Path) -> dict[str, list[dict]]:
     if not isinstance(raw, dict):
         raise EvalError(f"{path}: expected an object")
     check: dict[str, list[dict]] = {}
-    for name in ("wrong", "same"):
+    for name in ("wrong", "same", "broader"):
         entries = raw.get(name)
         if not isinstance(entries, list) or not entries:
             raise EvalError(f"{path}: expected a non-empty {name!r} list")
@@ -1348,11 +1369,13 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path, judge: Ju
         "wrong_facts": 0,
         "missed_facts": 0,
         "narrower": 0,
+        "broader": 0,
         "wrong_tags": 0,
         "question_decisions": 0,
         "observed": 0,
         "observed_supported": 0,
         "observed_narrower": 0,
+        "observed_broader": 0,
         "observed_unsupported": 0,
         "refused_facts": 0,
         "refused_parts": 0,
@@ -1384,11 +1407,13 @@ def score_run(data: Path, variant: str, backend: str, synthetic: Path, judge: Ju
             "wrong_facts",
             "missed_facts",
             "narrower",
+            "broader",
             "wrong_tags",
             "question_decisions",
             "observed",
             "observed_supported",
             "observed_narrower",
+            "observed_broader",
             "observed_unsupported",
         ):
             totals[name] += scored[name]
@@ -1438,6 +1463,7 @@ def score_session(
     tags = []
     pairs = []
     narrower = 0
+    broader = 0
     for group in groups:
         run_fact = group.facts.get(summary["backend"])
         key_fact = group.facts.get(KEY_BACKEND)
@@ -1453,6 +1479,7 @@ def score_session(
             key_fact.get("statement", ""),
             key_fact.get("quote", ""),
             run_fact.get("statement", ""),
+            run_evidence(run_fact),
         )
         split = placed.get(id(key_fact))
         pairs.append(
@@ -1461,7 +1488,7 @@ def score_session(
                 "run": run_fact.get("statement", ""),
                 "verdict": answer["verdict"],
                 "differs": answer["differs"],
-                "check": answer["check"],
+                "unheld": answer["unheld"],
                 "split": split,
             }
         )
@@ -1471,6 +1498,8 @@ def score_session(
             continue
         if answer["verdict"] == "narrower":
             narrower += 1
+        if answer["verdict"] == "broader":
+            broader += 1
         for name in ("source", "kind", "term", "scope"):
             if run_fact.get(name) != key_fact.get(name):
                 tags.append(
@@ -1494,11 +1523,13 @@ def score_session(
         "wrong_facts": len(wrong),
         "missed_facts": len(missed),
         "narrower": narrower,
+        "broader": broader,
         "wrong_tags": len(tags),
         "question_decisions": len(questions),
         "observed": observed["count"],
         "observed_supported": observed["supported"],
         "observed_narrower": observed["narrower"],
+        "observed_broader": observed["broader"],
         "observed_unsupported": observed["unsupported"],
         "wrong": wrong,
         "missed": missed,
@@ -1519,11 +1550,17 @@ def _judge_observed(judge: Judge, run_facts: list[dict]) -> dict[str, int]:
     """Each ``[observed]`` fact judged against its own cited quote (BUILD-PLAN M16).
 
     The judge answers whether the quote says what the statement says; the report gives
-    how many observed facts are supported, narrower and unsupported. Observed recall
+    how many observed facts are supported, narrower, broader (the statement says more than
+    its quote) and unsupported. Observed recall
     needs a key of agent entries, which does not exist.
     """
-    counts = {"count": 0, "supported": 0, "narrower": 0, "unsupported": 0}
-    buckets = {"same": "supported", "narrower": "narrower", "different": "unsupported"}
+    counts = {"count": 0, "supported": 0, "narrower": 0, "broader": 0, "unsupported": 0}
+    buckets = {
+        "same": "supported",
+        "narrower": "narrower",
+        "broader": "broader",
+        "different": "unsupported",
+    }
     for fact in run_facts:
         if fact.get("source") != "observed" or not fact.get("quote"):
             continue
@@ -1536,7 +1573,7 @@ def _judge_observed(judge: Judge, run_facts: list[dict]) -> dict[str, int]:
 def _split_buckets() -> dict[str, dict[str, int]]:
     """The per-split key-side counts a report carries, ``unsplit`` making them add up."""
     return {
-        name: {"key_facts": 0, "found": 0, "narrower": 0, "missed": 0, "wrong": 0}
+        name: {"key_facts": 0, "found": 0, "narrower": 0, "broader": 0, "missed": 0, "wrong": 0}
         for name in (*SPLIT_NAMES, "unsplit")
     }
 
@@ -1558,8 +1595,8 @@ def _add_session_splits(splits: dict[str, dict[str, int]], scored: dict) -> None
         bucket = _split_bucket(splits, record.get("split"))
         bucket["key_facts"] += 1
         bucket["found"] += 1
-        if record["verdict"] == "narrower":
-            bucket["narrower"] += 1
+        if record["verdict"] in ("narrower", "broader"):
+            bucket[record["verdict"]] += 1
     for record in scored["wrong"]:
         if record.get("split") is None:
             continue
@@ -1637,10 +1674,11 @@ def _print_report(report: dict) -> None:
         f"{report['backend']} ({report['variant']}): {totals['sessions']} sessions, "
         f"{totals['facts_kept']} facts kept against {totals['key_facts']} key facts: "
         f"{totals['wrong_facts']} wrong, {totals['missed_facts']} missed, "
-        f"{totals['narrower']} narrower, "
+        f"{totals['narrower']} narrower, {totals['broader']} broader, "
         f"{totals['wrong_tags']} wrong tags, {totals['question_decisions']} questions "
         f"as decisions, observed {totals['observed_supported']} supported, "
-        f"{totals['observed_narrower']} narrower, {totals['observed_unsupported']} "
+        f"{totals['observed_narrower']} narrower, {totals['observed_broader']} broader, "
+        f"{totals['observed_unsupported']} "
         f"unsupported of {totals['observed']}, "
         f"{totals['refused_facts']} refused facts, "
         f"{totals['refused_parts']} refused parts, "
@@ -1651,7 +1689,8 @@ def _print_report(report: dict) -> None:
     for name, bucket in (report.get("splits") or {}).items():
         print(
             f"  split {name}: {bucket['found']} of {bucket['key_facts']} key facts found"
-            f" ({bucket['narrower']} narrower), {bucket['missed']} missed,"
+            f" ({bucket['narrower']} narrower, {bucket['broader']} broader),"
+            f" {bucket['missed']} missed,"
             f" {bucket['wrong']} wrong statements",
             flush=True,
         )
@@ -1795,12 +1834,14 @@ def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
         "key_items": 0,
         "found": 0,
         "narrower": 0,
+        "broader": 0,
         "missed": 0,
         "stated": 0,
         "stated_wrong": 0,
         "observed": 0,
         "observed_supported": 0,
         "observed_narrower": 0,
+        "observed_broader": 0,
         "observed_unsupported": 0,
     }
     buckets = _split_buckets() if split else None
@@ -1850,6 +1891,7 @@ def _score_turns_session(
         "key_items": len(items),
         "found": 0,
         "narrower": 0,
+        "broader": 0,
         "missed": 0,
         "stated": 0,
         "stated_wrong": 0,
@@ -1881,6 +1923,7 @@ def _score_turns_session(
             item.get("statement", ""),
             item.get("quote", ""),
             fact.get("statement", ""),
+            run_evidence(fact),
         )
         pairs.append(
             {
@@ -1888,7 +1931,7 @@ def _score_turns_session(
                 "run": fact.get("statement", ""),
                 "verdict": answer["verdict"],
                 "differs": answer["differs"],
-                "check": answer["check"],
+                "unheld": answer["unheld"],
                 "split": where,
             }
         )
@@ -1908,20 +1951,22 @@ def _score_turns_session(
         counts["found"] += 1
         if bucket is not None:
             bucket["found"] += 1
-        if answer["verdict"] == "narrower":
-            counts["narrower"] += 1
+        if answer["verdict"] in ("narrower", "broader"):
+            counts[answer["verdict"]] += 1
             if bucket is not None:
-                bucket["narrower"] += 1
+                bucket[answer["verdict"]] += 1
     observed = _judge_observed(judge, facts)
     counts["stated"] = sum(1 for fact in facts if fact.get("source") == "stated")
     counts["observed"] = observed["count"]
     counts["observed_supported"] = observed["supported"]
     counts["observed_narrower"] = observed["narrower"]
+    counts["observed_broader"] = observed["broader"]
     counts["observed_unsupported"] = observed["unsupported"]
     record = {
         "key_items": len(items),
         "found": counts["found"],
         "narrower": counts["narrower"],
+        "broader": counts["broader"],
         "missed": counts["missed"],
         "stated": counts["stated"],
         "wrong": wrong_statements,
@@ -1945,15 +1990,17 @@ def _cmd_score_turns(args: argparse.Namespace) -> int:
     _write_json(out, report)
     print(
         f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items"
-        f" ({t['narrower']} narrower); {t['stated_wrong']} of {t['stated']} [stated] facts"
+        f" ({t['narrower']} narrower, {t['broader']} broader); {t['stated_wrong']} of"
+        f" {t['stated']} [stated] facts"
         f" not in the key; observed {t['observed_supported']} supported,"
-        f" {t['observed_narrower']} narrower, {t['observed_unsupported']} unsupported of"
+        f" {t['observed_narrower']} narrower, {t['observed_broader']} broader,"
+        f" {t['observed_unsupported']} unsupported of"
         f" {t['observed']}; judge calls {report['judge_calls']}; report {out}"
     )
     for name, bucket in (report.get("splits") or {}).items():
         print(
             f"  split {name}: found {bucket['found']} of {bucket['key_facts']}"
-            f" key items ({bucket['narrower']} narrower)"
+            f" key items ({bucket['narrower']} narrower, {bucket['broader']} broader)"
         )
     return 0
 
@@ -2031,9 +2078,11 @@ def _cmd_judge_check(args: argparse.Namespace) -> int:
         ]
     wrong_hits = sum(1 for row in judged["wrong"] if row["verdict"] == "different")
     same_hits = sum(1 for row in judged["same"] if row["verdict"] in ("same", "narrower"))
+    broader_hits = sum(1 for row in judged["broader"] if row["verdict"] in FOUND)
     need_wrong = math.ceil(JUDGE_CHECK_WRONG_SHARE * len(judged["wrong"]))
     need_same = math.ceil(JUDGE_CHECK_SAME_SHARE * len(judged["same"]))
-    passed = wrong_hits >= need_wrong and same_hits >= need_same
+    need_broader = math.ceil(JUDGE_CHECK_SAME_SHARE * len(judged["broader"]))
+    passed = wrong_hits >= need_wrong and same_hits >= need_same and broader_hits >= need_broader
     report = {
         "at": datetime.now(UTC).isoformat(),
         "judge_prompt": judge.prompt_hash,
@@ -2042,10 +2091,13 @@ def _cmd_judge_check(args: argparse.Namespace) -> int:
         "judge_calls": judge.calls,
         "wrong": judged["wrong"],
         "same": judged["same"],
+        "broader": judged["broader"],
         "wrong_different": wrong_hits,
         "wrong_needed": need_wrong,
         "same_ok": same_hits,
         "same_needed": need_same,
+        "broader_found": broader_hits,
+        "broader_needed": need_broader,
         "passed": passed,
     }
     out = data / "reports" / f"{time.strftime('%Y%m%dT%H%M%S')}-judge-check.json"
@@ -2053,7 +2105,8 @@ def _cmd_judge_check(args: argparse.Namespace) -> int:
     print(
         f"judge check: {wrong_hits} of {len(judged['wrong'])} planted wrong judged"
         f" different (need {need_wrong}), {same_hits} of {len(judged['same'])} planted"
-        f" same judged same or narrower (need {need_same}) ->"
+        f" same judged same or narrower (need {need_same}), {broader_hits} of"
+        f" {len(judged['broader'])} planted broader judged found (need {need_broader}) ->"
         f" {'PASS' if passed else 'FAIL'}; report {out}"
     )
     return 0 if passed else 1
@@ -2125,7 +2178,7 @@ def score_block(
             # line's extra words would read as a difference.
             answer = judge.verdict(line, "", value.value)
             judged.append({"line": line, **answer})
-            if answer["verdict"] in ("same", "narrower"):
+            if answer["verdict"] in FOUND:
                 present = True
                 line_found = line
                 break

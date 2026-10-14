@@ -11,10 +11,18 @@
     },
     "verdict": {
       "type": "string",
-      "enum": ["same", "narrower", "different"],
-      "description": "same: the run statement says what the key text says. narrower: it says part of what the key text says and contradicts nothing. different: it says something the key text does not, contradicts it, or leaves out something that changes the meaning."
+      "enum": [
+        "same",
+        "narrower",
+        "broader",
+        "different"
+      ],
+      "description": "same: the run statement says what the key text says. narrower: it says part of what the key text says and contradicts nothing. broader: it says everything the key text says and adds more beside it, changing nothing the key text says. different: it changes or contradicts what the key text says, says something else in its place, or leaves out something that changes the meaning."
     }
   },
-  "required": ["differs", "verdict"],
+  "required": [
+    "differs",
+    "verdict"
+  ],
   "additionalProperties": false
 }
