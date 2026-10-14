@@ -3886,8 +3886,10 @@ def test_the_digest_prompt_keeps_lasting_values_set_by_orders():
     """BUILD-PLAN T47: a lasting value an order sets is not the order, and is kept as a fact
     or decision stating the value."""
     assert (
-        "A lasting value an order sets is not the order, and is kept as a fact or decision"
-        " stating the value." in prompt_words()
+        "A value an order names that a later session must know (where something lives, what it"
+        " is called, what a setting is set to) is not the order, and is kept as a fact or"
+        " decision stating the value; that work was started, run or finished is never such a"
+        " value." in prompt_words()
     )
 
 

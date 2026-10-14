@@ -14,8 +14,9 @@ documents already say.
 Also never a fact: a one-time order to do a piece of work, given or approved by the user,
 whether or not it was carried out. A standing rule, a permission, and the choice an
 approval settles are not such orders.
-A lasting value an order sets is not the order, and is kept as a fact or decision
-stating the value.
+A value an order names that a later session must know (where something lives, what it
+is called, what a setting is set to) is not the order, and is kept as a fact or decision
+stating the value; that work was started, run or finished is never such a value.
 
 Memory has two terms. A line on a long-term page should still be true and useful a
 year from now; one that will not last is not worth keeping. A line on recent.md is

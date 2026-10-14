@@ -581,8 +581,10 @@ def test_an_order_to_do_work_is_never_a_fact_in_digest_decide_or_review():
     order = (
         "Also never a fact: a one-time order to do a piece of work, given or approved by the"
         " user, whether or not it was carried out. A standing rule, a permission, and the"
-        " choice an approval settles are not such orders. A lasting value an order sets is not"
-        " the order, and is kept as a fact or decision stating the value."
+        " choice an approval settles are not such orders. A value an order names that a later"
+        " session must know (where something lives, what it is called, what a setting is set"
+        " to) is not the order, and is kept as a fact or decision stating the value; that work"
+        " was started, run or finished is never such a value."
     )
     prompts = {
         "digest.md": digest.prompt_text(),

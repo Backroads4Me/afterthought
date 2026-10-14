@@ -1288,8 +1288,9 @@ def test_the_turns_prompt_keeps_a_lasting_value_set_by_a_request():
     the order."""
     words = " ".join(digest.turns_prompt_text().split())
     assert (
-        "A request that sets a lasting value (a location, a name, a setting, a choice of"
-        " tool) also gives that value as its own item, labelled decision or fact, with a"
-        ' statement that says the value and not the order ("The project lives at /srv/project").'
-        in words
+        "A request that names a value a later session must know (where something lives,"
+        " what something is called, what a setting is set to) also gives that value as its"
+        " own item, labelled decision or fact, with a statement that says the value and not"
+        ' the order ("The project lives at /srv/project"). That work was started, run,'
+        " restarted, retried or finished is never such a value." in words
     )

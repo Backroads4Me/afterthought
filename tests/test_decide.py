@@ -569,8 +569,10 @@ def test_the_decide_prompt_keeps_lasting_values_set_by_orders():
     or decision stating the value."""
     words = " ".join(decide.prompt().split())
     assert (
-        "A lasting value an order sets is not the order, and is kept as a fact or decision"
-        " stating the value." in words
+        "A value an order names that a later session must know (where something lives, what it"
+        " is called, what a setting is set to) is not the order, and is kept as a fact or"
+        " decision stating the value; that work was started, run or finished is never such a"
+        " value." in words
     )
 
 
