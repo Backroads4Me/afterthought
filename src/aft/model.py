@@ -27,7 +27,6 @@ import os
 import random
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -37,13 +36,6 @@ from aft import schema as schemamod
 from aft.config import Config
 
 USAGE_LOG = "usage.jsonl"
-# A budget check reads the day's total from the tail of the ledger (BUILD-PLAN T51):
-# the file stays the truth, and what this cache keeps beside it - every line's totals,
-# the newest days' lines - is rebuilt from the file whenever the file's size or
-# modification time moves. Records older than the kept days still count in the totals,
-# and a check older than the kept days answers by reading the file whole.
-USAGE_CACHE = "usage-cache.json"
-USAGE_CACHE_DAYS = 8
 # A digest chunk is large and the endpoint is shared, so a call is allowed to take
 # a while before it counts as lost.
 TIMEOUT_SECONDS = 300.0
@@ -416,228 +408,81 @@ def tokens_used(config: Config, since: datetime | None = None, purpose: str | No
     With a ``purpose``, only ledger lines of that purpose count; a line written without
     one counts as ``work``, the purpose every call had before the ledger named one
     (BUILD-PLAN F86).
-
-    The ledger file stays the truth (BUILD-PLAN T51): a check answers from the cache
-    kept beside it - the totals of every line, the newest days' lines - and the cache is
-    rebuilt from the file whenever the file's size or modification time moves, so a line
-    anything else wrote is read again. A check older than the cache keeps days reads the
-    file whole, as does a check with nothing cached.
     """
     path = usage_path(config)
     if not path.exists():
         return 0
     start = _utc(since) if since is not None else None
-    cache = _usage_cache(config, path)
-    if cache is not None:
-        answer = _tokens_from_cache(cache, start, purpose)
-        if answer is not None:
-            return answer
     total = 0
     # A torn write must not spoil the ledger for good, so bytes that do not decode
     # are read as replacement characters and any line that is not a billable record
     # of this home's own shape is left out of the total.
-    for line in path.read_text(errors="replace").splitlines():
-        billable = _billable(line)
-        if billable is None:
+    for line in _ledger_lines(path, start):
+        try:
+            record = json.loads(line)
+        except ValueError:
             continue
-        at, line_purpose, tokens = billable
-        if purpose is not None and line_purpose != purpose:
+        if not isinstance(record, dict):
+            continue
+        if purpose is not None and record.get("purpose", "work") != purpose:
             continue
         if start is not None:
-            at_time = _time(at)
-            if at_time is None or at_time < start:
+            at = _time(record.get("at"))
+            if at is None or at < start:
                 continue
-        total += tokens
+        prompt = _token_count(record, "prompt_tokens")
+        completion = _token_count(record, "completion_tokens")
+        if prompt is None or completion is None:
+            continue
+        total += prompt + completion
     return total
 
 
-@dataclass
-class _LedgerCache:
-    """What a budget check keeps beside the usage ledger (BUILD-PLAN T51).
-
-    ``total`` holds every billable line's tokens by purpose, however old. ``days`` holds
-    the newest days' lines as ``[at, purpose, tokens]`` under the UTC day the line's
-    stamp names, with a line whose stamp cannot be read kept under the empty day: a
-    check since a moment skips it, as the file read does, and a check of everything
-    counts it in the totals. ``size`` and ``mtime_ns`` are the file state the cache was
-    read beside, and a check that finds either moved rebuilds from the file.
-    """
-
-    size: int
-    mtime_ns: int
-    total: dict[str, int] = field(default_factory=dict)
-    days: dict[str, list[list[Any]]] = field(default_factory=dict)
+#: The ledger is appended in time order, give or take writers racing each other, so a
+#: read from the end stops once it passes a line this much older than the start it
+#: counts from (BUILD-PLAN T51).
+LEDGER_SLACK = timedelta(hours=1)
+#: How much of the ledger a read from the end takes at a time.
+LEDGER_BLOCK = 64 * 1024
 
 
-def _billable(line: str) -> tuple[Any, Any, int] | None:
-    """The ``(at, purpose, tokens)`` a ledger line charges, or None when it charges
-    nothing: a torn or non-JSON line, a record of another shape, or one whose token
-    counts are missing or not whole numbers."""
+def _ledger_lines(path: Path, start: datetime | None) -> list[str]:
+    """The ledger's lines a check since ``start`` needs: all of them when ``start`` is
+    None, otherwise the lines from the end back to the first one stamped more than
+    ``LEDGER_SLACK`` before ``start`` (BUILD-PLAN T51). The file stays the only record;
+    a budget check reads the day's tail instead of every day the ledger has kept."""
+    if start is None:
+        return path.read_text(errors="replace").splitlines()
+    stop = start - LEDGER_SLACK
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        data = b""
+        while position > 0:
+            step = min(LEDGER_BLOCK, position)
+            position -= step
+            handle.seek(position)
+            data = handle.read(step) + data
+            # The first line of what is read may be cut short by the block's edge; only
+            # the whole lines after it can say how far back the read has come.
+            whole = data.split(b"\n")[1:] if position > 0 else data.split(b"\n")
+            if any(_before(line, stop) for line in whole):
+                break
+    lines = data.decode(errors="replace").splitlines()
+    return lines[1:] if position > 0 else lines
+
+
+def _before(line: bytes, stop: datetime) -> bool:
+    """Whether a ledger line is stamped before ``stop``; a line that cannot be read is
+    not, so it never ends a read early."""
     try:
         record = json.loads(line)
     except ValueError:
-        return None
+        return False
     if not isinstance(record, dict):
-        return None
-    prompt = _token_count(record, "prompt_tokens")
-    completion = _token_count(record, "completion_tokens")
-    if prompt is None or completion is None:
-        return None
-    # A purpose that is not a string never matches a check's purpose, which is a string
-    # or None, so it is keyed by its repr: the file read counted such a line all the
-    # same, and the cache keys it without choking on it.
-    return record.get("at"), _purpose_key(record.get("purpose", "work")), prompt + completion
-
-
-def _purpose_key(purpose: Any) -> str:
-    """The cache key a ledger line's purpose is kept under."""
-    return purpose if isinstance(purpose, str) else repr(purpose)
-
-
-def _usage_cache(config: Config, path: Path) -> _LedgerCache | None:
-    """The cache beside the ledger, rebuilt from the file when the file moved or the
-    cache is gone or unreadable. A rebuild failure leaves the check to read the file
-    whole; the ledger is the truth and the cache is only a way to read it less."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    cache = _read_usage_cache(config.home / USAGE_CACHE)
-    if cache is not None and cache.size == stat.st_size and cache.mtime_ns == stat.st_mtime_ns:
-        return cache
-    fresh = _parse_usage(path, stat)
-    _write_usage_cache(config.home / USAGE_CACHE, fresh)
-    return fresh
-
-
-def _parse_usage(path: Path, stat: os.stat_result) -> _LedgerCache:
-    """The cache state of the ledger as it stands: one read of the file."""
-    cache = _LedgerCache(size=stat.st_size, mtime_ns=stat.st_mtime_ns)
-    # A torn write must not spoil the ledger for good, so bytes that do not decode
-    # are read as replacement characters and any line that is not a billable record
-    # of this home's own shape is left out of the cache, as the file read leaves it
-    # out of the total.
-    for line in path.read_text(errors="replace").splitlines():
-        billable = _billable(line)
-        if billable is None:
-            continue
-        at, purpose, tokens = billable
-        cache.total[purpose] = cache.total.get(purpose, 0) + tokens
-        when = _time(at)
-        day = when.astimezone(UTC).date().isoformat() if when is not None else ""
-        cache.days.setdefault(day, []).append([at, purpose, tokens])
-    _trim_days(cache)
-    return cache
-
-
-def _trim_days(cache: _LedgerCache) -> None:
-    """Keep only the newest days' lines in the cache, the empty day with them: the
-    totals carry every line, so a check of everything never reads the file for the
-    trimmed days."""
-    dated = sorted(day for day in cache.days if day)
-    for day in dated[: max(0, len(dated) - USAGE_CACHE_DAYS)]:
-        del cache.days[day]
-
-
-def _read_usage_cache(path: Path) -> _LedgerCache | None:
-    """The cached ledger state, or None when it is absent or unreadable or of another
-    shape: anything amiss is answered by reading the ledger itself."""
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    if not isinstance(state, dict):
-        return None
-    size, mtime_ns, total, days = (
-        state.get("size"),
-        state.get("mtime_ns"),
-        state.get("total"),
-        state.get("days"),
-    )
-    if not isinstance(size, int) or not isinstance(mtime_ns, int):
-        return None
-    if not isinstance(total, dict) or not all(
-        isinstance(key, str) and isinstance(value, int) for key, value in total.items()
-    ):
-        return None
-    if not isinstance(days, dict) or not all(
-        isinstance(key, str)
-        and isinstance(lines, list)
-        and all(isinstance(line, list) and len(line) == 3 for line in lines)
-        for key, lines in days.items()
-    ):
-        return None
-    return _LedgerCache(size=size, mtime_ns=mtime_ns, total=total, days=days)
-
-
-def _write_usage_cache(path: Path, cache: _LedgerCache) -> None:
-    """Write the cache beside the ledger, best effort: a cache that cannot be written
-    leaves every check to read the ledger itself, which answers the same."""
-    try:
-        path.write_text(
-            json.dumps(
-                {
-                    "size": cache.size,
-                    "mtime_ns": cache.mtime_ns,
-                    "total": cache.total,
-                    "days": cache.days,
-                }
-            ),
-            encoding="utf-8",
-        )
-    except OSError:
-        pass
-
-
-def _tokens_from_cache(
-    cache: _LedgerCache, start: datetime | None, purpose: str | None
-) -> int | None:
-    """The answer a check takes from the cache, or None when the cache cannot answer
-    it: a check since a moment older than the days the cache keeps reads the file
-    whole, because the trimmed days' lines are not in it."""
-    if start is None:
-        return sum(cache.total.values())
-    dated = sorted(day for day in cache.days if day)
-    if dated and start.date().isoformat() < dated[0]:
-        return None
-    total = 0
-    # A whole day older than the start cannot hold a line since it: the day a line's
-    # stamp names is the day it is cached under, so the lines of the days before the
-    # start's day are all skipped, as the file read skips them one by one.
-    for day in (day for day in cache.days if day and day >= start.date().isoformat()):
-        for at, line_purpose, tokens in cache.days[day]:
-            if purpose is not None and line_purpose != purpose:
-                continue
-            at_time = _time(at)
-            if at_time is None or at_time < start:
-                continue
-            total += tokens
-    return total
-
-
-def _refresh_usage_cache(
-    config: Config, path: Path, record: dict[str, Any], tokens: int, appended: int
-) -> None:
-    """Fold the line just appended into the cache beside the ledger, so the check that
-    follows reads the file less (BUILD-PLAN T51). The cache is folded only when it
-    describes the ledger as it stood just before this line: its size plus this line's
-    bytes is the ledger's size now. When it is gone, unreadable, or of any other state,
-    it is left alone and the next check rebuilds it from the file, which is the truth."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return
-    cache = _read_usage_cache(config.home / USAGE_CACHE)
-    if cache is None or cache.size + appended != stat.st_size:
-        return
-    at, purpose = record.get("at"), _purpose_key(record.get("purpose", "work"))
-    cache.total[purpose] = cache.total.get(purpose, 0) + tokens
-    when = _time(at)
-    day = when.astimezone(UTC).date().isoformat() if when is not None else ""
-    cache.days.setdefault(day, []).append([at, purpose, tokens])
-    _trim_days(cache)
-    cache.size, cache.mtime_ns = stat.st_size, stat.st_mtime_ns
-    _write_usage_cache(config.home / USAGE_CACHE, cache)
+        return False
+    at = _time(record.get("at"))
+    return at is not None and at < stop
 
 
 def tokens_used_today(config: Config, now: datetime | None = None, purpose: str = "work") -> int:
@@ -877,10 +722,6 @@ def _record_usage(config: Config, started: datetime, usage: Any, purpose: str = 
         # An answer that cannot be billed is not returned: budgets are read from this
         # log, so the caller leaves the work queued and reports the failure (DESIGN 14).
         raise ModelError(f"cannot record token usage in {path}: {exc}") from exc
-    # The check that follows this call reads the day's total from the cache beside the
-    # ledger (BUILD-PLAN T51), so the line just appended is folded into it instead of
-    # leaving the next check to rebuild the cache from the file.
-    _refresh_usage_cache(config, path, record, prompt + completion, len(json.dumps(record) + "\n"))
 
 
 def _token_count(source: Any, key: str) -> int | None:
