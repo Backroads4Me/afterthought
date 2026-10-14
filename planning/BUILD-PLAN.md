@@ -2215,6 +2215,11 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     24, 2 and 2 to 4 and 5. Under the new scorer F88 does not meet its own rule; T46
     follows it up. A first judge without `broader` and with the names check deciding
     failed the hand read: it called most statements holding a true extra detail wrong.
+  - **Baseline, 2026-10-14** (main `fcc8285`, turns pipeline, GLM-5.3-Flash, digest
+    prompts `56d06506906a135f`, judge prompt `79b5313192c2f4a1`; variants
+    `main-2026-10-14-1` and `-2`): found 25 and 27 of 76, held-out 14 and 15 of 41, dev 11
+    and 12 of 35; wrong `[stated]` 4 of 28 and 2 of 26. A prompt change is compared with
+    these runs on held-out.
   - **Sandbox:** every eval run that calls a model uses a temporary `AFT_HOME` and a neutral
     working directory, so the F87 recall hook and capture do not reach the user's memory.
   - **Not in this change:** an `[observed]` recall key; paired per-session differences with
