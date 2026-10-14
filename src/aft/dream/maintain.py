@@ -7,8 +7,6 @@ flagging oversize pages, regenerating index.md files, and appending to log.md.
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -60,7 +58,7 @@ def check_anchors(
     config_host: str,
     record_write: Callable[[Path], None] | None = None,
 ) -> tuple[list[BrokenAnchor], list[ClearedAnchor]]:
-    """Check fact anchors with ripgrep against the project default branch.
+    """Check fact anchors against the project default branch.
 
     Anchors whose commit is not yet on the default branch are skipped.
     A broken anchor marks the fact line stale, unless the line has an open note,
@@ -114,7 +112,7 @@ def check_anchors(
                 continue
 
             ancestor_check = git(
-                ["merge-base", "--is-ancestor", str(commit), default_branch],
+                ["merge-base", "--is-ancestor", "--end-of-options", str(commit), default_branch],
                 cwd=repo_path,
                 check=False,
             )
@@ -130,24 +128,7 @@ def check_anchors(
                 is_broken = True
             else:
                 content = show_res.stdout
-                is_broken = False
-                rg_bin = shutil.which("rg")
-                for word in all_of:
-                    target_str = str(word)
-                    if rg_bin is not None:
-                        rg_res = subprocess.run(
-                            [rg_bin, "-F", "-q", "--", target_str],
-                            input=content,
-                            capture_output=True,
-                            text=True,
-                        )
-                        if rg_res.returncode != 0:
-                            is_broken = True
-                            break
-                    else:
-                        if target_str not in content:
-                            is_broken = True
-                            break
+                is_broken = any(str(word) not in content for word in all_of)
 
             reason = f"anchor words gone from {anchor_path}" if is_broken else ""
             anchor_status[sid] = (is_broken, reason)

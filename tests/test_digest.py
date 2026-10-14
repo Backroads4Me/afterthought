@@ -2617,6 +2617,31 @@ def test_the_schema_holds_the_keys_limits_and_enums_the_plan_gives():
     assert handoff["properties"]["files"]["items"]["maxLength"] == 200
 
 
+def test_summary_schema_holds_goal_and_files():
+    """L2: summary.schema.json agrees with digest.schema.json on goal and files in handoff."""
+    from aft import schema
+
+    s_schema = digest.summary_schema()
+    schema.check(s_schema)
+    assert s_schema["required"] == ["summary", "handoff"]
+    assert s_schema["properties"]["summary"]["maxLength"] == 800
+    handoff = s_schema["properties"]["handoff"]
+    assert handoff["required"] == ["in_flight", "failed", "open"]
+    assert "goal" in handoff["properties"]
+    assert "files" in handoff["properties"]
+    assert handoff["properties"]["goal"]["required"] == ["text", "entry"]
+    assert handoff["properties"]["goal"]["properties"]["text"]["maxLength"] == 400
+    assert handoff["properties"]["files"]["maxItems"] == 10
+    assert handoff["properties"]["files"]["items"]["maxLength"] == 200
+
+
+def test_the_summary_prompt_describes_goal_and_files():
+    """L2: summary.md prompt describes goal and files in handoff."""
+    words = digest.summary_prompt_text()
+    assert "- goal:" in words
+    assert "- files:" in words
+
+
 def test_the_schema_is_one_the_validator_reads():
     """`aft.schema` is what constrains the answer, so its own checks run before any call."""
     from aft import schema

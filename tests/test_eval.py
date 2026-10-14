@@ -1577,6 +1577,23 @@ def test_the_rescore_command_requires_an_output(tmp_path):
         )
 
 
+def test_longmemeval_peak_rss_mb_units(monkeypatch):
+    """L11: longmemeval reports peak RSS in MB on Linux (KB) and macOS (bytes)."""
+    from unittest.mock import MagicMock
+
+    mock_ru = MagicMock()
+    mock_ru.ru_maxrss = 1024 * 1024  # 1,048,576
+    monkeypatch.setattr(longmemeval.resource, "getrusage", lambda _who: mock_ru)
+
+    # On Linux (ru_maxrss is in KB): 1024*1024 KB = 1024 MB
+    monkeypatch.setattr(longmemeval.sys, "platform", "linux")
+    assert longmemeval._peak_rss_mb() == 1024.0
+
+    # On macOS (ru_maxrss is in bytes): 1024*1024 bytes = 1 MB
+    monkeypatch.setattr(longmemeval.sys, "platform", "darwin")
+    assert longmemeval._peak_rss_mb() == 1.0
+
+
 # ---------------------------------------------------------------------------
 # F80: the rank measure over search alone
 

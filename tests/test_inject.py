@@ -955,6 +955,26 @@ def test_a_session_start_hook_injects_into_a_path_capture_excludes(
     assert out == EXPECTED + "\n"
 
 
+def test_session_start_hook_and_inject_agree_on_an_excluded_path(
+    widget, tmp_path, capsys, monkeypatch
+):
+    """L7: aft inject and the session-start hook resolve an excluded path with the same
+    never=capture.exclude_paths, so both agree."""
+    monkeypatch.setenv("AFT_HOME", str(widget.home))
+    excluded_dir = tmp_path / "scratch" / "nested"
+    excluded_dir.mkdir(parents=True)
+    scratch = tmp_path / "scratch"
+    cfg_file = widget.home / "config.toml"
+    cfg_file.write_text(cfg_file.read_text() + f'[capture]\nexclude_paths = ["{scratch}"]\n')
+
+    assert main(["inject", str(excluded_dir)]) == 0
+    injected = capsys.readouterr().out
+    out = run_session_start(
+        monkeypatch, capsys, "claude-session-start.json", *CLAUDE_START, excluded_dir
+    )
+    assert out == injected
+
+
 def recorded_projects(config: Config) -> list[tuple[str, str | None, str]]:
     """Every ``(agent, project id, slug)`` the queue recorded at a session start."""
     path = config.home / "queue.sqlite"

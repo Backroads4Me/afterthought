@@ -16,6 +16,7 @@ makes one commit per project run (separate from M4.1's checkpoint and tagging co
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -278,6 +279,24 @@ def _project_of_group(
             return project, (None if project is not None else path)
         return registry.by_slug(record.slug), None
     return registry.by_slug(slug), None
+
+
+def _fact_entry(fact_item: page.Fact, sources_map: dict[str, dict]) -> str | None:
+    for ref in fact_item.refs:
+        s_entry = sources_map.get(ref, {})
+        res = str(s_entry.get("resource", ""))
+        if "#" in res:
+            return res.rsplit("#", 1)[-1]
+    return None
+
+
+def _meta_key(f_dict: dict) -> tuple[str, str | None, str | None, str | None]:
+    return (
+        f_dict.get("statement", ""),
+        f_dict.get("entry"),
+        f_dict.get("kind"),
+        f_dict.get("source"),
+    )
 
 
 def run_project(
@@ -875,16 +894,34 @@ def run_project(
                 if isinstance(s, dict) and s.get("id") is not None
             }
 
-            facts_meta = {
-                f["statement"]: f
-                for f in (aft_dict.get("facts") or [])
-                if isinstance(f, dict) and "statement" in f
-            }
+            facts_meta: dict[tuple[str, str | None, str | None, str | None], list[dict]] = (
+                defaultdict(list)
+            )
+            for f in aft_dict.get("facts") or []:
+                if isinstance(f, dict) and "statement" in f:
+                    facts_meta[_meta_key(f)].append(f)
 
             parsed_page = page.parse(d_text, digest_path)
 
             for fact in parsed_page.facts:
-                meta = facts_meta.get(fact.statement, {})
+                entry = _fact_entry(fact, sources_map)
+                key = (fact.statement, entry, fact.kind, fact.source)
+                if facts_meta.get(key):
+                    meta = facts_meta[key].pop(0)
+                else:
+                    no_entry_key = (fact.statement, None, fact.kind, fact.source)
+                    if facts_meta.get(no_entry_key):
+                        meta = facts_meta[no_entry_key].pop(0)
+                    else:
+                        match = next(
+                            (
+                                k
+                                for k, meta_items in facts_meta.items()
+                                if k[0] == fact.statement and meta_items
+                            ),
+                            None,
+                        )
+                        meta = facts_meta[match].pop(0) if match is not None else {}
                 scope = meta.get("scope", "project")
                 if unfiled and scope != "global":
                     # A session of no project has no project page for this fact; it stays

@@ -1825,10 +1825,13 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
         return "", None
     registry = Registry.load(config.registry_path)
     try:
-        # The directory is resolved without the capture exclusions: they keep a session's
-        # words out of the queue, and the record is skipped below for that, but a session
-        # that starts in an excluded path still gets the memory the path's project holds.
-        result = keys.resolve(event.cwd, registry, config.host)
+        # The directory is resolved with capture.exclude_paths, matching aft inject.
+        result = keys.resolve(
+            event.cwd,
+            registry,
+            config.host,
+            never=config.settings.capture.exclude_paths,
+        )
     except gitutil.GitError:
         result = keys.Resolution(kind=keys.NONE, cwd=event.cwd)
     from aft import notes

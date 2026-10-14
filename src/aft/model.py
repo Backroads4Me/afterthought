@@ -147,7 +147,7 @@ def complete_json(
         "temperature": config.settings.model.temperature,
         "response_format": {
             "type": "json_schema",
-            "json_schema": {"name": SCHEMA_NAME, "schema": schema},
+            "json_schema": {"name": SCHEMA_NAME, "strict": True, "schema": schema},
         },
     }
 
