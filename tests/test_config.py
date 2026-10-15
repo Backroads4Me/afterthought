@@ -63,6 +63,17 @@ def test_digest_verify_settings_read_from_config(home):
     assert settings.verifier_model == "small"
 
 
+def test_digest_keep_check_defaults_on(home):
+    settings = configmod.load().settings.digest
+    assert settings.keep_check is True
+
+
+def test_digest_keep_check_read_from_config(home):
+    (home / "config.toml").write_text("[digest]\nkeep_check = false\n")
+    settings = configmod.load().settings.digest
+    assert settings.keep_check is False
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

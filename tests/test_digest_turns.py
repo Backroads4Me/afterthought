@@ -43,7 +43,9 @@ def turns_config(cfg: Config) -> Config:
     """The served config with the turns pipeline chosen, re-read from disk."""
     path = cfg.home / configmod.CONFIG_NAME
     path.write_text(
-        path.read_text(encoding="utf-8").replace('pipeline = "base"', 'pipeline = "turns"'),
+        path.read_text(encoding="utf-8").replace(
+            'pipeline = "base"', 'pipeline = "turns"\nkeep_check = false'
+        ),
         encoding="utf-8",
     )
     return configmod.load()
@@ -1081,7 +1083,7 @@ def verified_two_endpoint_config(cfg: Config, verifier: FakeEndpoint, key_env: s
     )
     text = text.replace(
         'pipeline = "base"\n',
-        'pipeline = "turns"\nverify_items = true\n'
+        'pipeline = "turns"\nkeep_check = false\nverify_items = true\n'
         f'verifier_endpoint = "{verifier.endpoint}"\n'
         + (f'verifier_api_key_env = "{key_env}"\n' if key_env else ""),
     )
@@ -1438,3 +1440,196 @@ def test_the_turns_prompt_labels_a_yes_to_work_a_request():
         " something) is a request, as the same words without the proposal would be." in words
     )
     assert '"yes, build the importer and merge it"' in words
+
+
+def keep_config(cfg: Config) -> Config:
+    """The turns config with the keep check turned on, re-read from disk."""
+    path = cfg.home / configmod.CONFIG_NAME
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("keep_check = false", "keep_check = true"),
+        encoding="utf-8",
+    )
+    return configmod.load()
+
+
+def run_keep_checked(session: Session, *answers: object) -> tuple[digest.Digest, FakeEndpoint]:
+    """The digest of the shared session with the keep check on, and the fake that served it."""
+    fake, cfg = serve(session.cfg, *answers)
+    cfg = keep_config(turns_config(cfg))
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    return wrote, fake
+
+
+def test_keep_check_true_item_is_kept(session: Session):
+    wrote, fake = run_keep_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": []},
+        {"facts": [{"item": "#1", "reason": "A standing architecture decision.", "keep": True}]},
+    )
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert wrote.dropped == ()
+    assert len(fake.requests) == 4
+    sent = fake.requests[-1]["messages"][1]["content"]
+    assert "Capture runs at session end." in sent
+
+
+def test_keep_check_false_item_is_dropped_with_its_reason(session: Session):
+    wrote, _ = run_keep_checked(
+        session,
+        summary(),
+        settled(SETTLED),
+        {"items": []},
+        {
+            "facts": [
+                {"item": "#1", "reason": "A one-time instruction to run tests.", "keep": False}
+            ]
+        },
+    )
+    assert not wrote.facts
+    assert [(d.statement, d.reason) for d in wrote.dropped] == [
+        ("Capture runs at session end.", "A one-time instruction to run tests.")
+    ]
+
+
+def test_keep_check_makes_no_call_when_the_setting_is_off(session: Session):
+    fake, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    cfg = turns_config(cfg)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert len(fake.requests) == 3
+
+
+def test_keep_check_spent_budget_makes_no_call_and_keeps_facts(session: Session):
+    fake, cfg = serve(session.cfg, summary(), settled(SETTLED), {"items": []})
+    cfg = keep_config(turns_config(cfg))
+    now = datetime.now(UTC)
+    line = {
+        "at": now.isoformat(),
+        "prompt_tokens": cfg.settings.work.daily_token_budget,
+        "completion_tokens": 0,
+        "purpose": "work",
+    }
+    import json
+
+    with (cfg.home / "usage.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line) + "\n")
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert [(f.statement, f.source) for f in wrote.facts] == [
+        ("Capture runs at session end.", "stated")
+    ]
+    assert len(fake.requests) == 3
+
+
+def test_keep_check_batch_of_25_facts_makes_two_calls(session: Session):
+    fake, cfg = serve(
+        session.cfg,
+        {"facts": [{"item": "#1", "reason": "valid", "keep": True} for _ in range(20)]},
+        {"facts": [{"item": "#1", "reason": "valid", "keep": True} for _ in range(5)]},
+    )
+    twenty_five = [
+        digest.Fact(
+            statement=f"Fact statement {n}.",
+            kind="decision",
+            source="stated",
+            quote="words",
+            entry="e1",
+            scope="project",
+            date="2026-10-14",
+        )
+        for n in range(1, 26)
+    ]
+    try:
+        kept, dropped = digest._kept_facts(cfg, twenty_five)
+    finally:
+        fake.stop()
+    assert len(fake.requests) == 2
+    assert len(kept) == 25
+    assert dropped == []
+    req1 = fake.requests[0]["messages"][1]["content"]
+    assert "[#20]" in req1
+    assert "[#21]" not in req1
+    req2 = fake.requests[1]["messages"][1]["content"]
+    assert "[#5]" in req2
+    assert "[#6]" not in req2
+
+
+def test_keep_check_asks_about_an_observed_item(session: Session):
+    wrote, _ = run_keep_checked(
+        session,
+        summary(),
+        settled(item("e1", "none", "", "")),
+        {"items": [seen("The file was written.", "written", "e3#t1")]},
+        {"facts": [{"item": "#1", "reason": "Transient session status.", "keep": False}]},
+    )
+    assert not wrote.facts
+    assert [(d.statement, d.reason) for d in wrote.dropped] == [
+        ("The file was written.", "Transient session status.")
+    ]
+
+
+def test_keep_check_prompt_and_schema_ship():
+    from aft import schema as schemamod
+
+    prompt = digest.keep_prompt_text()
+    assert "Every fact passes one test:" in prompt
+    assert "would a future session" in prompt
+    assert "one-time order" in prompt
+    schema = digest.keep_schema()
+    schemamod.check(schema)
+    assert schema["required"] == ["facts"]
+    items = schema["properties"]["facts"]["items"]
+    assert items["required"] == ["item", "reason", "keep"]
+    assert schema["properties"]["facts"]["maxItems"] == 20
+
+
+def _fact(statement: str) -> digest.Fact:
+    return digest.Fact(statement, "decision", "stated", statement, "e1", "project", "2026-10-04")
+
+
+def test_a_keep_verdict_answers_only_for_the_fact_its_label_names(session: Session):
+    """A skipped verdict never shifts onto another fact: a verdict counts for the fact its
+    label names, and a fact no verdict names is kept as it was (BUILD-PLAN F90)."""
+    facts = [_fact("Run the suite on port 9000."), _fact("All workers talk over TLS on 8443.")]
+    fake, cfg = serve(
+        session.cfg, {"facts": [{"item": "#2", "reason": "Status of the session.", "keep": False}]}
+    )
+    try:
+        kept, dropped = digest._kept_facts(keep_config(turns_config(cfg)), facts)
+    finally:
+        fake.stop()
+    assert kept == facts[:1]
+    assert [d.statement for d in dropped] == [facts[1].statement]
+
+
+def test_a_keep_answer_cut_for_length_keeps_the_batch(session: Session, monkeypatch):
+    """A keep call whose answer ran out of output keeps its batch as it was, and the digest
+    goes on (BUILD-PLAN F90, T54)."""
+    from aft import model
+
+    facts = [_fact("All workers talk over TLS on 8443.")]
+
+    def cut(*args, **kwargs):
+        raise model.OutputCut("the answer used all 8000 output tokens (finish_reason length)")
+
+    monkeypatch.setattr(digest, "_model_answer", cut)
+    kept, dropped = digest._kept_facts(keep_config(turns_config(session.cfg)), facts)
+    assert kept == facts
+    assert dropped == []

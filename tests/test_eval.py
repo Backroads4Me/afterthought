@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import re
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -939,6 +940,7 @@ _PROMPT_MARKERS = (
     ("observed", "You read the assistant's own words"),
     ("decide", "You maintain a project's memory"),
     ("final", "You read the items one part of a working session settled"),
+    ("keep", "You check proposed memory facts"),
 )
 
 
@@ -968,6 +970,13 @@ class RoutedEndpoint(FakeEndpoint):
             word = str(self.by_kind.get("word", ""))
             which = "answer" if word and word in user.lower() else "distractor"
             kind = f"{which}:{kind}"
+        if kind == "keep" and "keep" not in self.by_kind:
+            # The keep check (BUILD-PLAN F90) keeps every fact it is shown unless a test
+            # scripts otherwise, so the pipeline's own answers stand.
+            labels = re.findall(r"(?m)^\[(#\d+)\]", user)
+            return Reply(
+                content={"facts": [{"item": n, "reason": "kept", "keep": True} for n in labels]}
+            )
         answer = self.by_kind.get(kind)
         if answer is None:
             return Reply(status=500)

@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "description": "The keep-test answers for a batch of facts (BUILD-PLAN F90).",
+  "properties": {
+    "facts": {
+      "type": "array",
+      "description": "The keep verdicts for the facts in the batch, in the order shown.",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "item": {
+            "type": "string",
+            "description": "The label of the fact, such as #1.",
+            "maxLength": 8
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence explaining why a future session would or would not act differently or ask the user again without it, or naming which excluded kind it is.",
+            "maxLength": 300
+          },
+          "keep": {
+            "type": "boolean",
+            "description": "Whether to keep the fact (true) or drop it (false)."
+          }
+        },
+        "required": [
+          "item",
+          "reason",
+          "keep"
+        ]
+      }
+    }
+  },
+  "required": [
+    "facts"
+  ]
+}

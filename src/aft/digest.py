@@ -90,6 +90,9 @@ SUMMARY_PROMPT_FILE = "prompts/summary.md"
 SUMMARY_SCHEMA_FILE = "prompts/summary.schema.json"
 VERIFY_PROMPT_FILE = "prompts/verify.md"
 VERIFY_SCHEMA_FILE = "prompts/verify.schema.json"
+KEEP_PROMPT_FILE = "prompts/keep.md"
+KEEP_SCHEMA_FILE = "prompts/keep.schema.json"
+KEEP_BATCH_SIZE = 20
 
 # What a user turn shows the per-turn call besides its own words: the end of the
 # assistant message it answers, within this many characters of the compacted text. The
@@ -315,6 +318,16 @@ def verify_prompt_text() -> str:
 def verify_schema() -> dict:
     """The shape of the two answers one kept item is checked by (BUILD-PLAN F56)."""
     return _shipped_json(VERIFY_SCHEMA_FILE)
+
+
+def keep_prompt_text() -> str:
+    """The keep check's prompt, shipped beside the module (BUILD-PLAN F90)."""
+    return _shipped_text(KEEP_PROMPT_FILE)
+
+
+def keep_schema() -> dict:
+    """The shape of the keep check's answers for a batch of facts (BUILD-PLAN F90)."""
+    return _shipped_json(KEEP_SCHEMA_FILE)
 
 
 def tokens(text: str) -> int:
@@ -1794,6 +1807,78 @@ def _verified_items(
     return kept, dropped
 
 
+def _kept_facts(config: Config, facts: list[Fact]) -> tuple[list[Fact], list[Dropped]]:
+    """The facts that pass the keep-test on their own (BUILD-PLAN F90).
+
+    Every fact a turns digest keeps (any source) is asked once, in batches of up to
+    KEEP_BATCH_SIZE (20) per call: would a future session act differently, or ask the user
+    again, without it; or is it a one-time order to do work, the status of work in the
+    session (started, ran, restarted, finished, failed), a step of troubleshooting that
+    ended with the session, or a value the repository already records?
+
+    The schema gives per fact reason first, then keep (true or false). A fact answered false
+    is dropped with the reason recorded on the page's dropped list. The call only removes
+    facts; it never adds, edits or retags one. The calls count against the day's budget and
+    are skipped when it is spent (the facts are then kept as today).
+    """
+    if not facts:
+        return [], []
+    kept: list[Fact] = []
+    dropped: list[Dropped] = []
+    budget = config.settings.work.daily_token_budget
+
+    for offset in range(0, len(facts), KEEP_BATCH_SIZE):
+        batch = facts[offset : offset + KEEP_BATCH_SIZE]
+        if model.tokens_used_today(config) >= budget:
+            kept.extend(batch)
+            continue
+        listing = "\n".join(
+            f"[#{n}] [{fact.source}] {fact.kind}: {fact.statement} (words: {fact.quote})"
+            if fact.quote
+            else f"[#{n}] [{fact.source}] {fact.kind}: {fact.statement}"
+            for n, fact in enumerate(batch, start=1)
+        )
+        try:
+            answer = _model_answer(
+                config,
+                keep_prompt_text(),
+                listing,
+                keep_schema(),
+            )
+        except (AnswerRefused, OutputCut):
+            kept.extend(batch)
+            continue
+        # A verdict answers for the fact its label names; a fact no verdict names, or
+        # named twice, is kept as it was, so a skipped or extra answer never shifts a
+        # verdict onto another fact.
+        named: dict[int, list[dict]] = {}
+        for verdict in answer.get("facts") or []:
+            if isinstance(verdict, dict):
+                number = _label_number(str(verdict.get("item", "")))
+                if number is not None:
+                    named.setdefault(number, []).append(verdict)
+        for n, fact in enumerate(batch, start=1):
+            verdicts = named.get(n, [])
+            if len(verdicts) == 1:
+                verdict = verdicts[0]
+                if verdict.get("keep") is False:
+                    reason = str(verdict.get("reason") or "").strip() or "failed keep-test"
+                    dropped.append(
+                        Dropped(
+                            statement=fact.statement,
+                            kind=fact.kind,
+                            source=fact.source,
+                            entry=fact.entry,
+                            reason=reason,
+                        )
+                    )
+                else:
+                    kept.append(fact)
+            else:
+                kept.append(fact)
+    return kept, dropped
+
+
 def _label_number(label: str) -> int | None:
     """``#3`` or ``3`` as 3, or None when it is neither."""
     text = label.strip().removeprefix(LABEL_PREFIX)
@@ -1863,7 +1948,8 @@ def _digest_parts_turns(
     been; the summary and turns calls read a bounded ask, so a cut in one of them is
     refused as any other failure. With ``digest.verify_items`` on, every ``[stated]``
     item left is asked back once more over the entries around it, whether the user asserted
-    it and whether it still stands.
+    it and whether it still stands. With ``digest.keep_check`` on, every fact left is asked
+    once in batches of up to 20 whether it passes the keep-test on its own.
     """
     result = Digested([], [], [], {"in_flight": "", "failed": [], "open": []}, [])
     order = {entry.id: n for n, entry in enumerate((e for c in chunks for e in c), start=1)}
@@ -1997,6 +2083,11 @@ def _digest_parts_turns(
         # BUILD-PLAN F56: each [stated] item left is asked back once, whether the user
         # asserted it and whether it still stands; what the check refuses joins the refusals.
         facts, checked = _verified_items(config, facts, list(entries.values()))
+        dropped = [*dropped, *checked]
+    if config.settings.digest.keep_check:
+        # BUILD-PLAN F90: every fact a turns digest keeps (any source) is asked once in
+        # batches of up to 20 whether it passes the keep-test on its own.
+        facts, checked = _kept_facts(config, facts)
         dropped = [*dropped, *checked]
     return replace(result, facts=facts, dropped=dropped)
 
