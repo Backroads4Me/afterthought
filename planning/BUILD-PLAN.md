@@ -2509,6 +2509,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   held-out found rises by at least 1 of 50; mean wrong `[stated]` rises by no more than 1;
   observed judged unsupported rises by no more than 2. Tests: an observed fact refused for
   its names goes to no restate call.
+  - **Measured, ruling 2026-10-15: not merged** (branch `f92-restate-stated`). Four runs
+    (`g-f92-1` to `-4`; the first attempt was void, the model endpoint was down and every
+    call failed) against `g-f90b-1` to `-4`: held-out found 21, 19, 21, 21 (mean 20.5,
+    +2.75, passes); all items 40.5 against 34.5; observed judged unsupported 14.5 against
+    17.5 (passes); wrong `[stated]` 16, 24, 20, 21 (mean 20.25, +5.75, fails the +1
+    limit); tokens +3%. The new wrong lines are mostly one-time orders and approvals the
+    keep check lets through once restated ("Spec recall on prompt and start L8 on pi.",
+    "F85 is approved for merge and the search token budget should be specced as a
+    follow-up task."), session pacing ("pi is available again and may be used if
+    needed."), and statements naming the user ("Ted has disabled herems."). The keep check
+    has to refuse approvals of one-time work, and names, before restating can pay.
 - **T54 A call that runs out of output is asked again on half its input** (ruling
   2026-10-14). An `observed` call on a long chunk sometimes writes until `max_tokens` and
   returns broken JSON (main's runs: about one and a half chunks per run, each losing every
