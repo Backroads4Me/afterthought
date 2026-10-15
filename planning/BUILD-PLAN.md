@@ -2529,6 +2529,21 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   refused as today. Tests: a length-cut answer is asked again as two halves and both
   halves' facts are kept; an answer that fails for another reason keeps today's retry; a
   half that fails again is refused. Review checkpoint: no.
+- **F93 The keep check refuses approvals of one-time work** (ruling 2026-10-15; follows
+  F90 and F92). Restated facts in F92 passed the keep check as approvals ("F85 is
+  approved for merge and the search token budget should be specced as a follow-up
+  task."), as the pace of work ("pi is available again and may be used if needed."), and
+  as statements naming the user. `keep.md` says an approval of one-time work is the order
+  it approves (a lasting permission or a design or setting choice the approval settles
+  stays kept), that the pace of work and what is available for it are not facts, and that
+  a statement calling the user by a personal name is not kept; two examples join it.
+  Branch `f93-keep-approvals`.
+  - **Measure, before merging (decision rule set now):** four runs against main with F90
+    (`g-f90b-1` to `-4`), each in its own sandbox home: mean wrong `[stated]` falls by at
+    least 2; held-out mean found does not fall by more than 1; observed judged unsupported
+    does not rise by more than 2. If it merges, F92 is measured again on top of it.
+  - **Tests:** the prompt-shape test for the new sentences. Review checkpoint: yes (a
+    prompt that drops facts; lead reviews in full).
 
 ## 6. Ted's checklists at milestone ends
 
