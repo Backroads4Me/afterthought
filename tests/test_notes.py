@@ -31,6 +31,12 @@ BODY = """## State
 """
 
 
+def commit_day(rev: str, repo) -> str:
+    """The UTC day of a commit, as the settle code dates a line by it (BUILD-PLAN T43)."""
+    stamp = run_git(["show", "-s", "--format=%ct", rev], repo).strip()
+    return datetime.fromtimestamp(int(stamp), UTC).date().isoformat()
+
+
 def entry(id: str, day: int, role: str, text: str) -> Entry:
     return Entry(
         id=id, time=datetime(2026, 10, day, 9, tzinfo=UTC), role=role, text=text, is_error=False
@@ -211,7 +217,7 @@ def test_replace_rests_on_the_line_s_and_the_note_s_quotes(widget):
     notes.settle(
         widget, the_note(widget).where, notes.REPLACE, "The daemon  listens on 9000.", now=NOW
     )
-    day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
+    day = commit_day("HEAD~1", widget.vault)
     lines = page_text(widget).splitlines()
     new = lines.index(f"- The daemon listens on 9000. [stated] {day} [^s1] [^s2] [^s3]")
     assert lines[new + 1].startswith("- ~~The daemon listens on 8123.")
@@ -233,7 +239,7 @@ def test_a_replacement_cites_the_settle_as_its_own_source(widget):
         f"aft: settle {note.where} (replace): The daemon listens on 8123.",
     ]
     assert (settled.message, settled.citation) == (subjects[1], subjects[0])
-    day = run_git(["show", "-s", "--format=%cs", first], widget.vault).strip()
+    day = commit_day(first, widget.vault)
     text = page_text(widget)
     assert f"- The daemon listens on 9000. [stated] {day} [^s1] [^s2] [^s3]" in text
     assert "superseded 2026-10-05 by [^s2]" in text
@@ -318,7 +324,7 @@ def test_replace_is_observed_when_no_quote_is_the_user_s(widget):
         ],
     )
     notes.settle(widget, the_note(widget).where, notes.REPLACE, "Port 9000.", now=NOW)
-    day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
+    day = commit_day("HEAD~1", widget.vault)
     assert f"- Port 9000. [observed] {day} [^s1] [^s2] [^s3]" in page_text(widget)
 
 
@@ -349,7 +355,7 @@ def test_a_name_only_the_line_s_quote_says_can_rest_in_a_replacement(widget):
     notes.settle(
         widget, note.where, notes.REPLACE, "The daemon listens on 9000, not 8123.", now=NOW
     )
-    day = run_git(["show", "-s", "--format=%cs", "HEAD~1"], widget.vault).strip()
+    day = commit_day("HEAD~1", widget.vault)
     lines = page_text(widget).splitlines()
     new = lines.index(f"- The daemon listens on 9000, not 8123. [stated] {day} [^s1] [^s2] [^s3]")
     assert lines[new + 1].startswith("- ~~The daemon listens on 8123.")
