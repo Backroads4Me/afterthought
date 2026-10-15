@@ -2477,6 +2477,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     was; the setting off makes no call; a spent budget makes no call and keeps the facts;
     a batch of 25 facts makes two calls. Review checkpoint: yes (a model call that drops
     facts; lead reviews in full).
+  - **Measured, ruling 2026-10-15: merged, on by default.** On the grown key, four runs
+    each against main's four (`g-main-1` to `-4`: held-out 16, 17, 17, 17 of 50; wrong
+    `[stated]` 32, 36, 29, 28). The first keep prompt cut wrong `[stated]` to 11.5 but
+    held-out found to 11 (it dropped places, names and people a session could look up).
+    The prompt as merged keeps what a session could rediscover (where something lives,
+    what it is called, who someone is, the user's setup) and keeps when unsure
+    (`g-f90b-1` to `-4`): held-out 19, 18, 19, 15 (mean 17.75); wrong `[stated]` 11, 16,
+    20, 11 (mean 14.5, from 31.25); observed judged unsupported 17.5 from 23.75; tokens
+    +12%. Verdicts are matched to facts by their item label, and a keep call cut for
+    length keeps its batch.
 - **F91 F89 again, behind the keep call** (ruling 2026-10-14). After F90 merges, the F89
   branch (`f89-restate`, restate examples that keep the claim) is rebased onto main with
   the restated facts passing F90's keep call like any other, and measured on the grown key
