@@ -2491,6 +2491,16 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   branch (`f89-restate`, restate examples that keep the claim) is rebased onto main with
   the restated facts passing F90's keep call like any other, and measured on the grown key
   with F89's rule against main with F90 on.
+  - **Measured, ruling 2026-10-15: not merged** (branch `f91-restate-behind-keep`). Four
+    runs (`g-f91-1` to `-4`, each in its own sandbox home with a budget that does not run
+    out; the restate call ran: 432 to 441 calls a run against 357 to 366) against main
+    with F90 (`g-f90b-1` to `-4`): held-out found 20, 22, 18, 18 against 19, 18, 19, 15
+    (+1.75, passes); all items 40 against 34.5; wrong `[stated]` 19, 13, 22, 18 against
+    11, 16, 20, 11 (+3.5, fails the +1 limit); observed judged unsupported 20, 23, 37, 21
+    against 13, 21, 17, 19 (+7.75, fails the +2 limit); tokens +11%. Restating finds more,
+    but restated `[observed]` facts are often unsupported by their quote, and the keep
+    check does not judge support. A version that restates only `[stated]` facts is the
+    next thing to try.
 - **T54 A call that runs out of output is asked again on half its input** (ruling
   2026-10-14). An `observed` call on a long chunk sometimes writes until `max_tokens` and
   returns broken JSON (main's runs: about one and a half chunks per run, each losing every
