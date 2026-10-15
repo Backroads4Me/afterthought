@@ -2550,6 +2550,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     limit); observed judged unsupported 17.25 against 17.5. A tighter keep prompt trades
     recall for precision again, and the trades now sit near what four runs of one prompt
     vary by (held-out 15 to 19 in main's own four).
+- **F94 Restating behind the tighter keep check** (ruling 2026-10-15; F92 and F93 together).
+  F92 found more but kept more wrong `[stated]` lines; F93 refused more wrong lines but
+  cost recall. Their differences sit near what four runs of one prompt vary by, so this
+  comparison uses eight runs a side. Branch `f94-restate-and-keep` (F93's keep prompt with
+  F92's `[stated]`-only restate).
+  - **Measure, before merging (decision rule set now):** eight runs of F94 (`g-f94-1` to
+    `-8`) against eight of main with F90 (`g-f90b-1` to `-4` and `g-f90c-1` to `-4`), each
+    run in its own sandbox home with a budget that does not run out, at most six at once:
+    held-out mean found rises by at least 1 of 50; mean wrong `[stated]` rises by no more
+    than 1; observed judged unsupported rises by no more than 2. The spread of each side's
+    eight runs is reported beside the means.
 
 ## 6. Ted's checklists at milestone ends
 
