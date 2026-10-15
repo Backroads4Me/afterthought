@@ -2501,6 +2501,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     but restated `[observed]` facts are often unsupported by their quote, and the keep
     check does not judge support. A version that restates only `[stated]` facts is the
     next thing to try.
+- **F92 Restate only `[stated]` facts** (ruling 2026-10-15; follows F91). F91 with one
+  change: only a `[stated]` fact refused for its names is restated, in the user's words
+  (or the proposal's, for an approval). Restated `[observed]` and `[inferred]` facts were
+  the ones its quote did not support. Branch `f92-restate-stated`. Measured with F89's
+  rule against main with F90 (`g-f90b-1` to `-4`), four runs each in its own sandbox home:
+  held-out found rises by at least 1 of 50; mean wrong `[stated]` rises by no more than 1;
+  observed judged unsupported rises by no more than 2. Tests: an observed fact refused for
+  its names goes to no restate call.
 - **T54 A call that runs out of output is asked again on half its input** (ruling
   2026-10-14). An `observed` call on a long chunk sometimes writes until `max_tokens` and
   returns broken JSON (main's runs: about one and a half chunks per run, each losing every
