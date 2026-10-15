@@ -93,6 +93,9 @@ VERIFY_SCHEMA_FILE = "prompts/verify.schema.json"
 KEEP_PROMPT_FILE = "prompts/keep.md"
 KEEP_SCHEMA_FILE = "prompts/keep.schema.json"
 KEEP_BATCH_SIZE = 20
+RESTATE_PROMPT_FILE = "prompts/restate.md"
+RESTATE_SCHEMA_FILE = "prompts/restate.schema.json"
+NAMES_REFUSAL_PREFIX = "the statement names words"
 
 # What a user turn shows the per-turn call besides its own words: the end of the
 # assistant message it answers, within this many characters of the compacted text. The
@@ -219,6 +222,8 @@ class Dropped:
     source: str
     entry: str
     reason: str
+    # The refused fact, kept for the restate call (BUILD-PLAN F89).
+    fact: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -323,6 +328,16 @@ def verify_schema() -> dict:
 def keep_prompt_text() -> str:
     """The keep check's prompt, shipped beside the module (BUILD-PLAN F90)."""
     return _shipped_text(KEEP_PROMPT_FILE)
+
+
+def restate_prompt_text() -> str:
+    """The restate prompt, shipped beside the module (BUILD-PLAN F89)."""
+    return _shipped_text(RESTATE_PROMPT_FILE)
+
+
+def restate_schema() -> dict:
+    """The shape of restated items (BUILD-PLAN F89)."""
+    return _shipped_json(RESTATE_SCHEMA_FILE)
 
 
 def keep_schema() -> dict:
@@ -948,6 +963,9 @@ def _digest_parts_base(
                     )
                     last_refused = True
             return
+        part_facts, part_dropped = _restate_chunk(
+            config, session_id, part, part_facts, part_dropped, role=role, raw=raw
+        )
         result.facts.extend(part_facts)
         result.dropped.extend(part_dropped)
         result.summaries.append(answer["summary"])
@@ -1960,6 +1978,7 @@ def _digest_parts_turns(
     for number, part in enumerate(chunks):
         raw = raws[number] if raws is not None else None
         turns, before, before_id, answered = turn_blocks(part, before, before_id)
+        facts_from, dropped_from = len(result.facts), len(result.dropped)
         try:
             summary = None
             for _ in range(2):
@@ -2067,6 +2086,17 @@ def _digest_parts_turns(
                     result.dropped.append(_call_refused(part, "observed", str(exc)))
             except AnswerRefused as exc:
                 result.dropped.append(_call_refused(part, "observed", str(exc)))
+        part_facts, part_dropped = _restate_chunk(
+            config,
+            session_id,
+            part,
+            result.facts[facts_from:],
+            result.dropped[dropped_from:],
+            role=role,
+            raw=raw,
+        )
+        result.facts[facts_from:] = part_facts
+        result.dropped[dropped_from:] = part_dropped
         if summary is None:
             last_refused = True
             continue
@@ -2379,7 +2409,99 @@ def _refused(fact: dict, reason: str) -> Dropped:
         source=fact["source"],
         entry=fact["entry"],
         reason=reason,
+        fact=fact,
     )
+
+
+def _restate_chunk(
+    config: Config,
+    session_id: str,
+    part: Sequence[Entry],
+    facts: list[Fact],
+    dropped: list[Dropped],
+    role: str = rules.PRIMARY,
+    raw: Sequence[Entry] | None = None,
+) -> tuple[list[Fact], list[Dropped]]:
+    """Restate facts refused only for their names once in their source's words (BUILD-PLAN F89).
+
+    Each fact refused only because its statement names a word the source lacks is sent to one
+    repair call per chunk. A restated fact passes through the full verify code again.
+    """
+    if not config.settings.digest.restate:
+        return facts, dropped
+
+    by_id = _cited(part)
+    candidates: list[tuple[Dropped, Entry, str, str]] = []
+    for d in dropped:
+        if d.reason.startswith(NAMES_REFUSAL_PREFIX) and d.fact is not None:
+            entry = by_id.get(d.fact["entry"])
+            if entry is not None:
+                grounding_text = entry.text
+                if d.fact.get("source") == "stated" and d.fact.get("proposal"):
+                    prop = d.fact["proposal"]
+                    prop_text = prop[1] if isinstance(prop, (list, tuple)) else str(prop)
+                    if prop_text:
+                        grounding_text = f"{grounding_text}\n{prop_text}"
+                missing = ungrounded(d.fact["statement"], grounding_text, when=entry.time)
+                missing_str = (
+                    ", ".join(missing)
+                    if missing
+                    else (d.reason.split(": ", 1)[1] if ": " in d.reason else "")
+                )
+                candidates.append((d, entry, missing_str, grounding_text))
+
+    if not candidates:
+        return facts, dropped
+
+    budget = config.settings.work.daily_token_budget
+    if model.tokens_used_today(config) >= budget:
+        return facts, dropped
+
+    blocks = [
+        f"[#{n}]\n"
+        f"Statement: {d.fact['statement']}\n"
+        f"Missing words: {missing_str}\n"
+        f"Source text:\n{grounding_text}"
+        for n, (d, entry, missing_str, grounding_text) in enumerate(candidates, start=1)
+    ]
+    chunk_text = "\n\n".join(blocks)
+    try:
+        reply = _model_answer(config, restate_prompt_text(), chunk_text, restate_schema())
+    except AnswerRefused:
+        return facts, dropped
+
+    by_number: dict[int, str] = {}
+    for item in reply.get("items", []):
+        if isinstance(item, dict) and "item" in item and "statement" in item:
+            num = _label_number(str(item["item"]))
+            stmt = item["statement"].strip()
+            if num is not None and stmt and not placeholder(stmt):
+                by_number[num] = stmt
+
+    kept_facts = list(facts)
+    remaining_dropped = list(dropped)
+    for n, (d, _, _, _) in enumerate(candidates, start=1):
+        new_statement = by_number.get(n)
+        if not new_statement:
+            continue
+        restated_fact = {
+            **d.fact,
+            "statement": new_statement,
+        }
+        new_kept, new_dropped = verify(
+            config, session_id, part, [restated_fact], role=role, raw_span=raw
+        )
+        if new_kept:
+            kept_fact = new_kept[0]
+            if "proposal" in d.fact and d.fact["proposal"]:
+                kept_fact = replace(kept_fact, proposal=d.fact["proposal"])
+            kept_facts.append(kept_fact)
+            remaining_dropped = [x for x in remaining_dropped if x is not d]
+        elif new_dropped:
+            idx = remaining_dropped.index(d)
+            remaining_dropped[idx] = new_dropped[0]
+
+    return kept_facts, remaining_dropped
 
 
 def _require_session_id(session_id: str) -> None:
