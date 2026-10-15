@@ -87,6 +87,10 @@ class DigestConfig:
     # of up to 20, whether it passes the keep-test on its own; one answered false is dropped
     # with the reason recorded on the page.
     keep_check: bool = True
+    # BUILD-PLAN F89: when true, a fact refused only because its statement names a word
+    # the source text does not hold (the ungrounded names check) is restated once in the
+    # source's words and verified again.
+    restate: bool = True
 
 
 @dataclass(frozen=True)
@@ -426,6 +430,9 @@ verifier_model = ""
 # passes the keep-test on its own; one answered false is dropped with the reason
 # recorded on the page (BUILD-PLAN F90).
 keep_check = true
+# When a fact is refused because its statement names a word the source text does not
+# hold (the ungrounded names check), restate it once in the source's words (BUILD-PLAN F89).
+restate = true
 
 [dream]
 interval_minutes = 30
