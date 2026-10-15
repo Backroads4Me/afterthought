@@ -2422,10 +2422,14 @@ def _restate_chunk(
     role: str = rules.PRIMARY,
     raw: Sequence[Entry] | None = None,
 ) -> tuple[list[Fact], list[Dropped]]:
-    """Restate facts refused only for their names once in their source's words (BUILD-PLAN F89).
+    """Restate ``[stated]`` facts refused only for their names once in the user's words
+    (BUILD-PLAN F89, F92).
 
-    Each fact refused only because its statement names a word the source lacks is sent to one
-    repair call per chunk. A restated fact passes through the full verify code again.
+    Each ``[stated]`` fact refused only because its statement names a word the user's turn
+    (or the proposal it approves) lacks is sent to one repair call per chunk; a restated
+    fact passes through the full verify code again. Other sources are not restated: a
+    restated ``[observed]`` or ``[inferred]`` fact was too often unsupported by its quote
+    (F91).
     """
     if not config.settings.digest.restate:
         return facts, dropped
@@ -2433,7 +2437,11 @@ def _restate_chunk(
     by_id = _cited(part)
     candidates: list[tuple[Dropped, Entry, str, str]] = []
     for d in dropped:
-        if d.reason.startswith(NAMES_REFUSAL_PREFIX) and d.fact is not None:
+        if (
+            d.reason.startswith(NAMES_REFUSAL_PREFIX)
+            and d.fact is not None
+            and d.fact.get("source") == "stated"
+        ):
             entry = by_id.get(d.fact["entry"])
             if entry is not None:
                 grounding_text = entry.text

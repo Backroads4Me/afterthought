@@ -298,8 +298,9 @@ def test_turns_pipeline_restates_fact_refused_for_names(session: Session):
     assert "dropped" not in data or not data["dropped"]
 
 
-def test_observed_fact_refused_for_name_is_restated_and_kept(session: Session):
-    """An observed fact refused for an ungrounded name is restated and kept (BUILD-PLAN F89)."""
+def test_observed_fact_refused_for_name_is_not_restated(session: Session):
+    """Only [stated] facts are restated (BUILD-PLAN F92): an observed fact refused for an
+    ungrounded name stays refused and no restate call is made."""
     # e2 holds: ASSISTANT_ANSWER ("Done: the hook writes one row and returns...")
     # Initial statement names unheld "PostgreSQL"
     initial = answer(
@@ -310,21 +311,16 @@ def test_observed_fact_refused_for_name_is_restated_and_kept(session: Session):
             source="observed",
         )
     )
-    restatement = {
-        "items": [
-            {
-                "item": "#1",
-                "statement": "The hook writes one row and returns without calling a model.",
-            }
-        ]
-    }
-    wrote = digest_once(session, initial, restatement)
-    assert [f.statement for f in wrote.facts] == [
-        "The hook writes one row and returns without calling a model."
-    ]
-    assert wrote.facts[0].source == "inferred"
-    data = frontmatter(session.cfg, wrote.path)["aft"]
-    assert "dropped" not in data or not data["dropped"]
+    fake, cfg = serve(session.cfg, initial)
+    try:
+        wrote = digest.digest_job(cfg, claim(cfg, session.transcript, session.cwd))
+    finally:
+        fake.stop()
+    assert wrote is not None
+    assert wrote.facts == ()
+    assert any("PostgreSQL" in d.reason for d in wrote.dropped)
+    # Only the digest call was made: the observed fact went to no restate call.
+    assert len(fake.requests) == 1
 
 
 def test_restated_approval_fact_preserves_proposal(session: Session):
