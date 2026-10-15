@@ -43,7 +43,9 @@ def turns_config(cfg: Config) -> Config:
     """The served config with the turns pipeline chosen, re-read from disk."""
     path = cfg.home / configmod.CONFIG_NAME
     path.write_text(
-        path.read_text(encoding="utf-8").replace('pipeline = "base"', 'pipeline = "turns"'),
+        path.read_text(encoding="utf-8").replace(
+            'pipeline = "base"', 'pipeline = "turns"\nkeep_check = false'
+        ),
         encoding="utf-8",
     )
     return configmod.load()
@@ -1081,7 +1083,7 @@ def verified_two_endpoint_config(cfg: Config, verifier: FakeEndpoint, key_env: s
     )
     text = text.replace(
         'pipeline = "base"\n',
-        'pipeline = "turns"\nverify_items = true\n'
+        'pipeline = "turns"\nkeep_check = false\nverify_items = true\n'
         f'verifier_endpoint = "{verifier.endpoint}"\n'
         + (f'verifier_api_key_env = "{key_env}"\n' if key_env else ""),
     )
@@ -1444,9 +1446,7 @@ def keep_config(cfg: Config) -> Config:
     """The turns config with the keep check turned on, re-read from disk."""
     path = cfg.home / configmod.CONFIG_NAME
     path.write_text(
-        path.read_text(encoding="utf-8").replace(
-            'pipeline = "turns"\n', 'pipeline = "turns"\nkeep_check = true\n'
-        ),
+        path.read_text(encoding="utf-8").replace("keep_check = false", "keep_check = true"),
         encoding="utf-8",
     )
     return configmod.load()

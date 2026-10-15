@@ -86,7 +86,7 @@ class DigestConfig:
     # BUILD-PLAN F90: when true, every fact a turns digest keeps is asked once, in batches
     # of up to 20, whether it passes the keep-test on its own; one answered false is dropped
     # with the reason recorded on the page.
-    keep_check: bool = False
+    keep_check: bool = True
 
 
 @dataclass(frozen=True)
@@ -425,7 +425,7 @@ verifier_model = ""
 # When true, every fact a turns digest keeps is asked once in batches whether it
 # passes the keep-test on its own; one answered false is dropped with the reason
 # recorded on the page (BUILD-PLAN F90).
-keep_check = false
+keep_check = true
 
 [dream]
 interval_minutes = 30
