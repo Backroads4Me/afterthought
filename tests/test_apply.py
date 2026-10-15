@@ -26,6 +26,12 @@ YESTERDAY = "2026-10-04"
 RUN_PROJECT = "p_widget"
 
 
+def commit_day(rev: str, repo) -> str:
+    """The UTC day of a commit, as the settle code dates a line by it (BUILD-PLAN T43)."""
+    stamp = run_git(["show", "-s", "--format=%ct", rev], repo).strip()
+    return datetime.fromtimestamp(int(stamp), UTC).date().isoformat()
+
+
 @pytest.fixture
 def fake():
     endpoint = FakeEndpoint()
@@ -2626,7 +2632,7 @@ def test_a_settled_replacements_statement_verifies_inside_its_fact_line(initiali
         "aft: settle projects/widget/overview.md:1 (replace): The daemon listens on 8123.",
     )
     sha = run_git(["rev-parse", "HEAD"], cfg.vault)
-    day = run_git(["show", "-s", "--format=%cs", sha], cfg.vault)
+    day = commit_day(sha, cfg.vault)
     v, origin, dt, yours = apply._lookup_evidence(
         cfg, f"aft://edit/{sha}", "The daemon listens on 9000."
     )
