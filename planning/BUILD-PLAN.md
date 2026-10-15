@@ -2544,6 +2544,12 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     does not rise by more than 2. If it merges, F92 is measured again on top of it.
   - **Tests:** the prompt-shape test for the new sentences. Review checkpoint: yes (a
     prompt that drops facts; lead reviews in full).
+  - **Measured, ruling 2026-10-15: not merged** (branch `f93-keep-approvals`). Four runs
+    (`g-f93-1` to `-4`) against `g-f90b-1` to `-4`: wrong `[stated]` 14, 10, 14, 11 (mean
+    12.25, -2.25, passes); held-out found 11, 15, 17, 17 (mean 15, -2.75, fails the -1
+    limit); observed judged unsupported 17.25 against 17.5. A tighter keep prompt trades
+    recall for precision again, and the trades now sit near what four runs of one prompt
+    vary by (held-out 15 to 19 in main's own four).
 
 ## 6. Ted's checklists at milestone ends
 
