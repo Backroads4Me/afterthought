@@ -2529,6 +2529,49 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   refused as today. Tests: a length-cut answer is asked again as two halves and both
   halves' facts are kept; an answer that fails for another reason keeps today's retry; a
   half that fails again is refused. Review checkpoint: no.
+- **F93 The keep check refuses approvals of one-time work** (ruling 2026-10-15; follows
+  F90 and F92). Restated facts in F92 passed the keep check as approvals ("F85 is
+  approved for merge and the search token budget should be specced as a follow-up
+  task."), as the pace of work ("pi is available again and may be used if needed."), and
+  as statements naming the user. `keep.md` says an approval of one-time work is the order
+  it approves (a lasting permission or a design or setting choice the approval settles
+  stays kept), that the pace of work and what is available for it are not facts, and that
+  a statement calling the user by a personal name is not kept; two examples join it.
+  Branch `f93-keep-approvals`.
+  - **Measure, before merging (decision rule set now):** four runs against main with F90
+    (`g-f90b-1` to `-4`), each in its own sandbox home: mean wrong `[stated]` falls by at
+    least 2; held-out mean found does not fall by more than 1; observed judged unsupported
+    does not rise by more than 2. If it merges, F92 is measured again on top of it.
+  - **Tests:** the prompt-shape test for the new sentences. Review checkpoint: yes (a
+    prompt that drops facts; lead reviews in full).
+  - **Measured, ruling 2026-10-15: not merged** (branch `f93-keep-approvals`). Four runs
+    (`g-f93-1` to `-4`) against `g-f90b-1` to `-4`: wrong `[stated]` 14, 10, 14, 11 (mean
+    12.25, -2.25, passes); held-out found 11, 15, 17, 17 (mean 15, -2.75, fails the -1
+    limit); observed judged unsupported 17.25 against 17.5. A tighter keep prompt trades
+    recall for precision again, and the trades now sit near what four runs of one prompt
+    vary by (held-out 15 to 19 in main's own four).
+- **F94 Restating behind the tighter keep check** (ruling 2026-10-15; F92 and F93 together).
+  F92 found more but kept more wrong `[stated]` lines; F93 refused more wrong lines but
+  cost recall. Their differences sit near what four runs of one prompt vary by, so this
+  comparison uses eight runs a side. Branch `f94-restate-and-keep` (F93's keep prompt with
+  F92's `[stated]`-only restate).
+  - **Measure, before merging (decision rule set now):** eight runs of F94 (`g-f94-1` to
+    `-8`) against eight of main with F90 (`g-f90b-1` to `-4` and `g-f90c-1` to `-4`), each
+    run in its own sandbox home with a budget that does not run out, at most six at once:
+    held-out mean found rises by at least 1 of 50; mean wrong `[stated]` rises by no more
+    than 1; observed judged unsupported rises by no more than 2. The spread of each side's
+    eight runs is reported beside the means.
+  - **Measured, ruling 2026-10-16: passes all three parts** (branch
+    `f94-restate-and-keep`). Eight runs a side, all sixteen scored with the same key and
+    judge:
+    - Held-out found: F94 20, 21, 20, 14, 21, 21, 22, 17 (mean 19.5, range 14 to 22) against
+      main 19, 18, 19, 15, 15, 16, 15, 15 (mean 16.5, range 15 to 19): +3.0, passes.
+    - Wrong `[stated]`: F94 13, 14, 11, 14, 10, 9, 6, 13 (mean 11.25, range 6 to 14) against
+      main 11, 16, 20, 11, 10, 16, 14, 10 (mean 13.5, range 10 to 20): -2.25, passes.
+    - Observed judged unsupported: F94 mean 15.125 (range 9 to 23) against main 16.25
+      (range 13 to 21): -1.125, passes.
+    - All found: F94 mean 40.0 of 97 (range 32 to 44) against main 33.125 (range 28 to 36).
+      `[stated]` lines kept: F94 mean 49.9 against main 44.9.
 
 ## 6. Ted's checklists at milestone ends
 
