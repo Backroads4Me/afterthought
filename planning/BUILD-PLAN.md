@@ -2561,6 +2561,17 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     held-out mean found rises by at least 1 of 50; mean wrong `[stated]` rises by no more
     than 1; observed judged unsupported rises by no more than 2. The spread of each side's
     eight runs is reported beside the means.
+  - **Measured, ruling 2026-10-16: passes all three parts** (branch
+    `f94-restate-and-keep`). Eight runs a side, all sixteen scored with the same key and
+    judge:
+    - Held-out found: F94 20, 21, 20, 14, 21, 21, 22, 17 (mean 19.5, range 14 to 22) against
+      main 19, 18, 19, 15, 15, 16, 15, 15 (mean 16.5, range 15 to 19): +3.0, passes.
+    - Wrong `[stated]`: F94 13, 14, 11, 14, 10, 9, 6, 13 (mean 11.25, range 6 to 14) against
+      main 11, 16, 20, 11, 10, 16, 14, 10 (mean 13.5, range 10 to 20): -2.25, passes.
+    - Observed judged unsupported: F94 mean 15.125 (range 9 to 23) against main 16.25
+      (range 13 to 21): -1.125, passes.
+    - All found: F94 mean 40.0 of 97 (range 32 to 44) against main 33.125 (range 28 to 36).
+      `[stated]` lines kept: F94 mean 49.9 against main 44.9.
 
 ## 6. Ted's checklists at milestone ends
 
