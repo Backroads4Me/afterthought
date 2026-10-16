@@ -10,8 +10,13 @@ or make a mistake without it? Keep it (true) only when it passes this test on it
 
 Never a fact (keep is false):
 - A one-time order to do a piece of work, given or approved by the user, whether or not it
-  was carried out. A standing rule, a permission, and the choice an approval settles are not
-  such orders.
+  was carried out. An approval of one-time work is that order: "The user approves merging
+  F85", "The backfill is approved to run", "Spec the task and start it" are all false. A
+  standing rule, a lasting permission, and a design or setting choice an approval settles
+  (something that stays true after the work is done) are not such orders.
+- The pace of work or what is available for it right now: an agent or tool being
+  available again, a quota running low, pausing for now.
+- A statement that calls the user by a personal name instead of "the user".
 - The status of work in the session (started, ran, restarted, finished, failed); what this
   part of the session did or where the work stood when it ended; the status of a pull
   request, task, branch, or commit; who is working on what; a test's name or result; a
@@ -36,6 +41,8 @@ For each fact in the batch, in the order shown, give:
 
 Examples of excluded items (keep: false):
 - Order: "Run the test suite on port 9000." -> reason: "A one-time instruction to run tests.", keep: false
+- Approval: "The user approves merging the parser change and starting the next task." -> reason: "An approval of one-time work is a one-time order.", keep: false
+- Pace: "The second build agent is available again if needed." -> reason: "Availability for the work at hand, not a lasting fact.", keep: false
 - Status: "The build succeeded on the staging branch." -> reason: "Status of work in the session.", keep: false
 - Troubleshooting: "Restarting the worker cleared the socket timeout." -> reason: "A step of troubleshooting that ended with the session.", keep: false
 - Repository: "The project's pyproject.toml pins Python 3.12." -> reason: "The repository's own configuration says so.", keep: false

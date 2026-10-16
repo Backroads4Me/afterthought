@@ -1633,3 +1633,14 @@ def test_a_keep_answer_cut_for_length_keeps_the_batch(session: Session, monkeypa
     kept, dropped = digest._kept_facts(keep_config(turns_config(session.cfg)), facts)
     assert kept == facts
     assert dropped == []
+
+
+def test_the_keep_prompt_refuses_approvals_of_one_time_work_pace_and_names():
+    """BUILD-PLAN F93: an approval of one-time work is the order it approves, the pace of
+    work and what is available for it are not facts, and a statement naming the user is
+    not kept; a lasting choice an approval settles still is."""
+    words = " ".join(digest.keep_prompt_text().split())
+    assert "An approval of one-time work is that order" in words
+    assert "a design or setting choice an approval settles" in words
+    assert "The pace of work or what is available for it right now" in words
+    assert 'calls the user by a personal name instead of "the user"' in words
