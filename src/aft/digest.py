@@ -1436,22 +1436,28 @@ def enclosing_sentence(text: str, quote: str) -> str:
     # The sentence runs from the boundary before the quote - the previous ., ? or !
     # followed by whitespace, a line break, or the start of the text - to the boundary
     # after it, so every sentence the quote overlaps lies inside the slice and a question
-    # mark in any of them is seen. A line break is a boundary the same way: a turn written
-    # across lines without punctuation holds one sentence per line. A dot inside a word, a
-    # version or a filename is no boundary.
+    # mark in any of them is seen. A quote that ends with its own ., ! or ? ends the
+    # sentence there when the text after it is whitespace or nothing: the mark sits behind
+    # the forward scan, so the scan would otherwise run on into the next sentence. A line
+    # break is a boundary the same way: a turn written across lines without punctuation
+    # holds one sentence per line. A dot inside a word, a version or a filename is no
+    # boundary.
     sentence_start = 0
     for i in range(start - 1, -1, -1):
         if text[i] == "\n" or (text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace())):
             sentence_start = i + 1
             break
     sentence_end = len(text)
-    for i in range(end, len(text)):
-        if text[i] == "\n":
-            sentence_end = i
-            break
-        elif text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
-            sentence_end = i + 1
-            break
+    if flat_quote[-1] in ".!?" and (end == len(text) or text[end].isspace()):
+        sentence_end = end
+    else:
+        for i in range(end, len(text)):
+            if text[i] == "\n":
+                sentence_end = i
+                break
+            elif text[i] in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+                sentence_end = i + 1
+                break
     return text[sentence_start:sentence_end].strip()
 
 
