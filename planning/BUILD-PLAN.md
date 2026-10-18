@@ -2684,6 +2684,25 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     a question is refused; a quote holding a question mark is refused; a quote spanning
     lines still yields its sentence. Review checkpoint: yes (R2 quote checks; lead reviews
     in full).
+  - **Measured, ruling 2026-10-18: not merged** (#195 closed, branch
+    `f95-quote-ends-sentence`). The lead's full review found the change as specified, and
+    the replay gave 32 of 44 no longer refused and 12 still refused, as above. Eight runs
+    (`g-f95-1` to `-8`) against the eight F94 runs, all on T57's key with T56's scorer:
+    - Held-out found: 24, 22, 25, 23, 24, 28, 22, 24 (mean 24.0, range 22 to 28) against
+      F94's mean 23.1 (range 19 to 26): +0.9, passes.
+    - Wrong `[stated]`: 11, 18, 7, 13, 9, 13, 13, 18 (mean 12.75, range 7 to 18) against
+      F94's 10.5 (range 6 to 14): +2.25, fails the +1 limit.
+    - Observed judged unsupported: mean 11.4 against 13.6, passes. All found: mean 47.25
+      of 86 against 46.25.
+    - Of the 18 more wrong lines over eight runs, 8 are facts whose quotes F94 refused as a
+      question. They are wrong for how they are written more than for what they claim:
+      they call the user by name ("Ted uses Vorta backup with a 3 hour schedule.", kept
+      beside "The user uses Vorta backup with a 3 hour schedule."), or name another person
+      the key does not hold ("Chuck has installed the latest prod."). The other 10 lie in
+      what eight runs of one pipeline vary by (the rerank pool, a captain.md guardrail).
+      The keep check's sentence against naming the user does not hold: 55 of the 2,432
+      facts the eight F94 runs kept call the user by name or by a guessed pronoun. F95
+      can be measured again once statements stop naming the user.
 
 ## 6. Ted's checklists at milestone ends
 
