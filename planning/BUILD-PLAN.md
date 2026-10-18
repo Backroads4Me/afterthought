@@ -2572,6 +2572,90 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
       (range 13 to 21): -1.125, passes.
     - All found: F94 mean 40.0 of 97 (range 32 to 44) against main 33.125 (range 28 to 36).
       `[stated]` lines kept: F94 mean 49.9 against main 44.9.
+- **T56 One run fact can answer several key items** (ruling 2026-10-18; lead and Ted).
+  `score-turns` pairs facts one to one (`match_facts`), so a run fact that holds two key
+  items answers only one of them, and the other reads as missed: "Staging is still on
+  db-staging-02.internal; only the read replica moved to db-staging-03.internal." pairs
+  with one of its two items, and "The user's two major concerns are ..." with one of the
+  two concerns. A fact whose quote holds the key item's quote can also fall short of both
+  thresholds: the key quote "I'm a FL resident, so no state taxes." stands inside the run's
+  quote, which begins "my primary concern is cost reduction and simplicity.", at a quote
+  ratio of 0.56 and a statement ratio of 0.38. In the eight F94 runs, 29 missed item-runs
+  have a kept fact that overlaps them and no pair, and 24 more are paired and judged
+  `different`: about 3 to 4 items a run, the size of F94's whole gain and of the spread
+  between runs.
+  - **Pairing:** in `score-turns` only, a key item pairs with a run fact when their quotes
+    overlap or their statements agree as `fact_overlap` says today, or when the key
+    item's quote, folded as `quote_tokens` folds it, stands whole inside the run fact's
+    folded quote. A run fact may answer several key items; each pair is judged on its
+    own, and a key item still takes at most one run fact, the strongest. A run fact counts
+    as wrong `[stated]` only when no key item pairs with it or every pair is judged
+    `different`. `compare`, which matches backends against each other, keeps one-to-one
+    pairing.
+  - **Re-score:** the sixteen runs on disk (`g-f94-1` to `-8`, and main's `g-f90b-1` to
+    `-4` and `g-f90c-1` to `-4`) are scored again with the same key and judge, and the new
+    means and spreads go beside the old ones here. They become the baseline every later
+    recall task is measured against.
+  - **Tests:** a run fact holding two key items' quotes answers both; a key item whose
+    quote stands inside a longer run quote pairs; a key item takes only its strongest run
+    fact; a run fact paired only with `different` verdicts counts as wrong `[stated]`;
+    `compare` still pairs one to one. Review checkpoint: no.
+- **T57 The key rules on what every run misses** (ruling 2026-10-18; lead and Ted; after
+  T56). The T52 pass for misses: 38 key items are missed by all eight F94 runs, and some
+  are what the keep-test is meant to refuse or what the pipeline rightly replaces. Among
+  them: one-time orders ("Create the WirePlumber config that sets bluez5.headset-roles to
+  hands-free only, removing HSP.", "Accept the proposed review feedback changes, ..."),
+  the status of work ("The bad timedatectl command with --adjust-system-clock already
+  ran.", "The user put the proposed multi-port extension change on hold for now."), a
+  passing state ("The user's Groq API key is brand new."), and items a later turn of the
+  same session replaces ("The staging database moved to db-staging-03.internal last
+  week.", "Every release goes out to the canary before the fleet, with no exceptions.",
+  "Use agent-switchboard as the name in the prompt and create ~/agent-switchboard.").
+  - **Ruling:** after T56's re-score, the lead lists every key item missed by all eight
+    F94 runs and rules each one `durable` (it passes the keep-test and nothing later in
+    its session replaces it), `order`, `status`, `passing` or `replaced`. Items ruled
+    anything but `durable` leave `key-turns.json`; a `replaced` item's turn keeps the item
+    that replaces it. Rulings the lead is unsure of go to Ted. The previous key is kept
+    beside it (`key-turns.2026-10-18-pre-t57.json`), and the split does not change.
+  - **Re-score:** the sixteen runs are scored again on the ruled key, and the means and
+    spreads go here as the baseline for F95 and later tasks.
+- **F95 A quote that ends its own sentence is judged by that sentence** (ruling
+  2026-10-18; Ted; touches R2's quote checks). `enclosing_sentence` in `digest.py` scans
+  forward for the sentence's end from the character after the quote. A quote that ends
+  with its sentence's own `.`, `!` or `?` has that mark behind the scan's start, so the
+  slice runs on into the next sentence. A user's statement followed by a question is then
+  read as a question: "I use Vorta backup and havve a 3 hour schedule." is refused as
+  `the quote is a question, never a settled item` because the next sentence asks "would an
+  hourly schedule cost much diskspace and activty?". The same slice makes a short quote
+  that is a whole sentence ("usually about 3-4.") fail the fragment check, since it no
+  longer equals its enclosing sentence. The code then does not do what its docstring says
+  (the sentence of the text that holds the quote); R2 itself does not change.
+  - **Fix:** when the quote's last character is `.`, `!` or `?` and the text after it is
+    whitespace or the end of the text, the sentence ends at the quote's end. Both callers
+    take the fix: `stated_refusal` (digest verification and `dream/apply.py`) and the
+    fragment check in `digest.py`. A quote cut from inside a sentence that asks is still
+    refused: "I'm going to stikc with C4, does the compose file need to change at all or
+    is it ready?" stays a question.
+  - **Replay, before measuring:** the 44 `[stated]` facts the eight F94 runs dropped as a
+    question, checked again with the fix against their turns' text: 32 are no longer
+    refused (among them the key items "The user uses Vorta backup with a 3 hour schedule
+    and is more worried about their documents.", "The Actual password should be replaced
+    via agent vault.", "Last time a librecoach ha-addons-alpha was used for the testing.",
+    "The user usually runs about 3-4 agents."), and 12 still are (all six "The user is
+    going to stick with C4." among them). The builder reproduces the count with the code
+    as built and reports it on the PR.
+  - **Measure, before merging (decision rule set now):** eight runs (`g-f95-1` to `-8`),
+    each in its own sandbox home with a budget that does not run out, at most six at once,
+    against the eight F94 runs (`g-f94-1` to `-8`), all scored on T57's key with T56's
+    scorer: held-out mean found does not fall; mean wrong `[stated]` rises by no more than
+    1; observed judged unsupported rises by no more than 2. The spread of each side's
+    eight runs is reported beside the means.
+  - **Tests:** a quote ending with its own full stop and followed by a question is not
+    refused, in digest verification and in `dream/apply.py`; a whole-sentence short quote
+    with its full stop passes the fragment check; a quote cut from a sentence that ends in
+    a question is refused; a quote holding a question mark is refused; a quote spanning
+    lines still yields its sentence. Review checkpoint: yes (R2 quote checks; lead reviews
+    in full).
 
 ## 6. Ted's checklists at milestone ends
 
