@@ -919,8 +919,8 @@ def test_score_refuses_an_unknown_backend(ev, tmp_path, cfg):
         ev.score_run(tmp_path / "data", "base", "openai", tmp_path, judge)
 
 
-def test_one_run_fact_cannot_answer_two_key_items(ev, tmp_path, cfg):
-    """Two key items match one run fact: only the strongest pairing is judged and counted."""
+def test_a_run_fact_holding_two_key_items_quotes_answers_both(ev, tmp_path, cfg):
+    """One run fact holding two key items' quotes pairs with and answers both."""
     data = tmp_path / "data"
     key_turns_file(
         data,
@@ -928,19 +928,228 @@ def test_one_run_fact_cannot_answer_two_key_items(ev, tmp_path, cfg):
             "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
             "sess-1#2": {
                 "user": "",
-                "durable": [key_fact("deploy happens on port 8008 with the blue runner")],
+                "durable": [key_fact("blue runner handles staging")],
             },
         },
     )
-    write_summary(data, "local", "sess-1", [key_fact("deploy happens on port 8008")])
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "deploy happens on port 8008 and blue runner handles staging",
+                "deploy happens on port 8008. blue runner handles staging.",
+            )
+        ],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("same"), verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["key_items"] == 2
+    assert report["totals"]["found"] == 2
+    assert report["totals"]["missed"] == 0
+    assert report["totals"]["stated_wrong"] == 0
+    assert len(judge_requests(fake)) == 2
+    pairs = report["sessions"][0]["pairs"]
+    assert len(pairs) == 2
+    assert {p["key"] for p in pairs} == {
+        "The session said: deploy happens on port 8008",
+        "The session said: blue runner handles staging",
+    }
+
+
+def test_a_key_item_whose_quote_stands_inside_a_longer_run_quote_pairs_under_thresholds(
+    ev, tmp_path, cfg
+):
+    """A key item whose quote stands inside a longer run quote pairs although both ratios
+    are under their thresholds."""
+    data = tmp_path / "data"
+    key_quote = "I'm a FL resident, so no state taxes."
+    run_quote = (
+        "my primary concern is cost reduction and simplicity. I'm a FL resident, so no"
+        " state taxes. We also need to keep the infrastructure minimal."
+    )
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [
+                    key_fact(
+                        key_quote,
+                        statement="FL resident pays no state taxes",
+                    )
+                ],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "User prioritizes cost reduction, simplicity, minimal infrastructure, and has no"
+                " state taxes due to FL residency.",
+                run_quote,
+            )
+        ],
+    )
+    # Verify that fact_overlap alone is None
+    assert (
+        ev.fact_overlap(
+            {"quote": key_quote, "statement": "FL resident pays no state taxes"},
+            {
+                "quote": run_quote,
+                "statement": (
+                    "User prioritizes cost reduction, simplicity, minimal infrastructure, and has"
+                    " no state taxes due to FL residency."
+                ),
+            },
+        )
+        is None
+    )
     fake, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["key_items"] == 1
+    assert report["totals"]["found"] == 1
+    assert report["totals"]["missed"] == 0
+    assert len(judge_requests(fake)) == 1
+
+
+def test_a_key_item_takes_only_its_strongest_run_fact(ev, tmp_path, cfg):
+    """A key item matching several run facts takes only its strongest, leaving weaker ones."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [key_fact("deploy happens on port 8008")],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            # Weaker match: containment-only or lower ratio
+            run_fact(
+                "deploy happens on port 8008 with the blue runner in the secondary cluster",
+                "notice: deploy happens on port 8008 with the blue runner in the secondary cluster",
+            ),
+            # Stronger match: exact fact_overlap
+            run_fact(
+                "deploy happens on port 8008",
+                "deploy happens on port 8008",
+            ),
+        ],
+    )
+    fake, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["key_items"] == 1
+    assert report["totals"]["found"] == 1
+    assert len(judge_requests(fake)) == 1
+    pair = report["sessions"][0]["pairs"][0]
+    assert pair["run"] == "deploy happens on port 8008"
+
+
+def test_a_stated_run_fact_paired_only_with_different_verdicts_counts_once_as_wrong(
+    ev, tmp_path, cfg
+):
+    """A [stated] run fact paired with several key items counts as wrong once when all its
+    verdicts are different."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
+            "sess-1#2": {
+                "user": "",
+                "durable": [key_fact("blue runner handles staging")],
+            },
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "deploy happens on port 9999 and green runner handles staging",
+                "deploy happens on port 8008. blue runner handles staging.",
+                source="stated",
+            )
+        ],
+    )
+    fake, judge = judged(
+        ev,
+        cfg,
+        data,
+        verdict("different", "port 9999"),
+        verdict("different", "green runner"),
+    )
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["key_items"] == 2
+    assert report["totals"]["found"] == 0
+    assert report["totals"]["missed"] == 2
+    assert report["totals"]["stated"] == 1
+    assert report["totals"]["stated_wrong"] == 1
+    wrong = report["sessions"][0]["wrong"]
+    assert wrong == ["deploy happens on port 9999 and green runner handles staging"]
+
+
+def test_match_facts_still_pairs_one_to_one(ev):
+    """match_facts retains one-to-one pairing across lists."""
+    key = [key_fact("deploy happens on port 8008"), key_fact("deploy on port 8008")]
+    run = [run_fact("deploy happens on port 8008", "deploy happens on port 8008")]
+    groups = ev.match_facts({"key": key, "run": run})
+    paired = [group for group in groups if len(group.facts) == 2]
+    assert len(paired) == 1
+    assert len(groups) == 2
+
+
+def test_a_stated_run_fact_with_one_same_verdict_is_not_wrong(ev, tmp_path, cfg):
+    """A stated run fact paired with several key items is not wrong if at least one pair is
+    judged same."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
+            "sess-1#2": {
+                "user": "",
+                "durable": [key_fact("blue runner handles staging")],
+            },
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "deploy happens on port 8008 and green runner handles staging",
+                "deploy happens on port 8008. blue runner handles staging.",
+                source="stated",
+            )
+        ],
+    )
+    fake, judge = judged(
+        ev,
+        cfg,
+        data,
+        verdict("same"),
+        verdict("different", "green runner"),
+    )
     report = ev.score_turns(data, "base", "local", judge)
     assert report["totals"]["key_items"] == 2
     assert report["totals"]["found"] == 1
     assert report["totals"]["missed"] == 1
-    assert len(judge_requests(fake)) == 1
-    missed = report["sessions"][0]["missed_items"]
-    assert missed == ["The session said: deploy happens on port 8008 with the blue runner"]
+    assert report["totals"]["stated"] == 1
+    assert report["totals"]["stated_wrong"] == 0
+    assert report["sessions"][0]["wrong"] == []
 
 
 def test_a_right_quote_under_a_wrong_statement_is_wrong(ev, tmp_path, cfg):
@@ -1134,6 +1343,41 @@ def test_both_splits_are_reported_for_the_per_turn_key(ev, tmp_path, cfg):
     assert buckets["dev"]["key_facts"] + buckets["held-out"]["key_facts"] == 2
     assert buckets["dev"]["found"] + buckets["held-out"]["found"] == 2
     assert buckets["unsplit"]["key_facts"] == 0
+
+
+def test_a_wrong_stated_fact_counts_in_the_split_of_its_first_pair(ev, tmp_path, cfg):
+    """A [stated] fact whose every pair is judged different counts once as wrong, in the
+    split of the first key item it pairs with; an unpaired one counts in no split."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
+            "sess-1#2": {"user": "", "durable": [key_fact("blue runner handles staging")]},
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "deploy happens on port 9999 and green runner handles staging",
+                "deploy happens on port 8008. blue runner handles staging.",
+                source="stated",
+            ),
+            run_fact("the user likes tea", "I like tea", source="stated"),
+        ],
+    )
+    ev.build_split(data)
+    _, judge = judged(
+        ev, cfg, data, verdict("different", "port 9999"), verdict("different", "green runner")
+    )
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["stated_wrong"] == 2
+    buckets = report["splits"]
+    assert sum(bucket["wrong"] for bucket in buckets.values()) == 1
+    assert buckets["unsplit"]["wrong"] == 0
 
 
 def test_score_reports_the_split_of_its_key_facts(ev, tmp_path, cfg):
