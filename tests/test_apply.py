@@ -3579,6 +3579,47 @@ def test_dream_refuses_stated_fact_quoted_from_a_question(initialized, home, fak
     assert not overview.exists() or "store digest at session end" not in overview.read_text()
 
 
+def test_dream_keeps_stated_fact_whose_quote_ends_its_own_sentence(initialized, home, fake):
+    """R2: a quote that ends with its own full stop is judged by that sentence; the
+    question asked after it in the same turn does not refuse the fact (BUILD-PLAN F95)."""
+    cfg = config_with_fake(home, initialized.vault, fake)
+    registry = Registry.load(cfg.registry_path)
+    registry.add("widget", "Widget")
+    registry.save()
+
+    write_digest(
+        cfg,
+        "widget",
+        "d-statement",
+        facts=[
+            {
+                "statement": "Use Vorta backup and a 3 hour schedule.",
+                "kind": "decision",
+                "source": "stated",
+                "date": TODAY,
+                "ref": "s1",
+            }
+        ],
+        sources=[
+            {
+                "id": "s1",
+                "resource": "aft://session/claude/sess_stmt#e1",
+                "quote": "I use Vorta backup and a 3 hour schedule.",
+                "text": "I'm more worried. I use Vorta backup and a 3 hour schedule."
+                "   would an hourly schedule cost much?",
+            }
+        ],
+    )
+
+    fake.script = [reply("add", None, "use vorta backup and a 3 hour schedule")]
+    res = schedule.run(cfg, now=NOW)
+    report = res.reports["widget"]
+    assert len(report.added) == 1
+    assert report.added[0].statement == "Use Vorta backup and a 3 hour schedule."
+    overview = cfg.vault / "projects" / "widget" / "overview.md"
+    assert "Use Vorta backup and a 3 hour schedule." in overview.read_text()
+
+
 def test_dream_refuses_stated_fact_quoted_from_a_question_with_a_version_dot(
     initialized, home, fake
 ):

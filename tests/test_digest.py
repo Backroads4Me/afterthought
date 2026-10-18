@@ -568,6 +568,66 @@ def test_base_digest_refuses_quote_cropped_from_a_question(session: Session):
     assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
 
 
+def test_base_digest_keeps_quote_that_ends_its_own_sentence_before_a_question(session: Session):
+    """BUILD-PLAN F95: a [stated] quote that ends with its own full stop is judged by
+    that sentence; the question asked after it in the same turn does not refuse it."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record(
+            "e1",
+            "user",
+            "I'm more worried. I use Vorta backup and a 3 hour schedule."
+            "   would an hourly schedule cost much?",
+        ),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Use Vorta backup and a 3 hour schedule.",
+                quote="I use Vorta backup and a 3 hour schedule.",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["I use Vorta backup and a 3 hour schedule."]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_refuses_quote_cut_from_a_sentence_ending_in_a_question(session: Session):
+    """BUILD-PLAN F95: the quote-end rule lifts only a quote that carries its own end
+    mark; a quote cut from a sentence that ends in a question is still refused."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record(
+            "e1",
+            "user",
+            "I'm going to stick with C4, does the compose file need to change?",
+        ),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Stick with C4.",
+                quote="I'm going to stick with C4",
+                entry="e1",
+            )
+        ),
+    )
+    assert not wrote.facts
+    dropped = frontmatter(session.cfg, wrote.path)["aft"]["dropped"]
+    assert any(d["reason"] == "the quote is a question, never a settled item" for d in dropped)
+
+
 def test_base_digest_refuses_quote_cropped_from_a_question_across_lines(session: Session):
     """BUILD-PLAN F52: a question written across lines is still a question: the quote is
     judged by the sentence it was cut from, whatever lines the turn broke it across (M1)."""
@@ -736,6 +796,38 @@ def test_base_digest_keeps_a_short_quote_that_is_the_whole_sentence(session: Ses
         ),
     )
     assert [fact.quote for fact in wrote.facts] == ["Always use uv"]
+    assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
+
+
+def test_base_digest_keeps_a_short_quote_ending_its_own_sentence_before_a_question(
+    session: Session,
+):
+    """BUILD-PLAN F95: a short quote that is the whole sentence it was cut from, written
+    with its full stop, is no fragment even when a question follows it in the turn."""
+    write_records(
+        session.transcript,
+        {"cwd": str(session.cwd)},
+        record(
+            "e1",
+            "user",
+            "I back up about 3-4 times a day. usually about 3-4."
+            " would an hourly schedule be better?",
+        ),
+        record("e2", "assistant", ASSISTANT_ANSWER),
+        record("e3", "user", SECOND_PROMPT),
+        record("e4", "assistant", SECOND_ANSWER),
+    )
+    wrote = digest_once(
+        session,
+        answer(
+            said(
+                statement="Back up about 3-4 times a day.",
+                quote="usually about 3-4.",
+                entry="e1",
+            )
+        ),
+    )
+    assert [fact.quote for fact in wrote.facts] == ["usually about 3-4."]
     assert "dropped" not in frontmatter(session.cfg, wrote.path)["aft"]
 
 
@@ -4466,6 +4558,21 @@ def test_enclosing_sentence_treats_a_line_break_as_a_boundary():
     assert digest.enclosing_sentence(turn, "use uv for installs") == "always use uv for installs"
     assert digest.enclosing_sentence(turn, "installs") == "always use uv for installs"
     assert digest.enclosing_sentence(turn, "what about poetry") == "what about poetry?"
+
+
+def test_enclosing_sentence_stops_at_a_quote_that_ends_its_own_sentence():
+    """BUILD-PLAN F95: a quote whose last character is ., ! or ? ends its sentence when
+    the text after it is whitespace or nothing; the question asked after it is the next
+    sentence, not part of the one the quote was cut from."""
+    turn = (
+        "I'm more worried. I use Vorta backup and a 3 hour schedule."
+        "   would an hourly schedule cost much?"
+    )
+    quote = "I use Vorta backup and a 3 hour schedule."
+    assert digest.enclosing_sentence(turn, quote) == "I use Vorta backup and a 3 hour schedule."
+    assert digest.stated_refusal(quote, turn) is None
+    exclaim = "I always use uv! what runs on it?"
+    assert digest.enclosing_sentence(exclaim, "I always use uv!") == "I always use uv!"
 
 
 def test_key_tokens_are_the_checkable_words_and_unspaced_backticked_spans():
