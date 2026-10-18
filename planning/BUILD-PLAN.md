@@ -2600,6 +2600,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     quote stands inside a longer run quote pairs; a key item takes only its strongest run
     fact; a run fact paired only with `different` verdicts counts as wrong `[stated]`;
     `compare` still pairs one to one. Review checkpoint: no.
+  - **Built 2026-10-18** (#196, with a lead fix: a wrong `[stated]` fact counts in the
+    split of the first key item it pairs with). The sixteen runs re-scored on the same key
+    (97 items, 50 held-out):
+    - F94: held-out found 23, 24, 24, 19, 24, 24, 26, 21 (mean 23.1, was 19.5); all found
+      mean 46.25 (was 40.0); wrong `[stated]` mean 10.5 (was 11.25).
+    - main with F90: held-out found 20, 22, 22, 18, 17, 17, 18, 18 (mean 19.0, was 16.5);
+      all found mean 38.0 (was 33.1); wrong `[stated]` mean 13.0 (was 13.5).
 - **T57 The key rules on what every run misses** (ruling 2026-10-18; lead and Ted; after
   T56). The T52 pass for misses: 38 key items are missed by all eight F94 runs, and some
   are what the keep-test is meant to refuse or what the pipeline rightly replaces. Among
@@ -2619,6 +2626,27 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     beside it (`key-turns.2026-10-18-pre-t57.json`), and the split does not change.
   - **Re-score:** the sixteen runs are scored again on the ruled key, and the means and
     spreads go here as the baseline for F95 and later tasks.
+  - **Ruled 2026-10-18:** after T56, 32 items are missed by all eight F94 runs. Ten leave
+    the key (eleven lines, since one turn appears in two exported copies of its session):
+    `order` for the choice of option 1 among the punctuation fixes and both WirePlumber
+    config approvals; `status` for the timedatectl command that already ran, the
+    crew-dispatch path that did not exist, and the multi-port change put on hold;
+    `passing` for the Groq key's age; `replaced` for the agent-switchboard name, the
+    db-staging-03 move and the canary rule. Three go to Ted and stay in the key until he
+    rules: "Accept the proposed review feedback changes, including posting to ted when a
+    member goes BLOCKED." (a lasting design choice, or one-time work the repository
+    records?), "The user has disabled Hermes." (the user's setup, or a troubleshooting
+    step?), "Disable the sound voxtype plays when the transcribed words print." (an order,
+    or a lasting setting?). The other 19 are `durable`. The rulings are in
+    `~/src/aft-eval-data/t57-rulings.json`. The key holds 86 items over 639 turns (43
+    held-out, 43 dev).
+  - **Baseline on the ruled key** (T56's scorer):
+    - F94: held-out found mean 23.1 (range 19 to 26) of 43; wrong `[stated]` mean 10.5
+      (range 6 to 14); observed judged unsupported mean 13.6; all found mean 46.25 of 86.
+    - main with F90: held-out found mean 18.4 (range 16 to 22); wrong `[stated]` mean
+      13.6 (range 9 to 20); observed judged unsupported mean 15.0; all found mean 37.4.
+    - Observed judged unsupported moved by up to 1.5 on a re-score with no change to the
+      runs or to what it judges, so judge calls outside the cache vary by about that much.
 - **F95 A quote that ends its own sentence is judged by that sentence** (ruling
   2026-10-18; Ted; touches R2's quote checks). `enclosing_sentence` in `digest.py` scans
   forward for the sentence's end from the character after the quote. A quote that ends
