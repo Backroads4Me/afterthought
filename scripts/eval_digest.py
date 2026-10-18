@@ -1971,6 +1971,9 @@ def _score_turns_session(
     wrong_statements = []
     missed_statements = []
     fact_verdicts: list[list[str]] = [[] for _ in facts]
+    # The split bucket of the first key item each run fact is paired with, where its
+    # wrong [stated] count goes; an unpaired fact belongs to no split.
+    fact_buckets: list[dict[str, int] | None] = [None for _ in facts]
     for item_index, (turn_id, item) in enumerate(items):
         where = split.get(turn_id) if split else None
         bucket = _split_bucket(buckets, where) if buckets is not None else None
@@ -1992,6 +1995,8 @@ def _score_turns_session(
             run_evidence(fact),
         )
         fact_verdicts[fact_index].append(answer["verdict"])
+        if fact_buckets[fact_index] is None:
+            fact_buckets[fact_index] = bucket
         pairs.append(
             {
                 "key": item.get("statement", ""),
@@ -2022,6 +2027,8 @@ def _score_turns_session(
         if not verdicts or all(v == "different" for v in verdicts):
             counts["stated_wrong"] += 1
             wrong_statements.append(fact.get("statement", ""))
+            if verdicts and fact_buckets[fact_index] is not None:
+                fact_buckets[fact_index]["wrong"] += 1
     observed = _judge_observed(judge, facts)
     counts["stated"] = sum(1 for fact in facts if fact.get("source") == "stated")
     counts["observed"] = observed["count"]

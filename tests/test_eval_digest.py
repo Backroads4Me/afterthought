@@ -1345,6 +1345,41 @@ def test_both_splits_are_reported_for_the_per_turn_key(ev, tmp_path, cfg):
     assert buckets["unsplit"]["key_facts"] == 0
 
 
+def test_a_wrong_stated_fact_counts_in_the_split_of_its_first_pair(ev, tmp_path, cfg):
+    """A [stated] fact whose every pair is judged different counts once as wrong, in the
+    split of the first key item it pairs with; an unpaired one counts in no split."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {"user": "", "durable": [key_fact("deploy happens on port 8008")]},
+            "sess-1#2": {"user": "", "durable": [key_fact("blue runner handles staging")]},
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "deploy happens on port 9999 and green runner handles staging",
+                "deploy happens on port 8008. blue runner handles staging.",
+                source="stated",
+            ),
+            run_fact("the user likes tea", "I like tea", source="stated"),
+        ],
+    )
+    ev.build_split(data)
+    _, judge = judged(
+        ev, cfg, data, verdict("different", "port 9999"), verdict("different", "green runner")
+    )
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["stated_wrong"] == 2
+    buckets = report["splits"]
+    assert sum(bucket["wrong"] for bucket in buckets.values()) == 1
+    assert buckets["unsplit"]["wrong"] == 0
+
+
 def test_score_reports_the_split_of_its_key_facts(ev, tmp_path, cfg):
     """The per-session key reports its facts' splits too, through the per-turn key."""
     data = tmp_path / "data"
