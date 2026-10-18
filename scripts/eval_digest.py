@@ -1823,17 +1823,74 @@ def with_pipeline(cfg: Config, variant: str) -> Config:
 KEY_TURNS = "key-turns.json"
 
 
-def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
-    """A run's facts against the per-turn key, one key item to one run fact (BUILD-PLAN M16).
+def quote_contains(item_quote: str, fact_quote: str) -> bool:
+    """True when the key item's quote stands whole and in order inside the run fact's quote."""
+    sub = quote_tokens(item_quote)
+    if not sub:
+        return False
+    full = quote_tokens(fact_quote)
+    n = len(sub)
+    m = len(full)
+    if n > m:
+        return False
+    for i in range(m - n + 1):
+        if full[i : i + n] == sub:
+            return True
+    return False
 
-    Key items and run facts are paired through ``match_facts``, strongest pairs first, so
-    a run fact answers at most one key item, and each pair is judged: the names and
-    numbers of the run statement are checked against the key text with no model call, and
-    what survives is judged. A key item counts as found only when its pair is judged
-    ``same`` or ``narrower``; a ``[stated]`` fact left unpaired, or judged ``different``,
-    is wrong. Every ``[observed]`` fact is judged against its own cited quote; the key
-    labels the user's turns only, so it holds no observed recall. When the data directory
-    holds a frozen split, the key-side numbers are reported for both splits.
+
+def turn_fact_overlap(item: dict, fact: dict) -> float | None:
+    """How strongly a key item and a run fact pair in score-turns, or None when they do not.
+
+    A key item pairs with a run fact when fact_overlap names them the same thing (score
+    >= 1.0), or when the key item's quote stands whole and in order inside the run fact's
+    quote (score < 1.0). Containment pairs rank below every fact_overlap pair.
+    """
+    overlap = fact_overlap(item, fact)
+    if overlap is not None:
+        return overlap
+    if quote_contains(item.get("quote", ""), fact.get("quote", "")):
+        quote = quote_overlap(item.get("quote", ""), fact.get("quote", ""))
+        statement = statement_overlap(item.get("statement", ""), fact.get("statement", ""))
+        return max(quote / QUOTE_MATCH_RATIO, statement / STATEMENT_MATCH_RATIO)
+    return None
+
+
+def pair_turn_facts(key_items: list[dict], run_facts: list[dict]) -> list[tuple[int, int]]:
+    """Pair each key item with at most one run fact, its strongest.
+
+    A run fact may answer several key items. Each key item takes its strongest matching
+    run fact; ties are broken by earlier run fact index. Returns a list of (item_index,
+    fact_index) pairs.
+    """
+    pairs: list[tuple[int, int]] = []
+    for item_index, item in enumerate(key_items):
+        best_overlap: float | None = None
+        best_fact_index: int | None = None
+        for fact_index, fact in enumerate(run_facts):
+            score = turn_fact_overlap(item, fact)
+            if score is None:
+                continue
+            if best_overlap is None or score > best_overlap:
+                best_overlap = score
+                best_fact_index = fact_index
+        if best_fact_index is not None:
+            pairs.append((item_index, best_fact_index))
+    return pairs
+
+
+def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
+    """A run's facts against the per-turn key (BUILD-PLAN F55, T56).
+
+    Key items and run facts are paired through ``pair_turn_facts``, each key item taking
+    at most one run fact, its strongest, while a run fact may answer several key items.
+    Each pair is judged: the names and numbers of the run statement are checked against
+    the key text with no model call, and what survives is judged. A key item counts as
+    found only when its pair is judged ``same``, ``narrower``, or ``broader``; a
+    ``[stated]`` fact left unpaired, or judged ``different`` in every pair it is in, is
+    wrong. Every ``[observed]`` fact is judged against its own cited quote; the key labels
+    the user's turns only, so it holds no observed recall. When the data directory holds
+    a frozen split, the key-side numbers are reported for both splits.
     """
     if backend not in BACKENDS:
         raise EvalError(f"unknown backend {backend!r}; the backends are {', '.join(BACKENDS)}")
@@ -1897,9 +1954,9 @@ def _score_turns_session(
     facts: list[dict],
     split: dict[str, str] | None,
 ) -> dict:
-    """One session against its labelled key items, each pair judged (BUILD-PLAN M16)."""
-    turn_of = {id(item): turn_id for turn_id, item in items}
-    groups = match_facts({KEY_BACKEND: [item for _, item in items], backend: facts})
+    """One session against its labelled key items, each pair judged (BUILD-PLAN M16, T56)."""
+    key_fact_list = [item for _, item in items]
+    matched = dict(pair_turn_facts(key_fact_list, facts))
     counts = {
         "key_items": len(items),
         "found": 0,
@@ -1913,24 +1970,20 @@ def _score_turns_session(
     pairs = []
     wrong_statements = []
     missed_statements = []
-    for group in groups:
-        item = group.facts.get(KEY_BACKEND)
-        fact = group.facts.get(backend)
-        where = split.get(turn_of.get(id(item), "")) if split and item is not None else None
+    fact_verdicts: list[list[str]] = [[] for _ in facts]
+    for item_index, (turn_id, item) in enumerate(items):
+        where = split.get(turn_id) if split else None
         bucket = _split_bucket(buckets, where) if buckets is not None else None
-        if item is not None and fact is None:
+        if bucket is not None:
+            bucket["key_facts"] += 1
+        if item_index not in matched:
             counts["missed"] += 1
             missed_statements.append(item.get("statement", ""))
             if bucket is not None:
-                bucket["key_facts"] += 1
                 bucket["missed"] += 1
             continue
-        if fact is not None and item is None:
-            if fact.get("source") == "stated":
-                counts["stated_wrong"] += 1
-                wrong_statements.append(fact.get("statement", ""))
-            continue
-        assert item is not None and fact is not None
+        fact_index = matched[item_index]
+        fact = facts[fact_index]
         answer = judge_pair(
             judge,
             item.get("statement", ""),
@@ -1938,6 +1991,7 @@ def _score_turns_session(
             fact.get("statement", ""),
             run_evidence(fact),
         )
+        fact_verdicts[fact_index].append(answer["verdict"])
         pairs.append(
             {
                 "key": item.get("statement", ""),
@@ -1948,18 +2002,11 @@ def _score_turns_session(
                 "split": where,
             }
         )
-        if bucket is not None:
-            bucket["key_facts"] += 1
         if answer["verdict"] == "different":
             counts["missed"] += 1
             missed_statements.append(item.get("statement", ""))
             if bucket is not None:
                 bucket["missed"] += 1
-            if fact.get("source") == "stated":
-                counts["stated_wrong"] += 1
-                wrong_statements.append(fact.get("statement", ""))
-                if bucket is not None:
-                    bucket["wrong"] += 1
             continue
         counts["found"] += 1
         if bucket is not None:
@@ -1968,6 +2015,13 @@ def _score_turns_session(
             counts[answer["verdict"]] += 1
             if bucket is not None:
                 bucket[answer["verdict"]] += 1
+    for fact_index, fact in enumerate(facts):
+        if fact.get("source") != "stated":
+            continue
+        verdicts = fact_verdicts[fact_index]
+        if not verdicts or all(v == "different" for v in verdicts):
+            counts["stated_wrong"] += 1
+            wrong_statements.append(fact.get("statement", ""))
     observed = _judge_observed(judge, facts)
     counts["stated"] = sum(1 for fact in facts if fact.get("source") == "stated")
     counts["observed"] = observed["count"]
