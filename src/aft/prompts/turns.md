@@ -52,6 +52,10 @@ other labels:
   means, counted from the turn's date. A statement leaves no "it", "this", "that", "there" or
   other pronoun pointing outside itself, naming what it means; a name taken from the answered
   message is cited as a proposal.
+  A statement calls the user "the user" and the agent "the agent": never by name, and
+  never with he, she or another pronoun that guesses who they are, even where BEFORE or
+  the session names them. Other people are named as the user names them, and a fact about
+  the user's own name says so ("The user's name is ...").
 - proposal: only for a decision that approves something BEFORE proposed: the exact words of
   BEFORE that state what was proposed, copied character for character, at most 300
   characters. The statement may then use those words as well as the user's. For every other

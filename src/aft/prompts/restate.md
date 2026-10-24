@@ -14,6 +14,11 @@ abbreviates it. Drop a detail the source does not hold rather than replace it. N
 different claim from the source text: the restated sentence says what the statement said, or
 less of it, and nothing else.
 
+A statement calls the user "the user" and the agent "the agent": never by name, and never
+with he, she or another pronoun that guesses who they are, even where BEFORE or the
+session names them. Other people are named as the user names them, and a fact about the
+user's own name says so ("The user's name is ...").
+
 If the claim cannot be stated without the missing words, return an empty statement for that
 item.
 

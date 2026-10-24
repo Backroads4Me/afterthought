@@ -1635,12 +1635,25 @@ def test_a_keep_answer_cut_for_length_keeps_the_batch(session: Session, monkeypa
     assert dropped == []
 
 
-def test_the_keep_prompt_refuses_approvals_of_one_time_work_pace_and_names():
-    """BUILD-PLAN F93: an approval of one-time work is the order it approves, the pace of
-    work and what is available for it are not facts, and a statement naming the user is
-    not kept; a lasting choice an approval settles still is."""
+def test_the_keep_prompt_refuses_approvals_of_one_time_work_pace():
+    """BUILD-PLAN F93: an approval of one-time work is the order it approves, and the pace
+    of work and what is available for it are not facts; a lasting choice an approval
+    settles still is."""
     words = " ".join(digest.keep_prompt_text().split())
     assert "An approval of one-time work is that order" in words
     assert "a design or setting choice an approval settles" in words
     assert "The pace of work or what is available for it right now" in words
-    assert 'calls the user by a personal name instead of "the user"' in words
+    assert "calls the user by a personal name" not in words
+
+
+def test_the_turns_prompt_calls_the_user_the_user():
+    """BUILD-PLAN F96: a statement calls the user "the user" and the agent "the agent"."""
+    words = " ".join(digest.turns_prompt_text().split())
+    assert 'calls the user "the user" and the agent "the agent"' in words
+
+
+def test_the_restate_prompt_calls_the_user_the_user():
+    """BUILD-PLAN F96: a restated statement calls the user "the user" and the agent
+    "the agent"."""
+    words = " ".join(digest.restate_prompt_text().split())
+    assert 'calls the user "the user" and the agent "the agent"' in words

@@ -16,7 +16,6 @@ Never a fact (keep is false):
   (something that stays true after the work is done) are not such orders.
 - The pace of work or what is available for it right now: an agent or tool being
   available again, a quota running low, pausing for now.
-- A statement that calls the user by a personal name instead of "the user".
 - The status of work in the session (started, ran, restarted, finished, failed); what this
   part of the session did or where the work stood when it ended; the status of a pull
   request, task, branch, or commit; who is working on what; a test's name or result; a
