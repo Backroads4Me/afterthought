@@ -2640,6 +2640,15 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     or a lasting setting?). The other 19 are `durable`. The rulings are in
     `~/src/aft-eval-data/t57-rulings.json`. The key holds 86 items over 639 turns (43
     held-out, 43 dev).
+  - **Ted's rulings, 2026-10-24:** the review approval is narrowed to its lasting part,
+    "When a switchboard member goes BLOCKED, the supervisor posts it to ted on the board."
+    (accepting the whole review list is one-time work); "The user has disabled Hermes."
+    stays `durable` (the runs keep it as short-term and then drop it as `a short-term fact
+    belongs to a project, never global`, so its miss is a scope defect, not the
+    keep-test); the voxtype print sound leaves the key as an `order` (both copies). The
+    key holds 84 items (42 held-out, 42 dev); the previous key is kept as
+    `key-turns.2026-10-24-pre-t57-ted.json`. The baseline below is re-scored on this key
+    once the model endpoint answers again; the narrowed item needs new judge calls.
   - **Baseline on the ruled key** (T56's scorer):
     - F94: held-out found mean 23.1 (range 19 to 26) of 43; wrong `[stated]` mean 10.5
       (range 6 to 14); observed judged unsupported mean 13.6; all found mean 46.25 of 86.
