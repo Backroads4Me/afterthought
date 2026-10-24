@@ -1821,6 +1821,7 @@ def with_pipeline(cfg: Config, variant: str) -> Config:
 # Scoring a run against the per-turn key (BUILD-PLAN F55)
 
 KEY_TURNS = "key-turns.json"
+USER_NAMES = "user-names.json"
 
 
 def quote_contains(item_quote: str, fact_quote: str) -> bool:
@@ -1899,6 +1900,8 @@ def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
         raise EvalError(f"{key_path}: no per-turn key")
     labelled = _turn_items(_read_json(key_path), key_path)
     split = load_split(data)
+    names_path = data / USER_NAMES
+    user_names = [str(n) for n in _read_json(names_path)] if names_path.exists() else None
     totals = {
         "sessions": 0,
         "key_items": 0,
@@ -1914,6 +1917,8 @@ def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
         "observed_broader": 0,
         "observed_unsupported": 0,
     }
+    if user_names is not None:
+        totals["naming_user"] = 0
     buckets = _split_buckets() if split else None
     sessions = []
     for session_id, items in sorted(labelled.items()):
@@ -1922,7 +1927,7 @@ def score_turns(data: Path, variant: str, backend: str, judge: Judge) -> dict:
             continue
         summary = _read_json(summary_path)
         facts = [dict(fact) for fact in summary.get("facts", [])]
-        scored = _score_turns_session(judge, backend, items, facts, split)
+        scored = _score_turns_session(judge, backend, items, facts, split, user_names)
         totals["sessions"] += 1
         for name, value in scored["totals"].items():
             totals[name] += value
@@ -1953,6 +1958,7 @@ def _score_turns_session(
     items: list[tuple[str, dict]],
     facts: list[dict],
     split: dict[str, str] | None,
+    user_names: list[str] | None = None,
 ) -> dict:
     """One session against its labelled key items, each pair judged (BUILD-PLAN M16, T56)."""
     key_fact_list = [item for _, item in items]
@@ -2030,6 +2036,9 @@ def _score_turns_session(
             if verdicts and fact_buckets[fact_index] is not None:
                 fact_buckets[fact_index]["wrong"] += 1
     observed = _judge_observed(judge, facts)
+    naming_user_statements = _naming_user_statements(facts, user_names)
+    if user_names is not None:
+        counts["naming_user"] = len(naming_user_statements)
     counts["stated"] = sum(1 for fact in facts if fact.get("source") == "stated")
     counts["observed"] = observed["count"]
     counts["observed_supported"] = observed["supported"]
@@ -2047,7 +2056,26 @@ def _score_turns_session(
         "missed_items": missed_statements,
         "pairs": pairs,
     }
+    if user_names is not None:
+        record["naming_user"] = len(naming_user_statements)
+        record["naming_user_statements"] = naming_user_statements
     return {"record": record, "totals": counts, "splits": buckets}
+
+
+def _naming_user_statements(facts: list[dict], names: list[str] | None) -> list[str]:
+    """Statements that call the user by a listed name their quote does not hold (F96)."""
+    if not names:
+        return []
+    statements = []
+    for fact in facts:
+        statement = fact.get("statement", "")
+        held = [n for n in names if re.search(rf"\b{re.escape(n)}\b", statement)]
+        if not held:
+            continue
+        if any(re.search(rf"\b{re.escape(n)}\b", fact.get("quote", "")) for n in held):
+            continue
+        statements.append(statement)
+    return statements
 
 
 def _cmd_score_turns(args: argparse.Namespace) -> int:
@@ -2062,11 +2090,13 @@ def _cmd_score_turns(args: argparse.Namespace) -> int:
         / f"{time.strftime('%Y%m%dT%H%M%S')}-turns-{args.variant}-{args.backend}.json"
     )
     _write_json(out, report)
+    stated_txt = f"{t['stated_wrong']} of {t['stated']} [stated] facts not in the key"
+    if "naming_user" in t:
+        stated_txt += f"; {t['naming_user']} naming_user"
     print(
         f"{args.variant}/{args.backend}: found {t['found']} of {t['key_items']} key items"
-        f" ({t['narrower']} narrower, {t['broader']} broader); {t['stated_wrong']} of"
-        f" {t['stated']} [stated] facts"
-        f" not in the key; observed {t['observed_supported']} supported,"
+        f" ({t['narrower']} narrower, {t['broader']} broader); {stated_txt};"
+        f" observed {t['observed_supported']} supported,"
         f" {t['observed_narrower']} narrower, {t['observed_broader']} broader,"
         f" {t['observed_unsupported']} unsupported of"
         f" {t['observed']}; judge calls {report['judge_calls']}; report {out}"

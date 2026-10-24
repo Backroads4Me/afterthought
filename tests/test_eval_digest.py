@@ -1055,6 +1055,133 @@ def test_a_key_item_takes_only_its_strongest_run_fact(ev, tmp_path, cfg):
     assert pair["run"] == "deploy happens on port 8008"
 
 
+def test_naming_user_counts_a_statement_naming_a_listed_name_its_quote_lacks(ev, tmp_path, cfg):
+    """BUILD-PLAN F96: naming_user counts a kept fact whose statement holds a listed
+    name as a whole word when its quote does not hold the name the same way."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [key_fact("i've restored three vintage radios")],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Dana restored three vintage radios",
+                "i've restored three vintage radios",
+            ),
+            run_fact(
+                "Danamarie joined the project",
+                "danamarie joined the project",
+            ),
+        ],
+    )
+    (data / "user-names.json").write_text(json.dumps(["Dana"]), encoding="utf-8")
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["naming_user"] == 1
+    assert report["sessions"][0]["naming_user"] == 1
+    assert report["sessions"][0]["naming_user_statements"] == ["Dana restored three vintage radios"]
+
+
+def test_naming_user_skips_a_statement_whose_quote_holds_the_name(ev, tmp_path, cfg):
+    """BUILD-PLAN F96: a statement whose quote holds the listed name is not counted."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [key_fact("i've restored three vintage radios")],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Dana restored three vintage radios",
+                "Dana restored three vintage radios",
+            )
+        ],
+    )
+    (data / "user-names.json").write_text(json.dumps(["Dana"]), encoding="utf-8")
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["naming_user"] == 0
+    assert report["sessions"][0]["naming_user"] == 0
+    assert report["sessions"][0]["naming_user_statements"] == []
+
+
+def test_naming_user_skips_a_name_not_on_the_list(ev, tmp_path, cfg):
+    """BUILD-PLAN F96: a name the list does not hold is not counted."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [key_fact("i've restored three vintage radios")],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Dana restored three vintage radios",
+                "i've restored three vintage radios",
+            )
+        ],
+    )
+    (data / "user-names.json").write_text(json.dumps(["Kim"]), encoding="utf-8")
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert report["totals"]["naming_user"] == 0
+    assert report["sessions"][0]["naming_user_statements"] == []
+
+
+def test_naming_user_is_absent_from_the_totals_without_user_names_file(ev, tmp_path, cfg):
+    """BUILD-PLAN F96: without user-names.json the naming_user keys are absent."""
+    data = tmp_path / "data"
+    key_turns_file(
+        data,
+        {
+            "sess-1#1": {
+                "user": "",
+                "durable": [key_fact("i've restored three vintage radios")],
+            }
+        },
+    )
+    write_summary(
+        data,
+        "local",
+        "sess-1",
+        [
+            run_fact(
+                "Dana restored three vintage radios",
+                "i've restored three vintage radios",
+            )
+        ],
+    )
+    _, judge = judged(ev, cfg, data, verdict("same"))
+    report = ev.score_turns(data, "base", "local", judge)
+    assert "naming_user" not in report["totals"]
+    assert "naming_user" not in report["sessions"][0]
+    assert "naming_user_statements" not in report["sessions"][0]
+
+
 def test_a_stated_run_fact_paired_only_with_different_verdicts_counts_once_as_wrong(
     ev, tmp_path, cfg
 ):
