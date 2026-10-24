@@ -2647,8 +2647,18 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     belongs to a project, never global`, so its miss is a scope defect, not the
     keep-test); the voxtype print sound leaves the key as an `order` (both copies). The
     key holds 84 items (42 held-out, 42 dev); the previous key is kept as
-    `key-turns.2026-10-24-pre-t57-ted.json`. The baseline below is re-scored on this key
-    once the model endpoint answers again; the narrowed item needs new judge calls.
+    `key-turns.2026-10-24-pre-t57-ted.json`.
+  - **Baseline on the 84-item key** (T56's scorer, re-scored 2026-10-24), the one later
+    recall tasks are measured against:
+    - F94 (main): held-out found 23, 24, 24, 19, 24, 24, 26, 21 (mean 23.1 of 42, range
+      19 to 26); wrong `[stated]` mean 10.6 (range 7 to 14); observed judged unsupported
+      mean 13.6; all found mean 46.1 of 84.
+    - Main before F94 (F90 on): held-out found mean 18.4 (range 16 to 22); wrong
+      `[stated]` mean 13.25 (range 8 to 19); observed judged unsupported mean 15.0; all
+      found mean 37.75.
+    - F95's runs on the same key: held-out found mean 24.0; wrong `[stated]` mean 12.75
+      (+2.1 against F94, still past the +1 limit); observed judged unsupported mean 11.4;
+      all found mean 47.25. F95's ruling stands.
   - **Baseline on the ruled key** (T56's scorer):
     - F94: held-out found mean 23.1 (range 19 to 26) of 43; wrong `[stated]` mean 10.5
       (range 6 to 14); observed judged unsupported mean 13.6; all found mean 46.25 of 86.
