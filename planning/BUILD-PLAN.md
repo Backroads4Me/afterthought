@@ -2719,9 +2719,46 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
       beside "The user uses Vorta backup with a 3 hour schedule."), or name another person
       the key does not hold ("Chuck has installed the latest prod."). The other 10 lie in
       what eight runs of one pipeline vary by (the rerank pool, a captain.md guardrail).
-      The keep check's sentence against naming the user does not hold: 55 of the 2,432
-      facts the eight F94 runs kept call the user by name or by a guessed pronoun. F95
-      can be measured again once statements stop naming the user.
+      The keep check's sentence against naming the user does not hold: 27 of the 2,432
+      facts the eight F94 runs kept call the user by name where the quote does not (F96).
+      F95 can be measured again once statements stop naming the user.
+- **F96 A `[stated]` statement calls the user "the user"** (ruling 2026-10-24; Ted;
+  follows F95). The eight F94 runs keep 27 statements (4, 1, 6, 3, 2, 5, 2, 4 a run; 25
+  `[stated]`, 2 `[inferred]`) that call the user by name where the quote does not:
+  "Ted no longer uses YNAB and has moved to Actual budget self-hosted at ..." quotes "I no
+  longer use YNAB, I have moved to Actual budget ...". The model takes the name from
+  BEFORE or the session's instructions and puts it in place of the user's "I". `digest.md`
+  and `observed.md` say to call the user "the user" and the agent "the agent"; `turns.md`
+  and `restate.md`, which write every `[stated]` statement, do not. The only guard on that
+  path is `keep.md`'s line refusing "a statement that calls the user by a personal name",
+  which drops a true fact for its wording, and lets most of these through. A memory line
+  that names the user breaks the vault's rule that lines call the user "the user".
+  - **Prompts:** `turns.md` (the statement rules) and `restate.md` (the rewrite rules) say,
+    in `digest.md`'s words, that a statement calls the user "the user" and the agent "the
+    agent", never by name and never with he, she or another pronoun that guesses who they
+    are, even where BEFORE or the session names them; other people are named as the user
+    names them, and a fact about the user's own name says it ("The user's name is ...").
+    `keep.md` drops its line on statements that call the user by a personal name: the keep
+    call judges what a fact says, not its wording.
+  - **Scorer:** `score-turns` reports, per run and per session, the kept facts of any
+    source whose statement holds a name listed in `<data>/user-names.json` (whole word,
+    case kept) that the fact's quote does not hold, as `naming_user`, with the statements.
+    The names list lives in the eval data, never in the repository; with no list the count
+    is not reported. `user-names.json` holds `["Ted"]`.
+  - **Measure, before merging (decision rule set now):** eight runs (`g-f96-1` to `-8`),
+    each in its own sandbox home with a budget that does not run out, at most six at once,
+    against the eight F94 runs on the 84-item key (T57) with T56's scorer: mean
+    `naming_user` falls to 1 or less (from 3.4); held-out mean found does not fall by more
+    than 1; mean wrong `[stated]` does not rise by more than 1; observed judged unsupported
+    does not rise by more than 2. The spread of each side's eight runs is reported beside
+    the means. If F96 merges, F95 is rebased onto it and measured again with its own rule.
+  - **Not in scope:** lines already in the vault that name the user; `aft review` names
+    them for the user to withdraw.
+  - **Tests:** prompt-shape tests that `turns.md` and `restate.md` hold the sentence and
+    `keep.md` no longer lists naming; `score-turns` counts a statement naming a listed name
+    its quote lacks, skips one whose quote holds the name, skips a name not on the list,
+    and reports nothing without `user-names.json`. Review checkpoint: yes (prompts that
+    write `[stated]` statements; lead reviews in full).
 
 ## 6. Ted's checklists at milestone ends
 
