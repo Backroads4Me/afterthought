@@ -2759,6 +2759,27 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     its quote lacks, skips one whose quote holds the name, skips a name not on the list,
     and reports nothing without `user-names.json`. Review checkpoint: yes (prompts that
     write `[stated]` statements; lead reviews in full).
+  - **Measured, ruling 2026-10-24: not merged** (#197 closed, branch
+    `f96-call-the-user-the-user`). The lead's full review found the change as specified,
+    with one lead fix (`restate.md` named BEFORE, which its input does not hold). Eight
+    runs (`g-f96-1` to `-8`) against the eight F94 runs on the 84-item key:
+    - `naming_user`: 2, 2, 0, 2, 2, 0, 0, 0 (mean 1.0, from 3.4): passes. Every one left
+      writes the budget's own name, "'Ted&Jessica Budget'", which the user's setup holds,
+      so no statement still calls the user by name.
+    - Held-out found: 16, 23, 20, 24, 19, 20, 19, 17 (mean 19.75, range 16 to 24) against
+      23.1 (range 19 to 26): -3.4, fails the -1 limit.
+    - Wrong `[stated]`: 21, 19, 5, 13, 14, 11, 12, 17 (mean 14.0, range 5 to 21) against
+      10.6 (range 7 to 14): +3.4, fails the +1 limit.
+    - Observed judged unsupported: mean 10.9 against 13.6, passes. All found: mean 40.75 of
+      84 against 46.1.
+    - The loss gathers in a few sessions. In the retirement plan session, "The user's
+      primary concern is cost reduction and simplicity." and "The user is a FL resident, so
+      no state taxes." went from found in 8 of 8 runs to 1 of 8: the runs wrote the turn's
+      facts as one statement of two sentences, which the names check then refused whole.
+      The new sentence sits inside the statement bullet, after "one plain sentence", and
+      the statements grew. A version that states the rule once at the top of `turns.md`,
+      as `digest.md` does, and keeps the statement bullet as it was is the next thing to
+      try.
 
 ## 6. Ted's checklists at milestone ends
 
