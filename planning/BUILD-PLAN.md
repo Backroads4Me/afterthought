@@ -2834,6 +2834,48 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
        at most 25% above it.
     4. `stale`: correct rate no more than 10 points below the empty arm.
     A miss names what to fix. This run gates no merge; it is the first baseline.
+  - **First baseline (2026-11-01): three of the four parts missed.** 168 runs, 3 void, all
+    on `m-trixie`, which drops out. Medians per run:
+
+    | kind | arm | runs | correct | tokens | uncached | turns | seconds |
+    | --- | --- | --- | --- | --- | --- | --- | --- |
+    | memory | with | 21 | 95% | 7,796 | 7,556 | 1 | 22.8 |
+    | memory | without | 21 | 67% | 57,992 | 10,220 | 7 | 54.0 |
+    | repo | with | 27 | 100% | 15,340 | 7,251 | 2 | 26.1 |
+    | repo | without | 27 | 89% | 15,713 | 5,860 | 3 | 27.0 |
+    | stale | with | 15 | 80% | 25,828 | 6,870 | 3 | 30.3 |
+    | stale | without | 15 | 100% | 20,478 | 5,563 | 4 | 29.4 |
+    | control | with | 18 | 83% | 15,554 | 5,896 | 2 | 25.5 |
+    | control | without | 18 | 100% | 11,610 | 4,360 | 3 | 25.5 |
+
+    1. `memory` missed: +29 points against +50.
+    2. `repo` held: +11 points, tokens 0.98 times.
+    3. `control` missed: -17 points against -5, tokens 1.34 times against 1.25.
+    4. `stale` missed: -20 points against -10.
+
+    What each miss names:
+    - **`stale`:** one question, `s-alias`, wrong in all three `with` runs and the whole
+      gap. The dotfiles page holds a `[stated]` line sending aliases to `~/.bash_aliases`
+      beside an `[observed]` line about Atuin, and the block carries the first. The F97
+      replay flags this line, so #198 raises it to Ted; the line stays in memory until
+      settled.
+    - **`control`:** one question, `c-unit`, wrong in all three `with` runs and the whole
+      correctness gap. Recall put a line about `paseo.service` first and the agent took it,
+      in two runs with no tool call, though recall says to check. The line is true of
+      another project. The token excess is the block and recall on a question they cannot
+      help.
+    - **`memory`:** three of the eight questions were answerable without memory. `m-kit` is
+      in the site's own docs, and `m-honcho` and `m-docker` are general knowledge; the
+      grep that proved them absent from the clone was too narrow. The other four score
+      92% against 42%, +50, but that subset was chosen after the run and passes nothing.
+      The next run needs a stricter proof and a sealed question set.
+    - **Not in the rule:** the largest gain. On `memory` questions memory costs 7.5 times
+      fewer tokens, 6 fewer turns and 31 fewer seconds. `m-honcho` costs up to 100k tokens
+      without it, and those runs reach the right answer by reading.
+    - **Also seen:** the settle offer opens 5 of 83 `with` answers, on questions with
+      nothing to do with it.
+    - **Limit:** pi delivers the block whole. Claude Code cuts blocks over about 10,000
+      characters to a 2 KB preview, so this baseline does not measure Claude Code.
 
 ## 6. Ted's checklists at milestone ends
 
