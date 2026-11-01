@@ -3003,14 +3003,27 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   ...):") and a sentence cut at its colon ("`docker compose down` does NOT remove named
   volumes. To get a truly clean install:"). A fact has to read as a statement on its own,
   and these do not.
-  - **Open question for Ted, before this is briefed:** the importer makes no model call. A
-    line's statement is the line without its list marker, and nothing judges it, so scoping
-    imported lines needs a decision: give the importer a model call that scopes each line by
-    F98's rule, or scope the whole file deterministically (the global pages unless the
-    file's own directory and content both say one project), or leave the scope as it is and
-    let `aft review` move the lines. The second is the smallest and needs no budget; the
-    first is the only one that gets a mixed file right. The rest of this task does not
-    depend on the answer.
+  - **Scope:** every memory file declares its scope in frontmatter, and `_body` strips the
+    frontmatter before the split, so the import discards the one statement it needs.
+    `read_file` reads the `type` field instead (top level in the older files, under
+    `metadata` in the newer ones) and scopes the file's lines by it: `project` keeps the
+    file's directory as its project, and `user`, `feedback` and `reference` go to the global
+    pages whatever directory held the file. No model call: the type is the author's own
+    declaration, written with the whole session in view, and a later call judging one
+    orphaned line would know less. `MEMORY.md` has no type and keeps its own handling.
+  - **Why the mapping is right, not a guess:** of the 65 files on this machine, 35 declare
+    `project`, 18 `feedback`, 4 `reference`, 1 `user`, and the 7 without a type are the
+    `MEMORY.md` indexes. `feedback` is a preference, which `digest.md` already scopes
+    global, and `user` is the user's own life, likewise. All four `reference` files are
+    environment facts, and three of them are this task's bug: `homelab_topology.md`,
+    `ops_ssh_access.md` and `dockhand_stack_paths.md`, all three imported into postmarked.
+    Reading the field is not an approximation of the fix; it is the fix.
+  - **The limit, and what it would take to pass it:** scope is per file, so a `project` file
+    holding one global line still lands whole in its project. No such file is on this
+    machine - `project_architecture.md` is uniformly about postmarked, and the one genuinely
+    mixed file is `reference`, which the mapping already sends global - so the case is
+    hypothetical and gets no budget now. Per-line scoping can be added later without rework:
+    the shape rules below do not depend on how scope is decided.
   - **Shape:** `read_file` drops a line that is not a statement and reports it in `dropped`
     with its reason, as it already does for struck text and footnotes: a table row (a line
     of `|`-separated cells, and the `---|---` rule under it), a line that is only a bold or
@@ -3019,10 +3032,14 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     the file stays in the library, and the user can import the section by hand.
   - **Not in scope:** the lines already imported. They are candidates at 0/3 signals and can
     never corroborate, since a memory file stands behind no session; `aft review` offers
-    them, and `aft forget` takes a whole import back.
+    them, and `aft forget` takes a whole import back. Whether to re-import after this merges
+    is the user's call, not the task's.
   - **Tests:** a table row, a rule row, a bold-label-only line and a line ending on a colon
     are each dropped with their reason and absent from `lines`; a line that reads as a
-    statement is unaffected. Review checkpoint: yes (what enters memory, and where).
+    statement is unaffected; a `type` at the top level and one under `metadata` are both
+    read; `project` scopes to the file's directory while `user`, `feedback` and `reference`
+    scope global; a file with no type keeps today's behavior. Review checkpoint: yes (what
+    enters memory, and where).
 
 ## 6. Ted's checklists at milestone ends
 
