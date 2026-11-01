@@ -2800,6 +2800,39 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Limits:** runs only for a project with digests waiting. `--replace` is refused, as the
     note cites no quote; `--keep` and `--withdraw` work.
 
+- **T59 Does memory change what a cold agent does** (ruling 2026-11-01; Ted). Every eval so
+  far measures what memory holds. This one measures what it is for: the same questions put
+  to a cold pi agent with memory and without, scored on the answer and the work it took.
+  - **Harness:** `eval/outcome.py`. Each run is `pi -p --no-session --mode json` with stdin
+    closed, in a clone of the project, so `.board` and uncommitted work are absent. Tools
+    are `read,bash,ffgrep,fffind,grep`, in both arms, so no run starts a subagent outside
+    the sandbox. Each arm has its own `AFT_HOME`: one holds a copy of the live vault with
+    the clone's path registered, the other an empty vault. The real hooks fire in both, and
+    capture stays in the sandbox, where no dream runs. At most three agents at once.
+  - **Questions:** `~/src/aft-eval-data/outcome/questions.yaml`, 28 in four kinds. `repo`
+    (9): in the clone and in memory. `memory` (8): in memory, and a grep proves it is not
+    in the clone. `stale` (5): memory says something the clone no longer holds, or says it
+    alongside a line that disagrees. `control` (6): in the clone, and a grep proves it is
+    not in the vault, so memory can only cost here. A shell check proves each reference
+    against the clone before any run. Three repeats in each arm, 168 runs.
+  - **Scoring:** a judge at temperature 0 reads the question, the reference and the answer,
+    with no sign of the arm, and says `correct`, `partial`, `wrong` or `no_answer`; the
+    order is shuffled. Partial counts half. Tokens are input plus cache read plus output,
+    summed over turns, because vLLM's cache is shared across runs; uncached input is
+    reported beside it.
+  - **Void:** a run is void if a tool call names a path under the home directory, uses a
+    tool outside the list, leaves the clone changed, or times out at 300 s. A question with
+    more than a fifth of its runs void drops out of its kind's score, and the report lists
+    it. An agent's own `aft search` is not void: it reads the arm's sandbox.
+  - **Rule, set before the run:** memory earns its place when all four hold.
+    1. `memory`: correct rate at least 50 points above the empty arm.
+    2. `repo`: correct rate no more than 5 points below the empty arm, and median tokens
+       lower.
+    3. `control`: correct rate no more than 5 points below the empty arm, and median tokens
+       at most 25% above it.
+    4. `stale`: correct rate no more than 10 points below the empty arm.
+    A miss names what to fix. This run gates no merge; it is the first baseline.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
