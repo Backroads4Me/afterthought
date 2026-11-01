@@ -2876,6 +2876,153 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
       nothing to do with it.
     - **Limit:** pi delivers the block whole. Claude Code cuts blocks over about 10,000
       characters to a 2 KB preview, so this baseline does not measure Claude Code.
+- **F97 General knowledge the agent explained is not a fact** (drafted 2026-11-01, not yet
+  ruled; after F96). A retirement-project session about testing a used graphics card left
+  four `[inferred]` candidates holding public vendor knowledge an assistant turn explained:
+  which GPU generation a part belongs to and which driver branch supports it, the BIOS
+  settings a large-VRAM card needs to enumerate, the step Linux wants before it puts an
+  external GPU on the PCI bus, and the kernel boot parameter that fixes a memory-window
+  error. None of them says anything about what the user owns or has configured; they are
+  reference material a future session knows as well as this one did. The same digest kept
+  the setup fact beside them, that the user's card was connected in an external enclosure,
+  `[stated]`, so refusing the four loses nothing a session needs. `keep.md` lists no
+  excluded kind that covers them, and two of its clauses argue for keeping them: "Keep a
+  fact even when a later session could find it out again by looking" and "When unsure, keep
+  it". Both are written for the user's own setup, not for what the agent looked up. The
+  session has since been forgotten at the user's request, so the lines are quoted here by
+  shape rather than by text.
+  - **Prompt:** `keep.md` gains an excluded kind: general technical knowledge about a
+    product, specification, standard or operating system that the agent explained, where the
+    statement says nothing about what the user owns, runs or has configured. The boundary is
+    the user's setup, and the prompt draws it with a pair: "A large-VRAM card needs wide
+    memory windows enabled in the BIOS to enumerate." is false, and "The user's GPU is
+    connected in an external Thunderbolt enclosure." is true. A fact the agent looked up
+    that fixes a choice the user made (a version floor the project now pins) stays a fact;
+    the excluded kind is the explanation alone. The "keep a fact even when a later session
+    could find it out again by looking" clause says what it is about: where the user's own
+    things live, what they are called, and how their machines are arranged.
+  - **Stage:** the keep check runs on every fact a turns digest keeps, of any source, so it
+    sees facts like these; they reach the page as `[inferred]` because the observed check
+    regrades a claim the tool output does not hold, and R3 then holds an `[inferred]` line
+    in Candidates. The exclusion therefore belongs in `keep.md` and not in `digest.md`.
+  - **Measure, before merging (decision rule set now):** eight runs (`g-f97-1` to `-8`),
+    each in its own sandbox home with a budget that does not run out, at most six at once,
+    against the eight F94 runs on the 84-item key (T57) with T56's scorer. No mechanical
+    signal separates public knowledge from the user's setup, so the gain is hand-ruled: the
+    lead lists every kept fact of an assistant entry across the eight runs of each side and
+    rules it `setup` or `reference`, and the mean `reference` count falls by at least half.
+    Held-out mean found does not fall by more than 1; mean wrong `[stated]` does not rise by
+    more than 1; observed judged unsupported does not rise by more than 2. The spread of
+    each side's eight runs is reported beside the means. The rulings go in the eval data
+    beside the key.
+  - **Tests:** prompt-shape tests that `keep.md` holds the excluded kind and its pair of
+    examples. Review checkpoint: yes (a prompt that decides what memory keeps).
+- **F98 A fact about the user's machines is global wherever the session ran** (drafted
+  2026-11-01, not yet ruled; follows F97). The F97 facts sat in the Retirement project
+  because the session's cwd was a directory `registry.yaml` maps to that project. Path
+  routing is right: it is `host:path` that names a project, and the user asked an off-topic
+  question from a project directory. What misfires is scope, and the digest said so: all
+  five facts of that part carried `scope: project`, the one about the user's own external
+  enclosure among them, which is their environment and holds for every project. `digest.md`
+  and `turns.md` both say global for "a preference or a fact about the user's environment
+  that holds for every project ... otherwise project", and the model answers "otherwise"
+  with the project the session ran in rather than testing whether the fact holds beyond it.
+  A hardware fact filed under one project is invisible to every other project that needs it.
+  - **Prompts:** `digest.md` and `turns.md` say that the project the session ran in does not
+    decide scope: a fact is `project` only when it is about that project's own code, data,
+    deployment or the work on it, and a fact about the user's machines, hardware, network,
+    operating system, accounts or tools is `global` however off-topic it was for the session
+    that found it. The `scope` enum and `term`'s "a short fact ... its scope is project"
+    rule do not change.
+  - **Scorer:** `score-turns` reports, per run and per session, the kept facts scoped
+    `project` whose statement holds none of the project's own names (its slug, title and the
+    last segment of each registered path) as `off_project`, with the statements. It is a
+    signal, not a verdict: a true project fact can name nothing.
+  - **Measure, before merging (decision rule set now):** `key-turns.json` carries no scope,
+    so scope is not scored against the key. Eight runs (`g-f98-1` to `-8`), under F97 if F97
+    merges first, against the eight F94 runs on the 84-item key with T56's scorer: mean
+    `off_project` falls, and the lead hand-rules every `off_project` statement of each side
+    `right` or `wrong` to confirm the fall is correction and not a new error. Held-out mean
+    found does not fall by more than 1; mean wrong `[stated]` does not rise by more than 1.
+    The spread of each side's eight runs is reported beside the means. Whether the key
+    should carry scope at all is a question for Ted, not this task.
+  - **Not in scope:** moving lines already in the vault between scopes.
+  - **Tests:** prompt-shape tests that both prompts hold the sentence; `score-turns` counts
+    a `project` fact naming nothing of its project, skips one that names the slug, a
+    registered path segment or the title, and skips a `global` fact. Review checkpoint: yes
+    (prompts that decide where memory lands).
+- **F99 A statement is grounded against its quote, not its entry** (drafted 2026-11-01, not
+  yet ruled; after F97). Two checks stand between a fact and the page, and neither ties the
+  statement to the quote. `evidence.find_quote` asks whether the quote appears in the entry
+  it cites, and `ungrounded(fact["statement"], entry.text)` asks whether the statement's
+  words appear in the entry. Both can pass while the quote carries none of the claim,
+  because the entry is long and the quote is a fragment of it. Two candidates in the
+  retirement project showed it: a hardware claim citing a kernel boot parameter, a
+  memory-window size and an error string stood on a sixteen-character quote holding none of
+  them, and a claim about dotenv not overriding process env stood on a quote that was one
+  environment variable's name and a colon. In both, the entry held the claim's words further
+  along, so the grounding check passed, and the quote verified because its characters were
+  there. They came from different agents' sessions, so this is not one adapter's bug. The
+  page then shows a verified line whose evidence says nothing, which breaks the rule the
+  vault rests on: evidence travels with the claim.
+  - **Why the quotes were short:** the model emitted them cut at an embedded double quote.
+    In both cases the words just past the cut were a quoted string inside the agent's own
+    prose, and the quote stopped exactly where that `"` began. A quote reaches the page as
+    `item["quote"]` from the model's JSON with no repair, so the cut is the model's, not the
+    parser's. It is worth a look while this task is open, but it is not the fix: a cut quote
+    only matters because nothing checks that the quote carries the claim.
+  - **Code:** the grounding check for `observed` and `inferred` facts runs against the quote
+    instead of the whole entry: `ungrounded(fact["statement"], fact["quote"],
+    when=entry.time)`. The entry stays the authority for whether the quote is real
+    (`find_quote`) and for the `[stated]` path, which already checks the user's turn. A fact
+    whose statement names words its own quote does not hold is dropped with the reason it
+    already uses, naming those words.
+  - **Lint:** `lint_vault` reports a source whose quote does not ground the fact it backs,
+    so the lines already in the vault are found rather than trusted. It is a finding, not a
+    repair; `aft review` offers the fact for the user to reject.
+  - **Measure, before merging:** eight runs (`g-f99-1` to `-8`) against the eight F94 runs
+    on the 84-item key with T56's scorer. This check drops facts by design, so the rule is
+    two-sided: observed judged unsupported falls, and held-out mean found does not fall by
+    more than 1. If held-out found falls further, the model is being asked for a quote that
+    carries a whole statement and cannot give one in 300 characters; `digest.md`'s quote
+    rule is then the thing to change, and this task reports that instead of merging.
+  - **Tests:** a fact whose statement names words its quote lacks is dropped although the
+    entry holds them; a fact whose quote carries the statement passes; the `[stated]` path
+    is unchanged; a vault line whose quote does not ground its fact produces a lint finding.
+    Review checkpoint: yes (quote verification is a trust rule).
+- **F100 Imported memory files keep their own scope and drop their fragments** (drafted
+  2026-11-01, not yet ruled; after M7 and F98). `claude_memory.py` makes each line of a
+  legacy memory file an `[inferred]` fact of the project whose directory holds the file. The
+  postmarked import shows what that costs. `homelab_topology.md` sat in postmarked's memory
+  directory, so the whole homelab became postmarked candidates: the Dockhand host list, the
+  tailnet name, every Proxmox host and the machines on them. None of it is about postmarked,
+  and all of it is the user's environment, which F98 scopes `global`. The line split costs
+  the rest: markdown table rows became facts (a row of host, address and description cells),
+  so did bare fragments ("**How to apply:** If you see any remaining `goodpath` string
+  anywhere, it's a bug", "Postmarked source files (edit HERE, then deploy via Dockhand
+  ...):") and a sentence cut at its colon ("`docker compose down` does NOT remove named
+  volumes. To get a truly clean install:"). A fact has to read as a statement on its own,
+  and these do not.
+  - **Open question for Ted, before this is briefed:** the importer makes no model call. A
+    line's statement is the line without its list marker, and nothing judges it, so scoping
+    imported lines needs a decision: give the importer a model call that scopes each line by
+    F98's rule, or scope the whole file deterministically (the global pages unless the
+    file's own directory and content both say one project), or leave the scope as it is and
+    let `aft review` move the lines. The second is the smallest and needs no budget; the
+    first is the only one that gets a mixed file right. The rest of this task does not
+    depend on the answer.
+  - **Shape:** `read_file` drops a line that is not a statement and reports it in `dropped`
+    with its reason, as it already does for struck text and footnotes: a table row (a line
+    of `|`-separated cells, and the `---|---` rule under it), a line that is only a bold or
+    heading label with no clause after it, and a line ending on a colon, which introduces
+    text the split has thrown away. A line whose statement would be a fragment is no loss:
+    the file stays in the library, and the user can import the section by hand.
+  - **Not in scope:** the lines already imported. They are candidates at 0/3 signals and can
+    never corroborate, since a memory file stands behind no session; `aft review` offers
+    them, and `aft forget` takes a whole import back.
+  - **Tests:** a table row, a rule row, a bold-label-only line and a line ending on a colon
+    are each dropped with their reason and absent from `lines`; a line that reads as a
+    statement is unaffected. Review checkpoint: yes (what enters memory, and where).
 
 ## 6. Ted's checklists at milestone ends
 
