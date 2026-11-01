@@ -180,6 +180,8 @@ class ProjectRunReport:
     rejected: list[RejectedFact] = field(default_factory=list)
     broken_anchors: list[maintain.BrokenAnchor] = field(default_factory=list)
     cleared_anchors: list[maintain.ClearedAnchor] = field(default_factory=list)
+    words_left: list[maintain.WordLeft] = field(default_factory=list)
+    repo_gone: bool = False
     archived_lines: list[maintain.ArchivedLine] = field(default_factory=list)
     oversize_pages: list[str] = field(default_factory=list)
     lifted: list[LiftedFact] = field(default_factory=list)
@@ -1042,6 +1044,10 @@ def run_project(
         )
         report.broken_anchors.extend(broken)
         report.cleared_anchors.extend(cleared)
+        left, report.repo_gone = maintain.check_words(
+            vault_path, project, today, config.host, record_write=record_write
+        )
+        report.words_left.extend(left)
 
         archived = maintain.archive_superseded(
             vault_path, page_slug, today, record_write=record_write

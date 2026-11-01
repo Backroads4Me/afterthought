@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from datetime import UTC, datetime
 
-from aft import page, vault
+from aft import page, pagewrite, vault
 from aft.dream import maintain
 from aft.registry import Registry, path_key
 from conftest import make_repo, run_git
@@ -575,3 +578,130 @@ aft:
     by_ref = archived_fact.superseded_by
     assert by_ref in source_map
     assert source_map[by_ref]["quote"] == "replacement line quote"
+
+
+WORDS_DATE = "2026-09-01T12:00:00Z"
+GONE_DATE = "2026-09-03T12:00:00Z"
+LINE_DATE = "2026-09-02"
+
+
+def _dated_commit(repo, message, when):
+    run_git(["add", "."], repo)
+    env = {"GIT_COMMITTER_DATE": when, "GIT_AUTHOR_DATE": when}
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message], cwd=repo, check=True, env=os.environ | env
+    )
+
+
+def _drop_words(repo):
+    (repo / "notes.txt").write_text("nothing here\n")
+    _dated_commit(repo, "drop", GONE_DATE)
+
+
+def _word_project(initialized, tmp_path, body, repo_words="use parse_config here\n"):
+    repo = tmp_path / "widget"
+    repo.mkdir()
+    run_git(["init", "-q"], repo)
+    (repo / "notes.txt").write_text(repo_words)
+    _dated_commit(repo, "words", WORDS_DATE)
+    registry = Registry.load(initialized.registry_path)
+    proj = registry.add("widget", "Widget")
+    registry.add_path(proj, path_key(initialized.host, repo))
+    registry.save()
+    overview = initialized.vault / "projects" / "widget" / "overview.md"
+    overview.parent.mkdir(parents=True, exist_ok=True)
+    overview.write_text(f"""---
+type: Project
+title: widget
+sources:
+  - id: s1
+    resource: aft://session/claude/123#e1
+    quote: "a quote"
+aft:
+  project: {proj.id}
+---
+
+## Facts
+
+{body}
+""")
+    vault.commit(initialized.vault, ["projects"], "seed")
+    return repo, proj, overview
+
+
+def test_word_left_before_today_is_asked_once_and_settled_stays_settled(initialized, tmp_path):
+    line = f"- `parse_config` reads the file. [observed] {LINE_DATE} [^s1]"
+    repo, proj, overview = _word_project(initialized, tmp_path, line)
+    _drop_words(repo)
+
+    left, _ = maintain.check_words(initialized.vault, proj, TODAY, initialized.host)
+
+    assert [(w.page, w.word) for w in left] == [("projects/widget/overview.md", "parse_config")]
+    parsed = page.parse(overview.read_text(), overview.relative_to(initialized.vault))
+    assert parsed.facts[0].state == page.NEEDS_YOU
+    assert "left the repository" in parsed.facts[0].callouts[0].text[0]
+
+    # An open note: the line is not active, so a second dream asks nothing.
+    again, _ = maintain.check_words(initialized.vault, proj, TODAY, initialized.host)
+    assert again == []
+
+    # Settled: the note sits in the archive, and the word is not asked about again.
+    doc = pagewrite.PageDoc.read(overview, vault=initialized.vault)
+    doc.resolve_callout(doc.page.facts[0])
+    overview.write_text(doc.render())
+    assert maintain.check_words(initialized.vault, proj, TODAY, initialized.host)[0] == []
+
+
+def test_word_never_in_the_repo_is_not_asked(initialized, tmp_path):
+    line = f"- `no_such_word` is mentioned. [observed] {LINE_DATE} [^s1]"
+    repo, proj, _ = _word_project(initialized, tmp_path, line)
+    _drop_words(repo)
+    assert maintain.check_words(initialized.vault, proj, TODAY, initialized.host)[0] == []
+
+
+def test_a_number_alone_is_not_asked_about(initialized, tmp_path):
+    line = f"- The port is 12345. [observed] {LINE_DATE} [^s1]"
+    repo, proj, _ = _word_project(initialized, tmp_path, line, "port 12345\n")
+    _drop_words(repo)
+    assert maintain.check_words(initialized.vault, proj, TODAY, initialized.host)[0] == []
+
+
+def test_word_flags_stop_at_the_cap(initialized, tmp_path):
+    names = [f"name_{i:02d}" for i in range(maintain.WORD_FLAGS_PER_RUN + 2)]
+    body = "\n".join(f"- `{n}` is used. [observed] {LINE_DATE} [^s1]" for n in names)
+    repo, proj, overview = _word_project(initialized, tmp_path, body, " ".join(names) + "\n")
+    _drop_words(repo)
+
+    left, _ = maintain.check_words(initialized.vault, proj, TODAY, initialized.host)
+
+    assert len(left) == maintain.WORD_FLAGS_PER_RUN
+    parsed = page.parse(overview.read_text(), overview.relative_to(initialized.vault))
+    assert [f.state for f in parsed.facts].count(page.NEEDS_YOU) == maintain.WORD_FLAGS_PER_RUN
+
+
+def test_deleted_repo_changes_nothing_and_says_so(initialized, tmp_path):
+    line = f"- `parse_config` reads the file. [observed] {LINE_DATE} [^s1]"
+    repo, proj, overview = _word_project(initialized, tmp_path, line)
+    before = overview.read_text()
+    shutil.rmtree(repo)
+
+    assert maintain.check_words(initialized.vault, proj, TODAY, initialized.host) == ([], True)
+    assert overview.read_text() == before
+
+
+def test_directory_without_a_repo_is_not_reported_as_gone(initialized, tmp_path):
+    line = f"- `parse_config` reads the file. [observed] {LINE_DATE} [^s1]"
+    repo, proj, _ = _word_project(initialized, tmp_path, line)
+    shutil.rmtree(repo / ".git")
+
+    assert maintain.check_words(initialized.vault, proj, TODAY, initialized.host) == ([], False)
+
+
+def test_report_lists_words_left_and_an_unchecked_project(initialized):
+    from aft.dream.apply import ProjectRunReport
+    from aft.dream.report import has_changes
+
+    rep = ProjectRunReport(project="widget", repo_gone=True)
+    assert not has_changes(rep)
+    rep.words_left.append(maintain.WordLeft("projects/widget/overview.md", "A line.", "a_word"))
+    assert has_changes(rep)

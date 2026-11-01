@@ -1,7 +1,8 @@
 """Maintenance steps for the dream (DESIGN 9, steps 6 and 7).
 
-Anchor checks, moving superseded lines older than 90 days to the archive,
-flagging oversize pages, regenerating index.md files, and appending to log.md.
+Anchor checks, flagging lines whose words left the repository, moving superseded lines
+older than 90 days to the archive, flagging oversize pages, regenerating index.md files,
+and appending to log.md.
 """
 
 from __future__ import annotations
@@ -19,6 +20,13 @@ from aft.registry import Project, RegistryError, split_key
 
 ANCHOR_AGE_DAYS = 90
 MAX_PAGE_CHARS = 12_000
+
+#: The most lines one dream flags in a project, so a large rename does not bury the user in
+#: notes; the rest are flagged by the dreams after it.
+WORD_FLAGS_PER_RUN = 5
+
+#: A word shorter than this matches too much of a repository to say anything.
+MIN_WORD_CHARS = 4
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,16 @@ class ClearedAnchor:
     page: str
     statement: str
     sid: str
+
+
+@dataclass(frozen=True)
+class WordLeft:
+    """A line with a question under it: a word it names was in the repository at the line's
+    date and is gone from the default branch."""
+
+    page: str
+    statement: str
+    word: str
 
 
 @dataclass(frozen=True)
@@ -193,6 +211,142 @@ def check_anchors(
             page_path.write_text(doc.render(), encoding="utf-8")
 
     return broken_list, cleared_list
+
+
+def check_words(
+    vault: Path,
+    project: Project | None,
+    today: str,
+    config_host: str,
+    record_write: Callable[[Path], None] | None = None,
+) -> tuple[list[WordLeft], bool]:
+    """Ask about long-term lines that name a word the repository no longer holds (DESIGN 9).
+
+    A word counts when it held in the repository at the line's date and is gone from the
+    default branch. The check asks and changes nothing else: a line under a question stays
+    in memory, since a word can leave the code while the fact stays true. The user's answer
+    to a question stands, so a word settled on a page is not asked about there again.
+
+    Returns the lines asked about, and whether this host's registered path for the project
+    is gone, in which case nothing was checked.
+    """
+    if project is None or not project.paths:
+        return [], False
+
+    repo_path = _find_repo(project, config_host)
+    if repo_path is None:
+        return [], _repo_gone(project, config_host)
+
+    default_branch = _get_default_branch(repo_path)
+    project_dir = vault / "projects" / project.slug
+    if not default_branch or not project_dir.is_dir():
+        return [], False
+
+    flags: list[WordLeft] = []
+    grepped: dict[tuple[str, str], int] = {}
+    commits: dict[str, str] = {}
+
+    def grep(word: str, rev: str) -> int:
+        if (word, rev) not in grepped:
+            found = git(
+                ["grep", "-q", "-I", "-F", "-e", word, rev, "--"], cwd=repo_path, check=False
+            )
+            grepped[(word, rev)] = found.returncode
+        return grepped[(word, rev)]
+
+    def commit_at(day: str) -> str:
+        if day not in commits:
+            found = git(
+                ["rev-list", "-1", f"--before={day}T23:59:59Z", default_branch],
+                cwd=repo_path,
+                check=False,
+            )
+            commits[day] = found.stdout.strip() if found.returncode == 0 else ""
+        return commits[day]
+
+    for page_path in sorted(project_dir.rglob("*.md")):
+        if page_path.name == "index.md" or page.is_recent(page_path.relative_to(vault)):
+            continue
+        if len(flags) >= WORD_FLAGS_PER_RUN:
+            break
+        rel = page_path.relative_to(vault).as_posix()
+        try:
+            doc = pagewrite.PageDoc.read(page_path, vault=vault)
+            archive = doc._archive_file()
+        except (OSError, pagewrite.WriteError):
+            continue
+        settled = archive.read_text(encoding="utf-8") if archive.exists() else ""
+
+        found: list[tuple[page.Fact, str, str]] = []
+        for fact in doc.page.facts:
+            if len(flags) + len(found) >= WORD_FLAGS_PER_RUN:
+                break
+            if fact.state != page.ACTIVE or fact.section == page.CANDIDATES:
+                continue
+            at = commit_at(fact.date)
+            if not at:
+                continue
+            for word in _line_words(fact.statement):
+                if _word_mark(word) in settled:
+                    continue
+                if grep(word, default_branch) == 1 and grep(word, at) == 0:
+                    found.append((fact, word, at))
+                    break
+
+        # Last line first: a note moves every line below it, and a handle refuses a move.
+        written = False
+        for fact, word, at in reversed(found):
+            try:
+                doc.add_callout(fact, "question", _word_note(word, at), today)
+            except pagewrite.WriteError:
+                continue
+            written = True
+            flags.append(WordLeft(page=rel, statement=fact.statement, word=word))
+        if written:
+            if record_write is not None:
+                record_write(page_path)
+            page_path.write_text(doc.render(), encoding="utf-8")
+
+    return flags, False
+
+
+def _line_words(statement: str) -> list[str]:
+    """The words of a line a repository can hold: names, paths, flags and config keys. A
+    number or version moves on without the fact behind it changing, so it needs a letter."""
+    from aft import digest
+
+    words = [word.strip("`") for word in digest.key_tokens(statement)]
+    return list(
+        dict.fromkeys(
+            word for word in words if len(word) >= MIN_WORD_CHARS and any(c.isalpha() for c in word)
+        )
+    )
+
+
+def _word_mark(word: str) -> str:
+    """The words of a note that name ``word``, as a settled note keeps them in the archive."""
+    return f"`{word}` left the repository"
+
+
+def _word_note(word: str, commit: str) -> str:
+    """The question under a line."""
+    return (
+        f"{_word_mark(word)}: {commit[:8]} holds it and the default branch does not."
+        " Does this line still hold?"
+    )
+
+
+def _repo_gone(project: Project, config_host: str) -> bool:
+    """Whether a path registered for this host is gone. A directory that stands but holds
+    no repository was never checked, and that is no change to report."""
+    for key in project.paths:
+        try:
+            host, path = split_key(key)
+        except RegistryError:
+            continue
+        if host == config_host and not path.exists():
+            return True
+    return False
 
 
 def archive_superseded(
