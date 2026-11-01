@@ -2780,6 +2780,25 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
       the statements grew. A version that states the rule once at the top of `turns.md`,
       as `digest.md` does, and keeps the statement bullet as it was is the next thing to
       try.
+- **F97 A dream asks about a line whose word left the repository** (ruling 2026-11-01;
+  Ted). R8's check runs and nothing writes an anchor: no prompt or schema has the field, and
+  the vault holds none. A replay over the 270 active long-term lines in projects with a
+  local repo, anchoring each at the commit of its date, reads: naming a repo file covers 10
+  lines and flags none; a key word anywhere in the repo covers 147 and flags 2, one out of
+  date (`~/.bash_aliases`) and one still true (the endpoint address). None of the 7
+  superseded lines would have been caught; later sessions replaced them while the code kept
+  its words. Under R8 the false flag would have taken a true line out of memory, so this
+  check asks and leaves the line in.
+  - **Check:** `maintain.check_words` runs in dream maintenance after the anchors. A word is
+    a key token of the statement with a letter and at least four characters; it counts when
+    `git grep` finds it at the line's date and not on the default branch. No model call.
+  - **Note:** a `[!question]` under the line, which stays injected, marked as waiting. At
+    most five a dream in a project. A settled note in the archive stops the same word being
+    asked about on that page again.
+  - **Report:** "Words gone from the repository" under Stale. A registered path on this
+    host that is gone gets a line under "Not checked", and does not make a report by itself.
+  - **Limits:** runs only for a project with digests waiting. `--replace` is refused, as the
+    note cites no quote; `--keep` and `--withdraw` work.
 
 ## 6. Ted's checklists at milestone ends
 
