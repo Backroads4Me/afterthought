@@ -200,7 +200,13 @@ def format_run_section(
 
     # 7. Stale
     lines.append("## Stale")
-    if report.broken_anchors or report.cleared_anchors or report.oversize_pages:
+    if (
+        report.broken_anchors
+        or report.cleared_anchors
+        or report.words_left
+        or report.repo_gone
+        or report.oversize_pages
+    ):
         if report.broken_anchors:
             lines.append("### Broken anchors")
             for b in report.broken_anchors:
@@ -209,6 +215,13 @@ def format_run_section(
             lines.append("### Cleared anchors")
             for cl in report.cleared_anchors:
                 lines.append(f"- {cl.statement} on {cl.page} [^{cl.sid}] (matches again)")
+        if report.words_left:
+            lines.append("### Words gone from the repository")
+            for w in report.words_left:
+                lines.append(f"- {w.statement} on {w.page} (`{w.word}` left the repository)")
+        if report.repo_gone:
+            lines.append("### Not checked")
+            lines.append("- The project's registered path is gone, so its lines were not checked.")
         if report.oversize_pages:
             lines.append("### Oversize pages")
             for op in report.oversize_pages:
@@ -388,6 +401,7 @@ def has_changes(rep: apply.ProjectRunReport) -> bool:
         or rep.questions
         or rep.broken_anchors
         or rep.cleared_anchors
+        or rep.words_left
         or rep.archived_lines
         or rep.lifted
         or rep.rolled_off

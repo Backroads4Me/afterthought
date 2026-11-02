@@ -63,7 +63,7 @@ Lines carry their state in the text:
 | `~~struck~~ ... withdrawn <date>` | Removed with `aft forget`. |
 | `... (stale <date>: <reason>)` | Its anchor in the code no longer matches. Not shown. |
 | A line followed by `> [!conflict]` | Disputed: newer evidence disagrees without the authority to replace it. Shown, marked as disputed. |
-| A line followed by `> [!question]` | Waiting on you. Shown, marked as waiting. |
+| A line followed by `> [!question]` | Waiting on you. Shown, marked as waiting. A dream also asks this when a word the line names has left the project's repository. |
 
 ## Editing by hand
 
