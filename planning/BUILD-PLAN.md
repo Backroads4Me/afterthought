@@ -2876,7 +2876,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
       nothing to do with it.
     - **Limit:** pi delivers the block whole. Claude Code cuts blocks over about 10,000
       characters to a 2 KB preview, so this baseline does not measure Claude Code.
-- **F97 General knowledge the agent explained is not a fact** (drafted 2026-11-01, not yet
+- **F98 General knowledge the agent explained is not a fact** (drafted 2026-11-01, not yet
   ruled; after F96). A retirement-project session about testing a used graphics card left
   four `[inferred]` candidates holding public vendor knowledge an assistant turn explained:
   which GPU generation a part belongs to and which driver branch supports it, the BIOS
@@ -2905,7 +2905,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     sees facts like these; they reach the page as `[inferred]` because the observed check
     regrades a claim the tool output does not hold, and R3 then holds an `[inferred]` line
     in Candidates. The exclusion therefore belongs in `keep.md` and not in `digest.md`.
-  - **Measure, before merging (decision rule set now):** eight runs (`g-f97-1` to `-8`),
+  - **Measure, before merging (decision rule set now):** eight runs (`g-f98-1` to `-8`),
     each in its own sandbox home with a budget that does not run out, at most six at once,
     against the eight F94 runs on the 84-item key (T57) with T56's scorer. No mechanical
     signal separates public knowledge from the user's setup, so the gain is hand-ruled: the
@@ -2917,8 +2917,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     beside the key.
   - **Tests:** prompt-shape tests that `keep.md` holds the excluded kind and its pair of
     examples. Review checkpoint: yes (a prompt that decides what memory keeps).
-- **F98 A fact about the user's machines is global wherever the session ran** (drafted
-  2026-11-01, not yet ruled; follows F97). The F97 facts sat in the Retirement project
+- **F99 A fact about the user's machines is global wherever the session ran** (drafted
+  2026-11-01, not yet ruled; follows F98). The F98 facts sat in the Retirement project
   because the session's cwd was a directory `registry.yaml` maps to that project. Path
   routing is right: it is `host:path` that names a project, and the user asked an off-topic
   question from a project directory. What misfires is scope, and the digest said so: all
@@ -2939,7 +2939,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     last segment of each registered path) as `off_project`, with the statements. It is a
     signal, not a verdict: a true project fact can name nothing.
   - **Measure, before merging (decision rule set now):** `key-turns.json` carries no scope,
-    so scope is not scored against the key. Eight runs (`g-f98-1` to `-8`), under F97 if F97
+    so scope is not scored against the key. Eight runs (`g-f99-1` to `-8`), under F98 if F98
     merges first, against the eight F94 runs on the 84-item key with T56's scorer: mean
     `off_project` falls, and the lead hand-rules every `off_project` statement of each side
     `right` or `wrong` to confirm the fall is correction and not a new error. Held-out mean
@@ -2951,8 +2951,8 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     a `project` fact naming nothing of its project, skips one that names the slug, a
     registered path segment or the title, and skips a `global` fact. Review checkpoint: yes
     (prompts that decide where memory lands).
-- **F99 A statement is grounded against its quote, not its entry** (drafted 2026-11-01, not
-  yet ruled; after F97). Two checks stand between a fact and the page, and neither ties the
+- **F100 A statement is grounded against its quote, not its entry** (drafted 2026-11-01, not
+  yet ruled; after F98). Two checks stand between a fact and the page, and neither ties the
   statement to the quote. `evidence.find_quote` asks whether the quote appears in the entry
   it cites, and `ungrounded(fact["statement"], entry.text)` asks whether the statement's
   words appear in the entry. Both can pass while the quote carries none of the claim,
@@ -2980,7 +2980,7 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Lint:** `lint_vault` reports a source whose quote does not ground the fact it backs,
     so the lines already in the vault are found rather than trusted. It is a finding, not a
     repair; `aft review` offers the fact for the user to reject.
-  - **Measure, before merging:** eight runs (`g-f99-1` to `-8`) against the eight F94 runs
+  - **Measure, before merging:** eight runs (`g-f100-1` to `-8`) against the eight F94 runs
     on the 84-item key with T56's scorer. This check drops facts by design, so the rule is
     two-sided: observed judged unsupported falls, and held-out mean found does not fall by
     more than 1. If held-out found falls further, the model is being asked for a quote that
@@ -2990,13 +2990,13 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     entry holds them; a fact whose quote carries the statement passes; the `[stated]` path
     is unchanged; a vault line whose quote does not ground its fact produces a lint finding.
     Review checkpoint: yes (quote verification is a trust rule).
-- **F100 Imported memory files keep their own scope and drop their fragments** (drafted
-  2026-11-01, not yet ruled; after M7 and F98). `claude_memory.py` makes each line of a
+- **F101 Imported memory files keep their own scope and drop their fragments** (drafted
+  2026-11-01, not yet ruled; after M7 and F99). `claude_memory.py` makes each line of a
   legacy memory file an `[inferred]` fact of the project whose directory holds the file. The
   postmarked import shows what that costs. `homelab_topology.md` sat in postmarked's memory
   directory, so the whole homelab became postmarked candidates: the Dockhand host list, the
   tailnet name, every Proxmox host and the machines on them. None of it is about postmarked,
-  and all of it is the user's environment, which F98 scopes `global`. The line split costs
+  and all of it is the user's environment, which F99 scopes `global`. The line split costs
   the rest: markdown table rows became facts (a row of host, address and description cells),
   so did bare fragments ("**How to apply:** If you see any remaining `goodpath` string
   anywhere, it's a bug", "Postmarked source files (edit HERE, then deploy via Dockhand
