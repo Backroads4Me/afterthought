@@ -2,7 +2,8 @@
 
 It reads files only, so a cold session gets the same block in every agent without a model
 call or an index. The parts come out in the design's order and the block as a whole stays
-within ``inject.max_chars``: a fact is either in the block or left out, never cut short.
+within ``inject.max_chars``, or the lower limit a caller gives: a fact is either in the
+block or left out, never cut short.
 ``_block`` gives the one allocation of that budget, so no section can
 grow into what a cold session needs to find the rest of memory; a budget with no room for
 a layer's first line leaves that layer out and says so plainly under ``Cut``.
@@ -83,8 +84,14 @@ def block_project(resolution: Resolution) -> Project | None:
     return None if project is not None and project.archived else project
 
 
-def build(config: Config, resolution: Resolution, waiting: int | None = None) -> str:
-    """The block for ``resolution``.
+def build(
+    config: Config,
+    resolution: Resolution,
+    waiting: int | None = None,
+    limit: int | None = None,
+) -> str:
+    """The block for ``resolution``, within ``inject.max_chars`` and within ``limit``, the
+    room an agent's hook output leaves for it, when the caller names one.
 
     A registered project gets its name and description, the newest digest's handoff, its
     overview's facts, the pages and collections that cover it, and the lines on how to
@@ -94,6 +101,8 @@ def build(config: Config, resolution: Resolution, waiting: int | None = None) ->
     counted here when the caller has not counted them already.
     """
     max_chars = config.settings.inject.max_chars
+    if limit is not None:
+        max_chars = min(max_chars, limit)
     project = block_project(resolution)
     title: list[Part] = []
     own: list[Part] = []

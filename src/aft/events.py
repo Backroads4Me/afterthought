@@ -32,6 +32,9 @@ class SessionEvent:
     # The submitted prompt text, for a PROMPT event only. It lives in memory alone:
     # recall reads it, and nothing ever writes it anywhere (BUILD-PLAN F87).
     prompt: str | None = None
+    # A SESSION_START that resumes a session its agent just compacted, for an agent whose
+    # adapter wants the session's own recent work replayed (aft.checkpoint).
+    after_compaction: bool = False
 
 
 class AdapterError(Exception):

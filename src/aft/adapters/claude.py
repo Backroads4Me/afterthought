@@ -27,6 +27,13 @@ from aft.events import (
 
 AGENT = "claude"
 
+# Claude Code replaces a hook's context of about 10,000 characters or more with a preview of
+# about 2 KB and a file path. It measures the context as text, plain stdout and
+# additionalContext alike, not the JSON around it: the largest seen whole was 9,863 characters
+# and the smallest seen cut 11,084. The context a hook gives stays under this, so all of it
+# reaches the session.
+OUTPUT_LIMIT = 9_600
+
 # Claude Code's event name -> the kind afterthought dispatches it as, and the payload
 # field that says why it fired, kept as SessionEvent.detail. The hooks reference
 # enumerates `source` as startup, resume, clear, compact or fork, and `trigger` as
@@ -52,6 +59,7 @@ def parse_claude(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
         if kind == SESSION_START
         else path_field(payload, "transcript_path")
     )
+    detail = None if kind == PROMPT else optional_string_field(payload, field)
     return SessionEvent(
         agent=AGENT,
         kind=kind,
@@ -59,6 +67,7 @@ def parse_claude(hook_event: str, payload: dict, now: datetime) -> SessionEvent:
         cwd=path_field(payload, "cwd"),
         transcript_path=transcript,
         time=now,
-        detail=None if kind == PROMPT else optional_string_field(payload, field),
+        detail=detail,
         prompt=prompt,
+        after_compaction=kind == SESSION_START and detail == "compact",
     )

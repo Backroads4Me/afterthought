@@ -900,6 +900,19 @@ def session_state(config: Config, agent: str, session_id: str) -> SessionState:
     )
 
 
+def is_forgotten(config: Config, session_id: str) -> bool:
+    """Whether ``aft forget session`` removed this session, asked on the session-start hook,
+    so it waits for the queue no longer than recording the session's project does."""
+    conn = _connect(config, busy_timeout_ms=RECORD_BUSY_TIMEOUT_MS)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM forgotten WHERE session_id = ? LIMIT 1", (session_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
 def last_events(config: Config) -> dict[Path, datetime]:
     """The newest event time the queue holds for each working directory, whatever became
     of the job it arrived on.

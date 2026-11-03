@@ -66,7 +66,14 @@ CASES = [
         "claude",
         "SessionStart",
         SessionEvent(
-            "claude", "session_start", CLAUDE_ID, CLAUDE_CWD, CLAUDE_TRANSCRIPT, NOW, "compact"
+            "claude",
+            "session_start",
+            CLAUDE_ID,
+            CLAUDE_CWD,
+            CLAUDE_TRANSCRIPT,
+            NOW,
+            "compact",
+            after_compaction=True,
         ),
     ),
     (
