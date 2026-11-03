@@ -152,7 +152,8 @@ into the rest of afterthought:
 
 - **Event adapters** turn each agent's hook payload into one normalized event:
   `session_start`, `compaction`, or `session_end`, carrying agent, session id, working
-  directory, transcript path, and time.
+  directory, transcript path, and time, and on a start whether the adapter wants a
+  compaction's checkpoint (section 8).
 - **Transcript readers** turn each agent's transcript format into normalized entries: id,
   time, role (you, assistant, tool), text, and tool errors.
 
@@ -470,6 +471,28 @@ the agent. Claude Code and pi finishing at the same moment cannot corrupt each o
 watermarks. A sweep on the timer finds sessions whose hooks never fired, and running
 sessions that are idle or large, so long-lived sessions are processed in chunks.
 
+### After a compaction
+
+What a running session asked for and edited is in no digest yet, and a compaction leaves it
+to a summary a model wrote and nothing checks. So when Claude Code restarts a session with
+source `compact`, the session-start hook reads the transcript once and prints a checkpoint
+after the memory block (section 10): the three newest prompts and up to ten files named by
+edit and write tool calls, within 1,500 characters. Files changed through a shell command
+are not seen.
+
+A checkpoint is lifecycle evidence, not memory. It is rendered from the transcript each time
+and stored nowhere, so it expires with the session and cannot reach the vault, a digest or a
+dream. It takes no model call. Its words pass the filter capture uses, with injection
+patterns neutralized and pasted blocks and machine-written prompts left out, and the whole
+session is filtered, so an off-the-record span covers its prompts and its files alike. A session
+that is excluded or forgotten gets none, and so does one whose queue cannot be read. A
+transcript over 32 MB, or less than half a second of the hook's share left, also gives none,
+and any failure costs the checkpoint and never the block.
+
+This is the one transcript read on a hook, and it runs only on a compaction's restart. pi has
+no checkpoint: its extension keeps one block for the whole session, so a checkpoint would
+repeat on every turn and go stale, and pi's own summary already names the modified files.
+
 ### The filter
 
 A deterministic filter turns each transcript chunk into evidence:
@@ -722,6 +745,13 @@ Short-term memory comes after long-term memory, so it never crowds out what stay
 the block reaches its cap. Candidates, stale, superseded and withdrawn lines, and dream
 reports are left out, and nothing is injected per tool call. agentmemory found that
 injecting context into every tool turn burned tokens and turned it off by default. The cap is a starting point; M5 tunes it by usefulness.
+
+Claude Code replaces a hook's output of about 10,000 characters or more with a preview of
+about 2 KB, so the hook keeps the context it gives Claude Code under 9,600 characters
+whatever `inject.max_chars` says. That leaves 1,500 characters after the block for a compaction's
+checkpoint (section 8), which follows the block so "needs your decision" stays first. A
+session's recall dedupes against the block under the same limit. pi cuts nothing, so its
+block keeps to `inject.max_chars` alone.
 
 ### Recall on each prompt
 

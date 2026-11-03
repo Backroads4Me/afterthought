@@ -84,7 +84,7 @@ One OpenAI-compatible endpoint serves every model call: digests and dream decisi
 
 | Setting | Default | What it does |
 |---|---|---|
-| `inject.max_chars` | `8000` | The size cap of the memory block a session starts with, about 2,000 tokens. Lines are never cut in half: a line is in the block or left out. |
+| `inject.max_chars` | `8000` | The size cap of the memory block a session starts with, about 2,000 tokens. Lines are never cut in half: a line is in the block or left out. Claude Code cuts longer hook output down to a preview, so a higher value has no effect there past about 8,100 characters. |
 
 ## `[recall]`
 

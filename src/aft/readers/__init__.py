@@ -76,6 +76,23 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
     return _after(lambda: read_session(path), after)
 
 
+def work(agent: str, path: Path) -> Iterator[Entry]:
+    """What a session asked for and edited, in file order, for ``aft.checkpoint``.
+
+    Each ``USER`` entry is a prompt the user wrote, machine-written ones left out, and each
+    ``ASSISTANT`` entry holds one path as its text, from a tool call that edited that file.
+    They share one stream so the filter's off-the-record spans cover both.
+
+    Raises ``ReaderError`` for an agent whose adapter never asks for this, and
+    ``UnrecognizedTranscript`` as ``read`` does.
+    """
+    if agent != CLAUDE:
+        raise ReaderError(f"no work reader for agent {agent!r}")
+    from aft.readers.claude import work as read_work
+
+    return read_work(path)
+
+
 def _after(reopen: Callable[[], Iterator[Entry]], after: str | None) -> Iterator[Entry]:
     """The entries after ``after``, yielded as they are read rather than collected, so
     what the watermark passes over is never held in memory.

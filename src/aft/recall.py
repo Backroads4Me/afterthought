@@ -87,7 +87,13 @@ def query_words(prompt: str) -> list[str]:
     return [word for word in words if word and word.lower() not in FILLER_WORDS][:MAX_QUERY_WORDS]
 
 
-def recall(prompt: str | None, cwd, config: Config, session_id: str = "") -> str:
+def recall(
+    prompt: str | None,
+    cwd,
+    config: Config,
+    session_id: str = "",
+    block_limit: int | None = None,
+) -> str:
     """The block to add for one submitted prompt, or "" when nothing bears on it.
 
     Reads memory only: the vault, the registry and the search index answer it, and
@@ -98,7 +104,9 @@ def recall(prompt: str | None, cwd, config: Config, session_id: str = "") -> str
     archive entry, and never a digest of ``session_id`` itself. A worker session's prompt
     recalls nothing. ``recall.enabled = false`` gives nothing, as does a prompt left with
     fewer than three content words, and so does a vault that is not initialized: a
-    session that has no memory to give is not a failure and logs nothing.
+    session that has no memory to give is not a failure and logs nothing. ``block_limit`` is
+    the limit the session's start block was built under, so the dedupe compares against the
+    block the session was given.
     """
     settings = config.settings.recall
     if not settings.enabled or not prompt:
@@ -113,12 +121,14 @@ def recall(prompt: str | None, cwd, config: Config, session_id: str = "") -> str
     if len(words) < MIN_QUERY_WORDS:
         return ""
     try:
-        return _recall(words, cwd, config, settings, session_id)
+        return _recall(words, cwd, config, settings, session_id, block_limit)
     except Exception as exc:  # noqa: BLE001 - the hook turns any failure into a log line
         raise RecallError(f"recall failed: {type(exc).__name__}") from exc
 
 
-def _recall(words: list[str], cwd, config: Config, settings, session_id: str) -> str:
+def _recall(
+    words: list[str], cwd, config: Config, settings, session_id: str, block_limit: int | None
+) -> str:
     """The block one query recalls, within the configured bar, dedupe and budget."""
     registry = Registry.load(config.registry_path)
     try:
@@ -154,7 +164,7 @@ def _recall(words: list[str], cwd, config: Config, settings, session_id: str) ->
         if held is None:
             # Built only once a hit clears the bar: most prompts recall nothing, and the
             # start block is the costliest part of a recall.
-            held = _block_lines(inject.build(config, result))
+            held = _block_lines(inject.build(config, result, limit=block_limit))
         if _held_by_block(hit, held):
             continue
         lines.append(_hit_line(hit))

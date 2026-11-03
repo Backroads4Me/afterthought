@@ -37,6 +37,29 @@ SYNTHETIC_MODEL = "<synthetic>"
 # The record types Claude Code uses for one side of the conversation.
 CONVERSATION = (USER, ASSISTANT)
 
+# The tools that edit a file, and the input field each names it in. A file changed through a
+# shell command leaves no such call.
+EDIT_TOOLS = {
+    "Edit": "file_path",
+    "Write": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+}
+
+# The text a user record opens with when Claude Code, not the user, wrote it. "/compact" is
+# the user's, but it asks for the compaction and nothing of the work.
+MACHINE_PROMPTS = (
+    "<task-notification",
+    "<local-command",
+    "<bash-",
+    "[Request interrupted by user",
+    "<command-name",
+    "<ci-monitor",
+    "<side-sessions",
+    "<system-reminder",
+    "/compact",
+)
+
 # A slash command recorded by Claude Code carries its command name, message, and arguments
 # in XML-like tags (BUILD-PLAN F45). The reader renders the command as typed (/<name> <args>),
 # keeping text typed alongside it and leaving ordinary prompts byte-identical.
@@ -67,6 +90,37 @@ def _render_slash_command(text: str) -> str:
 def read(path: Path) -> Iterator[Entry]:
     """The session's entries: what the records of the file hold, in file order."""
     return iter_entries(path, _record_entries)
+
+
+def work(path: Path) -> Iterator[Entry]:
+    """The session's prompts and edits, one pass over the file: see ``readers.work``."""
+    return iter_entries(path, _work_entries)
+
+
+def _work_entries(record: dict) -> Iterator[Entry]:
+    """The prompt or the edited paths one record carries."""
+    for entry in _record_entries(record):
+        if entry.role == USER and not entry.text.lstrip().startswith(MACHINE_PROMPTS):
+            yield entry
+    if record.get("type") == ASSISTANT and not record.get("isSidechain"):
+        yield from _edits(record)
+
+
+def _edits(record: dict) -> Iterator[Entry]:
+    """One entry per file-editing tool call in an assistant record, its text the path."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    time = parse_time(record.get("timestamp"))
+    if not isinstance(content, list) or time is None:
+        return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        tool_input = block.get("input")
+        field = EDIT_TOOLS.get(block.get("name"))
+        path = tool_input.get(field) if field and isinstance(tool_input, dict) else None
+        if isinstance(path, str) and path:
+            yield Entry(f"{record.get('uuid')}#{block.get('id')}", time, ASSISTANT, path, False)
 
 
 def _record_entries(record: dict) -> Iterator[Entry]:

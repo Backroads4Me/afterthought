@@ -14,6 +14,11 @@ the parser keeps it as SessionEvent.prompt.
 `session_id`, `cwd` and `transcript_path` come from pi's session manager, whose
 `getSessionFile()` is undefined until the session is first written, so a payload can
 leave the transcript out or report it empty; either way the event still stands.
+
+`after_compaction` stays unset, though the extension does restart a session on
+`session_compact`. It keeps one block for the rest of the session (`afterthought.ts`), so a
+checkpoint would repeat on every turn and go stale, and pi's own summary already names the
+modified files and keeps recent entries verbatim.
 """
 
 from __future__ import annotations

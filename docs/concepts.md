@@ -130,7 +130,12 @@ at the very start of a prompt, so talking about them triggers nothing.
 
 - Each session starts with the memory block: the project's name, the last session's
   handoff, its long-term facts, your global preferences, its recent short-term facts, and
-  pointers to its other pages. The block stays within `inject.max_chars`.
+  pointers to its other pages. The block stays within `inject.max_chars`, and within what
+  Claude Code passes on whole from a hook: about 8,100 characters there.
+- After a compaction in Claude Code, a short section follows the block: the session's
+  newest prompts and the files it edited, read back from its own transcript. It is not
+  memory. It passes the same filter as capture, is stored nowhere, and comes with a note
+  saying it is context, not new requests.
 - Agents can run `aft search` and `aft read` for anything the block does not hold.
 - The timer digests finished sessions and dreams once a project has been quiet for
   `dream.quiet_minutes`. Work stops for the day when `work.daily_token_budget` is spent

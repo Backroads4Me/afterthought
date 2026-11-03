@@ -1063,7 +1063,7 @@ def test_a_failing_injection_exits_zero_and_prints_nothing(
     the session its memory and nothing else: exit 0, no output, one line in the hook log."""
     monkeypatch.setenv("AFT_HOME", str(widget.home))
 
-    def broken(config, resolution, waiting=None):
+    def broken(config, resolution, waiting=None, limit=None):
         raise RuntimeError("the vault is unreadable")
 
     monkeypatch.setattr(inject, "build", broken)

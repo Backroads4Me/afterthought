@@ -1710,6 +1710,9 @@ HOOK_LOG_TIMEOUT_SECONDS = 0.5
 # Recording a starting session's project is skipped when less than this is left of the
 # hook's working share: the block is already out, and the record is not worth the budget.
 HOOK_RECORD_MIN_SECONDS = 0.05
+# A compacted session's checkpoint is skipped when less than this is left of that share:
+# the time limit would take the block with it, and the block is what the hook's time is for.
+HOOK_CHECKPOINT_MIN_SECONDS = 0.5
 
 
 def cmd_hook(args) -> int:
@@ -1726,7 +1729,7 @@ def cmd_hook(args) -> int:
             payload = json.load(sys.stdin)
             event = _hook_event(args, payload)
             if event.kind == SESSION_START:
-                block, remember = _session_start(event)
+                block, remember = _session_start(event, deadline)
             else:
                 block = _dispatch(event)
         # Printed once the block is whole and the time limit is behind it, so an expiry
@@ -1792,7 +1795,13 @@ def _dispatch(event: SessionEvent) -> str:
     if event.kind == PROMPT:
         from aft import recall as recallmod
 
-        block = recallmod.recall(event.prompt, event.cwd, load(), session_id=event.session_id)
+        block = recallmod.recall(
+            event.prompt,
+            event.cwd,
+            load(),
+            session_id=event.session_id,
+            block_limit=_block_limit(event.agent),
+        )
         return _prompt_output(event.agent, block)
     if event.kind in (COMPACTION, SESSION_END):
         from aft import queue
@@ -1807,14 +1816,49 @@ def _dispatch(event: SessionEvent) -> str:
     return ""
 
 
-def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]:
+def _block_limit(agent: str) -> int | None:
+    """The room ``agent``'s hook output leaves the memory block, or None when it cuts nothing.
+
+    The room for a checkpoint is left on every start, so a block reads the same before and
+    after a compaction, and recall dedupes against one block."""
+    from aft import adapters, checkpoint
+
+    limit = adapters.OUTPUT_LIMITS.get(agent)
+    return None if limit is None else limit - checkpoint.MAX_CHARS - len(checkpoint.SEPARATOR)
+
+
+def _with_checkpoint(config: Config, event: SessionEvent, block: str, deadline: float) -> str:
+    """The block, with the session's own checkpoint after it when the session just compacted.
+
+    A checkpoint is worth less than the block it follows, so a failure costs the checkpoint
+    alone. The log line ends this step's share of the time limit, and only printing is left.
+    An expiry is caught here for that reason: HookTimeoutError is a BaseException so that it
+    reaches `cmd_hook` through steps that build the block, but this step runs after the block
+    is whole, and letting it through would leave the agent with no block at all.
+    """
+    if not event.after_compaction or deadline - time.monotonic() < HOOK_CHECKPOINT_MIN_SECONDS:
+        return block
+    from aft import checkpoint
+
+    try:
+        section = checkpoint.render(config, event)
+    except (checkpoint.CheckpointError, HookTimeoutError) as exc:
+        _log_hook_failure(event.agent, event.kind, exc)
+        return block
+    return f"{block}{checkpoint.SEPARATOR}{section}" if section else block
+
+
+def _session_start(
+    event: SessionEvent, deadline: float | None = None
+) -> tuple[str, Callable[[], None] | None]:
     """The block a starting session is given, and the step that records its project.
 
     The directory is resolved once, for both. Recording is returned rather than done, so the
     hook prints the block first: the record is what files this session's words if its
     directory is gone by the time they are digested (DESIGN 7), and it is capture's, so a
     session in an excluded path or project records nothing, and neither does a directory
-    that resolves to no project.
+    that resolves to no project. ``deadline`` is when the hook's working share ends, on the
+    clock of ``time.monotonic``; a caller with none gets no checkpoint.
     """
     from aft import gitutil, inject, keys, vault
     from aft.config import is_excluded
@@ -1837,7 +1881,10 @@ def _session_start(event: SessionEvent) -> tuple[str, Callable[[], None] | None]
     # its notes are counted on the shared pages, as a session of no project's are.
     for_block = inject.block_project(result)
     waiting = notes.count(config, for_block.slug if for_block else None)
-    block = _start_output(event.agent, inject.build(config, result, waiting), waiting)
+    memory = inject.build(config, result, waiting, limit=_block_limit(event.agent))
+    if deadline is not None:
+        memory = _with_checkpoint(config, event, memory, deadline)
+    block = _start_output(event.agent, memory, waiting)
     if result.slug is None or is_excluded(event.cwd, config):
         return block, None
     project_id = result.project.id if result.project is not None else None
