@@ -3041,6 +3041,85 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     scope global; a file with no type keeps today's behavior. Review checkpoint: yes (what
     enters memory, and where).
 
+- **F103 Search matches by meaning as well as by word** (drafted 2026-11-03, not yet ruled;
+  independent of F98 to F101; DESIGN 10's Search). Measured 2026-11-03 on
+  `aft-eval-data/search/coding.yaml` (103 entries, `qwen3.8-flash-next`): the production path
+  reaches recall@1 0.51, recall@5 0.64, recall@10 0.69, MRR 0.58, against BM25 alone at 0.38,
+  0.48, 0.55, 0.44. Reranking is worth +13 points at recall@1, and it is near its own
+  ceiling: at `--limit 60`, the pool size the rerank sees, the answer is in the pool for 75
+  of the 103 entries and the production path already delivers 71 of them into the top 10. No
+  reordering of that pool can do better, which is also why T42 found 100 candidates added
+  nothing over 60. The loss that is left is candidate generation.
+  - **What the 28 pool misses are.** Checked by the key's own substring rule against the live
+    vault and the evidence archive. For 10 the answer is in the vault and BM25 does not
+    propose it; for 18 the expected text is not in the vault at all, which is extraction or a
+    key written against `snapshot-2026-10-11` and not since refreshed, and no retrieval
+    reaches it. This task addresses the 10 and nothing else.
+  - **Why phrases do not already cover it.** All 10 rows have a phrase file from F85, so the
+    model's own alternative wordings have been tried on exactly these rows and still leave
+    them out of a 60-candidate pool. The clearest case is "what budgeting app does the user
+    use": the answer is "moved to Actual Budget, self-hosted", and the pool fills with
+    afterthought's own token-budget rows, because `budget` is the shared word. A lexical
+    index cannot tell the two senses apart at any weighting, and eight short phrases per row
+    do not add the sense that is missing. Searching "Actual budget self-hosted" returns the
+    row first, so the row is indexed and reachable; the question's words are what fail.
+  - **What it adds.** A dense index beside the FTS5 tables, in the same database, keyed by
+    the same `row_key` and the same content hash the `files` table already keeps. One
+    embedding per row, from an OpenAI-compatible `/v1/embeddings` endpoint. At search time
+    the dense neighbours of the query join the BM25 candidates before the existing rerank
+    runs, as a union with BM25's order kept for the rows both propose. Ranking, the two-tier
+    project order, the 10% curated-memory margin, the time window, injection, the dream and
+    `aft eval`'s pass/fail mode are all unchanged: this task only puts more of the right rows
+    in front of the reranker.
+  - **No new dependency, measured.** Cosine over `array('f')` rows with `zip` and `sum` in
+    the standard library costs 30 ms for the 1,077 `pages` and `digests` rows of the live
+    index, and 369 ms extrapolated to all 13,350 rows of the default collections, against a
+    production search that is 1.81 s at the median. Rule 6 is not engaged and neither numpy
+    nor an extension is needed. If a later task wants evidence covered at a lower cost, that
+    is its question, not this one's.
+  - **Where the vectors live.** In the index, which DESIGN principle 3 and `index.py` both
+    make disposable, not in the vault. F85 put phrases in the vault because they are model
+    prose a person may read and correct; a vector is neither, and 13,350 of them at 1,024
+    dimensions is about 55 MB that git would keep forever. The cost of that choice is that
+    `aft reindex` restores BM25 at once and leaves the dense side to refill: a row whose
+    hash has no vector is simply absent from the dense candidates, so search degrades to
+    today's behavior rather than failing. Backfill runs as a step of `aft run` under the
+    same budget and cooldown as phrases, newest rows first.
+  - **Configuration.** `[model] embed_endpoint` and `embed_name`, both empty by default, so
+    the feature is off until Ted sets them and no existing install changes behavior.
+    `embed_api_key_env` beside them, read only when `embed_endpoint` is set, following
+    `verifier_endpoint`'s rule. `[search] dense_candidates`, default 20, is how many dense
+    neighbours join the pool.
+  - **Files it owns:** `src/aft/index.py` (the vector table, hash keying, backfill),
+    `src/aft/search.py` (the union), `src/aft/model.py` (an embeddings call),
+    `src/aft/config.py` (the four settings), `src/aft/work.py` (the backfill step).
+  - **Measure, before merging (decision rule set now):** `aft eval --ranks` on
+    `coding.yaml`, with and without the dense union, on one vault snapshot and one endpoint,
+    reported with tokens and p90 wall time a search. It merges when at least 6 of the 10
+    named entries enter the top 10, recall@10 reaches 0.75 or better, MRR does not fall below
+    0.58, no entry found in the top 5 today drops out of it, and p90 search time stays under
+    3 s. The 18 are reported unchanged and are not counted either way. If it falls short the
+    task does not merge and the results go to Ted with the per-entry table.
+  - **Not in scope:** the 18 entries with no answer in the vault; refreshing `coding.yaml`;
+    `aft redigest --unfiled`, which is a separate existing fix for the three of the 10 whose
+    answer sits in a `digests/_unfiled/` file that no project owns; reranking changes;
+    anything in the injection path, which stays model-free and must not grow an endpoint
+    call.
+  - **Tests:** a row's vector is keyed by its content hash and a changed line has none until
+    re-embedded; a row with no vector is absent from the dense candidates and the search
+    still answers; the union keeps BM25's order for rows both sides propose and appends the
+    dense-only rows; `dense_candidates` bounds how many join; an unset `embed_endpoint` makes
+    the search byte-identical to today's; an embeddings endpoint that is unreachable, cooling
+    down or over budget leaves the search on BM25 and raises nothing; `aft reindex` drops and
+    rebuilds the vector table with the rest; injection makes no embeddings call. Review
+    checkpoint: yes (a new model call, and a new path into what search returns).
+  - **Questions for Ted, not settled here.** (1) DESIGN 2 lists "Vector search" as a v1
+    non-goal and the post-v1 list allows "vector search on the CPU ... only when M5 shows the
+    need"; this entry is the evidence of that need, and whether it is now in scope is Ted's
+    ruling. (2) DESIGN 2's goal "One local model does all model work" holds if one endpoint
+    serves both chat and embeddings; a second card serving an embedding model is a change to
+    that sentence, and it competes with `verifier_endpoint` for the same card.
+
 ## 6. Ted's checklists at milestone ends
 
 ### 6.1 M1
