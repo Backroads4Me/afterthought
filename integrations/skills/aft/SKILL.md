@@ -7,8 +7,9 @@ description: Afterthought, the user's shared memory for coding agents, run throu
 
 Afterthought keeps the user's memory: curated facts in a vault of markdown pages, built in
 the background from past sessions. You reach it only through the `aft` command. Never
-edit vault pages yourself; when the user wants to change memory by hand, tell them how
-(see "Changing memory by hand" below).
+edit vault pages yourself without the user's approval; by default, when the user wants to
+change memory by hand, tell them how (see "Changing memory by hand" below). When the user
+asks you to make the edit instead, follow that section's formats exactly.
 
 What a session receives: it starts with the memory block, and each prompt you send also
 brings back up to three lines that bear on it, under the heading "Memory that may bear on
