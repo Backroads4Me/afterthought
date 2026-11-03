@@ -52,6 +52,7 @@ LEGACY = {
 SHIPPED_SHA256 = {
     "SKILL.md": frozenset(
         {
+            "8616b0fe337678faa9381c896afdc456a92a8c94f13544df7fc0d1aac81070b6",
             "59e9cab56618c92f630fa62bd879d6c03cced8d75af5f031df5623a7fa118625",
             "89c53d21ee9d4a213882ab0c919720ffe37c2728f53a91f98bfb93526ca30849",
             "fe30cf9c9356880bd562b199d2a800b3ec5c99f713d0ec277a34777ece274a38",

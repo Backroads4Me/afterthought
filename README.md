@@ -66,7 +66,12 @@ uv tool install --editable .
    ```bash
    aft install claude
    aft install pi
+   aft install omp
    ```
+
+   `aft install omp` installs no skill of its own: point omp's
+   `skills.customDirectories` at `~/.pi/agent/skills` and it reads the `aft` skill
+   `aft install pi` keeps.
 
 5. Turn on background work, which digests sessions and dreams every 30 minutes:
 

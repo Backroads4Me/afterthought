@@ -25,6 +25,7 @@ from pathlib import Path
 
 CLAUDE = "claude"
 PI = "pi"
+OMP = "omp"
 
 USER = "user"
 ASSISTANT = "assistant"
@@ -69,7 +70,9 @@ def read(agent: str, path: Path, after: str | None = None) -> Iterator[Entry]:
     # importing them here keeps the package importable in either order.
     if agent == CLAUDE:
         from aft.readers.claude import read as read_session
-    elif agent == PI:
+    elif agent in (PI, OMP):
+        # omp is a fork of pi and writes pi's transcript: the same JSONL records, the same
+        # entry tree, the same session file names (src/aft/readers/pi.py).
         from aft.readers.pi import read as read_session
     else:
         raise ReaderError(f"no transcript reader for agent {agent!r}")

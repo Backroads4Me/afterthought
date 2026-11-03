@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
-    """The wheel ships integrations/, so aft install claude and aft install pi work
-    from an installed package without a source checkout (BUILD-PLAN F24)."""
+    """The wheel ships integrations/, so aft install claude, aft install pi and aft install
+    omp work from an installed package without a source checkout (BUILD-PLAN F24)."""
     repo_root = Path(__file__).resolve().parents[1]
     dist_dir = tmp_path / "dist"
     dist_dir.mkdir()
@@ -36,6 +36,9 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
         assert any(name == "aft/integrations/pi/afterthought.ts" for name in namelist), (
             f"expected aft/integrations/pi/afterthought.ts in wheel: {namelist}"
         )
+        assert any(name == "aft/integrations/omp/afterthought.ts" for name in namelist), (
+            f"expected aft/integrations/omp/afterthought.ts in wheel: {namelist}"
+        )
         assert any(name == "aft/integrations/skills/aft/SKILL.md" for name in namelist), (
             f"expected aft/integrations/skills/aft/SKILL.md in wheel: {namelist}"
         )
@@ -54,7 +57,7 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
         capture_output=True,
     )
 
-    # 3. Verify aft install claude and aft install pi work from the installed package
+    # 3. Verify the installers work from the installed package
     env = os.environ.copy()
     fake_home = tmp_path / "home"
     env["AFT_HOME"] = str(fake_home)
@@ -79,6 +82,15 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
     assert res_pi_dry.returncode == 0, res_pi_dry.stderr
     assert "afterthought/index.ts" in res_pi_dry.stdout
 
+    res_omp_dry = subprocess.run(
+        [str(aft_bin), "install", "omp", "--dry-run"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_omp_dry.returncode == 0, res_omp_dry.stderr
+    assert "hooks/pre/afterthought.ts" in res_omp_dry.stdout
+
     # 4. Perform actual installation
     res_claude = subprocess.run(
         [str(aft_bin), "install", "claude"],
@@ -98,3 +110,12 @@ def test_wheel_ships_integrations_and_installers_work(tmp_path: Path) -> None:
     )
     assert res_pi.returncode == 0, res_pi.stderr
     assert (fake_user_home / ".pi" / "agent" / "extensions" / "afterthought" / "index.ts").is_file()
+
+    res_omp = subprocess.run(
+        [str(aft_bin), "install", "omp"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert res_omp.returncode == 0, res_omp.stderr
+    assert (fake_user_home / ".omp" / "agent" / "hooks" / "pre" / "afterthought.ts").is_file()

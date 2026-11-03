@@ -2,7 +2,7 @@
 
 Work reaches the queue two ways (DESIGN 8). A hook fires and hands one event to
 `queue.enqueue`, which writes a row and returns inside its budget. A timer runs `sweep`,
-which walks both agents' session directories and enqueues what the hooks missed: a
+which walks every agent's session directories and enqueues what the hooks missed: a
 session whose hook never fired, and a long-lived session that has grown enough to be
 worth digesting in a chunk while it is still going.
 
@@ -26,16 +26,17 @@ from pathlib import Path
 from aft.config import Config, is_excluded
 from aft.events import COMPACTION, SESSION_END, SessionEvent
 from aft.queue import enqueue, session_state, watching_since
-from aft.readers import CLAUDE, PI
+from aft.readers import CLAUDE, OMP, PI
 
 # Where each agent keeps its session files, and the layout of one: Claude Code writes
-# ``<session id>.jsonl`` under a directory named for the working directory, and pi writes
-# ``<timestamp>_<session id>.jsonl`` under a directory named the same way. Both layouts
+# ``<session id>.jsonl`` under a directory named for the working directory, and pi and omp
+# write ``<timestamp>_<session id>.jsonl`` under a directory named the same way. Both layouts
 # are recorded in `aft.readers`. These are module constants rather than configuration
-# because they are facts about the two agents, not choices afterthought makes.
+# because they are facts about the agents, not choices afterthought makes.
 SESSION_DIRS = {
     CLAUDE: Path("~/.claude/projects"),
     PI: Path("~/.pi/agent/sessions"),
+    OMP: Path("~/.omp/agent/sessions"),
 }
 
 # A session that has not written for this long is done talking, whatever its hook said.
@@ -55,14 +56,14 @@ RETRY_AFTER = timedelta(hours=1)
 # sessions are processed in chunks so long-lived ones are not digested all at once).
 GROWTH_AFTER = 200 * 1024
 
-# The key each agent files a record's own id under: pi writes ``id``, Claude Code
+# The key each agent files a record's own id under: pi and omp write ``id``, Claude Code
 # ``uuid``. A watermark is looked up by that key because the same id is quoted inside
 # other records as a reference (pi's ``parentId``, Claude Code's ``parentUuid``), and a
 # reference to a record is not the record itself.
-RECORD_ID_KEYS = {PI: b'"id"', CLAUDE: b'"uuid"'}
+RECORD_ID_KEYS = {PI: b'"id"', OMP: b'"id"', CLAUDE: b'"uuid"'}
 
-# The record budget of the head scan that recovers a session's working directory. Both
-# agents record it early: pi in its opening session record, Claude Code in its first
+# The record budget of the head scan that recovers a session's working directory. Every
+# agent records it early: pi and omp in the opening session record, Claude Code in its first
 # conversation records.
 CWD_SCAN_RECORDS = 50
 
@@ -72,7 +73,7 @@ SWEEP_DETAIL = "sweep"
 
 
 def sweep(config: Config, now: datetime) -> list[SessionEvent]:
-    """Enqueue the sessions of both agents that hold capture work no hook reported.
+    """Enqueue the sessions of every agent that hold capture work no hook reported.
 
     Every session file modified in the last `SESSION_WINDOW` is measured against its own
     progress, never against the time of the last sweep, so a session whose hook never fired
@@ -150,7 +151,7 @@ def _candidate(
 def _session_files(directory: Path) -> list[Path]:
     """Every session file of one agent, in a name order that keeps runs comparable.
     A directory that is not there is an agent that is not installed, not an error: the
-    sweep runs for both and reports on neither.
+    sweep runs for every agent and reports on none of them.
     """
     root = directory.expanduser()
     return sorted(root.glob("*/*.jsonl")) if root.is_dir() else []
@@ -159,8 +160,8 @@ def _session_files(directory: Path) -> list[Path]:
 def _session_id(agent: str, path: Path) -> str:
     """The session a file holds the transcript of, from its name.
 
-    Claude Code names the file after the session; pi prefixes its start time to pi's own
-    session id. Both layouts are the ones `aft.readers` reads.
+    Claude Code names the file after the session; pi and omp prefix the start time to the
+    agent's own session id. Both layouts are the ones `aft.readers` reads.
     """
     stem = path.stem
     if agent == CLAUDE:

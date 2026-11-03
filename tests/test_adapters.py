@@ -42,6 +42,10 @@ PI_ID = "019f17a3-2b64-7a1f-9c2e-4f6d8a1b3c5d"
 PI_CWD = Path("/home/user/src/widget")
 PI_SESSION_DIR = "/home/user/.pi/agent/sessions/--home-user-src-widget--"
 PI_TRANSCRIPT = Path(f"{PI_SESSION_DIR}/2026-06-30T14-22-08-517Z_{PI_ID}.jsonl")
+# omp writes pi's file under a root and a directory name of its own, and its session events
+# carry no reason, so every omp event parses with no detail (tests/fixtures/hooks/README.md).
+OMP_SESSION_DIR = "/home/user/.omp/agent/sessions/-src-widget"
+OMP_TRANSCRIPT = Path(f"{OMP_SESSION_DIR}/2026-06-30T14-22-08-517Z_{PI_ID}.jsonl")
 
 # fixture, agent, the event name that agent fires, the event afterthought must build
 CASES = [
@@ -109,6 +113,24 @@ CASES = [
         "pi",
         "session_shutdown",
         SessionEvent("pi", "session_end", PI_ID, PI_CWD, PI_TRANSCRIPT, NOW, "quit"),
+    ),
+    (
+        "omp-session-start.json",
+        "omp",
+        "session_start",
+        SessionEvent("omp", "session_start", PI_ID, PI_CWD, OMP_TRANSCRIPT, NOW, None),
+    ),
+    (
+        "omp-session-before-compact.json",
+        "omp",
+        "session_before_compact",
+        SessionEvent("omp", "compaction", PI_ID, PI_CWD, OMP_TRANSCRIPT, NOW, None),
+    ),
+    (
+        "omp-session-shutdown.json",
+        "omp",
+        "session_shutdown",
+        SessionEvent("omp", "session_end", PI_ID, PI_CWD, OMP_TRANSCRIPT, NOW, None),
     ),
 ]
 
@@ -451,6 +473,34 @@ def test_session_end_hook_never_calls_systemd_with_isolated_home(home, monkeypat
     ) == (0, "", "")
     assert calls == []
     assert not (home / "last-work-trigger").exists()
+
+
+def test_omp_session_compact_parses_as_compaction():
+    """omp's session_compact event parses as a compaction event, as pi's does."""
+    from aft.adapters.omp import parse_omp
+    from aft.events import COMPACTION
+
+    data = payload("omp-session-before-compact.json") | {"hook_event_name": "session_compact"}
+    event = parse_omp("session_compact", data, NOW)
+    assert event.kind == COMPACTION
+    assert event.agent == "omp"
+    assert event.detail is None
+
+
+def test_omp_before_agent_start_keeps_the_prompt():
+    """An omp prompt event carries the prompt as its own content, not as a reason."""
+    from aft.adapters.omp import parse_omp
+    from aft.events import PROMPT
+
+    data = payload("omp-session-start.json") | {
+        "hook_event_name": "before_agent_start",
+        "prompt": "ship the release",
+    }
+    event = parse_omp("before_agent_start", data, NOW)
+    assert event.kind == PROMPT
+    assert event.agent == "omp"
+    assert event.prompt == "ship the release"
+    assert event.detail is None
 
 
 def test_pi_session_compact_parses_as_compaction():

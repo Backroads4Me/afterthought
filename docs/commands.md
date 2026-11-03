@@ -10,6 +10,7 @@ Every command is a subcommand of `aft`. `aft <command> --help` lists its options
 | `aft init` | Writes `~/.afterthought/config.toml` with the defaults if there is none, and creates the vault as a git repository. Safe to run again. |
 | `aft install claude [--dry-run] [--uninstall]` | Adds Afterthought's `SessionStart`, `PreCompact`, `SessionEnd` and `UserPromptSubmit` hooks to `~/.claude/settings.json`, and installs the `aft` skill, which tells an agent how to use Afterthought's commands. The `UserPromptSubmit` hook adds up to `recall.max_hits` memory lines to each prompt you send, under a heading that says to check them before relying on them; it reads memory and writes nothing (BUILD-PLAN F87). A copy of the skill under an earlier name (`library-import`, `aft-library-import`) is removed when it is one Afterthought shipped. Leaves every other hook alone. `--dry-run` shows the change; `--uninstall` removes only Afterthought's entries. |
 | `aft install pi [--dry-run] [--uninstall]` | Copies Afterthought's extension into pi's extensions directory and installs the `aft` skill in pi's skills directory. The extension adds up to `recall.max_hits` memory lines beside each prompt you send, in a section of its own; it reads memory and writes nothing (BUILD-PLAN F87). |
+| `aft install omp [--dry-run] [--uninstall]` | Copies Afterthought's hook module into omp's `hooks/pre` directory, under the agent directory omp resolves for the current profile. The module adds the memory block and up to `recall.max_hits` memory lines to omp's system prompt, each in a tagged block of its own, and hands omp's session lifecycle to `aft hook omp`. No skill is installed: omp reads the `aft` skill through `skills.customDirectories`, so point that at pi's skills directory rather than keeping a second copy. |
 | `aft install timer [--dry-run] [--uninstall]` | Writes the systemd user units that run `aft run` every `dream.interval_minutes`, then enables and starts the timer. `--uninstall` stops and removes them. |
 
 ## Projects
@@ -87,4 +88,4 @@ Reference documentation imported as a searchable, cited library. The `aft` skill
 
 | Command | What it does |
 |---|---|
-| `aft hook AGENT EVENT` | Handles one agent lifecycle event read from stdin. The installed hooks and the pi extension call it; you do not run it yourself. |
+| `aft hook AGENT EVENT` | Handles one agent lifecycle event read from stdin. The installed hooks, the pi extension and the omp hook module call it; you do not run it yourself. |

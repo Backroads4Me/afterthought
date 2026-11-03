@@ -296,7 +296,7 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_eval)
 
     p = sub.add_parser("hook", help="handle one agent lifecycle event read from stdin")
-    p.add_argument("agent", help="the agent that fired the event: claude or pi")
+    p.add_argument("agent", help="the agent that fired the event: claude, pi or omp")
     p.add_argument("event", help="that agent's own event name, e.g. SessionStart")
     p.set_defaults(handler=cmd_hook)
 
@@ -322,6 +322,16 @@ def _parser() -> argparse.ArgumentParser:
         help="remove afterthought's own extension and nothing else",
     )
     q.set_defaults(handler=cmd_install_pi)
+    q = isub.add_parser("omp", help="install the afterthought hook module in omp's hooks dir")
+    q.add_argument(
+        "--dry-run", action="store_true", help="print the hook module diff, write nothing"
+    )
+    q.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="remove afterthought's own hook module and nothing else",
+    )
+    q.set_defaults(handler=cmd_install_omp)
     q = isub.add_parser(
         "timer",
         help="install systemd user timer and service units for background work",
@@ -1610,6 +1620,42 @@ def cmd_install_pi(args) -> int:
     return 0
 
 
+def cmd_install_omp(args) -> int:
+    """Copy or remove afterthought's hook module in omp's configuration.
+
+    No skill is installed here. omp reads the ``aft`` skill through
+    ``skills.customDirectories``, so a copy of its own would be a second skill of the same
+    name drifting from the one ``aft install pi`` keeps.
+    """
+    from aft.install import omp as omp_install
+
+    hooks = omp_install.hooks_dir()
+    change = (
+        omp_install.uninstall(hooks, dry_run=args.dry_run)
+        if args.uninstall
+        else omp_install.install(hooks, dry_run=args.dry_run)
+    )
+    target = omp_install.target_path(hooks)
+    if not change.changed:
+        if args.uninstall:
+            print(f"no afterthought hook module in {hooks}")
+        else:
+            print(f"{target} is already up to date")
+        return 0
+    if args.dry_run and change.diff:
+        print(change.diff)
+    if change.backup is not None:
+        verb = "would back up" if args.dry_run else "backed up"
+        print(f"{verb} the previous {target.name} to {change.backup}")
+    if args.uninstall:
+        verb = "would remove" if args.dry_run else "removed"
+        print(f"{verb} {', '.join(str(path) for path in change.removed)}")
+    else:
+        verb = "would write" if args.dry_run else "installed"
+        print(f"{verb} {target}")
+    return 0
+
+
 def cmd_install_timer(args) -> int:
     """Install or remove afterthought's systemd user service and timer units."""
     from aft.install import systemd as systemd_install
@@ -1771,8 +1817,9 @@ def _dispatch(event: SessionEvent) -> str:
     ``session_start`` is injection's: it returns the block `aft inject` prints for the
     event's working directory (BUILD-PLAN M1.1, M1.2). The block goes out as plain text.
     Claude Code adds a ``SessionStart`` hook's plain stdout to the session's context, for
-    every source including ``compact`` (hooks reference, "SessionStart"), and pi's extension
-    reads the same text and adds it as a system prompt section. When notes wait on the user,
+    every source including ``compact`` (hooks reference, "SessionStart"); pi's extension reads
+    the same text and adds it as a system prompt section, and omp's hook module appends it to
+    the turn's system prompt as a tagged block. When notes wait on the user,
     the block goes out inside a JSON object with a notice for the user (`_start_output`).
     Injection only reads, so ``capture.exclude_paths`` and ``capture.exclude_projects`` do
     not apply to it. A vault
@@ -1914,8 +1961,9 @@ def _prompt_output(agent: str, block: str) -> str:
     Claude Code takes a ``UserPromptSubmit`` hook's added context as
     ``hookSpecificOutput.additionalContext`` (hooks reference, "JSON output" and
     "UserPromptSubmit"), printed only when there is a block and nothing otherwise. pi's
-    extension reads the hook's plain stdout and puts it in a section of its own, so the
-    block goes out as plain text for pi, and an empty answer prints nothing there either.
+    extension reads the hook's plain stdout and puts it in a section of its own, and omp's
+    hook module puts it in a tagged block of its own, so the block goes out as plain text for
+    both, and an empty answer prints nothing there either.
     """
     if not block or agent != "claude":
         return block
@@ -1937,9 +1985,9 @@ def _start_output(agent: str, block: str, waiting: int) -> str:
 
     Claude Code reads ``systemMessage`` as a message shown to the user and
     ``hookSpecificOutput.additionalContext`` as context, the same place plain stdout goes
-    (hooks reference, "JSON output" and "SessionStart"). pi's extension reads ``block`` and
-    ``notice`` and shows the notice with ``ctx.ui.notify``. A plain block never starts with
-    ``{``, so an extension tells the two apart by the first character.
+    (hooks reference, "JSON output" and "SessionStart"). pi's extension and omp's hook module
+    both read ``block`` and ``notice`` and show the notice with ``ctx.ui.notify``. A plain
+    block never starts with ``{``, so either one tells the two apart by the first character.
     """
     if not waiting or not block:
         return block

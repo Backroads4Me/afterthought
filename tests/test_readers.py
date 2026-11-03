@@ -1,4 +1,7 @@
-"""Transcript readers, over fixtures written in the shape of real Claude Code and pi files."""
+"""Transcript readers, over fixtures written in the shape of real Claude Code and pi files.
+
+omp writes pi's transcript, so it is read through pi's reader and over pi's fixtures.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from aft import filter as filtermod
 FIXTURES = Path(__file__).parent / "fixtures" / "transcripts"
 CLAUDE = readers.CLAUDE
 PI = readers.PI
+OMP = readers.OMP
 
 # The pi session header of pi-session.jsonl: bookkeeping, never conversation.
 PI_HEADER_ID = "7be69a6f-a36a-507b-b4b7-6cc754237d29"
@@ -291,6 +295,15 @@ def test_pi_session_reads_its_message_entries():
     # and not a turn whose text is whitespace.
     assert entries[1].text == "I'll check the metrics cache service and the panel tooling."
     assert entries[6].text.startswith("Yes, the metrics cache is healthy")
+
+
+def test_omp_reads_a_pi_transcript():
+    """omp is a fork of pi and writes pi's transcript, so the agent name omp sends with its
+    events reads the same file to the same entries rather than needing a reader of its own."""
+    assert read(OMP, "pi-session.jsonl") == read(PI, "pi-session.jsonl")
+    assert read(OMP, "pi-resumed.jsonl", after="17f1b5d4") == read(
+        PI, "pi-resumed.jsonl", after="17f1b5d4"
+    )
 
 
 def test_pi_skips_entries_that_are_not_conversation():

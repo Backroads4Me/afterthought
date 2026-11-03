@@ -22,7 +22,7 @@ PROMPT = "prompt"
 
 @dataclass(frozen=True)
 class SessionEvent:
-    agent: str  # "claude" | "pi"
+    agent: str  # "claude" | "pi" | "omp"
     kind: str  # SESSION_START | COMPACTION | SESSION_END
     session_id: str
     cwd: Path

@@ -5,11 +5,13 @@ entry in `PARSERS`, plus one in `OUTPUT_LIMITS` when the agent cuts what a hook 
 
 from aft.adapters.claude import OUTPUT_LIMIT as CLAUDE_OUTPUT_LIMIT
 from aft.adapters.claude import parse_claude
+from aft.adapters.omp import parse_omp
 from aft.adapters.pi import parse_pi
 
 PARSERS = {
     "claude": parse_claude,
     "pi": parse_pi,
+    "omp": parse_omp,
 }
 
 # The most a hook may print and have all of it reach the session, by agent.

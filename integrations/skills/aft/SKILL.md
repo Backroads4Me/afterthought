@@ -59,7 +59,7 @@ command has `--dry-run`, show its output first.
 | To ask what memory should not keep | `aft review <project\|global>`; it calls the model and counts against the day's token budget. Striking the lines it names, `aft review <project\|global> --withdraw <n,n,...\|all>`, follows "Reviewing what memory keeps" below |
 | To rebuild the search index | `aft reindex` |
 | To create the config file and the vault | `aft init`; safe to run again |
-| To install or remove afterthought's hooks, extension, skill or timer | `aft install claude`, `aft install pi`, `aft install timer`; each takes `--dry-run` to preview and `--uninstall` to remove |
+| To install or remove afterthought's hooks, extension, hook module, skill or timer | `aft install claude`, `aft install pi`, `aft install omp`, `aft install timer`; each takes `--dry-run` to preview and `--uninstall` to remove |
 | To import Claude Code's own memory files | `aft import claude-memory`, with `--dry-run` first |
 | To import documentation into the library | read `library-import.md` beside this file and follow it step by step |
 
