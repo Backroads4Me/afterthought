@@ -1832,6 +1832,9 @@ def _with_checkpoint(config: Config, event: SessionEvent, block: str, deadline: 
 
     A checkpoint is worth less than the block it follows, so a failure costs the checkpoint
     alone. The log line ends this step's share of the time limit, and only printing is left.
+    An expiry is caught here for that reason: HookTimeoutError is a BaseException so that it
+    reaches `cmd_hook` through steps that build the block, but this step runs after the block
+    is whole, and letting it through would leave the agent with no block at all.
     """
     if not event.after_compaction or deadline - time.monotonic() < HOOK_CHECKPOINT_MIN_SECONDS:
         return block
@@ -1839,7 +1842,7 @@ def _with_checkpoint(config: Config, event: SessionEvent, block: str, deadline: 
 
     try:
         section = checkpoint.render(config, event)
-    except checkpoint.CheckpointError as exc:
+    except (checkpoint.CheckpointError, HookTimeoutError) as exc:
         _log_hook_failure(event.agent, event.kind, exc)
         return block
     return f"{block}{checkpoint.SEPARATOR}{section}" if section else block

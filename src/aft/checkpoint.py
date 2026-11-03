@@ -74,13 +74,15 @@ def render(config: Config, event: SessionEvent) -> str:
             return ""
         # A whole session, so a span opened anywhere in it holds, as capture holds it.
         kept, _ = filter_entries(readers.work(event.agent, path), config)
+        # Inside the same try: rendering the section is as able to fail as reading it, and
+        # the caller recognizes only CheckpointError.
+        return _section(
+            [entry for entry in kept if entry.role == USER],
+            [entry.text for entry in kept if entry.role != USER],
+            event.cwd,
+        )
     except Exception as exc:  # noqa: BLE001 - the hook turns any failure into a log line
         raise CheckpointError(f"checkpoint failed: {type(exc).__name__}") from exc
-    return _section(
-        [entry for entry in kept if entry.role == USER],
-        [entry.text for entry in kept if entry.role != USER],
-        event.cwd,
-    )
 
 
 def _readable(path: Path) -> bool:

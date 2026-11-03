@@ -13,7 +13,7 @@ import pytest
 
 from aft import adapters, checkpoint, inject, keys, queue, readers, recall, search
 from aft import config as configmod
-from aft.cli import _block_limit, main
+from aft.cli import HookTimeoutError, _block_limit, main
 from aft.config import Config
 from aft.events import SESSION_START, SessionEvent
 from aft.forget import forget_session
@@ -344,6 +344,43 @@ def test_too_little_time_left_skips_the_section(initialized, tmp_path, monkeypat
     out = run_hook(monkeypatch, capsys, path, tmp_path)
     assert inject.HOW_TO in out
     assert "the compacted prompt" not in out
+
+
+def test_the_hook_timer_expiring_in_render_still_delivers_the_block(
+    initialized, tmp_path, monkeypatch, capsys
+):
+    """The expiry is a BaseException so it reaches `cmd_hook` through the steps that build
+    the block. Reaching it from here would cost the block the checkpoint only follows."""
+
+    def expire(config, event):
+        raise HookTimeoutError("the hook's share is spent")
+
+    monkeypatch.setattr("aft.checkpoint.render", expire)
+    path = transcript(tmp_path, user("u1", "the compacted prompt"))
+    out = run_hook(monkeypatch, capsys, path, tmp_path)
+    assert inject.HOW_TO in out
+    assert "the compacted prompt" not in out
+    log = (initialized.home / "logs" / "hooks.log").read_text(encoding="utf-8")
+    assert "HookTimeoutError" in log
+
+
+def test_a_failing_section_costs_the_checkpoint_and_not_the_block(
+    initialized, tmp_path, monkeypatch, capsys
+):
+    """`_section` runs inside `render`'s try, so its failure arrives as CheckpointError and
+    the caller recognizes it."""
+
+    def refuse(prompts, edited, cwd):
+        raise ValueError("the private prompt")
+
+    monkeypatch.setattr("aft.checkpoint._section", refuse)
+    path = transcript(tmp_path, user("u1", "the compacted prompt"))
+    out = run_hook(monkeypatch, capsys, path, tmp_path)
+    assert inject.HOW_TO in out
+    assert "the compacted prompt" not in out
+    log = (initialized.home / "logs" / "hooks.log").read_text(encoding="utf-8")
+    assert "ValueError" in log
+    assert "the private prompt" not in log
 
 
 def test_notes_waiting_go_out_with_the_section_inside_the_context(
