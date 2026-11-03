@@ -3040,7 +3040,6 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
     read; `project` scopes to the file's directory while `user`, `feedback` and `reference`
     scope global; a file with no type keeps today's behavior. Review checkpoint: yes (what
     enters memory, and where).
-
 - **F103 Search matches by meaning as well as by word** (drafted 2026-11-03, not yet ruled;
   independent of F98 to F101; DESIGN 10's Search). Measured 2026-11-03 on
   `aft-eval-data/search/coding.yaml` (103 entries, `qwen3.8-flash-next`): the production path
@@ -3116,9 +3115,18 @@ Rulings made after a task merged. Each is a small task of its own, briefed like 
   - **Questions for Ted, not settled here.** (1) DESIGN 2 lists "Vector search" as a v1
     non-goal and the post-v1 list allows "vector search on the CPU ... only when M5 shows the
     need"; this entry is the evidence of that need, and whether it is now in scope is Ted's
-    ruling. (2) DESIGN 2's goal "One local model does all model work" holds if one endpoint
-    serves both chat and embeddings; a second card serving an embedding model is a change to
-    that sentence, and it competes with `verifier_endpoint` for the same card.
+    ruling. `MEMORIX-BORROWINGS`'s constraint 2 puts the same position more sharply, "do not
+    add an embedding model, a reranker or a second endpoint", and governs work borrowed from
+    that document rather than this task, but it is the same sentence to rule on.
+    (2) Not whether a second endpoint may exist: F56 already ruled that the verifier's
+    endpoint and model "are their own settings, defaulting to the digest's model, so a second
+    model is a config change", and `model.verifier_endpoint` ships. What is unruled is a
+    second endpoint serving a different kind of model, an embedder rather than a chat model,
+    against DESIGN 2's "One local model does all model work" and DESIGN 13's one endpoint.
+  - **What it competes with.** F56 deferred its cross-family verifier measurement until "a
+    second local model is served", which a second instance now satisfies. That measurement is
+    already ruled and needs no new decision, and it wants the same card this task wants, so
+    the two are weighed against each other rather than in sequence.
 
 ## 6. Ted's checklists at milestone ends
 
