@@ -71,12 +71,15 @@ alongside `src/aft/queue.py`.
 **Holding the principles.** A checkpoint is lifecycle evidence, not a fact: it must not
 enter the vault, must not be dreamed on, and must expire with the session. Memorix
 states the same boundary ("A checkpoint is lifecycle evidence, not durable memory or a
-transcript backup", `README.md`, memory model). Deciding what goes in the checkpoint
-without a model call is the open design question; the cheapest version is the last few
-user prompts plus the files touched, which needs no model.
+transcript backup", `README.md`, memory model). What goes in the checkpoint without a
+model call is the three newest user prompts and up to ten edited files, within 1,500
+characters.
 
-**Done looks like.** A session that compacts keeps its own thread. Add an eval case
-under `eval/current/` alongside `paused-then-resumed`.
+**Built as F102** (#200). Nothing is stored and no model is called: the section is
+rendered from the transcript on each session start whose source is `compact`, and every
+word passes the filter capture uses. A pytest integration test holds it rather than a
+case under `eval/current/`. Whether a compacted session keeps its thread better is an
+outcome-eval question and is not measured.
 
 ### 2. Abstention: injecting nothing as a real outcome
 
